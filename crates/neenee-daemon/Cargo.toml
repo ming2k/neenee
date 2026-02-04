@@ -1,0 +1,18 @@
+[package]
+name = "neenee-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+prost = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+tonic-build = "0.12"

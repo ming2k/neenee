@@ -1,0 +1,16 @@
+[package]
+name = "neenee-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+neenee-tui = { path = "../neenee-tui" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+clap = { version = "4.4", features = ["derive"] }
+futures = "0.3"
+directories = "5.0"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
