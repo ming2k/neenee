@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/neenee-core",
-    "crates/neenee-daemon",
     "crates/neenee-tui",
     "crates/neenee-cli",
 ]
