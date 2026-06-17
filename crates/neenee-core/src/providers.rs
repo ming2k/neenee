@@ -68,6 +68,7 @@ impl Provider for MockProvider {
             role: Role::Assistant,
             content: "Hello! I am a mock AI. How can I help you today?".to_string(),
             display_content: None,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             hidden: false,
@@ -189,6 +190,12 @@ fn parse_openai_stream_data(data: &str) -> Vec<ProviderStreamEvent> {
     if let Some(content) = delta["content"].as_str().filter(|value| !value.is_empty()) {
         events.push(ProviderStreamEvent::TextDelta(content.to_string()));
     }
+    if let Some(reasoning) = delta["reasoning_content"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        events.push(ProviderStreamEvent::ReasoningDelta(reasoning.to_string()));
+    }
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for call in tool_calls {
             events.push(ProviderStreamEvent::ToolCallDelta {
@@ -237,6 +244,10 @@ impl Provider for OpenAIProvider {
 
         let choice = &response_json["choices"][0]["message"];
         let content = choice["content"].as_str().unwrap_or("").to_string();
+        let reasoning_content = choice["reasoning_content"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
 
         let tool_calls = choice.get("tool_calls").and_then(|tc| {
             tc.as_array().map(|arr| {
@@ -257,6 +268,7 @@ impl Provider for OpenAIProvider {
             role: Role::Assistant,
             content,
             display_content: None,
+            reasoning_content,
             tool_calls,
             tool_call_id: None,
             hidden: false,
@@ -456,6 +468,7 @@ impl Provider for GeminiProvider {
             role: Role::Assistant,
             content: content_text,
             display_content: None,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             hidden: false,
@@ -575,6 +588,7 @@ impl Provider for LlamaServerProvider {
             role: Role::Assistant,
             content,
             display_content: None,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             hidden: false,

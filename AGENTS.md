@@ -12,7 +12,7 @@ agents need to work effectively in the neenee repository.
 
 ```
 ┌─────────────┐    mpsc channels   ┌─────────────────────────────┐
-│ neenee-cli  │◄──────────────────►│ neenee-core                 │
+│ neenee      │◄──────────────────►│ neenee-core                 │
 │ (launcher)  │                    │ • Agent (ReAct loop)        │
 └─────────────┘                    │ • Tool registry             │
        │                           │ • Skills system             │
@@ -31,7 +31,7 @@ agents need to work effectively in the neenee repository.
 |-------|---------------|
 | `neenee-core` | **The brain.** Agent loop, tool definitions, skill discovery, provider abstractions. Must stay UI-agnostic. |
 | `neenee-tui` | **The face.** Ratatui-based terminal UI with semantic selection (not character-grid selection). Owns `document`, `layout`, `selection`, `render`, `input`, `clipboard`. |
-| `neenee-cli` | **The launcher.** Wires core + TUI, spawns the agent background task, handles provider switching, slash commands, config persistence. |
+| `neenee` | **The launcher.** Wires core + TUI, spawns the agent background task, handles provider switching, slash commands, config persistence. |
 
 There is intentionally no daemon/server crate: the CLI process owns the agent
 background task and talks to the TUI over in-process mpsc channels. If
@@ -82,12 +82,21 @@ Markdown soft breaks render as spaces, while explicit hard breaks remain line
 breaks. Terminal wrapping applies basic CJK kinsoku rules so closing punctuation
 does not begin a visual line and opening punctuation does not end one.
 
-The header combines durable harness state with transient semantic activity.
-Input submission immediately reports `queued`, followed by request persistence,
-context preparation/compaction, model wait, response finalization, and response
-persistence. Loop progress remains visible while tool events report `exploring`,
-`searching codebase`, `making edits`, `running command`, `using MCP`, or
-permission wait.
+The header shows only durable harness state: the neenee brand, the active
+provider/model, the mode (Build/Plan), and the current goal with checklist
+progress. Transient running status is **not** in the header; it is rendered
+inline at the end of the neenee message stream as a transient
+`┃ neenee ⟳ <status>` line. Input submission reports `queued`, followed by
+request persistence, context preparation/compaction, model wait, response
+finalization, and response persistence. Loop progress remains visible while
+tool events report `exploring`, `searching codebase`, `making edits`,
+`running command`, `using MCP`, or permission wait. The status line is hidden
+while assistant text is actively streaming (the streamed text is itself the
+feedback) and hidden when idle.
+
+The chat view follows the newest content automatically. Scrolling up pauses
+follow; scrolling back to the bottom (or sending a message) re-engages it, so
+the inline status line and streamed responses stay visible.
 
 ### 2.2 Dual-path Tool Calling
 
@@ -162,7 +171,16 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
+    fn access(&self) -> ToolAccess { ToolAccess::Write }
     async fn call(&self, arguments: &str) -> Result<String, String>;
+    async fn call_with_events<'a>(
+        &self,
+        _call_id: &str,
+        arguments: &str,
+        _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+    ) -> Result<String, String> {
+        self.call(arguments).await
+    }
     fn to_openai_function(&self) -> serde_json::Value;  // auto-generated default
 }
 ```
@@ -176,7 +194,14 @@ pub trait Tool: Send + Sync {
 | `edit_file` | `path`, `old_string`, `new_string` | Requires exact match; falls back to whitespace-normalized match |
 | `bash` | `command`, `timeout` | Large outputs are truncated |
 | `grep` | `pattern`, `path`, `ext` | Uses `rg`; capped at 50 matches |
+| `glob` | `pattern`, `path` | Fast file pattern matching (`**/*.rs`); skips VCS/build dirs |
 | `list_dir` | `path`, `pattern`, `recursive`, `max_results` | Respects `.git`/build dirs via ignore patterns |
+| `webfetch` | `url`, `raw` | Fetches a URL; HTML is stripped to text; output truncated |
+| `websearch` | `query` | DuckDuckGo search (no API key); best-effort |
+| `todo` | `items[]` | Standalone in-process task list; read-only for permissions |
+| `task` | `description`, `prompt` | Spawns a read-only exploration sub-agent; no recursion |
+| `create_project` | `name`, `type`, `path`, `git`, `neenee` | Scaffolds rust/node/python/go/generic projects |
+| `init_config` | `path` | Idempotently creates a `.neenee/` tree |
 | `use_skill` | `name` | Loads skill content into context |
 | `goal_checklist` | `items[]` | Replaces the active goal checklist; internal harness state, no permission prompt |
 | `mcp__<server>__<tool>` | Server-defined JSON schema | Dynamically discovered from configured local stdio MCP servers |
@@ -185,7 +210,7 @@ pub trait Tool: Send + Sync {
 
 1.  Create a unit struct in `crates/neenee-core/src/tools.rs`.
 2.  Implement `Tool` with `#[async_trait]`.
-3.  Register it in `neenee-cli/src/main.rs` inside the `tools` vector. The
+3.  Register it in `neenee/src/main.rs` inside the `tools` vector. The
     harness-owned `goal_checklist` tool is registered internally by `Agent`.
 4.  If it is a **write** tool, add it to the Plan-mode blocklist in
     `Agent::execute_tool()`.
@@ -278,6 +303,26 @@ evaluation. Interrupting or superseding a task rejects all pending requests.
 `/permissions` lists process-local always rules and `/permissions clear`
 revokes them.
 
+### Sub-agents (the `task` tool)
+
+The `task` tool lets the main agent delegate a focused research or exploration
+sub-task to a read-only sub-agent, mirroring opencode's explore-agent pattern:
+
+1.  `TaskTool` is constructed in `neenee/src/main.rs` with a **snapshot** of
+    the parent agent's toolset plus the live provider. Because the snapshot is
+    taken *before* the task tool is added to the list, the sub-agent can never
+    see the `task` tool — recursion is structurally impossible.
+2.  At call time the snapshot is filtered to `ToolAccess::ReadOnly` tools only,
+    so the sub-agent can `read_file`, `grep`, `glob`, `list_dir`, and `webfetch`
+    but cannot mutate the workspace and **never** prompts for permission.
+3.  The sub-agent runs through the normal `Agent::run()` ReAct loop (headless,
+    bounded by the same 32-round limit) with a focused system prompt.
+4.  Only the final written answer is returned to the parent agent, which stays
+    in control of any edits.
+
+Use `task` to parallelize investigation (where code lives, summarizing files,
+gathering web context). The parent performs writes after reviewing findings.
+
 ---
 
 ## 5. Provider Implementations
@@ -330,6 +375,7 @@ Discovered custom commands are included in the same popup.
 | `/compact` | Compact older complete turns into a durable checkpoint. |
 | `/goal <objective>` | Set the persistent goal. Also supports `status`, `done`, and `clear`. |
 | `/loop <1-50>` | Run bounded autonomous iterations. Also supports `resume`, `status`, and `stop`. |
+| `/init [path]` | Initialize a `.neenee/` configuration tree (skills, commands, agents) in the target directory. |
 | `/clear` | Clear the conversation history (keeps system prompt) |
 | `/help` | Display available commands |
 | `/exit` | Gracefully exit the program |
@@ -370,7 +416,7 @@ stashed and restored on close.
 ## 8. Configuration & Persistence
 
 Config is stored in `~/.config/neenee/config.toml` (managed by
-`neenee-cli/src/config.rs`).
+`neenee/src/config.rs`).
 
 ### Supported fields
 
@@ -523,7 +569,7 @@ after any tool call event, preventing tool side-effect replay.
 
 ```bash
 cargo build
-cargo run --bin neenee-cli
+cargo run            # neenee is the workspace's only binary
 ```
 
 No special build steps and no protobuf toolchain required.
@@ -534,14 +580,15 @@ No special build steps and no protobuf toolchain required.
 
 | If you change... | Also update... |
 |------------------|----------------|
-| Add/remove a tool | `neenee-cli/src/main.rs` tool list; this AGENTS.md tool table |
+| Add/remove a tool | `neenee/src/main.rs` tool list; this AGENTS.md tool table |
+| Add a project template | `project.rs` scaffold functions; this AGENTS.md tool table |
 | Change `Tool` trait | All provider impls; `to_openai_function()` default may suffice |
 | Change TUI rendering | Ensure `LayoutMap` regions remain accurate per block |
 | Change skill format or discovery | `skills.rs` + this AGENTS.md section 2.3 |
 | Change custom command format or discovery | `commands.rs` + this AGENTS.md section 2.5 |
 | Change `AgentResponse` variants | `neenee-tui/src/lib.rs` response handler match arms |
-| Add a new provider | `providers.rs`, `neenee-cli/src/main.rs` match arms, `config.rs`, this AGENTS.md provider table |
-| Add a slash command | `SLASH_COMMANDS` in `neenee-tui/src/lib.rs`, handler in `neenee-cli/src/main.rs`, this AGENTS.md command table |
+| Add a new provider | `providers.rs`, `neenee/src/main.rs` match arms, `config.rs`, this AGENTS.md provider table |
+| Add a slash command | `SLASH_COMMANDS` in `neenee-tui/src/lib.rs`, handler in `neenee/src/main.rs`, this AGENTS.md command table |
 
 ---
 

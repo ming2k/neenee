@@ -577,3 +577,835 @@ impl Tool for UseSkillTool {
         ))
     }
 }
+
+/// Fast file pattern matching using globs.
+pub struct GlobTool;
+
+const GLOB_MAX_RESULTS: usize = 200;
+
+fn glob_should_skip(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(
+                ".git"
+                    | "node_modules"
+                    | "target"
+                    | "__pycache__"
+                    | ".next"
+                    | "dist"
+                    | "build"
+                    | ".venv"
+                    | "venv"
+                    | ".cache"
+            )
+        )
+    })
+}
+
+#[async_trait]
+impl Tool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+    fn description(&self) -> &str {
+        "Fast file pattern matching. Find files by glob pattern, e.g. '**/*.rs' or \
+         'src/**/*.ts'. Returns matching paths. Prefer this over recursive listing when you \
+         know the file extension or naming pattern."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern (e.g. '**/*.rs', 'docs/*.md')" },
+                "path": { "type": "string", "description": "Base directory to search from (default '.')" }
+            },
+            "required": ["pattern"]
+        })
+    }
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
+        let pattern = args["pattern"].as_str().ok_or("Missing 'pattern'")?;
+        let base = args["path"].as_str().unwrap_or(".");
+
+        let base_path = std::path::Path::new(base);
+        let candidates = if pattern.contains('/') || base != "." {
+            vec![base_path.join(pattern).to_string_lossy().to_string()]
+        } else {
+            vec![
+                base_path.join(pattern).to_string_lossy().to_string(),
+                base_path
+                    .join("**")
+                    .join(pattern)
+                    .to_string_lossy()
+                    .to_string(),
+            ]
+        };
+
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for candidate in &candidates {
+            for entry in glob::glob(candidate).map_err(|e| format!("Bad glob pattern: {}", e))? {
+                let path = match entry {
+                    Ok(path) => path,
+                    Err(_) => continue,
+                };
+                if glob_should_skip(&path) {
+                    continue;
+                }
+                let display = path
+                    .strip_prefix(&cwd)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                if seen.insert(display.clone()) {
+                    results.push(display);
+                }
+                if results.len() >= GLOB_MAX_RESULTS {
+                    break;
+                }
+            }
+            if results.len() >= GLOB_MAX_RESULTS {
+                break;
+            }
+        }
+
+        if results.is_empty() {
+            Ok("No files matched the pattern.".to_string())
+        } else {
+            Ok(results.join("\n"))
+        }
+    }
+}
+
+/// Fetch a URL and return its text content (HTML stripped to text).
+pub struct WebFetchTool;
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("neenee/0.1 (+ai-coding-agent)")
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+/// Naive HTML → text conversion. Collapses whitespace and strips tags/scripts.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut skip = false;
+    let lower = html.to_ascii_lowercase();
+    let bytes: Vec<char> = html.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !in_tag && lower[i..].starts_with("<script") {
+            skip = true;
+        } else if skip && lower[i..].starts_with("</script") {
+            skip = false;
+            // jump to end of tag
+            if let Some(idx) = lower[i..].find('>') {
+                i += idx + 1;
+                continue;
+            }
+        } else if !in_tag && lower[i..].starts_with("<style") {
+            skip = true;
+        } else if skip && lower[i..].starts_with("</style") {
+            skip = false;
+            if let Some(idx) = lower[i..].find('>') {
+                i += idx + 1;
+                continue;
+            }
+        }
+        if skip {
+            i += 1;
+            continue;
+        }
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' && in_tag {
+            in_tag = false;
+            out.push(' ');
+        } else if !in_tag {
+            out.push(c);
+        }
+        i += 1;
+    }
+    // Decode a handful of common entities
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let mut collapsed = String::with_capacity(decoded.len());
+    let mut prev_ws = false;
+    for c in decoded.chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                collapsed.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            collapsed.push(c);
+            prev_ws = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn name(&self) -> &str {
+        "webfetch"
+    }
+    fn description(&self) -> &str {
+        "Fetch the content of a web page or URL and return it as text. Use for reading \
+         documentation, APIs, or any publicly accessible resource. HTML pages are converted to \
+         plain text. Output is truncated for very large pages."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "The fully-qualified URL to fetch (http/https)" },
+                "raw": { "type": "boolean", "description": "If true, return raw content without HTML stripping (default false)" }
+            },
+            "required": ["url"]
+        })
+    }
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
+        let url = args["url"].as_str().ok_or("Missing 'url'")?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("URL must start with http:// or https://".to_string());
+        }
+        let raw = args["raw"].as_bool().unwrap_or(false);
+        let client = http_client()?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("HTTP {} for {}", status, url));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read body: {}", e))?;
+        let body = if raw || !content_type.contains("html") {
+            text
+        } else {
+            html_to_text(&text)
+        };
+        if body.len() > 16_000 {
+            return Ok(format!(
+                "[Fetched {} chars from {}, truncated]\n{}\n\n[Use raw=true or a more specific URL for full content]",
+                body.len(),
+                url,
+                &body[..8_000]
+            ));
+        }
+        Ok(body)
+    }
+}
+
+/// Search the web using DuckDuckGo (no API key required, best-effort).
+pub struct WebSearchTool;
+
+#[derive(Debug)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+/// Parse DuckDuckGo HTML results. Tolerant to markup variations.
+fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    // DDG html endpoint wraps result links in <a class="result__a" href="...">
+    for piece in html.split("result__a") {
+        if results.len() >= 10 {
+            break;
+        }
+        let Some(href_start) = piece.find("href=\"") else {
+            continue;
+        };
+        let rest = &piece[href_start + 6..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let raw_url = &rest[..end];
+        // DDG redirects through /l/?uddg=<encoded>; extract the real url
+        let url = decode_ddg_redirect(raw_url);
+        if url.is_empty() || !url.starts_with("http") {
+            continue;
+        }
+        let title_rest = &rest[end..];
+        let title = extract_until(title_start_after(title_rest), '<');
+        let snippet = extract_snippet(piece);
+        if title.trim().is_empty() {
+            continue;
+        }
+        results.push(SearchResult {
+            title: decode_entities(&title),
+            url,
+            snippet: decode_entities(&snippet),
+        });
+    }
+    results
+}
+
+fn title_start_after(rest: &str) -> &str {
+    if let Some(idx) = rest.find('>') {
+        &rest[idx + 1..]
+    } else {
+        ""
+    }
+}
+
+fn extract_until(text: &str, terminator: char) -> String {
+    text.find(terminator)
+        .map(|idx| text[..idx].to_string())
+        .unwrap_or_else(|| text.to_string())
+}
+
+fn extract_snippet(piece: &str) -> String {
+    if let Some(idx) = piece.find("result__snippet") {
+        let rest = &piece[idx..];
+        if let Some(gt) = rest.find('>') {
+            return extract_until(&rest[gt + 1..], '<');
+        }
+    }
+    String::new()
+}
+
+fn decode_ddg_redirect(raw: &str) -> String {
+    if let Some(stripped) = raw.strip_prefix("//duckduckgo.com/l/?uddg=") {
+        let encoded = stripped.split('&').next().unwrap_or("");
+        if let Ok(decoded) = url_decode(encoded) {
+            return decoded;
+        }
+    }
+    raw.to_string()
+}
+
+fn url_decode(value: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).map_err(|e| e.to_string())?;
+                let byte = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
+                out.push(byte as char);
+                i += 2;
+            }
+            c => out.push(c as char),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn decode_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "websearch"
+    }
+    fn description(&self) -> &str {
+        "Search the web and return the top results (title, url, snippet). Uses DuckDuckGo so no \
+         API key is required. Best for finding current information, documentation, or examples."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "The search query" }
+            },
+            "required": ["query"]
+        })
+    }
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
+        let query = args["query"].as_str().ok_or("Missing 'query'")?;
+        let client = http_client()?;
+        let endpoint = "https://html.duckduckgo.com/html/";
+        let response = client
+            .post(endpoint)
+            .form(&[("q", query)])
+            .send()
+            .await
+            .map_err(|e| format!("Search request failed: {}", e))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("Search failed with HTTP {}", status));
+        }
+        let html = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read search response: {}", e))?;
+        let results = parse_ddg_results(&html);
+        if results.is_empty() {
+            return Ok(format!("No results found for '{}'.", query));
+        }
+        let formatted = results
+            .iter()
+            .enumerate()
+            .map(|(idx, result)| {
+                format!(
+                    "{}. {}\n   {}\n   {}",
+                    idx + 1,
+                    result.title,
+                    result.url,
+                    result.snippet
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(formatted)
+    }
+}
+
+/// A lightweight, standalone task list (decoupled from the persistent goal).
+/// Useful as a scratchpad when no goal is active. State is in-process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+pub struct TodoWriteTool {
+    items: Arc<Mutex<Vec<TodoItem>>>,
+}
+
+impl TodoWriteTool {
+    pub fn new() -> Self {
+        Self {
+            items: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<TodoItem> {
+        self.items
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+impl Default for TodoWriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for TodoWriteTool {
+    fn name(&self) -> &str {
+        "todo"
+    }
+    fn description(&self) -> &str {
+        "Maintain a standalone task list (independent of the active goal). Replace the whole list \
+         each call with the current set of concrete steps. Keep at most one item in_progress. \
+         The returned list reflects the updated state."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string" },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"]
+                            }
+                        },
+                        "required": ["content", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": false
+        })
+    }
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        struct Arguments {
+            items: Vec<TodoArgs>,
+        }
+        #[derive(serde::Deserialize)]
+        struct TodoArgs {
+            content: String,
+            status: String,
+        }
+
+        let parsed: Arguments =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
+        if parsed.items.len() > 50 {
+            return Err("Todo list is limited to 50 items.".to_string());
+        }
+        let mut items = Vec::with_capacity(parsed.items.len());
+        let mut in_progress = 0;
+        for entry in parsed.items {
+            if entry.content.trim().is_empty() {
+                return Err("Todo item content cannot be empty.".to_string());
+            }
+            let status = match entry.status.as_str() {
+                "pending" => TodoStatus::Pending,
+                "in_progress" => {
+                    in_progress += 1;
+                    TodoStatus::InProgress
+                }
+                "completed" => TodoStatus::Completed,
+                other => return Err(format!("Unknown todo status '{}'.", other)),
+            };
+            items.push(TodoItem {
+                content: entry.content,
+                status,
+            });
+        }
+        if in_progress > 1 {
+            return Err("At most one todo item may be in_progress.".to_string());
+        }
+        *self.items.lock().unwrap_or_else(|error| error.into_inner()) = items.clone();
+        let rendered = render_todo(&items);
+        Ok(format!("Todo list updated:\n{}", rendered))
+    }
+}
+
+fn render_todo(items: &[TodoItem]) -> String {
+    if items.is_empty() {
+        return "(empty)".to_string();
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let mark = match item.status {
+                TodoStatus::Pending => "[ ]",
+                TodoStatus::InProgress => "[~]",
+                TodoStatus::Completed => "[x]",
+            };
+            format!("{}. {} {}", idx + 1, mark, item.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Spawn a read-only exploration sub-agent to handle a research sub-task.
+///
+/// The sub-agent runs the same provider with the read-only subset of tools,
+/// so it never prompts for permission and cannot mutate the workspace. Its
+/// final answer is returned to the calling agent, which stays in control of
+/// any write operations. Recursion is prevented by excluding `task` (and
+/// other dispatch tools) from the sub-agent's toolset.
+pub struct TaskTool {
+    provider: Arc<dyn crate::Provider>,
+    tools: Vec<Arc<dyn crate::Tool>>,
+}
+
+impl TaskTool {
+    /// `tools` should be the parent agent's full toolset; the task tool filters
+    /// it down to read-only tools for the spawned sub-agent.
+    pub fn new(provider: Arc<dyn crate::Provider>, tools: Vec<Arc<dyn crate::Tool>>) -> Self {
+        Self { provider, tools }
+    }
+}
+
+const TASK_MAX_ROUNDS_HINT: &str = "Run at most a handful of tool rounds, then answer.";
+
+#[async_trait]
+impl Tool for TaskTool {
+    fn name(&self) -> &str {
+        "task"
+    }
+    fn description(&self) -> &str {
+        "Launch a focused, read-only sub-agent to research or explore part of the codebase (or the \
+         web) and return a concise written answer. Use it to parallelize investigation: finding \
+         where code lives, summarizing files, gathering context. The sub-agent cannot modify \
+         files — you perform any edits after reviewing its findings."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "description": { "type": "string", "description": "Short label for the sub-task (<=60 chars)" },
+                "prompt": { "type": "string", "description": "The full, self-contained instructions for the sub-agent" }
+            },
+            "required": ["description", "prompt"]
+        })
+    }
+    fn access(&self) -> ToolAccess {
+        ToolAccess::ReadOnly
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        self.run_sub_agent(arguments, Box::new(|_| {})).await
+    }
+
+    async fn call_with_events<'a>(
+        &self,
+        _call_id: &str,
+        arguments: &str,
+        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+    ) -> Result<String, String> {
+        self.run_sub_agent(arguments, on_event).await
+    }
+}
+
+impl TaskTool {
+    async fn run_sub_agent<'a>(
+        &self,
+        arguments: &str,
+        mut on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+    ) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
+        let description = args["description"]
+            .as_str()
+            .ok_or("Missing 'description'")?
+            .trim();
+        let prompt = args["prompt"].as_str().ok_or("Missing 'prompt'")?;
+        if description.is_empty() {
+            return Err("'description' must not be empty.".to_string());
+        }
+        if prompt.trim().is_empty() {
+            return Err("'prompt' must not be empty.".to_string());
+        }
+
+        // Sub-agent gets read-only tools only; never itself (no recursion).
+        let sub_tools: Vec<Arc<dyn crate::Tool>> = self
+            .tools
+            .iter()
+            .filter(|tool| tool.access() == crate::ToolAccess::ReadOnly && tool.name() != "task")
+            .cloned()
+            .collect();
+
+        let sub_agent =
+            crate::Agent::new(self.provider.clone(), sub_tools, crate::AgentMode::Build);
+
+        let system = format!(
+            "You are a focused research sub-agent. Your single job is to answer the assigned task \
+             accurately and concisely using read-only tools. Explore the workspace or the web as \
+             needed, then write a clear, complete final answer with the key findings (file paths, \
+             signatures, relevant snippets, conclusions). Do not modify any files. {}\n\nTask: {}",
+            TASK_MAX_ROUNDS_HINT, description,
+        );
+        let mut messages = vec![
+            crate::Message::new(crate::Role::System, system),
+            crate::Message::new(crate::Role::User, prompt.to_string()),
+        ];
+        let result = sub_agent
+            .run_streaming_with_events(&mut messages, |event| {
+                Self::forward_event(event, &mut on_event)
+            })
+            .await?;
+        let content = result.content.trim().to_string();
+        if content.is_empty() {
+            Ok("(sub-agent returned no answer)".to_string())
+        } else {
+            Ok(content)
+        }
+    }
+
+    fn forward_event(
+        event: crate::AgentEvent,
+        on_event: &mut dyn FnMut(crate::SubTaskEvent),
+    ) {
+        match event {
+            crate::AgentEvent::ModelRequestStarted { tool_round } => {
+                let status = if tool_round == 0 {
+                    "waiting for model".to_string()
+                } else {
+                    format!("waiting for model · round {}", tool_round + 1)
+                };
+                on_event(crate::SubTaskEvent::Activity(status));
+            }
+            crate::AgentEvent::AssistantDelta { delta, start } => {
+                if start {
+                    on_event(crate::SubTaskEvent::StreamStart);
+                }
+                on_event(crate::SubTaskEvent::StreamDelta(delta));
+            }
+            crate::AgentEvent::AssistantEnd(content) => {
+                on_event(crate::SubTaskEvent::StreamEnd(content));
+            }
+            crate::AgentEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                on_event(crate::SubTaskEvent::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+            crate::AgentEvent::ToolResult {
+                id,
+                name,
+                output,
+                duration_ms,
+            } => {
+                on_event(crate::SubTaskEvent::ToolResult {
+                    id,
+                    name,
+                    output,
+                    duration_ms,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Message, Provider, Role};
+    use futures::stream::{self, BoxStream};
+
+    struct CannedProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for CannedProvider {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+            Ok(Message::new(Role::Assistant, "found 3 relevant files"))
+        }
+        async fn stream_chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::once(async {
+                Ok("found 3 relevant files".to_string())
+            })))
+        }
+    }
+
+    struct EchoReadTool;
+
+    #[async_trait::async_trait]
+    impl Tool for EchoReadTool {
+        fn name(&self) -> &str {
+            "echo_read"
+        }
+        fn description(&self) -> &str {
+            "test read tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+        fn access(&self) -> ToolAccess {
+            ToolAccess::ReadOnly
+        }
+        async fn call(&self, _arguments: &str) -> Result<String, String> {
+            Ok("echo".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn task_tool_runs_read_only_subagent_and_returns_answer() {
+        let tool = TaskTool::new(
+            std::sync::Arc::new(CannedProvider),
+            vec![std::sync::Arc::new(EchoReadTool)],
+        );
+
+        let output = tool
+            .call(r#"{"description":"find files","prompt":"where are the handlers?"}"#)
+            .await
+            .unwrap();
+
+        assert_eq!(output, "found 3 relevant files");
+    }
+
+    #[tokio::test]
+    async fn task_tool_rejects_missing_fields() {
+        let tool = TaskTool::new(std::sync::Arc::new(CannedProvider), Vec::new());
+        assert!(tool.call(r#"{"description":"x"}"#).await.is_err());
+        assert!(tool.call(r#"{"prompt":"x"}"#).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn todo_tool_renders_updated_list() {
+        let tool = TodoWriteTool::new();
+        let output = tool
+            .call(
+                r#"{"items":[
+                    {"content":"design","status":"completed"},
+                    {"content":"implement","status":"in_progress"},
+                    {"content":"verify","status":"pending"}
+                ]}"#,
+            )
+            .await
+            .unwrap();
+        assert!(output.contains("[x] design"));
+        assert!(output.contains("[~] implement"));
+        assert!(output.contains("[ ] verify"));
+        let snapshot = tool.snapshot();
+        assert_eq!(snapshot.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn todo_tool_rejects_multiple_in_progress() {
+        let tool = TodoWriteTool::new();
+        let error = tool
+            .call(
+                r#"{"items":[
+                    {"content":"a","status":"in_progress"},
+                    {"content":"b","status":"in_progress"}
+                ]}"#,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("At most one"));
+    }
+}

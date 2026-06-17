@@ -4,15 +4,24 @@
 //! so that selection and copy operate on semantic units (blocks) rather than
 //! terminal grid characters.
 
-use neenee_core::Role;
+use neenee_core::{Role, SubTaskEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageKind {
     Chat,
     ToolStep {
+        id: String,
         name: String,
         arguments: String,
         output: Option<String>,
+        expanded: bool,
+        duration_ms: Option<u64>,
+        /// Child events emitted by a sub-agent spawned from this tool step.
+        children: Vec<ChatMessage>,
+    },
+    Thinking {
+        content: String,
+        duration_ms: Option<u64>,
         expanded: bool,
     },
 }
@@ -86,36 +95,122 @@ impl ChatMessage {
         }
     }
 
-    pub fn tool_step(name: impl Into<String>, arguments: impl Into<String>) -> Self {
+    pub fn tool_step(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
         let mut message = Self {
             role: Role::Tool,
             blocks: Vec::new(),
             raw: String::new(),
             kind: MessageKind::ToolStep {
+                id: id.into(),
                 name: name.into(),
                 arguments: arguments.into(),
                 output: None,
                 expanded: false,
+                duration_ms: None,
+                children: Vec::new(),
             },
         };
         message.refresh_tool_step();
         message
     }
 
-    pub fn finish_tool_step(&mut self, name: &str, output: impl Into<String>) -> bool {
+    pub fn finish_tool_step(
+        &mut self,
+        id: &str,
+        output: impl Into<String>,
+        duration_ms: u64,
+    ) -> bool {
         let MessageKind::ToolStep {
-            name: step_name,
+            id: step_id,
             output: step_output,
+            duration_ms: step_duration,
             ..
         } = &mut self.kind
         else {
             return false;
         };
-        if step_name != name || step_output.is_some() {
+        if step_id != id || step_output.is_some() {
             return false;
         }
         *step_output = Some(output.into());
+        *step_duration = Some(duration_ms);
         self.refresh_tool_step();
+        true
+    }
+
+    /// Append a sub-agent event as a nested child of this tool step.
+    ///
+    /// Returns `true` if this message is a tool step and the event was stored.
+    pub fn push_subtask_event(&mut self, event: &SubTaskEvent) -> bool {
+        let MessageKind::ToolStep { children, .. } = &mut self.kind else {
+            return false;
+        };
+        match event {
+            SubTaskEvent::StreamStart => {
+                children.push(ChatMessage::new(Role::Assistant, ""));
+            }
+            SubTaskEvent::StreamDelta(delta) => {
+                if let Some(last) = children.last_mut().filter(|m| {
+                    m.role == Role::Assistant && matches!(m.kind, MessageKind::Chat)
+                }) {
+                    last.push_stream(delta);
+                } else {
+                    let mut msg = ChatMessage::new(Role::Assistant, "");
+                    msg.push_stream(delta);
+                    children.push(msg);
+                }
+            }
+            SubTaskEvent::StreamEnd(content) => {
+                if let Some(last) = children.last_mut().filter(|m| m.role == Role::Assistant) {
+                    last.raw = content.clone();
+                    last.reparse();
+                } else {
+                    children.push(ChatMessage::new(Role::Assistant, content.clone()));
+                }
+            }
+            SubTaskEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                children.push(ChatMessage::tool_step(
+                    id.clone(),
+                    name.clone(),
+                    arguments.clone(),
+                ));
+            }
+            SubTaskEvent::ToolResult {
+                id,
+                output,
+                duration_ms,
+                ..
+            } => {
+                if let Some(child) = children.iter_mut().find(|m| {
+                    m.is_tool_step()
+                        && if let MessageKind::ToolStep {
+                            id: step_id,
+                            output: None,
+                            ..
+                        } = &m.kind
+                        {
+                            step_id == id
+                        } else {
+                            false
+                        }
+                }) {
+                    child.finish_tool_step(id, output.clone(), *duration_ms);
+                } else {
+                    let mut msg = ChatMessage::tool_step(id.clone(), "tool", "{}");
+                    msg.finish_tool_step(id, output.clone(), *duration_ms);
+                    children.push(msg);
+                }
+            }
+            SubTaskEvent::Activity(_) => {}
+        }
         true
     }
 
@@ -126,7 +221,7 @@ impl ChatMessage {
     pub fn tool_step_expanded(&self) -> Option<bool> {
         match &self.kind {
             MessageKind::ToolStep { expanded, .. } => Some(*expanded),
-            MessageKind::Chat => None,
+            _ => None,
         }
     }
 
@@ -140,12 +235,102 @@ impl ChatMessage {
         }
     }
 
-    fn refresh_tool_step(&mut self) {
+    pub fn thinking(content: impl Into<String>) -> Self {
+        let content = content.into();
+        let mut message = Self {
+            role: Role::Assistant,
+            blocks: Vec::new(),
+            raw: String::new(),
+            kind: MessageKind::Thinking {
+                content: content.clone(),
+                duration_ms: None,
+                expanded: false,
+            },
+        };
+        message.raw = content;
+        message.blocks = parse_blocks(&message.raw);
+        message
+    }
+
+    pub fn is_thinking(&self) -> bool {
+        matches!(self.kind, MessageKind::Thinking { .. })
+    }
+
+    pub fn thinking_expanded(&self) -> Option<bool> {
+        match &self.kind {
+            MessageKind::Thinking { expanded, .. } => Some(*expanded),
+            _ => None,
+        }
+    }
+
+    pub fn set_thinking_expanded(&mut self, expanded: bool) {
+        if let MessageKind::Thinking {
+            expanded: current, ..
+        } = &mut self.kind
+        {
+            *current = expanded;
+        }
+    }
+
+    pub fn set_thinking_duration(&mut self, duration_ms: u64) {
+        if let MessageKind::Thinking { duration_ms: d, .. } = &mut self.kind {
+            *d = Some(duration_ms);
+        }
+    }
+
+    /// Human-readable header for the thinking card (always one line).
+    pub fn thinking_header(&self) -> Option<String> {
+        let MessageKind::Thinking {
+            content,
+            duration_ms,
+            ..
+        } = &self.kind
+        else {
+            return None;
+        };
+        let chars = content.chars().count();
+        Some(format!(
+            "Thinking · {} · {} chars",
+            duration_text(*duration_ms),
+            chars
+        ))
+    }
+
+    /// Human-readable header for the tool-step card (always one line).
+    pub fn tool_step_header(&self) -> Option<String> {
         let MessageKind::ToolStep {
             name,
             arguments,
             output,
+            duration_ms,
+            ..
+        } = &self.kind
+        else {
+            return None;
+        };
+        let status = match output {
+            Some(output) if output.starts_with("Error") => "failed",
+            Some(_) => "completed",
+            None => "running",
+        };
+        Some(format!(
+            "{} · {} · {} · {}",
+            name,
+            status,
+            duration_text(*duration_ms),
+            argument_summary(name, arguments)
+        ))
+    }
+
+    fn refresh_tool_step(&mut self) {
+        let MessageKind::ToolStep {
+            id: _,
+            name,
+            arguments,
+            output,
             expanded,
+            duration_ms,
+            children: _,
         } = &self.kind
         else {
             return;
@@ -153,11 +338,8 @@ impl ChatMessage {
         self.raw = if *expanded {
             let arguments = pretty_json(arguments);
             match output {
-                Some(output) => format!(
-                    "Calling `{}`\n\n```json\n{}\n```\n\nResult\n\n{}",
-                    name, arguments, output
-                ),
-                None => format!("Calling `{}`\n\n```json\n{}\n```", name, arguments),
+                Some(output) => format!("```json\n{}\n```\n\nResult\n\n{}", arguments, output),
+                None => format!("```json\n{}\n```", arguments),
             }
         } else {
             let status = match output {
@@ -165,7 +347,13 @@ impl ChatMessage {
                 Some(_) => "completed",
                 None => "running",
             };
-            format!("⚒ {} · {} · {}", name, status, argument_summary(arguments))
+            format!(
+                "⚒ {} · {} · {} · {}",
+                name,
+                status,
+                duration_text(*duration_ms),
+                argument_summary(name, arguments)
+            )
         };
         self.blocks = parse_blocks(&self.raw);
     }
@@ -202,22 +390,84 @@ fn pretty_json(arguments: &str) -> String {
         .unwrap_or_else(|| arguments.to_string())
 }
 
-fn argument_summary(arguments: &str) -> String {
+fn duration_text(duration_ms: Option<u64>) -> String {
+    match duration_ms {
+        None => "...".to_string(),
+        Some(ms) if ms < 1000 => format!("{}ms", ms),
+        Some(ms) => format!("{:.1}s", ms as f64 / 1000.0),
+    }
+}
+
+fn argument_summary(name: &str, arguments: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return truncate(arguments, 72);
     };
     let Some(object) = value.as_object() else {
         return truncate(arguments, 72);
     };
-    let summary = ["path", "pattern", "command", "name"]
-        .iter()
-        .find_map(|key| {
-            object
-                .get(*key)
-                .and_then(serde_json::Value::as_str)
-                .map(|value| format!("{}={}", key, value))
-        })
-        .unwrap_or_else(|| arguments.to_string());
+
+    let get = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
+
+    let summary = match name {
+        "read_file" => {
+            if let Some(path) = get("path") {
+                let mut s = format!("Read {}", path);
+                if let Some(limit) = object.get("limit").and_then(|v| v.as_u64()) {
+                    s.push_str(&format!(" [limit={}]", limit));
+                }
+                if let Some(offset) = object.get("offset").and_then(|v| v.as_u64()) {
+                    s.push_str(&format!(" [offset={}]", offset));
+                }
+                s
+            } else {
+                "Read file".to_string()
+            }
+        }
+        "write_file" => get("path")
+            .map(|path| format!("Write {}", path))
+            .unwrap_or_else(|| "Write file".to_string()),
+        "edit_file" => get("path")
+            .map(|path| format!("Edit {}", path))
+            .unwrap_or_else(|| "Edit file".to_string()),
+        "bash" => get("command")
+            .map(|cmd| {
+                let first = cmd.lines().next().unwrap_or(cmd);
+                format!("Run {}", truncate(first, 64))
+            })
+            .unwrap_or_else(|| "Run command".to_string()),
+        "grep" => {
+            let pattern = get("pattern").unwrap_or("...");
+            let path = get("path").unwrap_or(".");
+            format!("Grep \"{}\" in {}", truncate(pattern, 48), path)
+        }
+        "glob" => get("pattern")
+            .map(|pattern| format!("Glob {}", pattern))
+            .unwrap_or_else(|| "Glob files".to_string()),
+        "list_dir" => get("path")
+            .map(|path| format!("List {}", path))
+            .unwrap_or_else(|| "List directory".to_string()),
+        "webfetch" => get("url")
+            .map(|url| format!("Fetch {}", url))
+            .unwrap_or_else(|| "Fetch URL".to_string()),
+        "websearch" => get("query")
+            .map(|query| format!("Search \"{}\"", truncate(query, 56)))
+            .unwrap_or_else(|| "Web search".to_string()),
+        "todo" => "Update todo list".to_string(),
+        "task" => get("description")
+            .map(|desc| format!("Task: {}", truncate(desc, 56)))
+            .unwrap_or_else(|| "Run sub-task".to_string()),
+        "create_project" => get("name")
+            .map(|name| format!("Create project {}", name))
+            .unwrap_or_else(|| "Create project".to_string()),
+        "use_skill" => get("name")
+            .map(|name| format!("Use skill {}", name))
+            .unwrap_or_else(|| "Use skill".to_string()),
+        "goal_checklist" => "Update goal checklist".to_string(),
+        _ => ["path", "pattern", "command", "name", "url", "query"]
+            .iter()
+            .find_map(|key| get(key).map(|value| format!("{}={}", key, value)))
+            .unwrap_or_else(|| arguments.to_string()),
+    };
     truncate(&summary, 72)
 }
 
@@ -697,11 +947,11 @@ mod tests {
 
     #[test]
     fn tool_step_collapses_and_restores_full_semantic_detail() {
-        let mut message = ChatMessage::tool_step("read_file", r#"{"path":"README.md"}"#);
+        let mut message = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
         assert!(message.raw.contains("read_file · running"));
         assert!(!message.raw.contains("```json"));
 
-        assert!(message.finish_tool_step("read_file", "contents"));
+        assert!(message.finish_tool_step("call_1", "contents", 1234));
         assert!(message.raw.contains("completed"));
         message.set_tool_step_expanded(true);
 

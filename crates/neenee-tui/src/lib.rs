@@ -16,6 +16,7 @@ use neenee_core::{
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
+    layout::Rect,
     Terminal,
 };
 use std::{
@@ -28,7 +29,7 @@ use std::{
 use tokio::sync::{mpsc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
-use crate::document::ChatMessage;
+use crate::document::{ChatMessage, MessageKind};
 use crate::layout::LayoutMap;
 use crate::render::Theme;
 use crate::selection::{get_selected_text, SelectionDrag, SelectionState};
@@ -46,6 +47,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/loop",
         "Run the active goal for bounded autonomous iterations",
     ),
+    ("/init", "Initialize a .neenee/ config tree in this project"),
     ("/exit", "Gracefully exit the program"),
     ("/help", "Show available commands and usage"),
     ("/clear", "Clear the conversation history"),
@@ -149,6 +151,7 @@ pub enum Modal {
     ApiKey,
     Endpoint,
     ModelName,
+    Help,
 }
 
 pub struct App {
@@ -156,6 +159,13 @@ pub struct App {
     /// Structured chat messages (semantic document model).
     pub messages: Vec<ChatMessage>,
     pub scroll: u16,
+    /// Whether the view follows the newest content (auto-scroll to bottom).
+    pub follow_bottom: bool,
+    /// Last measured stream height in lines and viewport height, used to pin
+    /// the view to the bottom while following.
+    pub content_lines: usize,
+    pub view_height: u16,
+    pub max_scroll: u16,
     pub tx: mpsc::UnboundedSender<AgentRequest>,
     pub should_quit: Arc<AtomicBool>,
     pub suggestion_index: Option<usize>,
@@ -368,6 +378,7 @@ pub async fn run_tui(
 
     // Spawn response listener
     tokio::spawn(async move {
+        let mut reasoning_start: Option<std::time::Instant> = None;
         while let Some(resp) = rx.recv().await {
             match resp {
                 AgentResponse::Text(t) => {
@@ -410,22 +421,75 @@ pub async fn run_tui(
                         msgs.pop();
                     }
                 }
-                AgentResponse::ToolCall { name, arguments } => {
+                AgentResponse::StreamReasoningDelta(delta) => {
+                    let mut msgs = messages_clone.lock().await;
+                    if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking()) {
+                        last.push_stream(&delta);
+                        if let MessageKind::Thinking { content, .. } = &mut last.kind {
+                            content.push_str(&delta);
+                        }
+                    } else {
+                        msgs.push(ChatMessage::thinking(delta));
+                        reasoning_start = Some(std::time::Instant::now());
+                    }
+                }
+                AgentResponse::StreamReasoningEnd(content) => {
+                    if let Some(started) = reasoning_start.take() {
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        let mut msgs = messages_clone.lock().await;
+                        if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking())
+                        {
+                            last.raw = content.clone();
+                            last.reparse();
+                            if let MessageKind::Thinking {
+                                content: current,
+                                duration_ms: d,
+                                ..
+                            } = &mut last.kind
+                            {
+                                *current = content;
+                                *d = Some(duration_ms);
+                            }
+                        }
+                    }
+                }
+                AgentResponse::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     *activity_clone.lock().await = tool_activity_status(&name).to_string();
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::tool_step(name, arguments));
+                    msgs.push(ChatMessage::tool_step(id, name, arguments));
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::ToolResult { name, output } => {
+                AgentResponse::ToolResult {
+                    id,
+                    name,
+                    output,
+                    duration_ms,
+                } => {
                     *activity_clone.lock().await = "thinking".to_string();
                     let mut msgs = messages_clone.lock().await;
                     if !msgs
                         .iter_mut()
-                        .any(|message| message.finish_tool_step(&name, output.clone()))
+                        .any(|message| message.finish_tool_step(&id, output.clone(), duration_ms))
                     {
-                        let mut message = ChatMessage::tool_step(name.clone(), "{}");
-                        message.finish_tool_step(&name, output);
+                        let mut message = ChatMessage::tool_step(id.clone(), name.clone(), "{}");
+                        message.finish_tool_step(&id, output, duration_ms);
                         msgs.push(message);
+                    }
+                }
+                AgentResponse::SubTask {
+                    parent_call_id,
+                    event,
+                } => {
+                    let mut msgs = messages_clone.lock().await;
+                    if let Some(message) = msgs
+                        .iter_mut()
+                        .find(|m| m.is_tool_step() && matches!(&m.kind, crate::document::MessageKind::ToolStep { id, .. } if id == &parent_call_id))
+                    {
+                        message.push_subtask_event(&event);
                     }
                 }
                 AgentResponse::PermissionRequest(request) => {
@@ -514,6 +578,10 @@ pub async fn run_tui(
         input: String::new(),
         messages: Vec::new(),
         scroll: 0,
+        follow_bottom: true,
+        content_lines: 0,
+        view_height: 0,
+        max_scroll: 0,
         tx,
         should_quit,
         suggestion_index: None,
@@ -585,10 +653,20 @@ async fn run_app_loop<B: Backend>(
     runtime: UiRuntime,
 ) -> io::Result<()> {
     let mut _copy_toast_timer: u8 = 0;
+    // Clipboard copies run in background tasks so a slow/hanging system
+    // clipboard (arboard/wl-copy) can never freeze the event loop.
+    let (copy_tx, mut copy_rx) =
+        mpsc::unbounded_channel::<Result<clipboard::CopyOutcome, String>>();
 
     loop {
         if app.should_quit.load(Ordering::SeqCst) {
             return Ok(());
+        }
+
+        // Apply any completed background clipboard copies.
+        while let Ok(result) = copy_rx.try_recv() {
+            set_copy_feedback(app, result);
+            app.copy_toast_ticks = 5;
         }
 
         // Sync provider/model from listener
@@ -623,6 +701,12 @@ async fn run_app_loop<B: Backend>(
         // Pull messages from the shared lock into app state for rendering
         app.messages = runtime.messages.lock().await.clone();
 
+        // While following, keep the newest content in view using the previous
+        // frame's measurement (max_scroll is recomputed after each draw).
+        if app.follow_bottom {
+            app.scroll = app.max_scroll;
+        }
+
         // Draw frame
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
@@ -632,7 +716,7 @@ async fn run_app_loop<B: Backend>(
                 app.pending_permission.is_some(),
             );
 
-            let input_rect = render::draw_chat(
+            let chat_render = render::draw_chat(
                 f,
                 &mut layout_map,
                 render::ChatView {
@@ -643,10 +727,13 @@ async fn run_app_loop<B: Backend>(
                     current_model: &app.current_model,
                     current_mode: app.current_mode,
                     current_goal: app.current_goal.as_ref(),
-                    loop_status: &status,
+                    activity: &status,
                     theme: &app.theme,
                 },
             );
+            let input_rect = chat_render.input_rect;
+            app.content_lines = chat_render.content_lines;
+            app.view_height = chat_render.view_height;
 
             let masked_input = if app.active_modal == Modal::ApiKey {
                 "•".repeat(app.input.chars().count())
@@ -659,10 +746,29 @@ async fn run_app_loop<B: Backend>(
             };
             render::draw_input(
                 f,
+                input_rect,
                 &masked_input,
                 app.cursor_display_x(),
                 accent,
-                " Enter send · / commands · Ctrl+T steps · Ctrl+C ×2 quit ",
+                &app.theme,
+            );
+
+            // Right-aligned hint line below the input box.
+            let hint_rect = Rect::new(
+                input_rect.x,
+                input_rect.y + input_rect.height,
+                input_rect.width,
+                1,
+            );
+            render::draw_hint(
+                f,
+                hint_rect,
+                &[
+                    ("ctrl+p", "commands"),
+                    ("ctrl+h", "help"),
+                    ("enter", "send"),
+                ],
+                &app.theme,
             );
 
             // Slash suggestions
@@ -675,6 +781,7 @@ async fn run_app_loop<B: Backend>(
                         &suggestions,
                         app.suggestion_index,
                         input_rect,
+                        &app.theme,
                     );
                 }
             }
@@ -689,6 +796,7 @@ async fn run_app_loop<B: Backend>(
                         &app.current_provider,
                         app.modal_index,
                         &app.key_status,
+                        &app.theme,
                     );
                 }
                 Modal::HistorySearch => {
@@ -697,15 +805,17 @@ async fn run_app_loop<B: Backend>(
                         &mut layout_map,
                         &app.input_history,
                         app.modal_index,
+                        &app.theme,
                     );
                 }
                 Modal::Permission => {
                     if let Some(request) = app.pending_permission.as_ref() {
-                        render::draw_permission_modal(
+                        render::draw_permission_sheet(
                             f,
                             request,
                             app.modal_index,
                             app.permission_confirm_always,
+                            &app.theme,
                         );
                     }
                 }
@@ -715,35 +825,50 @@ async fn run_app_loop<B: Backend>(
                         .and_then(|idx| SOLUTIONS.get(idx))
                         .map(|solution| solution.name)
                         .unwrap_or("provider");
-                    render::draw_api_key_modal(f, solution, &masked_input);
+                    render::draw_api_key_modal(f, solution, &masked_input, &app.theme);
                 }
                 Modal::Endpoint => render::draw_solution_input_modal(
                     f,
-                    " Relay endpoint ",
+                    " Relay endpoint",
                     "Full OpenAI-compatible chat completions URL",
                     &app.input,
                     false,
+                    &app.theme,
                 ),
                 Modal::ModelName => render::draw_solution_input_modal(
                     f,
-                    " Model ID ",
+                    " Model ID",
                     "Model name sent in the request body",
                     &app.input,
                     false,
+                    &app.theme,
                 ),
+                Modal::Help => render::draw_help_modal(f, &app.theme),
                 Modal::None => {}
             }
 
             // Copy toast
             if app.copy_toast_ticks > 0 {
-                render::draw_copy_toast(f, &app.copy_toast_message, app.copy_toast_failed);
+                render::draw_copy_toast(
+                    f,
+                    &app.copy_toast_message,
+                    app.copy_toast_failed,
+                    &app.theme,
+                );
             }
             if app.ctrl_c_armed_ticks > 0 {
-                render::draw_exit_toast(f);
+                render::draw_exit_toast(f, &app.theme);
             }
 
             app.layout_map = layout_map;
         })?;
+
+        // Recompute the bottom scroll offset for the next frame and keep the
+        // manual scroll position within bounds when not following.
+        app.max_scroll = app.content_lines.saturating_sub(app.view_height as usize) as u16;
+        if !app.follow_bottom {
+            app.scroll = app.scroll.min(app.max_scroll);
+        }
 
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
@@ -797,13 +922,30 @@ async fn run_app_loop<B: Backend>(
                             app.input_history.push(text.clone());
                         }
                         app.history_index = None;
+                        app.follow_bottom = true;
                         let _ = app.tx.send(AgentRequest::Chat(text));
+                    } else if let Some((start, end)) = app.selection.normalized_range() {
+                        // Enter on a selected tool-step or thinking card toggles just that card.
+                        if start.message_idx == end.message_idx {
+                            let mi = start.message_idx;
+                            let mut messages = runtime.messages.lock().await;
+                            if let Some(message) = messages.get_mut(mi) {
+                                if let Some(expanded) = message.tool_step_expanded() {
+                                    message.set_tool_step_expanded(!expanded);
+                                    app.selection = SelectionState::None;
+                                } else if let Some(expanded) = message.thinking_expanded() {
+                                    message.set_thinking_expanded(!expanded);
+                                    app.selection = SelectionState::None;
+                                }
+                            }
+                        }
                     }
                 }
                 input::InputAction::SendSlash(cmd) => {
                     app.suggestion_index = None;
                     runtime.is_responding.store(true, Ordering::SeqCst);
                     *runtime.activity_status.lock().await = "queued".to_string();
+                    app.follow_bottom = true;
                     runtime
                         .messages
                         .lock()
@@ -858,6 +1000,19 @@ async fn run_app_loop<B: Backend>(
                     app.active_modal = Modal::HistorySearch;
                     app.modal_index = app.input_history.len().saturating_sub(1);
                 }
+                input::InputAction::OpenCommands => {
+                    // Command palette: seed the input with "/" so the existing
+                    // slash-suggestion popup acts as a filterable palette.
+                    if !app.input.starts_with('/') {
+                        app.input = "/".to_string();
+                        app.cursor_position = app.input.chars().count();
+                    }
+                    app.suggestion_index = None;
+                }
+                input::InputAction::OpenHelp => {
+                    app.active_modal = Modal::Help;
+                    app.modal_index = 0;
+                }
                 input::InputAction::CloseModal => {
                     if matches!(
                         app.active_modal,
@@ -872,23 +1027,27 @@ async fn run_app_loop<B: Backend>(
                     app.active_modal = Modal::None;
                 }
                 input::InputAction::ScrollUp => {
+                    app.follow_bottom = false;
                     if app.scroll > 0 {
                         app.scroll -= 1;
                     }
                 }
                 input::InputAction::ScrollDown => {
-                    app.scroll += 1;
+                    if app.scroll < app.max_scroll {
+                        app.scroll += 1;
+                    }
+                    if app.scroll >= app.max_scroll {
+                        app.follow_bottom = true;
+                    }
                 }
                 input::InputAction::CopySelection => {
                     if let Some(text) = get_selected_text(&app.selection, &app.messages) {
-                        set_copy_feedback(app, crate::clipboard::copy(&text).await);
-                        app.copy_toast_ticks = 5;
+                        spawn_clipboard_copy(&copy_tx, text);
                     }
                 }
                 input::InputAction::CtrlC => {
                     if let Some(text) = get_selected_text(&app.selection, &app.messages) {
-                        set_copy_feedback(app, crate::clipboard::copy(&text).await);
-                        app.copy_toast_ticks = 5;
+                        spawn_clipboard_copy(&copy_tx, text);
                     } else if matches!(
                         app.active_modal,
                         Modal::ApiKey | Modal::Endpoint | Modal::ModelName
@@ -1026,7 +1185,11 @@ async fn run_app_loop<B: Backend>(
                             app.modal_index - 1
                         };
                     }
-                    Modal::ApiKey | Modal::Endpoint | Modal::ModelName | Modal::None => {}
+                    Modal::ApiKey
+                    | Modal::Endpoint
+                    | Modal::ModelName
+                    | Modal::Help
+                    | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
                     Modal::Models => {
@@ -1039,7 +1202,11 @@ async fn run_app_loop<B: Backend>(
                         let count = if app.permission_confirm_always { 2 } else { 3 };
                         app.modal_index = (app.modal_index + 1) % count;
                     }
-                    Modal::ApiKey | Modal::Endpoint | Modal::ModelName | Modal::None => {}
+                    Modal::ApiKey
+                    | Modal::Endpoint
+                    | Modal::ModelName
+                    | Modal::Help
+                    | Modal::None => {}
                 },
                 input::InputAction::PermissionSubmit => {
                     if app.permission_confirm_always {
@@ -1090,8 +1257,30 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::SelectionStart { x, y } => {
                     if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        app.selection = SelectionState::start_range(cursor);
-                        app.drag.start(cursor);
+                        if cursor.block_idx == usize::MAX {
+                            // Clicked a tool-step card header: toggle that card.
+                            let mut messages = runtime.messages.lock().await;
+                            if let Some(message) = messages.get_mut(cursor.message_idx) {
+                                if let Some(expanded) = message.tool_step_expanded() {
+                                    message.set_tool_step_expanded(!expanded);
+                                }
+                            }
+                            app.selection = SelectionState::None;
+                            app.drag.cancel();
+                        } else if cursor.block_idx == usize::MAX - 1 {
+                            // Clicked a thinking card header: toggle that card.
+                            let mut messages = runtime.messages.lock().await;
+                            if let Some(message) = messages.get_mut(cursor.message_idx) {
+                                if let Some(expanded) = message.thinking_expanded() {
+                                    message.set_thinking_expanded(!expanded);
+                                }
+                            }
+                            app.selection = SelectionState::None;
+                            app.drag.cancel();
+                        } else {
+                            app.selection = SelectionState::start_range(cursor);
+                            app.drag.start(cursor);
+                        }
                     } else {
                         app.selection = SelectionState::None;
                         app.drag.cancel();
@@ -1199,6 +1388,25 @@ fn compact_retry_reason(message: &str) -> String {
     }
 }
 
+fn spawn_clipboard_copy(
+    tx: &mpsc::UnboundedSender<Result<clipboard::CopyOutcome, String>>,
+    text: String,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::clipboard::copy(&text),
+        )
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_) => Err("clipboard copy timed out".to_string()),
+        };
+        let _ = tx.send(result);
+    });
+}
+
 fn set_copy_feedback(app: &mut App, result: Result<clipboard::CopyOutcome, String>) {
     match result {
         Ok(clipboard::CopyOutcome::Native) => {
@@ -1288,9 +1496,17 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
             continue;
         }
         if message.role == Role::Assistant {
+            if let Some(reasoning) = message.reasoning_content.take() {
+                restored.push(ChatMessage::thinking(reasoning));
+            }
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
-                    restored.push(ChatMessage::tool_step(call.name, call.arguments));
+                    // Historical results match by tool name, so use it as the id.
+                    restored.push(ChatMessage::tool_step(
+                        call.name.clone(),
+                        call.name,
+                        call.arguments,
+                    ));
                 }
                 if message.content.is_empty() {
                     continue;
@@ -1301,7 +1517,7 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
             if let Some((name, output)) = parse_tool_result(&message.content) {
                 if restored
                     .iter_mut()
-                    .any(|item| item.finish_tool_step(name, output))
+                    .any(|item| item.finish_tool_step(name, output, 0))
                 {
                     continue;
                 }
@@ -1353,6 +1569,7 @@ mod tests {
             role: Role::Assistant,
             content: String::new(),
             display_content: None,
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call".to_string(),
                 name: "read_file".to_string(),
@@ -1373,6 +1590,7 @@ mod tests {
                 role: Role::Assistant,
                 content: String::new(),
                 display_content: None,
+                reasoning_content: None,
                 tool_calls: Some(vec![
                     ToolCall {
                         id: "one".to_string(),

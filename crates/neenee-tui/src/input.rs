@@ -37,6 +37,10 @@ pub enum InputAction {
     OpenModels,
     /// Open history search modal.
     OpenHistory,
+    /// Open the command palette (slash commands).
+    OpenCommands,
+    /// Open the help / keybindings modal.
+    OpenHelp,
     /// Close any modal.
     CloseModal,
     /// Scroll up.
@@ -190,6 +194,20 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if context.active_modal == super::Modal::None {
+                        InputAction::OpenCommands
+                    } else {
+                        InputAction::None
+                    }
+                }
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if context.active_modal == super::Modal::None {
+                        InputAction::OpenHelp
+                    } else {
+                        InputAction::None
+                    }
+                }
                 KeyCode::Char('q')
                     if input.is_empty() && context.active_modal == super::Modal::None =>
                 {
@@ -205,6 +223,7 @@ pub fn process_event(
                     super::Modal::ApiKey => InputAction::SubmitApiKey,
                     super::Modal::Endpoint => InputAction::SubmitEndpoint,
                     super::Modal::ModelName => InputAction::SubmitModelName,
+                    super::Modal::Help => InputAction::CloseModal,
                     super::Modal::None => {
                         // If slash suggestions are visible and none selected, auto-pick first.
                         if context.input_starts_with_slash
@@ -316,9 +335,10 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Permission => InputAction::ModalUp,
-                    super::Modal::ApiKey | super::Modal::Endpoint | super::Modal::ModelName => {
-                        InputAction::None
-                    }
+                    super::Modal::ApiKey
+                    | super::Modal::Endpoint
+                    | super::Modal::ModelName
+                    | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.input_starts_with_slash && context.suggestion_count > 0 {
                             InputAction::SuggestPrev
@@ -331,9 +351,10 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Permission => InputAction::ModalDown,
-                    super::Modal::ApiKey | super::Modal::Endpoint | super::Modal::ModelName => {
-                        InputAction::None
-                    }
+                    super::Modal::ApiKey
+                    | super::Modal::Endpoint
+                    | super::Modal::ModelName
+                    | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.input_starts_with_slash && context.suggestion_count > 0 {
                             InputAction::SuggestNext

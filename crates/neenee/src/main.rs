@@ -4,12 +4,14 @@ use neenee_core::{
     async_trait,
     mcp::load_mcp_tools,
     parse_retryable_error,
+    project::{init_neenee_config, CreateProjectTool, InitConfigTool},
     providers::{
         DeepSeekProvider, GLMProvider, GeminiProvider, KimiCodeProvider, KimiProvider,
         LlamaServerProvider, MockProvider, OpenAIProvider, QwenProvider, VolcengineProvider,
     },
     tools::{
-        BashTool, EditFileTool, GrepTool, ListDirTool, ReadFileTool, UseSkillTool, WriteFileTool,
+        BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, TaskTool,
+        TodoWriteTool, UseSkillTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
     Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalStatus, HarnessSnapshot,
     Message, Provider, ProviderStreamEvent, Role, GOAL_COMPLETE_MARKER,
@@ -201,6 +203,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "compact",
     "goal",
     "loop",
+    "init",
     "clear",
     "help",
     "exit",
@@ -400,13 +403,46 @@ fn relay_agent_event(
             AgentResponse::StreamEnd(content.replace(GOAL_COMPLETE_MARKER, "").trim().to_string())
         }
         AgentEvent::AssistantDiscard => AgentResponse::StreamDiscard,
-        AgentEvent::ToolCall { name, arguments } => AgentResponse::ToolCall { name, arguments },
-        AgentEvent::ToolResult { name, output } => AgentResponse::ToolResult { name, output },
+        AgentEvent::ReasoningDelta { delta, start } => {
+            if start {
+                let _ = tx.send(AgentResponse::StreamStart);
+            }
+            streamed_text.store(true, Ordering::SeqCst);
+            AgentResponse::StreamReasoningDelta(delta)
+        }
+        AgentEvent::ReasoningEnd(content) => AgentResponse::StreamReasoningEnd(content),
+        AgentEvent::ToolCall {
+            id,
+            name,
+            arguments,
+        } => AgentResponse::ToolCall {
+            id,
+            name,
+            arguments,
+        },
+        AgentEvent::ToolResult {
+            id,
+            name,
+            output,
+            duration_ms,
+        } => AgentResponse::ToolResult {
+            id,
+            name,
+            output,
+            duration_ms,
+        },
         AgentEvent::GoalUpdated(goal) => {
             persist_goal_snapshot(&goal);
             AgentResponse::GoalUpdated(goal)
         }
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
+        AgentEvent::SubTask {
+            parent_call_id,
+            event,
+        } => AgentResponse::SubTask {
+            parent_call_id,
+            event,
+        },
     };
     let _ = tx.send(response);
 }
@@ -826,12 +862,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(WriteFileTool),
         Arc::new(EditFileTool),
         Arc::new(GrepTool),
+        Arc::new(GlobTool),
         Arc::new(ListDirTool),
+        Arc::new(WebFetchTool),
+        Arc::new(WebSearchTool),
+        Arc::new(TodoWriteTool::new()),
+        Arc::new(CreateProjectTool),
+        Arc::new(InitConfigTool),
         Arc::new(UseSkillTool {
             skills: skills_registry.clone(),
         }),
     ];
     tools.extend(mcp.tools);
+    // TaskTool gets a snapshot of the toolset (excluding itself) so spawned
+    // sub-agents cannot recurse and inherit the live provider.
+    let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone()));
+    tools.push(task_tool);
     let agent = Arc::new(Agent::new(agent_provider, tools, AgentMode::Build));
     if let Some(objective) = config.harness_goal.clone() {
         agent.restore_goal(Goal {
@@ -1546,6 +1592,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                             .await;
                         }
+                        "/init" => {
+                            let target = parts.get(1).copied().unwrap_or(".");
+                            match init_neenee_config(std::path::Path::new(target)) {
+                                Ok(created) if created.is_empty() => {
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "neenee is already configured in '{}'. Nothing to do.",
+                                        target
+                                    )));
+                                }
+                                Ok(created) => {
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Initialized neenee configuration in '{}'.\nCreated:\n{}",
+                                        target,
+                                        created
+                                            .iter()
+                                            .map(|path| format!("- {}", path))
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    )));
+                                }
+                                Err(error) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(error));
+                                }
+                            }
+                        }
                         "/clear" => {
                             history.lock().await.clear();
                             let _ = session.replace_messages(Vec::new()).await;
@@ -1587,6 +1658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /compact  — Compact older complete turns now\n\
                                 /goal     — Set, inspect, complete, or clear the active goal\n\
                                 /loop [N|resume|status|stop] — Run or resume bounded autonomous work\n\
+                                /init [path] — Initialize a .neenee/ config tree\n\
                                 /clear    — Clear conversation history\n\
                                 /exit     — Exit the program\n\
                                 /help     — Show this message{}", custom_help)

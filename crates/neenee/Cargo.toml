@@ -1,5 +1,5 @@
 [package]
-name = "neenee-cli"
+name = "neenee"
 version = "0.1.0"
 edition = "2021"
 

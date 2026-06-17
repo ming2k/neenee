@@ -10,7 +10,7 @@ OpenAI-compatible tool-call deltas before permission checks and execution.
 
 - **neenee-core**: Agent harness, providers, tools, goals, and skills.
 - **neenee-tui**: Ratatui UI with semantic document selection and live harness status.
-- **neenee-cli**: Provider wiring, slash commands, cancellation, and autonomous loops.
+- **neenee**: Provider wiring, slash commands, cancellation, and autonomous loops.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ OpenAI-compatible tool-call deltas before permission checks and execution.
 ## Getting Started
 
 ```bash
-cargo run --bin neenee-cli
+cargo run
 ```
 
 Useful harness commands:

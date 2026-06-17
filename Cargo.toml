@@ -2,6 +2,6 @@
 members = [
     "crates/neenee-core",
     "crates/neenee-tui",
-    "crates/neenee-cli",
+    "crates/neenee",
 ]
 resolver = "2"

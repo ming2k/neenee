@@ -291,8 +291,8 @@ mod tests {
 
     #[test]
     fn expanded_tool_step_copy_uses_semantic_detail() {
-        let mut message = ChatMessage::tool_step("read_file", r#"{"path":"README.md"}"#);
-        message.finish_tool_step("read_file", "file contents");
+        let mut message = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
+        message.finish_tool_step("call_1", "file contents", 42);
         message.set_tool_step_expanded(true);
         let code_index = message
             .blocks

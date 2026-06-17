@@ -52,6 +52,8 @@ pub struct Message {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -65,6 +67,7 @@ impl Message {
             role,
             content: content.into(),
             display_content: None,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             hidden: false,
@@ -87,6 +90,7 @@ impl Message {
             role: Role::Tool,
             content: content.into(),
             display_content: None,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
             hidden: false,
@@ -110,6 +114,7 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStreamEvent {
     TextDelta(String),
+    ReasoningDelta(String),
     ToolCallDelta {
         index: usize,
         id: Option<String>,
@@ -160,6 +165,20 @@ pub trait Tool: Send + Sync {
     }
     async fn call(&self, arguments: &str) -> Result<String, String>;
 
+    /// Execute the tool while optionally emitting events (e.g. sub-agent steps).
+    ///
+    /// The default implementation simply calls `call()` and emits no events.
+    /// Tools that spawn sub-agents can override this to stream child events back
+    /// to the parent harness.
+    async fn call_with_events<'a>(
+        &self,
+        _call_id: &str,
+        arguments: &str,
+        _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+    ) -> Result<String, String> {
+        self.call(arguments).await
+    }
+
     /// Generate an OpenAI-compatible function schema for this tool.
     fn to_openai_function(&self) -> serde_json::Value {
         serde_json::json!({
@@ -181,6 +200,7 @@ pub enum ToolAccess {
 
 pub mod commands;
 pub mod mcp;
+pub mod project;
 pub mod providers;
 pub mod skills;
 pub mod tools;
@@ -206,12 +226,15 @@ pub enum AgentRequest {
 pub enum AgentResponse {
     Text(String),
     ToolCall {
+        id: String,
         name: String,
         arguments: String,
     },
     ToolResult {
+        id: String,
         name: String,
         output: String,
+        duration_ms: u64,
     },
     PermissionRequest(PermissionRequest),
     PermissionsCleared,
@@ -235,8 +258,15 @@ pub enum AgentResponse {
     Activity(String),
     StreamStart,
     StreamDelta(String),
+    StreamReasoningDelta(String),
+    StreamReasoningEnd(String),
     StreamEnd(String),
     StreamDiscard,
+    /// A sub-agent event to render nested inside the parent tool step.
+    SubTask {
+        parent_call_id: String,
+        event: SubTaskEvent,
+    },
     Error(String),
     Exit,
     ProviderSwitched {
@@ -287,16 +317,70 @@ pub struct HarnessSnapshot {
     pub loop_status: String,
 }
 
+/// Events emitted by a sub-agent spawned through the `task` tool.
+///
+/// These are forwarded from the child agent back to the parent harness so that
+/// the TUI can render nested tool steps and streaming output inside the parent
+/// tool card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubTaskEvent {
+    /// The sub-agent started a new response stream.
+    StreamStart,
+    /// New text token from the sub-agent.
+    StreamDelta(String),
+    /// The sub-agent response stream finished with the final accumulated text.
+    StreamEnd(String),
+    /// The sub-agent invoked a tool.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A tool invoked by the sub-agent returned a result.
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+        duration_ms: u64,
+    },
+    /// A status update from the sub-agent.
+    Activity(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
-    ModelRequestStarted { tool_round: usize },
-    AssistantDelta { delta: String, start: bool },
+    ModelRequestStarted {
+        tool_round: usize,
+    },
+    AssistantDelta {
+        delta: String,
+        start: bool,
+    },
     AssistantEnd(String),
     AssistantDiscard,
-    ToolCall { name: String, arguments: String },
-    ToolResult { name: String, output: String },
+    ReasoningDelta {
+        delta: String,
+        start: bool,
+    },
+    ReasoningEnd(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+        duration_ms: u64,
+    },
     GoalUpdated(Goal),
     PermissionRequest(PermissionRequest),
+    /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.
+    SubTask {
+        parent_call_id: String,
+        event: SubTaskEvent,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,7 +651,7 @@ impl Agent {
         mut on_event: F,
     ) -> Result<Message, String>
     where
-        F: FnMut(AgentEvent),
+        F: FnMut(AgentEvent) + Send,
     {
         self.provider.prepare_tools(&self.tools);
         let mut tool_rounds = 0;
@@ -596,15 +680,21 @@ impl Agent {
                 if !tool_calls.is_empty() {
                     for call in tool_calls {
                         self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
+                        let call_id = format!("call_{}", uuid::Uuid::new_v4());
                         on_event(AgentEvent::ToolCall {
+                            id: call_id.clone(),
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
                         });
+                        let started = std::time::Instant::now();
                         let result = self.execute_tool(call, &mut on_event).await;
+                        let duration_ms = started.elapsed().as_millis() as u64;
                         self.emit_goal_update(call, &mut on_event);
                         on_event(AgentEvent::ToolResult {
+                            id: call_id,
                             name: call.name.clone(),
                             output: result.clone(),
+                            duration_ms,
                         });
                         messages.push(Message::tool_result(
                             call,
@@ -619,15 +709,21 @@ impl Agent {
             // Check for text-based tool calls (universal fallback for all providers)
             if let Some(call) = self.parse_tool_call(&response.content) {
                 self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
+                let call_id = format!("call_{}", uuid::Uuid::new_v4());
                 on_event(AgentEvent::ToolCall {
+                    id: call_id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
+                let started = std::time::Instant::now();
                 let result = self.execute_tool(&call, &mut on_event).await;
+                let duration_ms = started.elapsed().as_millis() as u64;
                 self.emit_goal_update(&call, &mut on_event);
                 on_event(AgentEvent::ToolResult {
+                    id: call_id,
                     name: call.name.clone(),
                     output: result.clone(),
+                    duration_ms,
                 });
                 messages.push(Message::tool_result(
                     &call,
@@ -647,7 +743,7 @@ impl Agent {
         mut on_event: F,
     ) -> Result<Message, String>
     where
-        F: FnMut(AgentEvent),
+        F: FnMut(AgentEvent) + Send,
     {
         self.provider.prepare_tools(&self.tools);
         let mut tool_rounds = 0;
@@ -669,8 +765,10 @@ impl Agent {
             });
             let mut stream = self.provider.stream_chat_events(messages.clone()).await?;
             let mut content = String::new();
+            let mut reasoning_content = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut emitted_text = false;
+            let mut emitted_reasoning = false;
 
             while let Some(event) = stream.next().await {
                 match event? {
@@ -681,6 +779,14 @@ impl Agent {
                             start: !emitted_text,
                         });
                         emitted_text = true;
+                    }
+                    ProviderStreamEvent::ReasoningDelta(delta) => {
+                        reasoning_content.push_str(&delta);
+                        on_event(AgentEvent::ReasoningDelta {
+                            delta,
+                            start: !emitted_reasoning,
+                        });
+                        emitted_reasoning = true;
                     }
                     ProviderStreamEvent::ToolCallDelta {
                         index,
@@ -709,6 +815,9 @@ impl Agent {
             if emitted_text {
                 on_event(AgentEvent::AssistantEnd(content.clone()));
             }
+            if emitted_reasoning {
+                on_event(AgentEvent::ReasoningEnd(reasoning_content.clone()));
+            }
 
             calls.retain(|call| !call.name.is_empty());
             for call in &mut calls {
@@ -720,6 +829,7 @@ impl Agent {
                 role: Role::Assistant,
                 content,
                 display_content: None,
+                reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 tool_calls: (!calls.is_empty()).then_some(calls),
                 tool_call_id: None,
                 hidden: false,
@@ -732,15 +842,21 @@ impl Agent {
             if let Some(tool_calls) = &response.tool_calls {
                 for call in tool_calls {
                     self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
+                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
                     on_event(AgentEvent::ToolCall {
+                        id: call_id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     });
+                    let started = std::time::Instant::now();
                     let result = self.execute_tool(call, &mut on_event).await;
+                    let duration_ms = started.elapsed().as_millis() as u64;
                     self.emit_goal_update(call, &mut on_event);
                     on_event(AgentEvent::ToolResult {
+                        id: call_id,
                         name: call.name.clone(),
                         output: result.clone(),
+                        duration_ms,
                     });
                     messages.push(Message::tool_result(
                         call,
@@ -756,15 +872,21 @@ impl Agent {
                     on_event(AgentEvent::AssistantDiscard);
                 }
                 self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
+                let call_id = format!("call_{}", uuid::Uuid::new_v4());
                 on_event(AgentEvent::ToolCall {
+                    id: call_id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
+                let started = std::time::Instant::now();
                 let result = self.execute_tool(&call, &mut on_event).await;
+                let duration_ms = started.elapsed().as_millis() as u64;
                 self.emit_goal_update(&call, &mut on_event);
                 on_event(AgentEvent::ToolResult {
+                    id: call_id,
                     name: call.name.clone(),
                     output: result.clone(),
+                    duration_ms,
                 });
                 messages.push(Message::tool_result(
                     &call,
@@ -803,7 +925,7 @@ impl Agent {
 
     fn emit_goal_update<F>(&self, call: &ToolCall, on_event: &mut F)
     where
-        F: FnMut(AgentEvent),
+        F: FnMut(AgentEvent) + Send,
     {
         if call.name == "goal_checklist" {
             if let Some(goal) = self.get_goal() {
@@ -814,7 +936,7 @@ impl Agent {
 
     async fn execute_tool<F>(&self, call: &ToolCall, on_event: &mut F) -> String
     where
-        F: FnMut(AgentEvent),
+        F: FnMut(AgentEvent) + Send,
     {
         let tool = match self.tools.iter().find(|t| t.name() == call.name) {
             Some(t) => t,
@@ -875,7 +997,20 @@ impl Agent {
             }
         }
 
-        match tool.call(&call.arguments).await {
+        let parent_call_id = call.id.clone();
+        match tool
+            .call_with_events(
+                &call.id,
+                &call.arguments,
+                Box::new(|event| {
+                    on_event(AgentEvent::SubTask {
+                        parent_call_id: parent_call_id.clone(),
+                        event,
+                    })
+                }),
+            )
+            .await
+        {
             Ok(output) => output,
             Err(err) => format!("Error executing {}: {}", call.name, err),
         }
@@ -928,6 +1063,7 @@ mod tests {
                     role: Role::Assistant,
                     content: String::new(),
                     display_content: None,
+                    reasoning_content: None,
                     tool_calls: Some(vec![ToolCall {
                         id: "call".to_string(),
                         name: "write_test".to_string(),
@@ -1190,7 +1326,7 @@ mod tests {
         assert_eq!(model_rounds, vec![0, 1]);
         assert!(events.iter().any(|event| matches!(
             event,
-            AgentEvent::ToolCall { name, arguments }
+            AgentEvent::ToolCall { name, arguments, .. }
                 if name == "stream_read" && arguments == "{\"value\":1}"
         )));
         assert!(matches!(
