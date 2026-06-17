@@ -85,6 +85,10 @@ pub struct SessionSummary {
     pub parent_id: Option<String>,
     pub message_count: usize,
     pub updated_at: u64,
+    pub created_at: u64,
+    /// Short description of what the session is about (first user message or
+    /// the active goal), already truncated for display.
+    pub overview: String,
     pub active: bool,
 }
 
@@ -334,8 +338,38 @@ fn summary(data: &SessionData, active: bool) -> SessionSummary {
         parent_id: data.parent_id.clone(),
         message_count: data.messages.len() + data.archived_messages.len(),
         updated_at: data.updated_at,
+        created_at: data.created_at,
+        overview: session_overview(data),
         active,
     }
+}
+
+/// Derive a short, human-readable description of a session: the first user
+/// message, falling back to the active goal, then to a placeholder.
+fn session_overview(data: &SessionData) -> String {
+    const MAX: usize = 64;
+    if let Some(message) = data
+        .messages
+        .iter()
+        .chain(data.archived_messages.iter())
+        .find(|message| message.role == neenee_core::Role::User)
+    {
+        return truncate_preview(&message.content, MAX);
+    }
+    if let Some(checkpoint) = &data.loop_checkpoint {
+        return truncate_preview(&checkpoint.goal, MAX);
+    }
+    "(empty session)".to_string()
+}
+
+fn truncate_preview(text: &str, max: usize) -> String {
+    let text = text.trim();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let head: String = chars.into_iter().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 fn unix_timestamp() -> u64 {

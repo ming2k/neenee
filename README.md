@@ -19,7 +19,9 @@ OpenAI-compatible tool-call deltas before permission checks and execution.
 ## Getting Started
 
 ```bash
-cargo run
+cargo run                 # start a fresh session
+cargo run -- resume       # pick a past session to resume
+cargo run -- resume <id>  # resume a specific session
 ```
 
 Useful harness commands:

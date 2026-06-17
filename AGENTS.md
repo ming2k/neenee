@@ -372,6 +372,7 @@ Discovered custom commands are included in the same popup.
 | `/session fork` | Fork the current transcript into a new active session. |
 | `/session open <id>` | Open a session by unique id prefix. |
 | `/session new` | Archive the current branch and start an empty session. |
+| `/sessions` | Browse past sessions (overview, created/last-active time) and resume one. |
 | `/compact` | Compact older complete turns into a durable checkpoint. |
 | `/goal <objective>` | Set the persistent goal. Also supports `status`, `done`, and `clear`. |
 | `/loop <1-50>` | Run bounded autonomous iterations. Also supports `resume`, `status`, and `stop`. |
@@ -570,6 +571,8 @@ after any tool call event, preventing tool side-effect replay.
 ```bash
 cargo build
 cargo run            # neenee is the workspace's only binary
+cargo run -- resume       # open the sessions picker
+cargo run -- resume <id>  # resume a specific session
 ```
 
 No special build steps and no protobuf toolchain required.

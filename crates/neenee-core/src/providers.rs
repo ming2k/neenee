@@ -127,12 +127,40 @@ impl OpenAIProvider {
 
     fn request_body(&self, messages: Vec<Message>, stream: bool) -> Value {
         let tools = self.tools.lock().unwrap();
+        // OpenAI rejects any `tool` message whose `tool_call_id` does not match
+        // a `tool_call` on a preceding assistant message. Drop orphan tool
+        // results (e.g. from text-fallback calls or older saved sessions) so the
+        // request can never fail with "tool_call_id is not found".
+        let mut known_ids = std::collections::HashSet::new();
+        let messages: Vec<Message> = messages
+            .into_iter()
+            .filter(|message| {
+                if !valid_provider_message(message) {
+                    return false;
+                }
+                match message.role {
+                    Role::Assistant => {
+                        if let Some(calls) = &message.tool_calls {
+                            for call in calls {
+                                known_ids.insert(call.id.clone());
+                            }
+                        }
+                        true
+                    }
+                    Role::Tool => message
+                        .tool_call_id
+                        .as_ref()
+                        .is_some_and(|id| !id.is_empty() && known_ids.contains(id)),
+                    _ => true,
+                }
+            })
+            .collect();
+
         let mut body = json!({
             "model": self.model,
             "stream": stream,
             "messages": messages
                 .into_iter()
-                .filter(valid_provider_message)
                 .map(openai_message)
                 .collect::<Vec<_>>()
         });
@@ -253,7 +281,11 @@ impl Provider for OpenAIProvider {
             tc.as_array().map(|arr| {
                 arr.iter()
                     .map(|t| ToolCall {
-                        id: t["id"].as_str().unwrap_or("").to_string(),
+                        id: t["id"]
+                            .as_str()
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4())),
                         name: t["function"]["name"].as_str().unwrap_or("").to_string(),
                         arguments: t["function"]["arguments"]
                             .as_str()
@@ -971,6 +1003,59 @@ mod tests {
 
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
         assert_eq!(body["messages"][1]["content"], "again");
+    }
+
+    #[test]
+    fn openai_request_drops_orphan_tool_results() {
+        let provider = OpenAIProvider::new("test-key".to_string(), "test-model".to_string());
+        let matched = ToolCall {
+            id: "call_matched".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let assistant_with_call = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            display_content: None,
+            reasoning_content: None,
+            tool_calls: Some(vec![matched.clone()]),
+            tool_call_id: None,
+            hidden: false,
+        };
+        let good_result = Message {
+            role: Role::Tool,
+            content: "ok".to_string(),
+            display_content: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some("call_matched".to_string()),
+            hidden: false,
+        };
+        let orphan_result = Message {
+            tool_call_id: Some("call_orphan".to_string()),
+            ..Message::new(Role::Tool, "orphan")
+        };
+        let empty_id_result = Message {
+            tool_call_id: Some(String::new()),
+            ..Message::new(Role::Tool, "empty id")
+        };
+
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "hi"),
+                assistant_with_call,
+                good_result,
+                orphan_result,
+                empty_id_result,
+            ],
+            false,
+        );
+
+        let messages = body["messages"].as_array().unwrap();
+        // user, assistant(tool_calls), and only the matched tool result survive.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_matched");
     }
 
     #[test]

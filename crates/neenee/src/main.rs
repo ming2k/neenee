@@ -14,7 +14,7 @@ use neenee_core::{
         TodoWriteTool, UseSkillTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
     Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalStatus, HarnessSnapshot,
-    Message, Provider, ProviderStreamEvent, Role, GOAL_COMPLETE_MARKER,
+    Message, Provider, ProviderStreamEvent, Role, SessionOverview, GOAL_COMPLETE_MARKER,
 };
 use neenee_tui::start_tui;
 use std::collections::HashMap;
@@ -199,6 +199,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "mcp",
     "permissions",
     "session",
+    "sessions",
     "resume",
     "compact",
     "goal",
@@ -705,6 +706,45 @@ fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
     ]
 }
 
+#[derive(Debug)]
+enum StartupMode {
+    Fresh,
+    Resume(Option<String>),
+    Picker,
+}
+
+fn parse_args(args: Vec<String>) -> StartupMode {
+    match args.as_slice() {
+        [] => StartupMode::Fresh,
+        [cmd] if cmd == "resume" => StartupMode::Picker,
+        [cmd, id] if cmd == "resume" => StartupMode::Resume(Some(id.clone())),
+        [cmd, ..] => {
+            eprintln!(
+                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)",
+                cmd
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn build_sessions_overview(session: &SessionStore) -> Vec<SessionOverview> {
+    match session.list().await {
+        Ok(items) => items
+            .into_iter()
+            .map(|item| SessionOverview {
+                id: item.id,
+                overview: item.overview,
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+                message_count: item.message_count,
+                active: item.active,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
@@ -898,10 +938,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         *reg = agent_skills;
     }
 
-    // Every process starts a fresh conversation. The previous active session is
+    // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session.
+    let startup: StartupMode = parse_args(std::env::args().skip(1).collect());
+
+    // Session loading honors the startup mode. The previous active session is
     // archived and remains available through /resume or /session resume.
     let session = Arc::new(SessionStore::load());
-    session.reset().await.map_err(std::io::Error::other)?;
+    let open_picker_on_start = match &startup {
+        StartupMode::Fresh => {
+            session.reset().await.map_err(std::io::Error::other)?;
+            false
+        }
+        StartupMode::Picker => {
+            session.reset().await.map_err(std::io::Error::other)?;
+            true
+        }
+        StartupMode::Resume(id) => {
+            if let Err(error) = session.resume(id.as_deref()).await {
+                eprintln!("resume failed: {error}; starting a fresh session.");
+                session.reset().await.map_err(std::io::Error::other)?;
+            }
+            false
+        }
+    };
     let active_messages = session.messages().await;
     let restored_messages = session.transcript().await;
     let history = Arc::new(tokio::sync::Mutex::new(active_messages));
@@ -962,6 +1021,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
+        if open_picker_on_start {
+            let _ = resp_tx.send(AgentResponse::SessionsOverview(
+                build_sessions_overview(&session).await,
+            ));
+        }
         while let Some(req) = req_rx.recv().await {
             match req {
                 AgentRequest::Interrupt => {
@@ -1373,6 +1437,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                         },
+                        "/sessions" => {
+                            let _ = resp_tx.send(AgentResponse::SessionsOverview(
+                                build_sessions_overview(&session).await,
+                            ));
+                        }
                         "/compact" => {
                             let mut current = history.lock().await.clone();
                             match compact_turn_history(

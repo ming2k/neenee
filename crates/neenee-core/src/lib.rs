@@ -242,6 +242,8 @@ pub enum AgentResponse {
     ProviderKeys(Vec<(String, bool)>),
     ConversationCleared,
     ConversationReplaced(Vec<Message>),
+    /// Replace the sessions picker contents (and open the picker).
+    SessionsOverview(Vec<SessionOverview>),
     Compacted {
         archived_messages: usize,
         before_chars: usize,
@@ -315,6 +317,18 @@ pub struct HarnessSnapshot {
     pub mode: AgentMode,
     pub goal: Option<Goal>,
     pub loop_status: String,
+}
+
+/// A row in the sessions picker: enough to identify, describe and order a past
+/// session without leaking the full transcript to the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOverview {
+    pub id: String,
+    pub overview: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub message_count: usize,
+    pub active: bool,
 }
 
 /// Events emitted by a sub-agent spawned through the `task` tool.
@@ -636,6 +650,20 @@ impl Agent {
         None
     }
 
+    /// Promote a text-based (fallback) tool call onto the preceding assistant
+    /// message as a native `tool_calls` entry. This keeps the tool_call /
+    /// tool_call_id pairing valid for OpenAI-compatible providers (which
+    /// require every tool result to reference an assistant tool call), while
+    /// non-native providers simply ignore the `tool_calls` field and keep using
+    /// the message `content`.
+    fn attach_fallback_tool_call(messages: &mut [Message], call: &ToolCall) {
+        if let Some(last) = messages.last_mut() {
+            if last.role == Role::Assistant && last.tool_calls.is_none() {
+                last.tool_calls = Some(vec![call.clone()]);
+            }
+        }
+    }
+
     pub async fn run(&self, messages: &mut Vec<Message>) -> Result<Message, String> {
         self.run_with_events(messages, |event| {
             if let AgentEvent::PermissionRequest(request) = event {
@@ -709,6 +737,7 @@ impl Agent {
             // Check for text-based tool calls (universal fallback for all providers)
             if let Some(call) = self.parse_tool_call(&response.content) {
                 self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
+                Self::attach_fallback_tool_call(messages, &call);
                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
                 on_event(AgentEvent::ToolCall {
                     id: call_id.clone(),
@@ -872,6 +901,7 @@ impl Agent {
                     on_event(AgentEvent::AssistantDiscard);
                 }
                 self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
+                Self::attach_fallback_tool_call(messages, &call);
                 let call_id = format!("call_{}", uuid::Uuid::new_v4());
                 on_event(AgentEvent::ToolCall {
                     id: call_id.clone(),

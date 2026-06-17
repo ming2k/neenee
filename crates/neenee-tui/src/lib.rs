@@ -12,7 +12,7 @@ use crossterm::{
 };
 use neenee_core::{
     AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot, Message, PermissionDecision,
-    PermissionRequest, Role,
+    PermissionRequest, Role, SessionOverview,
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -40,6 +40,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "Show MCP server connections and discovered tools"),
     ("/permissions", "Show or clear always-allowed tool rules"),
     ("/session", "Inspect or reset the durable session"),
+    ("/sessions", "Browse and resume past sessions"),
     ("/resume", "Resume the most recent cached session"),
     ("/compact", "Compact older complete turns now"),
     ("/goal", "Set or inspect the persistent harness goal"),
@@ -152,6 +153,7 @@ pub enum Modal {
     Endpoint,
     ModelName,
     Help,
+    Sessions,
 }
 
 pub struct App {
@@ -166,6 +168,10 @@ pub struct App {
     pub content_lines: usize,
     pub view_height: u16,
     pub max_scroll: u16,
+    /// Expanded card pinned under the HUD bar (its message index + screen rect),
+    /// when its body is scrolled into view. Clicks inside the rect collapse it.
+    pub sticky_card: Option<usize>,
+    pub sticky_rect: Option<ratatui::layout::Rect>,
     pub tx: mpsc::UnboundedSender<AgentRequest>,
     pub should_quit: Arc<AtomicBool>,
     pub suggestion_index: Option<usize>,
@@ -180,6 +186,8 @@ pub struct App {
     pub loop_status: String,
     pub activity_status: String,
     pub pending_permission: Option<PermissionRequest>,
+    /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
+    pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
@@ -216,6 +224,9 @@ struct UiRuntime {
     is_responding: Arc<AtomicBool>,
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     key_status: Arc<Mutex<HashMap<String, bool>>>,
+    /// Sessions picker rows + a one-shot request to open the picker modal.
+    sessions_overview: Arc<Mutex<Vec<SessionOverview>>>,
+    open_sessions: Arc<AtomicBool>,
 }
 
 impl App {
@@ -375,6 +386,10 @@ pub async fn run_tui(
     let pending_permission_clone = pending_permission.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
+    let sessions_overview = Arc::new(Mutex::new(Vec::<SessionOverview>::new()));
+    let sessions_overview_clone = sessions_overview.clone();
+    let open_sessions = Arc::new(AtomicBool::new(false));
+    let open_sessions_clone = open_sessions.clone();
 
     // Spawn response listener
     tokio::spawn(async move {
@@ -510,6 +525,10 @@ pub async fn run_tui(
                 AgentResponse::ConversationReplaced(messages) => {
                     *messages_clone.lock().await = chat_messages_from_core(messages);
                 }
+                AgentResponse::SessionsOverview(sessions) => {
+                    *sessions_overview_clone.lock().await = sessions;
+                    open_sessions_clone.store(true, Ordering::SeqCst);
+                }
                 AgentResponse::Compacted {
                     archived_messages,
                     before_chars,
@@ -582,6 +601,8 @@ pub async fn run_tui(
         content_lines: 0,
         view_height: 0,
         max_scroll: 0,
+        sticky_card: None,
+        sticky_rect: None,
         tx,
         should_quit,
         suggestion_index: None,
@@ -596,6 +617,7 @@ pub async fn run_tui(
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         pending_permission: None,
+        sessions_overview: Vec::new(),
         permission_confirm_always: false,
         input_history,
         history_index: None,
@@ -627,6 +649,8 @@ pub async fn run_tui(
             is_responding,
             messages: messages_for_loop,
             key_status,
+            sessions_overview,
+            open_sessions,
         },
     )
     .await;
@@ -688,6 +712,14 @@ async fn run_app_loop<B: Backend>(
                 app.modal_index = 0;
                 app.permission_confirm_always = false;
             }
+            // Sessions picker: refresh rows and open the modal on request.
+            app.sessions_overview = runtime.sessions_overview.lock().await.clone();
+            if runtime.open_sessions.swap(false, Ordering::SeqCst)
+                && app.active_modal != Modal::Permission
+            {
+                app.active_modal = Modal::Sessions;
+                app.modal_index = 0;
+            }
         }
 
         // Decrement toast timers
@@ -734,6 +766,16 @@ async fn run_app_loop<B: Backend>(
             let input_rect = chat_render.input_rect;
             app.content_lines = chat_render.content_lines;
             app.view_height = chat_render.view_height;
+            match chat_render.sticky {
+                Some(info) => {
+                    app.sticky_card = Some(info.message_idx);
+                    app.sticky_rect = Some(info.rect);
+                }
+                None => {
+                    app.sticky_card = None;
+                    app.sticky_rect = None;
+                }
+            }
 
             let masked_input = if app.active_modal == Modal::ApiKey {
                 "•".repeat(app.input.chars().count())
@@ -844,6 +886,12 @@ async fn run_app_loop<B: Backend>(
                     &app.theme,
                 ),
                 Modal::Help => render::draw_help_modal(f, &app.theme),
+                Modal::Sessions => render::draw_sessions_modal(
+                    f,
+                    &app.sessions_overview,
+                    app.modal_index.min(app.sessions_overview.len().saturating_sub(1)),
+                    &app.theme,
+                ),
                 Modal::None => {}
             }
 
@@ -1012,6 +1060,19 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::OpenHelp => {
                     app.active_modal = Modal::Help;
                     app.modal_index = 0;
+                }
+                input::InputAction::OpenSelectedSession => {
+                    if let Some(session) = app
+                        .sessions_overview
+                        .get(app.modal_index.min(app.sessions_overview.len().saturating_sub(1)))
+                    {
+                        let id = session.id.clone();
+                        app.active_modal = Modal::None;
+                        app.modal_index = 0;
+                        let _ = app
+                            .tx
+                            .send(AgentRequest::SlashCommand(format!("/session open {}", id)));
+                    }
                 }
                 input::InputAction::CloseModal => {
                     if matches!(
@@ -1185,6 +1246,16 @@ async fn run_app_loop<B: Backend>(
                             app.modal_index - 1
                         };
                     }
+                    Modal::Sessions => {
+                        let count = app.sessions_overview.len();
+                        app.modal_index = if count == 0 {
+                            0
+                        } else if app.modal_index == 0 {
+                            count - 1
+                        } else {
+                            app.modal_index - 1
+                        };
+                    }
                     Modal::ApiKey
                     | Modal::Endpoint
                     | Modal::ModelName
@@ -1200,6 +1271,10 @@ async fn run_app_loop<B: Backend>(
                     }
                     Modal::Permission => {
                         let count = if app.permission_confirm_always { 2 } else { 3 };
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::Sessions => {
+                        let count = app.sessions_overview.len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::ApiKey
@@ -1256,7 +1331,24 @@ async fn run_app_loop<B: Backend>(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
+                    // Sticky pinned card header: collapse it on click.
+                    if app
+                        .sticky_rect
+                        .is_some_and(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
+                    {
+                        if let Some(mi) = app.sticky_card {
+                            let mut messages = runtime.messages.lock().await;
+                            if let Some(message) = messages.get_mut(mi) {
+                                if let Some(expanded) = message.tool_step_expanded() {
+                                    message.set_tool_step_expanded(!expanded);
+                                } else if let Some(expanded) = message.thinking_expanded() {
+                                    message.set_thinking_expanded(!expanded);
+                                }
+                            }
+                        }
+                        app.selection = SelectionState::None;
+                        app.drag.cancel();
+                    } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
                         if cursor.block_idx == usize::MAX {
                             // Clicked a tool-step card header: toggle that card.
                             let mut messages = runtime.messages.lock().await;

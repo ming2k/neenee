@@ -236,6 +236,8 @@ pub struct Theme {
     pub element_bg: Color,
     /// Background for menus / suggestion popups.
     pub menu_bg: Color,
+    /// Tinted band behind the user's own messages (no role label is shown).
+    pub user_bg: Color,
     /// Dim overlay drawn behind modals to fake alpha.
     pub backdrop: Color,
     /// Brand / selection color.
@@ -267,6 +269,7 @@ impl Default for Theme {
             panel_bg: Color::Rgb(22, 24, 35),
             element_bg: Color::Rgb(33, 37, 54),
             menu_bg: Color::Rgb(27, 30, 44),
+            user_bg: Color::Rgb(29, 35, 54),
             backdrop: Color::Rgb(8, 9, 14),
             primary: Color::Rgb(34, 211, 238),
             warning: Color::Rgb(250, 204, 21),
@@ -300,6 +303,19 @@ pub struct ChatRender {
     pub content_lines: usize,
     /// Height of the chat viewport.
     pub view_height: u16,
+    /// The expanded card whose body is currently scrolled into view, so the app
+    /// can render/click a sticky header pinned under the HUD bar. `None` when no
+    /// expanded card body covers the top of the viewport.
+    pub sticky: Option<StickyInfo>,
+}
+
+/// A sticky pinned card header (returned to the app for click handling).
+pub struct StickyInfo {
+    pub message_idx: usize,
+    pub header: String,
+    pub color: Color,
+    pub block_idx: usize,
+    pub rect: Rect,
 }
 
 /// Render the blocks of a single message inside the given area.
@@ -325,6 +341,7 @@ fn render_message_blocks(
 
         match block {
             Block::Text { content } => {
+                let is_user = msg.role == neenee_core::Role::User;
                 let base = match msg.role {
                     neenee_core::Role::User => Style::default().fg(theme.user_fg),
                     neenee_core::Role::System => Style::default().fg(theme.system_fg),
@@ -332,6 +349,7 @@ fn render_message_blocks(
                 };
                 let lines = wrap_text(content, area.width.saturating_sub(3) as usize);
                 *content_lines += lines.len();
+                let full_width = area.width as usize;
                 for wl in &lines {
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
@@ -341,14 +359,33 @@ fn render_message_blocks(
                         break;
                     }
 
-                    let line = line_spans(
-                        "   ",
-                        Style::default(),
-                        &wl.text,
-                        line_selection(sel_range, wl),
-                        base,
-                        theme.selected_bg,
-                    );
+                    let line = if is_user {
+                        // Emphasize the user's message with a background band
+                        // instead of a role label.
+                        let selected =
+                            matches!(line_selection(sel_range, wl), Some((s, e)) if s != e);
+                        let bg = if selected { theme.selected_bg } else { theme.user_bg };
+                        let fg = if selected { theme.text } else { theme.user_fg };
+                        let indent = 3usize;
+                        let used = indent + wl.text.width();
+                        Line::from(vec![
+                            Span::styled(" ".repeat(indent), Style::default().bg(bg)),
+                            Span::styled(wl.text.clone(), Style::default().bg(bg).fg(fg)),
+                            Span::styled(
+                                padded_tail(full_width, used),
+                                Style::default().bg(bg),
+                            ),
+                        ])
+                    } else {
+                        line_spans(
+                            "   ",
+                            Style::default(),
+                            &wl.text,
+                            line_selection(sel_range, wl),
+                            base,
+                            theme.selected_bg,
+                        )
+                    };
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
 
@@ -605,7 +642,48 @@ fn render_message_blocks(
     }
 }
 
-/// Render a tool-step message as a bordered card with a summary header,
+/// Tracked info for an expanded card, used to render a sticky header pinned
+/// under the HUD bar while the card's body is scrolled into view.
+struct StickyCard {
+    message_idx: usize,
+    header: String,
+    color: Color,
+    /// usize::MAX for tool steps, usize::MAX - 1 for thinking cards.
+    block_idx: usize,
+    header_line: usize,
+    body_end_line: usize,
+}
+
+/// Build a full-width card header band: ` {arrow}  {header} ` on a solid
+/// background, padded so it reads as a colored region (no border lines).
+fn card_header_line(
+    arrow: &str,
+    header: &str,
+    arrow_color: Color,
+    header_color: Color,
+    bg: Color,
+    full_width: usize,
+) -> Line<'static> {
+    let lead_arrow = format!(" {} ", arrow);
+    let lead_header = format!(" {} ", header);
+    let used = lead_arrow.width() + lead_header.width();
+    Line::from(vec![
+        Span::styled(lead_arrow, Style::default().bg(bg).fg(arrow_color)),
+        Span::styled(
+            lead_header,
+            Style::default()
+                .bg(bg)
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            padded_tail(full_width, used),
+            Style::default().bg(bg),
+        ),
+    ])
+}
+
+/// Render a tool-step message as a card with a summary header,
 /// expandable body, and per-line scroll handling so tall cards scroll like
 /// normal messages.
 #[allow(clippy::too_many_arguments)]
@@ -620,6 +698,7 @@ fn render_tool_step_card(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
+    sticky_cards: &mut Vec<StickyCard>,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
@@ -637,8 +716,8 @@ fn render_tool_step_card(
     };
 
     let expanded = msg.tool_step_expanded() == Some(true);
-    let card_width = chat_area.width.saturating_sub(6) as usize;
-    if card_width < 8 {
+    let full_width = chat_area.width as usize;
+    if full_width < 8 {
         // Too narrow to draw a card; fall back to plain block rendering.
         render_message_blocks(
             frame,
@@ -656,31 +735,25 @@ fn render_tool_step_card(
         return;
     }
 
-    // Top border with embedded header.
-    let left = "   ╭─ ";
-    let right = " ─";
-    let corner = "╮";
-    let header_width = header.width();
-    let fill =
-        card_width.saturating_sub(left.width() + header_width + right.width() + corner.width());
-    let top = format!("{}{}{}{}{}", left, header, right, "─".repeat(fill), corner);
+    // Header band: solid background region with an arrow (no border lines).
+    let arrow = if expanded { "▾" } else { "▸" };
+    let header_line_idx = *content_lines;
+    let inner_width = chat_area.width.saturating_sub(6);
 
-    let bottom = format!("   ╰{}╯", "─".repeat(card_width.saturating_sub(5)));
-
-    // Body width is reduced by the card margins and left/right borders.
-    let inner_width = chat_area.width.saturating_sub(10);
-
-    // Top border.
     *content_lines += 1;
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
     } else if *current_y < chat_area.y + chat_area.height {
         let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                top.clone(),
-                Style::default().fg(status_color),
-            )])),
+            Paragraph::new(card_header_line(
+                arrow,
+                &header,
+                status_color,
+                status_color,
+                theme.element_bg,
+                full_width,
+            )),
             line_rect,
         );
         // Record the header region so clicks on the card title can toggle it.
@@ -688,25 +761,23 @@ fn render_tool_step_card(
             message_idx: mi,
             block_idx: usize::MAX,
             start_byte: 0,
-            end_byte: top.len(),
-            text: top,
+            end_byte: 0,
+            text: String::new(),
             prefix_cols: 0,
             rect: line_rect,
         });
         *current_y += 1;
     }
 
-    // Body (only when expanded; collapsed cards show just the header bar).
+    // Body region (only when expanded; collapsed cards show just the header band).
     if expanded {
         for (bi, block) in msg.blocks.iter().enumerate() {
             let sel_range = block_selection_range(selection, mi, bi);
             match block {
                 Block::Text { content } => {
-                    let base = Style::default().fg(theme.assistant_fg);
-                    let prefix = "   │ ";
-                    let prefix_cols = display_width_u16(prefix);
-                    let lines =
-                        wrap_text(content, inner_width.saturating_sub(prefix_cols) as usize);
+                    let body_bg = theme.menu_bg;
+                    let indent = 3usize;
+                    let lines = wrap_text(content, (inner_width as usize).saturating_sub(indent));
                     *content_lines += lines.len();
                     for wl in &lines {
                         if *skip_rows > 0 {
@@ -716,14 +787,22 @@ fn render_tool_step_card(
                         if *current_y >= chat_area.y + chat_area.height {
                             break;
                         }
-                        let line = line_spans(
-                            prefix,
-                            Style::default().fg(status_color),
-                            &wl.text,
-                            line_selection(sel_range, wl),
-                            base,
-                            theme.selected_bg,
-                        );
+                        let selected =
+                            matches!(line_selection(sel_range, wl), Some((s, e)) if s != e);
+                        let used = indent + wl.text.width();
+                        let line = Line::from(vec![
+                            Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
+                            Span::styled(
+                                wl.text.clone(),
+                                Style::default()
+                                    .bg(if selected { theme.selected_bg } else { body_bg })
+                                    .fg(if selected { theme.text } else { theme.assistant_fg }),
+                            ),
+                            Span::styled(
+                                padded_tail(full_width, used),
+                                Style::default().bg(body_bg),
+                            ),
+                        ]);
                         let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
                         frame.render_widget(Paragraph::new(line), line_rect);
                         layout_map.push(BlockRegion {
@@ -732,7 +811,7 @@ fn render_tool_step_card(
                             start_byte: wl.start_byte,
                             end_byte: wl.end_byte,
                             text: wl.text.clone(),
-                            prefix_cols,
+                            prefix_cols: indent as u16,
                             rect: line_rect,
                         });
                         *current_y += 1;
@@ -740,26 +819,30 @@ fn render_tool_step_card(
                 }
                 Block::Code { language, content } => {
                     // Code header line.
+                    let code_bg = theme.code_bg;
                     let lang_label = language.as_deref().unwrap_or("code");
-                    let code_header = format!("   │ {} ", lang_label);
                     *content_lines += 1;
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
                     } else if *current_y < chat_area.y + chat_area.height {
                         let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
                         frame.render_widget(
-                            Paragraph::new(Line::from(vec![Span::styled(
-                                code_header,
-                                Style::default().fg(theme.dim_fg),
-                            )])),
+                            Paragraph::new(card_header_line(
+                                "·",
+                                lang_label,
+                                theme.dim_fg,
+                                theme.dim_fg,
+                                code_bg,
+                                full_width,
+                            )),
                             line_rect,
                         );
                         *current_y += 1;
                     }
 
-                    // Code content.
-                    let prefix = "   │ ";
-                    let lines = wrap_text(content, inner_width.saturating_sub(5) as usize);
+                    // Code content on a uniform code_bg region.
+                    let indent = 3usize;
+                    let lines = wrap_text(content, (inner_width as usize).saturating_sub(indent));
                     *content_lines += lines.len();
                     for wl in &lines {
                         if *skip_rows > 0 {
@@ -769,15 +852,22 @@ fn render_tool_step_card(
                         if *current_y >= chat_area.y + chat_area.height {
                             break;
                         }
-                        let base = Style::default().fg(theme.code_fg).bg(theme.code_bg);
-                        let line = line_spans(
-                            prefix,
-                            Style::default().fg(status_color),
-                            &wl.text,
-                            line_selection(sel_range, wl),
-                            base,
-                            theme.selected_bg,
-                        );
+                        let selected =
+                            matches!(line_selection(sel_range, wl), Some((s, e)) if s != e);
+                        let used = indent + wl.text.width();
+                        let line = Line::from(vec![
+                            Span::styled(" ".repeat(indent), Style::default().bg(code_bg)),
+                            Span::styled(
+                                wl.text.clone(),
+                                Style::default()
+                                    .bg(if selected { theme.selected_bg } else { code_bg })
+                                    .fg(if selected { theme.text } else { theme.code_fg }),
+                            ),
+                            Span::styled(
+                                padded_tail(full_width, used),
+                                Style::default().bg(code_bg),
+                            ),
+                        ]);
                         let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
                         frame.render_widget(Paragraph::new(line), line_rect);
                         layout_map.push(BlockRegion {
@@ -786,25 +876,9 @@ fn render_tool_step_card(
                             start_byte: wl.start_byte,
                             end_byte: wl.end_byte,
                             text: wl.text.clone(),
-                            prefix_cols: 5,
+                            prefix_cols: indent as u16,
                             rect: line_rect,
                         });
-                        *current_y += 1;
-                    }
-
-                    // Code footer line.
-                    *content_lines += 1;
-                    if *skip_rows > 0 {
-                        *skip_rows = skip_rows.saturating_sub(1);
-                    } else if *current_y < chat_area.y + chat_area.height {
-                        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                        frame.render_widget(
-                            Paragraph::new(Line::from(vec![Span::styled(
-                                "   │",
-                                Style::default().fg(status_color),
-                            )])),
-                            line_rect,
-                        );
                         *current_y += 1;
                     }
                 }
@@ -857,19 +931,23 @@ fn render_tool_step_card(
     }
 
     // Bottom border.
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                bottom,
-                Style::default().fg(status_color),
-            )])),
-            line_rect,
-        );
-        *current_y += 1;
+    let _ = status_color;
+    if expanded {
+        sticky_cards.push(StickyCard {
+            message_idx: mi,
+            header,
+            color: match &msg.kind {
+                crate::document::MessageKind::ToolStep {
+                    output: Some(o),
+                    ..
+                } if o.starts_with("Error") => theme.error_fg,
+                crate::document::MessageKind::ToolStep { output: Some(_), .. } => theme.success,
+                _ => theme.info,
+            },
+            block_idx: usize::MAX,
+            header_line: header_line_idx,
+            body_end_line: *content_lines,
+        });
     }
 }
 
@@ -888,10 +966,12 @@ fn render_child_tool_step(
     let Some(header) = child.tool_step_header() else {
         return;
     };
+    let body_bg = theme.menu_bg;
+    let full_width = chat_area.width as usize;
+    let indent = 6usize;
 
-    let prefix = "   │   ⚒ ";
-    let header_text = format!("{}{}", prefix, header);
-    let header_lines = wrap_text(&header_text, chat_area.width.saturating_sub(3) as usize);
+    let header_text = format!("⚒ {}", header);
+    let header_lines = wrap_text(&header_text, full_width.saturating_sub(indent));
     *content_lines += header_lines.len();
     for wl in &header_lines {
         if *skip_rows > 0 {
@@ -901,12 +981,17 @@ fn render_child_tool_step(
         if *current_y >= chat_area.y + chat_area.height {
             break;
         }
+        let used = indent + wl.text.width();
         let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
         frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                wl.text.clone(),
-                Style::default().fg(status_color),
-            )])),
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
+                Span::styled(
+                    wl.text.clone(),
+                    Style::default().bg(body_bg).fg(status_color),
+                ),
+                Span::styled(padded_tail(full_width, used), Style::default().bg(body_bg)),
+            ])),
             line_rect,
         );
         *current_y += 1;
@@ -917,8 +1002,7 @@ fn render_child_tool_step(
         ..
     } = &child.kind
     {
-        let output_prefix = "   │   ";
-        let output_lines = wrap_text(output, chat_area.width.saturating_sub(9) as usize);
+        let output_lines = wrap_text(output, full_width.saturating_sub(indent + 1));
         *content_lines += output_lines.len();
         for wl in &output_lines {
             if *skip_rows > 0 {
@@ -928,13 +1012,17 @@ fn render_child_tool_step(
             if *current_y >= chat_area.y + chat_area.height {
                 break;
             }
-            let line = format!("{}{}", output_prefix, wl.text);
+            let used = indent + wl.text.width();
             let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
             frame.render_widget(
-                Paragraph::new(Line::from(vec![Span::styled(
-                    line,
-                    Style::default().fg(theme.assistant_fg),
-                )])),
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
+                    Span::styled(
+                        wl.text.clone(),
+                        Style::default().bg(body_bg).fg(theme.assistant_fg),
+                    ),
+                    Span::styled(padded_tail(full_width, used), Style::default().bg(body_bg)),
+                ])),
                 line_rect,
             );
             *current_y += 1;
@@ -955,11 +1043,13 @@ fn render_thinking_card(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
+    sticky_cards: &mut Vec<StickyCard>,
 ) {
     let Some(header) = msg.thinking_header() else {
         return;
     };
     let expanded = msg.thinking_expanded() == Some(true);
+    let header_line_idx = *content_lines;
     let full_width = chat_area.width as usize;
 
     // Too narrow to render a padded region — fall back to plain blocks.
@@ -1069,6 +1159,17 @@ fn render_thinking_card(
             }
         }
     }
+
+    if expanded {
+        sticky_cards.push(StickyCard {
+            message_idx: mi,
+            header,
+            color: theme.text_muted,
+            block_idx: usize::MAX - 1,
+            header_line: header_line_idx,
+            body_end_line: *content_lines,
+        });
+    }
 }
 
 /// Produce a run of spaces that fills the rest of a full-width line so a
@@ -1172,38 +1273,10 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     // Total stream height, counted independently of the viewport clip so the
     // app loop can follow the bottom.
     let mut content_lines: usize = 0;
+    // Expanded cards collected during the pass, for the sticky pinned header.
+    let mut sticky_cards: Vec<StickyCard> = Vec::new();
 
     for (mi, msg) in messages.iter().enumerate() {
-        // Render message header (role label, opencode-style)
-        let (glyph, label, role_color) = match msg.role {
-            neenee_core::Role::User => ("┃", "You", theme.user_fg),
-            neenee_core::Role::Assistant => ("┃", "neenee", theme.accent),
-            neenee_core::Role::System => ("┃", "system", theme.system_fg),
-            neenee_core::Role::Tool => ("┃", "tool", theme.quote_fg),
-        };
-
-        if !msg.is_tool_step() && !msg.is_thinking() {
-            content_lines += 1;
-            let header_line = Line::from(vec![
-                Span::styled(
-                    format!(" {} ", glyph),
-                    Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    label,
-                    Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-                ),
-            ]);
-
-            if skip_rows > 0 {
-                skip_rows = skip_rows.saturating_sub(1);
-            } else if current_y < chat_area.y + chat_area.height {
-                let line_rect = Rect::new(chat_area.x, current_y, chat_area.width, 1);
-                frame.render_widget(Paragraph::new(header_line), line_rect);
-                current_y += 1;
-            }
-        }
-
         // Render blocks
         if msg.is_tool_step() {
             render_tool_step_card(
@@ -1217,6 +1290,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 &mut skip_rows,
                 &mut current_y,
                 &mut content_lines,
+                &mut sticky_cards,
             );
         } else if msg.is_thinking() {
             render_thinking_card(
@@ -1230,6 +1304,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 &mut skip_rows,
                 &mut current_y,
                 &mut content_lines,
+                &mut sticky_cards,
             );
         } else {
             render_message_blocks(
@@ -1290,10 +1365,42 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     // The input box occupies the top 3 rows of the reserved bottom region;
     // the remaining 1 row is the hint line (rendered by the app loop).
     let input_rect = Rect::new(chunks[2].x, chunks[2].y, chunks[2].width, 3);
+
+    // Sticky pinned header: if an expanded card's body covers the top of the
+    // viewport (its header is scrolled out of view), pin its header to the line
+    // directly under the HUD bar so the user can always collapse it.
+    let mut sticky_info = None;
+    let first_visible = scroll as usize;
+    if let Some(card) = sticky_cards
+        .iter()
+        .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)
+    {
+        let line_rect = Rect::new(chat_area.x, chat_area.y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(card_header_line(
+                "▾",
+                &card.header,
+                card.color,
+                card.color,
+                theme.element_bg,
+                chat_area.width as usize,
+            )),
+            line_rect,
+        );
+        sticky_info = Some(StickyInfo {
+            message_idx: card.message_idx,
+            header: card.header.clone(),
+            color: card.color,
+            block_idx: card.block_idx,
+            rect: line_rect,
+        });
+    }
+
     ChatRender {
         input_rect,
         content_lines,
         view_height: chat_area.height,
+        sticky: sticky_info,
     }
 }
 
@@ -1658,6 +1765,100 @@ pub fn draw_api_key_modal(frame: &mut Frame, provider: &str, masked_key: &str, t
             Style::default().fg(theme.text_muted),
         )),
     ];
+
+    let block = panel_block(theme.primary, theme.panel_bg);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render a unix timestamp as a short relative time (e.g. "2h ago", "3d ago").
+pub fn relative_time(ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(ts);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h ago", diff / 3600)
+    } else if diff < 7 * 86_400 {
+        format!("{}d ago", diff / 86_400)
+    } else {
+        format!("{}w ago", diff / (7 * 86_400))
+    }
+}
+
+/// Draw the sessions picker: each row shows the session overview plus its
+/// creation and last-interaction times. Enter opens the selected session.
+pub fn draw_sessions_modal(
+    frame: &mut Frame,
+    sessions: &[neenee_core::SessionOverview],
+    selected: usize,
+    theme: &Theme,
+) {
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    let area = centered_rect(80, 64, frame.size());
+    frame.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        " Sessions",
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    if sessions.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " No previous sessions yet.",
+            Style::default().fg(theme.text_muted),
+        )));
+    }
+
+    for (i, session) in sessions.iter().enumerate() {
+        let is_selected = i == selected;
+        let bg = if is_selected {
+            theme.primary
+        } else {
+            theme.panel_bg
+        };
+        let fg = if is_selected {
+            contrast_fg(theme.primary)
+        } else {
+            theme.text
+        };
+        let muted = if is_selected {
+            contrast_fg(theme.primary)
+        } else {
+            theme.text_muted
+        };
+        let badge = if session.active { "● " } else { "  " };
+        let overview: String = session.overview.chars().take(48).collect();
+        let meta = format!(
+            "{} msgs · created {} · active {}",
+            session.message_count,
+            relative_time(session.created_at),
+            relative_time(session.updated_at)
+        );
+        let overview_used = 1 + badge.len() + overview.width();
+        let meta_used = 2 + meta.width();
+        // Right-align the meta on the same row when it fits.
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let gap = inner_width.saturating_sub(overview_used.min(inner_width / 2) + meta_used);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {}{}", badge, overview), Style::default().bg(bg).fg(fg)),
+            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+            Span::styled(format!("  {}  ", meta), Style::default().bg(bg).fg(muted)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑↓ navigate · Enter open · Esc close ",
+        Style::default().fg(theme.text_muted),
+    )));
 
     let block = panel_block(theme.primary, theme.panel_bg);
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -2036,9 +2237,13 @@ mod tests {
                 let mut layout_map = LayoutMap::new();
                 let mut thinking = ChatMessage::thinking("Reasoning about the task step by step.");
                 thinking.set_thinking_expanded(true);
+                let mut tool = ChatMessage::tool_step("call_1", "list_dir", r#"{"path":"."}"#);
+                tool.set_tool_step_expanded(true);
+                tool.finish_tool_step("call_1", "file_a\nfile_b", 12);
                 let messages = vec![
                     ChatMessage::new(neenee_core::Role::User, "hi"),
                     thinking,
+                    tool,
                 ];
                 let _ = draw_chat(
                     f,
@@ -2091,6 +2296,29 @@ mod tests {
                 draw_api_key_modal(f, "openai", "sk-•••", &theme);
                 draw_solution_input_modal(f, " Endpoint", "url", "https://x", false, &theme);
                 draw_help_modal(f, &theme);
+                draw_sessions_modal(
+                    f,
+                    &[
+                        neenee_core::SessionOverview {
+                            id: "abc123".to_string(),
+                            overview: "Refactor the renderer".to_string(),
+                            created_at: 0,
+                            updated_at: 0,
+                            message_count: 12,
+                            active: true,
+                        },
+                        neenee_core::SessionOverview {
+                            id: "def456".to_string(),
+                            overview: "Fix the tool_call_id bug".to_string(),
+                            created_at: 0,
+                            updated_at: 0,
+                            message_count: 4,
+                            active: false,
+                        },
+                    ],
+                    0,
+                    &theme,
+                );
             })
             .unwrap();
 

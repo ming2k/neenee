@@ -41,6 +41,8 @@ pub enum InputAction {
     OpenCommands,
     /// Open the help / keybindings modal.
     OpenHelp,
+    /// Open the currently-selected session in the sessions picker.
+    OpenSelectedSession,
     /// Close any modal.
     CloseModal,
     /// Scroll up.
@@ -219,6 +221,7 @@ pub fn process_event(
                         model: String::new(),
                     },
                     super::Modal::HistorySearch => InputAction::SendChat(String::new()),
+                    super::Modal::Sessions => InputAction::OpenSelectedSession,
                     super::Modal::Permission => InputAction::PermissionSubmit,
                     super::Modal::ApiKey => InputAction::SubmitApiKey,
                     super::Modal::Endpoint => InputAction::SubmitEndpoint,
@@ -306,6 +309,9 @@ pub fn process_event(
                     }
                 }
                 KeyCode::Left => {
+                    if context.active_modal == super::Modal::Permission {
+                        return InputAction::ModalUp;
+                    }
                     if matches!(
                         context.active_modal,
                         super::Modal::None
@@ -319,6 +325,9 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Right => {
+                    if context.active_modal == super::Modal::Permission {
+                        return InputAction::ModalDown;
+                    }
                     if matches!(
                         context.active_modal,
                         super::Modal::None
@@ -334,8 +343,9 @@ pub fn process_event(
                 KeyCode::Up => match context.active_modal {
                     super::Modal::Models => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
-                    super::Modal::Permission => InputAction::ModalUp,
-                    super::Modal::ApiKey
+                    super::Modal::Sessions => InputAction::ModalUp,
+                    super::Modal::Permission
+                    | super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
@@ -350,8 +360,9 @@ pub fn process_event(
                 KeyCode::Down => match context.active_modal {
                     super::Modal::Models => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
-                    super::Modal::Permission => InputAction::ModalDown,
-                    super::Modal::ApiKey
+                    super::Modal::Sessions => InputAction::ModalDown,
+                    super::Modal::Permission
+                    | super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
