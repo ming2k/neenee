@@ -17,6 +17,44 @@ use crate::layout::{BlockRegion, LayoutMap, TableCellHit};
 use crate::selection::{floor_char_boundary, inclusive_end, SelectionState};
 use neenee_core::{AgentMode, Goal, GoalStatus, PermissionRequest};
 
+/// Global viewport margin. Only vertical breathing room (1 cell top and
+/// bottom) is reserved; horizontally every component spans the full terminal
+/// width. Per-component insets (e.g. the `┃` accent bar on the input box and
+/// user messages) are owned by the components themselves, not by this margin.
+const VIEWPORT_H_MARGIN: u16 = 0;
+const VIEWPORT_V_MARGIN: u16 = 1;
+
+/// Uniform horizontal inset applied to every chat-area component so no band,
+/// bar, or text touches the terminal frame. Both gutters show `app_bg` via the
+/// global frame fill. Cards consume this via [`chat_band_rect`]; user panels
+/// and code blocks render their own equivalent gutters; markdown text wraps
+/// with `CHAT_H_INSET` cells of slack on the right.
+const CHAT_H_INSET: u16 = 2;
+
+/// The usable area after reserving the global viewport margins (1 cell top
+/// and bottom). The full `frame.size()` is only used to paint the app
+/// background and the modal backdrop.
+fn viewport_rect(frame: &Frame) -> Rect {
+    frame.size().inner(&ratatui::layout::Margin {
+        horizontal: VIEWPORT_H_MARGIN,
+        vertical: VIEWPORT_V_MARGIN,
+    })
+}
+
+/// Inner rect of a chat-area region after reserving the uniform
+/// [`CHAT_H_INSET`] left+right `app_bg` gutters. Use this as the render target
+/// for any solid-background band (card headers/bodies, child tool steps) so
+/// the band sits inside the gutters rather than spanning edge to edge. The
+/// surrounding cells keep `app_bg` from the global frame fill.
+fn chat_band_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x + CHAT_H_INSET,
+        area.y,
+        area.width.saturating_sub(2 * CHAT_H_INSET).max(1),
+        area.height,
+    )
+}
+
 /// The byte range of a block covered by the selection.
 /// `(start, None)` means "from start to the end of the block".
 fn block_selection_range(
@@ -104,13 +142,48 @@ fn line_spans(
     Line::from(spans)
 }
 
+/// Push one segment of a table grid line, splitting it around the selection
+/// overlay (if any). `seg_lo`/`seg_hi` are byte offsets within `text`;
+/// `style` is the base style for the segment (border vs. content); `sel_bg`
+/// is painted under the selected portion.
+fn push_table_segment(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    seg_lo: usize,
+    seg_hi: usize,
+    style: Style,
+    sel: Option<(usize, usize)>,
+    sel_bg: Color,
+) {
+    if seg_hi <= seg_lo {
+        return;
+    }
+    match sel {
+        Some((slo, shi)) if slo < seg_hi && seg_lo < shi => {
+            let cut_lo = slo.max(seg_lo) - seg_lo;
+            let cut_hi = shi.min(seg_hi) - seg_lo;
+            let segment = &text[seg_lo..seg_hi];
+            if cut_lo > 0 {
+                spans.push(Span::styled(segment[..cut_lo].to_string(), style));
+            }
+            spans.push(Span::styled(
+                segment[cut_lo..cut_hi].to_string(),
+                style.bg(sel_bg),
+            ));
+            if cut_hi < segment.len() {
+                spans.push(Span::styled(segment[cut_hi..].to_string(), style));
+            }
+        }
+        _ => {
+            spans.push(Span::styled(text[seg_lo..seg_hi].to_string(), style));
+        }
+    }
+}
+
 /// Build a rendered code line with a line-number gutter, a uniform `code_bg`
 /// band that fills the full width, and character-level selection highlighting.
-/// Replaces the old `╭─ ╰─` boxed code style with an opencode-like borderless
-/// block whose only ornament is the gutter.
-/// Build a rendered code line with an optional left `┃` bar, a line-number
-/// gutter, a uniform background that fills the full width, and character-level
-/// selection highlighting.
+/// The optional left bar is retained for callers that want it; code blocks
+/// themselves render borderless with only the gutter as ornament.
 #[allow(clippy::too_many_arguments)]
 fn code_gutter_line(
     left_bar: Option<Color>,
@@ -592,7 +665,20 @@ pub struct ChatView<'a> {
     pub input: &'a str,
     /// When true, the header and input box are hidden (overlay modal open).
     pub chrome_hidden: bool,
+    /// When set, the view is zoomed into a sub-agent task: a navigation bar is
+    /// rendered and `messages` is the focused task's child stream.
+    pub subagent_bar: Option<SubagentBarInfo>,
     pub theme: &'a Theme,
+}
+
+/// Info for the sub-agent navigation bar (shown when zoomed into a task).
+pub struct SubagentBarInfo {
+    /// Label for the focused sub-agent (its task description).
+    pub label: String,
+    /// 1-based index of the focused sub-agent among its siblings.
+    pub index: usize,
+    /// Total number of sibling sub-agent tasks.
+    pub total: usize,
 }
 
 /// Layout information returned by [`draw_chat`].
@@ -617,6 +703,11 @@ pub struct StickyInfo {
     pub color: Color,
     pub block_idx: usize,
     pub rect: Rect,
+    /// The content-line index of the real header inside the stream. The app
+    /// uses this to re-anchor the scroll offset when the user collapses the
+    /// pinned card, so the real header takes the sticky's place at the top of
+    /// the viewport instead of jumping to unrelated content.
+    pub header_line: usize,
 }
 
 /// Render the blocks of a single message inside the given area.
@@ -652,7 +743,8 @@ fn render_message_blocks(
                 let lines = if is_user {
                     wrap_text(content, area.width.saturating_sub(6) as usize)
                 } else {
-                    wrap_text(content, area.width.saturating_sub(4) as usize)
+                    // 4-col left indent + 2-col right gutter (`CHAT_H_INSET`).
+                    wrap_text(content, area.width.saturating_sub(6) as usize)
                 };
                 *content_lines += lines.len();
 
@@ -667,12 +759,15 @@ fn render_message_blocks(
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
                     } else if *current_y < area.y + area.height {
-                        // Top transition: ╻ (bottom-half bar) + ▄ (lower half
-                        // block) — only the bottom half carries the panel.
+                        // Top transition: ▄ (lower half block) for both the
+                        // bar (accent fg) and the panel (user_bg fg) so the
+                        // half-height boundary is pixel-accurate. Box-drawing
+                        // characters like ╻ are font-dependent and rarely sit
+                        // at the exact 50% mark.
                         let pad = Line::from(vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
                             Span::styled(
-                                "╻",
+                                "▄",
                                 Style::default().bg(theme.app_bg).fg(theme.accent),
                             ),
                             Span::styled(
@@ -710,7 +805,7 @@ fn render_message_blocks(
                         let mut spans = vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
                             Span::styled(
-                                "┃",
+                                "█",
                                 Style::default().bg(bg).fg(theme.accent),
                             ),
                             Span::styled(" ", Style::default().bg(bg)),
@@ -786,12 +881,13 @@ fn render_message_blocks(
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
                     } else if *current_y < area.y + area.height {
-                        // Bottom transition: ╹ (top-half bar) + ▀ (upper half
-                        // block) — only the top half carries the panel.
+                        // Bottom transition: ▀ (upper half block) for both the
+                        // bar (accent fg) and the panel (user_bg fg) — matching
+                        // the top transition's pixel-accurate half boundary.
                         let pad = Line::from(vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
                             Span::styled(
-                                "╹",
+                                "▀",
                                 Style::default().bg(theme.app_bg).fg(theme.accent),
                             ),
                             Span::styled(
@@ -819,7 +915,8 @@ fn render_message_blocks(
                 // generic line wrapper mangle `│` separators.
                 let indent = 3usize;
                 let full_width = area.width as usize;
-                let available = full_width.saturating_sub(indent + 1);
+                // `indent` left + 2-col right gutter (`CHAT_H_INSET`).
+                let available = full_width.saturating_sub(indent + 2);
                 let table = build_table_render(headers, rows, aligns, available);
                 let ncols = headers.len().max(1);
 
@@ -861,7 +958,6 @@ fn render_message_blocks(
                         break;
                     }
                     let is_border = row_info.is_none();
-                    let line_base = if is_border { border_style } else { base };
 
                     let start_byte = line_start_byte;
                     let end_byte = line_start_byte + line_text.len();
@@ -891,20 +987,59 @@ fn render_message_blocks(
 
                     let used = indent + line_text.width();
                     let mut spans = vec![Span::styled(" ".repeat(indent), pad_style)];
-                    match selected_span {
-                        None => spans.push(Span::styled(line_text.clone(), line_base)),
-                        Some((lo, hi)) => {
-                            if lo > 0 {
-                                spans.push(Span::styled(line_text[..lo].to_string(), line_base));
+                    // On data lines the `│` rules and inter-cell padding are
+                    // border decoration; only the padded cell text (col_spans)
+                    // is "content". Paint borders with the same muted style as
+                    // the horizontal separators so the grid reads as one
+                    // uniform weight — otherwise the vertical rules (drawn on
+                    // every data row with the brighter text colour) look
+                    // heavier than the sparse horizontal rules.
+                    if let Some(info) = row_info {
+                        let mut pos = 0usize;
+                        for &(lo, hi) in &info.col_spans {
+                            if lo > pos {
+                                push_table_segment(
+                                    &mut spans,
+                                    line_text,
+                                    pos,
+                                    lo,
+                                    border_style,
+                                    selected_span,
+                                    sel_bg,
+                                );
                             }
-                            spans.push(Span::styled(
-                                line_text[lo..hi].to_string(),
-                                line_base.bg(sel_bg),
-                            ));
-                            if hi < line_text.len() {
-                                spans.push(Span::styled(line_text[hi..].to_string(), line_base));
-                            }
+                            push_table_segment(
+                                &mut spans,
+                                line_text,
+                                lo,
+                                hi,
+                                base,
+                                selected_span,
+                                sel_bg,
+                            );
+                            pos = hi;
                         }
+                        if pos < line_text.len() {
+                            push_table_segment(
+                                &mut spans,
+                                line_text,
+                                pos,
+                                line_text.len(),
+                                border_style,
+                                selected_span,
+                                sel_bg,
+                            );
+                        }
+                    } else {
+                        push_table_segment(
+                            &mut spans,
+                            line_text,
+                            0,
+                            line_text.len(),
+                            border_style,
+                            selected_span,
+                            sel_bg,
+                        );
                     }
                     spans.push(Span::styled(padded_tail(full_width, used), pad_style));
                     let line = Line::from(spans);
@@ -961,7 +1096,14 @@ fn render_message_blocks(
                 // line-number gutter, matching opencode's clean look. No
                 // `╭─ ╰─` frame, no per-line `│` rule.
                 let code_bg = theme.code_bg;
-                let full_width = area.width as usize;
+                // The solid-background band is inset from the chat edges so it
+                // reads as a distinct panel rather than bleeding into the
+                // terminal frame. Content (gutter + code) lives inside the
+                // band; the surrounding cells keep `app_bg`.
+                let h_inset: u16 = 2;
+                let band_x = area.x + h_inset;
+                let band_w = area.width.saturating_sub(2 * h_inset).max(1);
+                let full_width = band_w as usize;
 
                 // Split into logical lines, tracking each one's byte offset
                 // within `content` so semantic selection maps back to the raw
@@ -974,29 +1116,24 @@ fn render_message_blocks(
                 }
 
                 let gutter_width = logical_lines.len().to_string().len().max(2);
-                // 2-char indent + ┃ bar + space matches the user-message /
-                // input-box accent bar position so the whole transcript shares
-                // one visual left rule for "structured content".
+                // The code band is a uniform background with a line-number
+                // gutter — no left accent bar.
                 let left_indent = 2usize;
                 let gutter_gap = 1usize;
-                let indent = left_indent + 1 /* ┃ */ + 1 /* space */ + gutter_width + gutter_gap;
-                let wrap_width = area.width.saturating_sub(indent as u16 + 1) as usize;
+                let indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
+                let wrap_width = full_width.saturating_sub(indent + 1);
 
-                // Subtle language tag on its own dim line, under the ┃ bar.
+                // Subtle language tag on its own dim line above the gutter.
                 if let Some(lang) = language.as_deref().filter(|l| !l.is_empty()) {
                     *content_lines += 1;
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
                     } else if *current_y < area.y + area.height {
-                        let used = left_indent + 1 + 1 + lang.len();
+                        let used = left_indent + 1 + lang.len();
                         let line = Line::from(vec![
                             Span::styled(
                                 " ".repeat(left_indent),
                                 Style::default().bg(code_bg),
-                            ),
-                            Span::styled(
-                                "┃",
-                                Style::default().bg(code_bg).fg(theme.accent),
                             ),
                             Span::styled(" ", Style::default().bg(code_bg)),
                             Span::styled(
@@ -1008,7 +1145,7 @@ fn render_message_blocks(
                                 Style::default().bg(code_bg),
                             ),
                         ]);
-                        let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                        let line_rect = Rect::new(band_x, *current_y, band_w, 1);
                         frame.render_widget(Paragraph::new(line), line_rect);
                         *current_y += 1;
                     }
@@ -1052,7 +1189,7 @@ fn render_message_blocks(
                         };
 
                         let line = code_gutter_line(
-                            Some(theme.accent),
+                            None,
                             left_indent,
                             &gutter,
                             gutter_gap,
@@ -1064,7 +1201,7 @@ fn render_message_blocks(
                             theme.selected_bg,
                             full_width,
                         );
-                        let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                        let line_rect = Rect::new(band_x, *current_y, band_w, 1);
                         frame.render_widget(Paragraph::new(line), line_rect);
 
                         if record_layout {
@@ -1093,7 +1230,7 @@ fn render_message_blocks(
                 };
                 let style = Style::default().fg(theme.heading_fg).add_modifier(modifier);
                 let continuation = " ".repeat(prefix_cols as usize);
-                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 1) as usize);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
                 for (line_index, wl) in lines.iter().enumerate() {
                     if *skip_rows > 0 {
@@ -1134,7 +1271,8 @@ fn render_message_blocks(
                 }
             }
             Block::Quote { content } => {
-                let lines = wrap_text(content, area.width.saturating_sub(5) as usize);
+                // 5-col `▎` prefix + 2-col right gutter (`CHAT_H_INSET`).
+                let lines = wrap_text(content, area.width.saturating_sub(7) as usize);
                 *content_lines += lines.len();
                 for wl in &lines {
                     if *skip_rows > 0 {
@@ -1210,7 +1348,7 @@ fn render_message_blocks(
                 let indent = "  ".repeat(*depth);
                 let prefix = format!("   {}{} ", indent, marker);
                 let prefix_cols = display_width_u16(&prefix);
-                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 1) as usize);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
                 for wl in &lines {
                     if *skip_rows > 0 {
@@ -1264,9 +1402,11 @@ struct StickyCard {
     body_end_line: usize,
 }
 
-/// Build a full-width card header band: `  {arrow}  {header} ` (2-space indent
-/// so the arrow aligns with the `┃` bar of user messages and code blocks) on a
-/// solid background, padded so it reads as a colored region (no border lines).
+/// Build the header band of an expandable card: a solid background region
+/// (no border lines) reading `+ {header}` when collapsed or `- {header}` when
+/// expanded, padded to the full width so it reads as a colored band. The body
+/// content is expected to start at column 2 so it left-aligns with the header
+/// text.
 fn card_header_line(
     arrow: &str,
     header: &str,
@@ -1275,8 +1415,8 @@ fn card_header_line(
     bg: Color,
     full_width: usize,
 ) -> Line<'static> {
-    let lead_arrow = format!("  {} ", arrow);
-    let lead_header = format!(" {} ", header);
+    let lead_arrow = format!("{} ", arrow);
+    let lead_header = header.to_string();
     let used = lead_arrow.width() + lead_header.width();
     Line::from(vec![
         Span::styled(
@@ -1300,9 +1440,130 @@ fn card_header_line(
     ])
 }
 
-/// Render one labelled section (Arguments / Result) inside an expanded
-/// tool-step card body. Handles scroll-skip, wrapping, semantic selection
-/// layout recording, and an optional blank separator above the label.
+/// Render the shared header band of an expandable card and record its rect in
+/// the layout map so clicks / `Enter` on it can toggle the card. Returns the
+/// content-line index of the header (used for sticky-pin tracking). Both
+/// tool-step and thinking cards delegate here.
+///
+/// `block_idx` is the sentinel recorded in [`BlockRegion`] so the click handler
+/// can tell the two card kinds apart: `usize::MAX` for tool-step cards and
+/// `usize::MAX - 1` for thinking cards.
+#[allow(clippy::too_many_arguments)]
+fn render_expandable_card_header(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    expanded: bool,
+    header: &str,
+    arrow_color: Color,
+    header_color: Color,
+    bg: Color,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) -> usize {
+    let arrow = if expanded { "-" } else { "+" };
+    let header_line_idx = *content_lines;
+
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(card_header_line(
+                arrow,
+                header,
+                arrow_color,
+                header_color,
+                bg,
+                full_width,
+            )),
+            line_rect,
+        );
+        layout_map.push(BlockRegion {
+            message_idx: mi,
+            block_idx,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: line_rect,
+        });
+        *current_y += 1;
+    }
+
+    header_line_idx
+}
+
+/// Draw a single blank line padded to `full_width` with `style`'s
+/// background. Used to separate sections inside an expanded card body so
+/// each part gets visual breathing room.
+fn draw_blank_line(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    style: Style,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                padded_tail(full_width, 0),
+                style,
+            ))),
+            rect,
+        );
+        *current_y += 1;
+    }
+}
+
+/// Draw a section label line (" Tool", " Arguments", " Result") inside an
+/// expanded card body. The label sits at column 1 (one-space prefix) in
+/// `label_style`; the rest of the band is filled with `pad_style`'s
+/// background so it reads as a solid colored row.
+#[allow(clippy::too_many_arguments)]
+fn draw_section_label(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    label: &str,
+    pad_style: Style,
+    label_style: Style,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let used = 1 + label.len();
+        let line = Line::from(vec![
+            Span::styled(" ", pad_style),
+            Span::styled(label, label_style),
+            Span::styled(padded_tail(full_width, used), pad_style),
+        ]);
+        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(Paragraph::new(line), rect);
+        *current_y += 1;
+    }
+}
+
+/// Render one labelled section (Arguments / a plain Result fallback) inside
+/// an expanded tool-step card body. Handles scroll-skip, wrapping, semantic
+/// selection layout recording, and an optional blank separator above the
+/// label. Result rendering for known tools is handled by
+/// [`render_tool_result_section`] instead.
 #[allow(clippy::too_many_arguments)]
 fn render_tool_body_section(
     frame: &mut Frame,
@@ -1327,117 +1588,49 @@ fn render_tool_body_section(
     content_lines: &mut usize,
 ) {
     if separator {
-        *content_lines += 1;
-        if *skip_rows > 0 {
-            *skip_rows = skip_rows.saturating_sub(1);
-        } else if *current_y < chat_area.y + chat_area.height {
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    padded_tail(full_width, 0),
-                    pad_style,
-                ))),
-                rect,
-            );
-            *current_y += 1;
-        }
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad_style,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
     }
 
-    // Section label line.
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let used = 1 + label.len();
-        let line = Line::from(vec![
-            Span::styled(" ", pad_style),
-            Span::styled(label, label_style),
-            Span::styled(padded_tail(full_width, used), pad_style),
-        ]);
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(Paragraph::new(line), rect);
-        *current_y += 1;
-    }
+    draw_section_label(
+        frame,
+        chat_area,
+        full_width,
+        label,
+        pad_style,
+        label_style,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
 
     // Content lines.
     let sel_range = block_selection_range(selection, mi, block_idx);
+    let _ = sel_range;
     if code_mode {
-        // Code rendering: line-number gutter, per-line wrapping, code colors.
-        let code_bg = theme.code_bg;
-        let mut logical_lines: Vec<(usize, &str)> = Vec::new();
-        let mut offset = 0usize;
-        for line in content.split('\n') {
-            logical_lines.push((offset, line));
-            offset += line.len() + 1;
-        }
-        let gutter_width = logical_lines.len().to_string().len().max(2);
-        let left_indent = 1usize;
-        let gutter_gap = 1usize;
-        let gutter_indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
-        let wrap_width = inner_w.saturating_sub(1 + gutter_width + gutter_gap);
-
-        for (line_idx, (line_start_byte, logical_line)) in
-            logical_lines.iter().enumerate()
-        {
-            let wrapped = wrap_text(logical_line, wrap_width);
-            let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-                vec![WrappedLine {
-                    text: String::new(),
-                    start_byte: 0,
-                    end_byte: 0,
-                }]
-            } else {
-                wrapped
-            };
-            *content_lines += wrapped.len();
-            for (wrap_idx, wl) in wrapped.iter().enumerate() {
-                if *skip_rows > 0 {
-                    *skip_rows = skip_rows.saturating_sub(1);
-                    continue;
-                }
-                if *current_y >= chat_area.y + chat_area.height {
-                    break;
-                }
-
-                let gutter = if wrap_idx == 0 {
-                    format!("{:>width$}", line_idx + 1, width = gutter_width)
-                } else {
-                    " ".repeat(gutter_width)
-                };
-
-                let block_wl = WrappedLine {
-                    text: wl.text.clone(),
-                    start_byte: line_start_byte + wl.start_byte,
-                    end_byte: line_start_byte + wl.end_byte,
-                };
-
-                let line = code_gutter_line(
-                    None,
-                    left_indent,
-                    &gutter,
-                    gutter_gap,
-                    code_bg,
-                    theme.dim_fg,
-                    &wl.text,
-                    line_selection(sel_range, &block_wl),
-                    theme.code_fg,
-                    theme.selected_bg,
-                    full_width,
-                );
-                let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                frame.render_widget(Paragraph::new(line), rect);
-                layout_map.push(BlockRegion {
-                    message_idx: mi,
-                    block_idx,
-                    start_byte: line_start_byte + wl.start_byte,
-                    end_byte: line_start_byte + wl.end_byte,
-                    text: wl.text.clone(),
-                    prefix_cols: gutter_indent as u16,
-                    rect,
-                });
-                *current_y += 1;
-            }
-        }
+        render_code_content(
+            frame,
+            chat_area,
+            full_width,
+            mi,
+            block_idx,
+            content,
+            selection,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        );
     } else {
         // Plain-text rendering: simple indent + wrap.
         let wrapped = wrap_text(content, inner_w);
@@ -1479,6 +1672,864 @@ fn render_tool_body_section(
     }
 }
 
+/// Render text content as a code block with a line-number gutter on
+/// `code_bg`. Used for `read_file` / `edit_file` results and as the
+/// fallback for unrecognized tools. The gutter starts at column `indent`
+/// so the code aligns with the rest of the card body.
+#[allow(clippy::too_many_arguments)]
+fn render_code_content(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    content: &str,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+) {
+    let code_bg = theme.code_bg;
+    let mut logical_lines: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+    for line in content.split('\n') {
+        logical_lines.push((offset, line));
+        offset += line.len() + 1;
+    }
+    let gutter_width = logical_lines.len().to_string().len().max(2);
+    let left_indent = indent;
+    let gutter_gap = 1usize;
+    let gutter_indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
+    let wrap_width = inner_w.saturating_sub(1 + gutter_width + gutter_gap);
+    let sel_range = block_selection_range(selection, mi, block_idx);
+
+    for (line_idx, (line_start_byte, logical_line)) in logical_lines.iter().enumerate() {
+        let wrapped = wrap_text(logical_line, wrap_width);
+        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+            vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }]
+        } else {
+            wrapped
+        };
+        *content_lines += wrapped.len();
+        for (wrap_idx, wl) in wrapped.iter().enumerate() {
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *current_y >= chat_area.y + chat_area.height {
+                break;
+            }
+
+            let gutter = if wrap_idx == 0 {
+                format!("{:>width$}", line_idx + 1, width = gutter_width)
+            } else {
+                " ".repeat(gutter_width)
+            };
+
+            let block_wl = WrappedLine {
+                text: wl.text.clone(),
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+            };
+
+            let line = code_gutter_line(
+                None,
+                left_indent,
+                &gutter,
+                gutter_gap,
+                code_bg,
+                theme.dim_fg,
+                &wl.text,
+                line_selection(sel_range, &block_wl),
+                theme.code_fg,
+                theme.selected_bg,
+                full_width,
+            );
+            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            frame.render_widget(Paragraph::new(line), rect);
+            layout_map.push(BlockRegion {
+                message_idx: mi,
+                block_idx,
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+                text: wl.text.clone(),
+                prefix_cols: gutter_indent as u16,
+                rect,
+            });
+            *current_y += 1;
+        }
+    }
+}
+
+/// Render a `list_dir` / `glob` result: one entry per row on `code_bg`,
+/// directories (entries ending in `/`) in `info`, files in `code_fg`. No
+/// line-number gutter since listing rows have no meaningful line index.
+#[allow(clippy::too_many_arguments)]
+fn render_listing_content(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    content: &str,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+) {
+    let code_bg = theme.code_bg;
+    let pad = Style::default().bg(code_bg);
+    let dir_fg = theme.info;
+    let file_fg = theme.code_fg;
+    let sel_range = block_selection_range(selection, mi, block_idx);
+    let wrap_w = inner_w.saturating_sub(indent).max(1);
+
+    let mut logical_lines: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+    for line in content.split('\n') {
+        logical_lines.push((offset, line));
+        offset += line.len() + 1;
+    }
+
+    for (line_start_byte, logical_line) in logical_lines.iter() {
+        let is_dir = logical_line.ends_with('/');
+        let fg = if is_dir { dir_fg } else { file_fg };
+        let base = Style::default().bg(code_bg).fg(fg);
+        let wrapped = wrap_text(logical_line, wrap_w);
+        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+            vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }]
+        } else {
+            wrapped
+        };
+        *content_lines += wrapped.len();
+        for wl in &wrapped {
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *current_y >= chat_area.y + chat_area.height {
+                break;
+            }
+            let block_wl = WrappedLine {
+                text: wl.text.clone(),
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+            };
+            let mut line = line_spans(
+                &" ".repeat(indent),
+                pad,
+                &wl.text,
+                line_selection(sel_range, &block_wl),
+                base,
+                theme.selected_bg,
+            );
+            let used = indent + wl.text.width();
+            line.spans
+                .push(Span::styled(padded_tail(full_width, used), pad));
+            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            frame.render_widget(Paragraph::new(line), rect);
+            layout_map.push(BlockRegion {
+                message_idx: mi,
+                block_idx,
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+                text: wl.text.clone(),
+                prefix_cols: indent as u16,
+                rect,
+            });
+            *current_y += 1;
+        }
+    }
+}
+
+/// A single logical line parsed out of grep's `path:linenum:content` format.
+struct GrepLine<'a> {
+    path: &'a str,
+    lineno: &'a str,
+    content: &'a str,
+    /// Byte offset of `content` within the original ripgrep output line.
+    content_offset: usize,
+}
+
+/// Parse `path:linenum:content` (ripgrep's default with `-n`). Paths may
+/// contain `:` (e.g. Windows `C:\foo`), so the scan accepts the first colon
+/// that is followed by an all-digit run and another colon as the
+/// line-number separator. Returns `None` for blank separators or any line
+/// that doesn't match the ripgrep shape.
+fn parse_grep_line(line: &str) -> Option<GrepLine<'_>> {
+    for (idx, ch) in line.char_indices() {
+        if ch != ':' {
+            continue;
+        }
+        let after = &line[idx + 1..];
+        let digits_end = after
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_digit())
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        if digits_end > 0 && after.as_bytes().get(digits_end) == Some(&b':') {
+            let path = &line[..idx];
+            if path.is_empty() {
+                continue;
+            }
+            let lineno = &after[..digits_end];
+            let content = &after[digits_end + 1..];
+            let content_offset = idx + 1 + digits_end + 1;
+            return Some(GrepLine {
+                path,
+                lineno,
+                content,
+                content_offset,
+            });
+        }
+    }
+    None
+}
+
+/// Emit `text` as one or more wrapped rows at column `indent`, all styled
+/// with `style` on `pad`'s background, recording a selectable [`BlockRegion`]
+/// per row whose byte range is anchored at `abs_start` within the tool
+/// output. Used for grep path headers, ripgrep separator rows, and any
+/// other "simple" result row that doesn't need a line-number gutter.
+#[allow(clippy::too_many_arguments)]
+fn emit_simple_rows(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    indent: usize,
+    text: &str,
+    abs_start: usize,
+    pad: Style,
+    style: Style,
+    sel_range: Option<(usize, Option<usize>)>,
+    selected_bg: Color,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    let wrap_w = full_width.saturating_sub(indent).max(1);
+    let wrapped = wrap_text(text, wrap_w);
+    let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+        vec![WrappedLine {
+            text: String::new(),
+            start_byte: 0,
+            end_byte: 0,
+        }]
+    } else {
+        wrapped
+    };
+    *content_lines += wrapped.len();
+    for wl in &wrapped {
+        if *skip_rows > 0 {
+            *skip_rows = skip_rows.saturating_sub(1);
+            continue;
+        }
+        if *current_y >= chat_area.y + chat_area.height {
+            break;
+        }
+        let block_wl = WrappedLine {
+            text: wl.text.clone(),
+            start_byte: abs_start + wl.start_byte,
+            end_byte: abs_start + wl.end_byte,
+        };
+        let mut line = line_spans(
+            &" ".repeat(indent),
+            pad,
+            &wl.text,
+            line_selection(sel_range, &block_wl),
+            style,
+            selected_bg,
+        );
+        let used = indent + wl.text.width();
+        line.spans
+            .push(Span::styled(padded_tail(full_width, used), pad));
+        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(Paragraph::new(line), rect);
+        layout_map.push(BlockRegion {
+            message_idx: mi,
+            block_idx,
+            start_byte: block_wl.start_byte,
+            end_byte: block_wl.end_byte,
+            text: wl.text.clone(),
+            prefix_cols: indent as u16,
+            rect,
+        });
+        *current_y += 1;
+    }
+}
+
+/// Render a `grep` result by grouping matches under their file path. Each
+/// new path is printed once as a bold `heading_fg` header row; each match
+/// is shown as `{lineno}  {content}` with the line number dimmed and the
+/// line-number column aligned across the whole result. Non-match lines
+/// (ripgrep block separators, etc.) fall back to a dimmed plain row.
+/// Selection byte ranges are anchored in the original tool output so
+/// copy/cut works across the visible match content.
+#[allow(clippy::too_many_arguments)]
+fn render_grep_content(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    content: &str,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+) {
+    let code_bg = theme.code_bg;
+    let pad = Style::default().bg(code_bg);
+    let header_style = Style::default()
+        .bg(code_bg)
+        .fg(theme.heading_fg)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().bg(code_bg).fg(theme.dim_fg);
+    let match_style = Style::default().bg(code_bg).fg(theme.code_fg);
+    let sel_range = block_selection_range(selection, mi, block_idx);
+
+    // Walk logical lines with their byte offsets in `content`.
+    let mut logical: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+    for line in content.split('\n') {
+        logical.push((offset, line));
+        offset += line.len() + 1;
+    }
+
+    // Width of the line-number column: the widest lineno across all matches,
+    // so the content column stays aligned within and across files.
+    let mut lineno_width = 1usize;
+    for (_, line) in &logical {
+        if let Some(p) = parse_grep_line(line) {
+            lineno_width = lineno_width.max(p.lineno.len());
+        }
+    }
+    let gap = 2usize;
+    let content_cols = indent + lineno_width + gap;
+    let content_wrap_w = inner_w.saturating_sub(lineno_width + gap).max(1);
+
+    let mut current_path: Option<&str> = None;
+
+    for (line_start_byte, logical_line) in &logical {
+        match parse_grep_line(logical_line) {
+            Some(parsed) => {
+                if current_path != Some(parsed.path) {
+                    current_path = Some(parsed.path);
+                    emit_simple_rows(
+                        frame,
+                        chat_area,
+                        full_width,
+                        mi,
+                        block_idx,
+                        indent,
+                        parsed.path,
+                        *line_start_byte,
+                        pad,
+                        header_style,
+                        sel_range,
+                        theme.selected_bg,
+                        layout_map,
+                        skip_rows,
+                        current_y,
+                        content_lines,
+                    );
+                }
+                // Absolute byte offset of `content` within the tool output.
+                let content_abs = line_start_byte + parsed.content_offset;
+                let wrapped = wrap_text(parsed.content, content_wrap_w);
+                let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+                    vec![WrappedLine {
+                        text: String::new(),
+                        start_byte: 0,
+                        end_byte: 0,
+                    }]
+                } else {
+                    wrapped
+                };
+                *content_lines += wrapped.len();
+                for (wrap_idx, wl) in wrapped.iter().enumerate() {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= chat_area.y + chat_area.height {
+                        break;
+                    }
+                    let lineno_span = if wrap_idx == 0 {
+                        let lpad = lineno_width.saturating_sub(parsed.lineno.len());
+                        Span::styled(format!("{}{}", " ".repeat(lpad), parsed.lineno), dim)
+                    } else {
+                        Span::styled(" ".repeat(lineno_width), dim)
+                    };
+                    let block_wl = WrappedLine {
+                        text: wl.text.clone(),
+                        start_byte: content_abs + wl.start_byte,
+                        end_byte: content_abs + wl.end_byte,
+                    };
+                    let selected = line_selection(sel_range, &block_wl);
+                    let mut spans = vec![
+                        Span::styled(" ".repeat(indent), pad),
+                        lineno_span,
+                        Span::styled(" ".repeat(gap), pad),
+                    ];
+                    match selected {
+                        None => spans.push(Span::styled(wl.text.clone(), match_style)),
+                        Some((lo, hi)) => {
+                            if lo > 0 {
+                                spans.push(Span::styled(wl.text[..lo].to_string(), match_style));
+                            }
+                            spans.push(Span::styled(
+                                wl.text[lo..hi].to_string(),
+                                match_style.bg(theme.selected_bg),
+                            ));
+                            if hi < wl.text.len() {
+                                spans.push(Span::styled(wl.text[hi..].to_string(), match_style));
+                            }
+                        }
+                    }
+                    let used = content_cols + wl.text.width();
+                    spans.push(Span::styled(padded_tail(full_width, used), pad));
+                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+                    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+                    layout_map.push(BlockRegion {
+                        message_idx: mi,
+                        block_idx,
+                        start_byte: block_wl.start_byte,
+                        end_byte: block_wl.end_byte,
+                        text: wl.text.clone(),
+                        prefix_cols: content_cols as u16,
+                        rect,
+                    });
+                    *current_y += 1;
+                }
+            }
+            None => {
+                emit_simple_rows(
+                    frame,
+                    chat_area,
+                    full_width,
+                    mi,
+                    block_idx,
+                    indent,
+                    logical_line,
+                    *line_start_byte,
+                    pad,
+                    dim,
+                    sel_range,
+                    theme.selected_bg,
+                    layout_map,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+            }
+        }
+    }
+}
+
+/// Render a `bash` result: plain wrapped rows on `code_bg` with no
+/// line-number gutter (command output rows have no meaningful line index).
+/// Section markers emitted by the tool (`Exit N`, `STDOUT:`, `STDERR:`,
+/// `(success, stderr):`, `[Output truncated`, `[Output was large`) are
+/// highlighted in `warning` so they stand out from the output itself.
+#[allow(clippy::too_many_arguments)]
+fn render_bash_content(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    block_idx: usize,
+    content: &str,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+) {
+    let code_bg = theme.code_bg;
+    let pad = Style::default().bg(code_bg);
+    let base = Style::default().bg(code_bg).fg(theme.code_fg);
+    let marker_style = Style::default()
+        .bg(code_bg)
+        .fg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    let sel_range = block_selection_range(selection, mi, block_idx);
+    let wrap_w = inner_w.saturating_sub(indent).max(1);
+
+    let mut logical_lines: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+    for line in content.split('\n') {
+        logical_lines.push((offset, line));
+        offset += line.len() + 1;
+    }
+
+    for (line_start_byte, logical_line) in logical_lines.iter() {
+        let trimmed = logical_line.trim_end();
+        let is_marker = trimmed.starts_with("Exit ")
+            || trimmed == "STDOUT:"
+            || trimmed == "STDERR:"
+            || trimmed.starts_with("(success, stderr):")
+            || trimmed.starts_with("[Output truncated")
+            || trimmed.starts_with("[Output was large");
+
+        let style = if is_marker { marker_style } else { base };
+        let wrapped = wrap_text(logical_line, wrap_w);
+        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+            vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }]
+        } else {
+            wrapped
+        };
+        *content_lines += wrapped.len();
+        for wl in &wrapped {
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *current_y >= chat_area.y + chat_area.height {
+                break;
+            }
+            let block_wl = WrappedLine {
+                text: wl.text.clone(),
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+            };
+            let mut line = line_spans(
+                &" ".repeat(indent),
+                pad,
+                &wl.text,
+                line_selection(sel_range, &block_wl),
+                style,
+                theme.selected_bg,
+            );
+            let used = indent + wl.text.width();
+            line.spans
+                .push(Span::styled(padded_tail(full_width, used), pad));
+            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            frame.render_widget(Paragraph::new(line), rect);
+            layout_map.push(BlockRegion {
+                message_idx: mi,
+                block_idx,
+                start_byte: line_start_byte + wl.start_byte,
+                end_byte: line_start_byte + wl.end_byte,
+                text: wl.text.clone(),
+                prefix_cols: indent as u16,
+                rect,
+            });
+            *current_y += 1;
+        }
+    }
+}
+
+/// Render the "Result" section of an expanded tool-step card. Draws the
+/// blank separator and `Result` label on the surrounding body background
+/// (so the label aligns with `Tool` / `Arguments`), then dispatches the
+/// content rendering based on the tool name. Known tools with structured
+/// output get a specialized renderer; everything else falls back to a
+/// line-numbered code block via [`render_code_content`].
+#[allow(clippy::too_many_arguments)]
+fn render_tool_result_section(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    name: &str,
+    output: &str,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+    body_pad: Style,
+    body_label: Style,
+) {
+    draw_blank_line(
+        frame,
+        chat_area,
+        full_width,
+        body_pad,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
+    draw_section_label(
+        frame,
+        chat_area,
+        full_width,
+        "Result",
+        body_pad,
+        body_label,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
+
+    let block_idx = 1usize;
+    match name {
+        "list_dir" | "glob" => render_listing_content(
+            frame,
+            chat_area,
+            full_width,
+            mi,
+            block_idx,
+            output,
+            selection,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        ),
+        "grep" => render_grep_content(
+            frame,
+            chat_area,
+            full_width,
+            mi,
+            block_idx,
+            output,
+            selection,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        ),
+        "bash" => render_bash_content(
+            frame,
+            chat_area,
+            full_width,
+            mi,
+            block_idx,
+            output,
+            selection,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        ),
+        _ => render_code_content(
+            frame,
+            chat_area,
+            full_width,
+            mi,
+            block_idx,
+            output,
+            selection,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        ),
+    }
+}
+
+/// Render a sub-agent `task` tool step as a compact, non-expandable card.
+/// Activating it (click / Enter) navigates into a dedicated sub-agent view
+/// rather than expanding a body inline. The card shows a one-line header
+/// (the task description + duration) and a live status line summarizing the
+/// sub-agent's progress.
+#[allow(clippy::too_many_arguments)]
+fn render_subagent_inline_card(
+    frame: &mut Frame,
+    chat_area: Rect,
+    msg: &ChatMessage,
+    mi: usize,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    let Some(header) = msg.tool_step_header() else {
+        return;
+    };
+
+    let (status_color, done) = match &msg.kind {
+        crate::document::MessageKind::ToolStep {
+            output: Some(output),
+            ..
+        } if output.starts_with("Error") => (theme.error_fg, true),
+        crate::document::MessageKind::ToolStep {
+            output: Some(_), ..
+        } => (theme.success, true),
+        _ => (theme.info, false),
+    };
+
+    let chat_area = chat_band_rect(chat_area);
+    let full_width = chat_area.width as usize;
+    if full_width < 8 {
+        return;
+    }
+
+    let bg = theme.element_bg;
+    let marker = if done { "✓" } else { "▸" };
+
+    // Header band: marker + header text, registered as a tool-step card header
+    // (block_idx = usize::MAX) so the existing click/Enter handling recognizes
+    // it; the app decides to navigate rather than toggle for `task` steps.
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(card_header_line(
+                marker,
+                &header,
+                status_color,
+                theme.text,
+                bg,
+                full_width,
+            )),
+            line_rect,
+        );
+        layout_map.push(BlockRegion {
+            message_idx: mi,
+            block_idx: usize::MAX,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: line_rect,
+        });
+        *current_y += 1;
+    }
+
+    // Live status line (e.g. "↳ Running: grep foo" / "↳ Completed · 3 calls").
+    if let Some(status) = msg.subagent_status_line() {
+        let inner_width = full_width.saturating_sub(2);
+        let wrapped = wrap_text(&status, inner_width.max(1));
+        *content_lines += wrapped.len();
+        for wl in &wrapped {
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *current_y >= chat_area.y + chat_area.height {
+                break;
+            }
+            let used = 2 + wl.text.width();
+            let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  ", Style::default().bg(bg)),
+                    Span::styled(
+                        wl.text.clone(),
+                        Style::default().bg(bg).fg(theme.text_muted),
+                    ),
+                    Span::styled(padded_tail(full_width, used), Style::default().bg(bg)),
+                ])),
+                line_rect,
+            );
+            // Make the whole status line part of the same clickable header so
+            // clicking anywhere on the card enters the sub-agent view.
+            layout_map.push(BlockRegion {
+                message_idx: mi,
+                block_idx: usize::MAX,
+                start_byte: 0,
+                end_byte: 0,
+                text: String::new(),
+                prefix_cols: 0,
+                rect: line_rect,
+            });
+            *current_y += 1;
+        }
+    }
+}
+
+/// Render the sub-agent navigation bar: the focused task's label + position
+/// among siblings on the left, and the return / cycle-sibling hints on the
+/// right. Drawn across the full chat width inside the app_bg gutters.
+fn draw_subagent_bar(
+    frame: &mut Frame,
+    rect: Rect,
+    bar: &SubagentBarInfo,
+    theme: &Theme,
+) {
+    let band = chat_band_rect(rect);
+    let full_width = band.width as usize;
+    if full_width < 8 {
+        return;
+    }
+    let bg = theme.menu_bg;
+    let muted = Style::default().bg(bg).fg(theme.text_muted);
+    let label_style = Style::default()
+        .bg(bg)
+        .fg(theme.text)
+        .add_modifier(Modifier::BOLD);
+    let accent = Style::default().bg(bg).fg(theme.accent);
+
+    let left_label = format!(" {} ", "Subagent");
+    let desc = bar.label.to_string();
+    let count = if bar.total > 1 {
+        format!(" ({} of {}) ", bar.index, bar.total)
+    } else {
+        " ".to_string()
+    };
+    let right = "Esc back   [ prev   ] next ".to_string();
+
+    let left_used = left_label.width() + desc.width() + count.width();
+    let gap = full_width.saturating_sub(left_used + right.width());
+    let mut spans = vec![
+        Span::styled(left_label, label_style),
+        Span::styled(desc, accent),
+        Span::styled(count, muted),
+        Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+        Span::styled(right, muted),
+    ];
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    if used < full_width {
+        spans.push(Span::styled(
+            " ".repeat(full_width - used),
+            Style::default().bg(bg),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), band);
+}
+
 /// Render a tool-step message as a card with a summary header,
 /// expandable body, and per-line scroll handling so tall cards scroll like
 /// normal messages.
@@ -1512,6 +2563,12 @@ fn render_tool_step_card(
     };
 
     let expanded = msg.tool_step_expanded() == Some(true);
+    // Render into the inset band so the `element_bg`/`menu_bg`/`code_bg` bands
+    // never touch the terminal frame — they sit inside the uniform 2-cell
+    // `app_bg` gutters shared with user panels and code blocks. All helpers
+    // below (header, body sections, child tool steps) read `chat_area.x` /
+    // `chat_area.width` directly, so shrinking here propagates everywhere.
+    let chat_area = chat_band_rect(chat_area);
     let full_width = chat_area.width as usize;
     if full_width < 8 {
         // Too narrow to draw a card; fall back to plain block rendering.
@@ -1531,43 +2588,64 @@ fn render_tool_step_card(
         return;
     }
 
-    // Header band: solid background region with an arrow (no border lines).
-    // ▼ = expanded (filled, large), ▶ = collapsed — much more visible than
-    // the tiny white-outline ▾/▸ glyphs they replace.
-    let arrow = if expanded { "▼" } else { "▶" };
-    let header_line_idx = *content_lines;
-    let inner_width = chat_area.width.saturating_sub(6);
+    // Header band: solid background region with a `+`/`-` expand marker (no
+    // border lines). Delegated to the shared expandable-card header helper so
+    // tool-step and thinking cards stay in sync. `inner_width` is the full
+    // band width; each body section subtracts its own indent before wrapping.
+    let inner_width = chat_area.width as usize;
+    let header_line_idx = render_expandable_card_header(
+        frame,
+        chat_area,
+        full_width,
+        mi,
+        usize::MAX,
+        expanded,
+        &header,
+        status_color,
+        theme.text_muted,
+        theme.element_bg,
+        layout_map,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
 
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(card_header_line(
-                arrow,
-                &header,
-                status_color,
-                theme.text_muted,
-                theme.element_bg,
-                full_width,
-            )),
-            line_rect,
-        );
-        // Record the header region so clicks on the card title can toggle it.
-        layout_map.push(BlockRegion {
-            message_idx: mi,
-            block_idx: usize::MAX,
-            start_byte: 0,
-            end_byte: 0,
-            text: String::new(),
-            prefix_cols: 0,
-            rect: line_rect,
-        });
-        *current_y += 1;
+    // Bash-only collapsed preview: under the header, show the `$ command` line
+    // and a truncated (ANSI-stripped) excerpt of the output so the user can
+    // see what ran and roughly what it produced without expanding. Other tool
+    // types keep the all-or-nothing collapsed header. Expand for the full
+    // structured view (Tool / Arguments / Result with a code gutter).
+    if !expanded {
+        if let crate::document::MessageKind::ToolStep {
+            name,
+            arguments,
+            output: Some(output),
+            ..
+        } = &msg.kind
+        {
+            if name == "bash" && !output.trim().is_empty() {
+                render_bash_preview(
+                    frame,
+                    chat_area,
+                    full_width,
+                    mi,
+                    arguments,
+                    output,
+                    theme,
+                    layout_map,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+            }
+        }
     }
 
     // Body region (only when expanded; collapsed cards show just the header band).
+    // Body content is indented 2 cols so it left-aligns with the header text in
+    // `+ {header}` (the `+` sits at col 0, the header text at col 2). A blank
+    // `menu_bg` row separates the header from the body and every pair of
+    // sections (Tool / Arguments / Result / children) so each part breathes.
     if expanded {
         let body_bg = theme.menu_bg;
         let pad = Style::default().bg(body_bg);
@@ -1576,8 +2654,8 @@ fn render_tool_step_card(
             .fg(theme.text_muted)
             .add_modifier(Modifier::BOLD);
         let arg_style = Style::default().bg(body_bg).fg(theme.text_muted);
-        let indent = 3usize;
-        let inner_w = (inner_width as usize).saturating_sub(indent);
+        let indent = 2usize;
+        let inner_w = inner_width.saturating_sub(indent);
 
         if let crate::document::MessageKind::ToolStep {
             name,
@@ -1586,23 +2664,30 @@ fn render_tool_step_card(
             ..
         } = &msg.kind
         {
-            // ── Tool ── (technical name, muted; only visible when expanded)
-            // Uses the same section-label style as Arguments / Result so the
-            // hierarchy reads cleanly.
-            *content_lines += 1;
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-            } else if *current_y < chat_area.y + chat_area.height {
-                let used = 1 + "Tool".len();
-                let line = Line::from(vec![
-                    Span::styled(" ", pad),
-                    Span::styled("Tool", label_style),
-                    Span::styled(padded_tail(full_width, used), pad),
-                ]);
-                let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                frame.render_widget(Paragraph::new(line), rect);
-                *current_y += 1;
-            }
+            // Blank line after the header band — separates `element_bg`
+            // header from `menu_bg` body with a row of body background.
+            draw_blank_line(
+                frame,
+                chat_area,
+                full_width,
+                pad,
+                skip_rows,
+                current_y,
+                content_lines,
+            );
+
+            // ── Tool ── (technical name, only visible when expanded).
+            draw_section_label(
+                frame,
+                chat_area,
+                full_width,
+                "Tool",
+                pad,
+                label_style,
+                skip_rows,
+                current_y,
+                content_lines,
+            );
             *content_lines += 1;
             if *skip_rows > 0 {
                 *skip_rows = skip_rows.saturating_sub(1);
@@ -1621,7 +2706,7 @@ fn render_tool_step_card(
                 *current_y += 1;
             }
 
-            // ── Arguments ──
+            // ── Arguments ── (blank-separated from Tool above).
             let kv = crate::document::parse_arguments_kv(arguments);
             let display_args: String = kv
                 .iter()
@@ -1642,7 +2727,7 @@ fn render_tool_step_card(
                     label_style,
                     indent,
                     inner_w,
-                    false,
+                    true,
                     false,
                     selection,
                     theme,
@@ -1653,47 +2738,50 @@ fn render_tool_step_card(
                 );
             }
 
-            // ── Result ── (only when output exists) — rendered as a code
-            // block with line-number gutter so file contents and command
-            // output are easy to scan.
+            // ── Result ── (only when output exists). Dispatched per tool
+            // name so listings, grep matches, and command output each get a
+            // purpose-built renderer; unknown tools fall back to a
+            // line-numbered code block. The separator + label always sit on
+            // the body background so "Result" aligns with "Tool" /
+            // "Arguments"; only the result content sits on the recessed
+            // `code_bg`.
             if let Some(output_str) = output {
                 if !output_str.is_empty() {
-                    let code_bg = theme.code_bg;
-                    let code_pad = Style::default().bg(code_bg);
-                    let code_label = Style::default()
-                        .bg(code_bg)
-                        .fg(theme.text_muted)
-                        .add_modifier(Modifier::BOLD);
-                    let code_out =
-                        Style::default().bg(code_bg).fg(theme.code_fg);
-                    render_tool_body_section(
+                    render_tool_result_section(
                         frame,
                         chat_area,
                         full_width,
                         mi,
-                        1,
-                        "Result",
+                        name,
                         output_str,
-                        code_out,
-                        code_pad,
-                        code_label,
-                        indent,
-                        inner_w,
-                        true,
-                        true,
                         selection,
                         theme,
                         layout_map,
                         skip_rows,
                         current_y,
                         content_lines,
+                        indent,
+                        inner_w,
+                        pad,
+                        label_style,
                     );
                 }
             }
         }
 
-        // Render nested sub-agent children inside the expanded card.
+        // ── Nested sub-agent children ── (blank-separated from Result).
         if let crate::document::MessageKind::ToolStep { children, .. } = &msg.kind {
+            if !children.is_empty() {
+                draw_blank_line(
+                    frame,
+                    chat_area,
+                    full_width,
+                    pad,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+            }
             for child in children {
                 if child.is_tool_step() {
                     render_child_tool_step(
@@ -1733,6 +2821,18 @@ fn render_tool_step_card(
                 }
             }
         }
+
+        // Trailing blank line: mirrors the header-side breathing room so the
+        // body closes with the same `menu_bg` band before whatever follows.
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
     }
 
     // Bottom border.
@@ -1835,7 +2935,8 @@ fn render_child_tool_step(
     }
 }
 
-/// Render a thinking/reasoning message as a muted bordered card.
+/// Render a thinking/reasoning message as an expandable card. Shares its
+/// header band with tool-step cards via `render_expandable_card_header`.
 #[allow(clippy::too_many_arguments)]
 fn render_thinking_card(
     frame: &mut Frame,
@@ -1854,7 +2955,9 @@ fn render_thinking_card(
         return;
     };
     let expanded = msg.thinking_expanded() == Some(true);
-    let header_line_idx = *content_lines;
+    // Render into the inset band so the `element_bg`/`menu_bg` bands sit inside
+    // the uniform 2-cell `app_bg` gutters, matching user panels and code blocks.
+    let chat_area = chat_band_rect(chat_area);
     let full_width = chat_area.width as usize;
 
     // Too narrow to render a padded region — fall back to plain blocks.
@@ -1875,45 +2978,61 @@ fn render_thinking_card(
         return;
     }
 
-    // Header band: a solid background-colored region (no border lines) with an
-    // arrow that indicates the expand state. ▶ = collapsed, ▼ = expanded.
-    // Uses card_header_line so the 2-space indent matches tool-step cards.
-    let arrow = if expanded { "▼" } else { "▶" };
-    let header_bg = theme.element_bg;
-    let header_line = card_header_line(
-        arrow,
+    // Header band: shared expandable-card header (`+ {header}` / `- {header}`).
+    let header_line_idx = render_expandable_card_header(
+        frame,
+        chat_area,
+        full_width,
+        mi,
+        usize::MAX - 1,
+        expanded,
         &header,
         theme.info,
         theme.text_muted,
-        header_bg,
-        full_width,
+        theme.element_bg,
+        layout_map,
+        skip_rows,
+        current_y,
+        content_lines,
     );
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(Paragraph::new(header_line), line_rect);
-        // Record the header region so clicks/Enter can toggle this card.
-        layout_map.push(BlockRegion {
-            message_idx: mi,
-            block_idx: usize::MAX - 1,
-            start_byte: 0,
-            end_byte: 0,
-            text: String::new(),
-            prefix_cols: 0,
-            rect: line_rect,
-        });
-        *current_y += 1;
-    }
 
     // Body region: a subtly different background band, shown only when expanded.
+    // Body content is indented 2 cols so it left-aligns with the header text in
+    // `+ {header}` (the `+` sits at col 0, the header text at col 2). A blank
+    // `menu_bg` row after the header and between consecutive text blocks gives
+    // the reasoning room to breathe (paragraph breaks inside a single block are
+    // already preserved as empty rows by `wrap_text`).
     if expanded {
         let body_bg = theme.menu_bg;
-        let indent = 3usize;
+        let pad = Style::default().bg(body_bg);
+        let indent = 2usize;
         let inner_width = full_width.saturating_sub(indent);
+        // Blank line after the header band — mirrors the tool-step card so
+        // both expandable cards open with the same breathing room.
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
+        let mut emitted_any_block = false;
         for (bi, block) in msg.blocks.iter().enumerate() {
             if let Block::Text { content } = block {
+                if emitted_any_block {
+                    draw_blank_line(
+                        frame,
+                        chat_area,
+                        full_width,
+                        pad,
+                        skip_rows,
+                        current_y,
+                        content_lines,
+                    );
+                }
+                emitted_any_block = true;
                 let lines = wrap_text(content, inner_width);
                 *content_lines += lines.len();
                 for wl in &lines {
@@ -1928,17 +3047,14 @@ fn render_thinking_card(
                     let selected = matches!(line_selection(sel_range, wl), Some((s, e)) if s != e);
                     let used = indent + wl.text.width();
                     let line = Line::from(vec![
-                        Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
+                        Span::styled(" ".repeat(indent), pad),
                         Span::styled(
                             wl.text.clone(),
                             Style::default()
                                 .bg(if selected { theme.selected_bg } else { body_bg })
                                 .fg(if selected { theme.text } else { theme.text_muted }),
                         ),
-                        Span::styled(
-                            padded_tail(full_width, used),
-                            Style::default().bg(body_bg),
-                        ),
+                        Span::styled(padded_tail(full_width, used), pad),
                     ]);
                     let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
@@ -1955,6 +3071,18 @@ fn render_thinking_card(
                 }
             }
         }
+
+        // Trailing blank line: mirrors the header-side breathing room so the
+        // body closes with the same `menu_bg` band before whatever follows.
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
     }
 
     if expanded {
@@ -1975,6 +3103,128 @@ fn padded_tail(full_width: usize, used: usize) -> String {
     " ".repeat(full_width.saturating_sub(used))
 }
 
+/// Strip ANSI CSI escape sequences (color/style codes) from a string. Command
+/// output often carries terminal color codes that would render as garbage in
+/// the TUI, so the bash preview runs output through this before truncating.
+/// Handles the common `\x1b[...m` color sequences; other escape types are
+/// rare in command output and left untouched.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for c2 in chars.by_ref() {
+                        if c2.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Maximum number of output lines shown in the collapsed bash preview before
+/// the `…` truncation marker kicks in.
+const BASH_PREVIEW_LINES: usize = 8;
+
+/// Render a compact, truncated preview of a completed bash call under the
+/// collapsed card header: a `$ <command>` line and the first
+/// `BASH_PREVIEW_LINES` lines of ANSI-stripped output (with a `…` marker
+/// when there is more). Each rendered row is registered with `block_idx =
+/// usize::MAX` so clicking anywhere on the preview toggles the card open,
+/// matching the expandable-card interaction model.
+#[allow(clippy::too_many_arguments)]
+fn render_bash_preview(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    arguments: &str,
+    output: &str,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    let body_bg = theme.menu_bg;
+    let pad = Style::default().bg(body_bg);
+    let indent = 2usize;
+    let inner_w = full_width.saturating_sub(indent).max(1);
+
+    // Extract the command from the JSON arguments, keep only its first line.
+    let command = crate::document::parse_arguments_kv(arguments)
+        .into_iter()
+        .find(|(k, _)| k == "command")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    let command_first = command.lines().next().unwrap_or(&command);
+
+    // Build the preview rows: the `$ command` line, then the visible output
+    // lines, then a `…` marker when the output was truncated.
+    let clean_output = strip_ansi(output);
+    let out_lines: Vec<&str> = clean_output.lines().collect();
+    let truncated = out_lines.len() > BASH_PREVIEW_LINES;
+    let visible: Vec<&str> = out_lines.into_iter().take(BASH_PREVIEW_LINES).collect();
+
+    // Each entry is (text, fg color). Lines are hard-truncated to the inner
+    // width (no per-line ellipsis) so the preview height stays predictable;
+    // the trailing `…` row already signals "more output below".
+    let mut rows: Vec<(String, Color)> = Vec::with_capacity(2 + visible.len());
+    let cmd_max = inner_w.saturating_sub(2); // reserve `$ `
+    let cmd_first_trunc: String = command_first.chars().take(cmd_max).collect();
+    rows.push((format!("$ {}", cmd_first_trunc), theme.text));
+    for line in &visible {
+        let trunc: String = line.chars().take(inner_w).collect();
+        rows.push((trunc, theme.text_muted));
+    }
+    if truncated {
+        rows.push(("…".to_string(), theme.dim_fg));
+    }
+
+    for (text, fg) in &rows {
+        *content_lines += 1;
+        if *skip_rows > 0 {
+            *skip_rows = skip_rows.saturating_sub(1);
+            continue;
+        }
+        if *current_y >= chat_area.y + chat_area.height {
+            break;
+        }
+        let used = indent + text.width();
+        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ".repeat(indent), pad),
+                Span::styled(text.clone(), Style::default().bg(body_bg).fg(*fg)),
+                Span::styled(padded_tail(full_width, used), pad),
+            ])),
+            line_rect,
+        );
+        layout_map.push(BlockRegion {
+            message_idx: mi,
+            block_idx: usize::MAX,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: line_rect,
+        });
+        *current_y += 1;
+    }
+}
+
 /// Draw the main chat area, recording layout info.
 pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'_>) -> ChatRender {
     let ChatView {
@@ -1989,15 +3239,19 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         spinner_phase,
         input,
         chrome_hidden,
+        subagent_bar,
         theme,
     } = view;
-    let size = frame.size();
+    let full = frame.size();
+    // Components render inside the vertical viewport margins (1 cell top and
+    // bottom); only the background fill uses the full terminal rect.
+    let size = viewport_rect(frame);
 
     // Paint the entire frame with the app background so the TUI owns every
     // pixel rather than leaving gaps at the terminal emulator's default color.
     frame.render_widget(
         RtBlock::default().style(Style::default().bg(theme.app_bg)),
-        size,
+        full,
     );
 
     let checklist = current_goal.and_then(goal_checklist_summary);
@@ -2030,17 +3284,17 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     let desired_input_height = input_wrapped_lines as u16 + 2; // top/bottom padding rows
     let max_input_height = (size.height / 2).max(3);
     let input_box_height = desired_input_height.min(max_input_height);
-    let bottom_height: u16 = if chrome_hidden {
+    let footer_height: u16 = if chrome_hidden {
         0
     } else {
-        status_height + input_box_height + 2 // + hint line + blank gap
+        status_height + input_box_height + 1 // + hint line (bottom spacing comes from the viewport margin)
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height), // Header and optional checklist dock
             Constraint::Min(0),                // Chat
-            Constraint::Length(bottom_height), // Status? + input box + hint line + bottom gap
+            Constraint::Length(footer_height), // Status? + input box + hint line + bottom gap
         ])
         .split(size);
 
@@ -2102,7 +3356,17 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     } // end !chrome_hidden
 
     // 2. Chat History
-    let chat_area = chunks[1];
+    // When zoomed into a sub-agent, reserve a 1-line navigation band at the
+    // bottom of the chat viewport for the sub-agent bar.
+    let (chat_area, subagent_bar_rect) = if subagent_bar.is_some() {
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(chunks[1]);
+        (sub[0], Some(sub[1]))
+    } else {
+        (chunks[1], None)
+    };
     let mut current_y = chat_area.y;
     // Account for scroll
     let mut skip_rows = scroll as usize;
@@ -2114,7 +3378,19 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
 
     for (mi, msg) in messages.iter().enumerate() {
         // Render blocks
-        if msg.is_tool_step() {
+        if msg.is_subagent_task() {
+            render_subagent_inline_card(
+                frame,
+                chat_area,
+                msg,
+                mi,
+                theme,
+                layout_map,
+                &mut skip_rows,
+                &mut current_y,
+                &mut content_lines,
+            );
+        } else if msg.is_tool_step() {
             render_tool_step_card(
                 frame,
                 chat_area,
@@ -2158,13 +3434,24 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
             );
         }
 
-        // Spacing between messages
-        content_lines += 1;
-        if skip_rows > 0 {
-            skip_rows = skip_rows.saturating_sub(1);
-        } else if current_y < chat_area.y + chat_area.height {
-            current_y += 1;
+        // Spacing between messages. A user message's panel already ends with a
+        // bottom transition row (▀) that separates it from the next message, so
+        // the extra blank line is omitted there to keep the gap to a single row
+        // (otherwise the sent message sits two rows above the following body).
+        if msg.role != neenee_core::Role::User {
+            content_lines += 1;
+            if skip_rows > 0 {
+                skip_rows = skip_rows.saturating_sub(1);
+            } else if current_y < chat_area.y + chat_area.height {
+                current_y += 1;
+            }
         }
+    }
+
+    // Sub-agent navigation band, drawn across the full chat width (inside the
+    // app_bg gutters) so it reads as a continuous bar pinned above the input.
+    if let (Some(bar), Some(rect)) = (subagent_bar.as_ref(), subagent_bar_rect) {
+        draw_subagent_bar(frame, rect, bar, theme);
     }
 
     // The transient running status lives directly above the input box (a thin
@@ -2203,15 +3490,18 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         .iter()
         .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)
     {
-        let line_rect = Rect::new(chat_area.x, chat_area.y, chat_area.width, 1);
+        // Pin inside the same inset band the cards render into so the sticky
+        // header aligns exactly with the (possibly scrolled-away) real header.
+        let band = chat_band_rect(chat_area);
+        let line_rect = Rect::new(band.x, chat_area.y, band.width, 1);
         frame.render_widget(
             Paragraph::new(card_header_line(
-                "▼",
+                "-",
                 &card.header,
                 card.color,
                 theme.text_muted,
                 theme.element_bg,
-                chat_area.width as usize,
+                band.width as usize,
             )),
             line_rect,
         );
@@ -2221,6 +3511,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
             color: card.color,
             block_idx: card.block_idx,
             rect: line_rect,
+            header_line: card.header_line,
         });
     }
 
@@ -2281,9 +3572,10 @@ pub fn draw_input(
     theme: &Theme,
     layout_map: &mut LayoutMap,
     record: bool,
+    input_scroll: &mut usize,
 ) {
     // The input box is rendered manually (not via a ratatui Block) so the `┃`
-    // bar can be half-height (`╻`/`╹`) on the transition rows, matching the
+    // bar can be half-height on the transition rows, matching the
     // sent-user-message treatment.
     let panel_bg = theme.panel_bg;
     let app_bg = theme.app_bg;
@@ -2296,29 +3588,72 @@ pub fn draw_input(
         Span::styled(ch.to_string(), Style::default().bg(bg).fg(accent))
     };
 
-    let mut lines: Vec<Line> = Vec::with_capacity(wrapped.len() + 2);
+    // Number of text rows that fit inside the box (top/bottom transition rows
+    // consume two lines). The box is sized by draw_chat to fit the wrapped text
+    // up to half the terminal height, so when the text exceeds this height we
+    // scroll to keep the cursor visible.
+    let visible_rows = (input_rect.height as usize).saturating_sub(2).max(1);
 
-    // Top transition: ╻ (bottom-half bar) + ▀ so only the bottom half carries
-    // panel_bg, creating a half-row inset above the text.
+    // Map the caret's display offset onto the wrapped grid.
+    let cursor_x_u = cursor_display_x as usize;
+    let mut cursor_line = wrapped.len().saturating_sub(1);
+    let mut cursor_col = cursor_x_u;
+    let mut acc = 0usize;
+    for (i, wl) in wrapped.iter().enumerate() {
+        let w = wl.text.width();
+        if cursor_x_u <= acc + w {
+            cursor_line = i;
+            cursor_col = cursor_x_u.saturating_sub(acc);
+            break;
+        }
+        acc += w;
+    }
+
+    // Keep the cursor line inside the visible window. Clamp to the valid scroll
+    // range so the input box never shows empty padding below the text.
+    let max_scroll = wrapped.len().saturating_sub(visible_rows);
+    let mut scroll = *input_scroll;
+    if wrapped.len() <= visible_rows {
+        scroll = 0;
+    } else {
+        if cursor_line < scroll {
+            scroll = cursor_line;
+        } else if cursor_line >= scroll + visible_rows {
+            scroll = cursor_line.saturating_sub(visible_rows - 1);
+        }
+        scroll = scroll.min(max_scroll);
+    }
+    *input_scroll = scroll;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_rows + 2);
+
+    // Top transition: ▄ (lower-half block) bar + ▀ panel so only the bottom
+    // half carries panel_bg, creating a half-row inset above the text. Block
+    // elements guarantee a pixel-accurate 50% split (box-drawing ╻ is
+    // font-dependent and often exceeds half height).
     lines.push(Line::from(vec![
-        bar("╻", app_bg),
+        bar("▄", app_bg),
         Span::styled(
             "▀".repeat(content_w),
             Style::default().fg(app_bg).bg(panel_bg),
         ),
     ]));
 
-    // Text rows: full-height ┃ + leading space + text, padded to full width.
+    // Text rows: full-height █ + leading space + text, padded to full width.
+    // Only the visible slice of wrapped lines is rendered so overflowing content
+    // can scroll while the box stays within its terminal-sized bounds.
     if wrapped.is_empty() {
         lines.push(Line::from(vec![
-            bar("┃", panel_bg),
+            bar("█", panel_bg),
             Span::styled(" ".repeat(content_w), Style::default().bg(panel_bg)),
         ]));
     } else {
-        for wl in &wrapped {
+        let start = scroll;
+        let end = (scroll + visible_rows).min(wrapped.len());
+        for wl in &wrapped[start..end] {
             let used = 1 + wl.text.width(); // leading space + text
             lines.push(Line::from(vec![
-                bar("┃", panel_bg),
+                bar("█", panel_bg),
                 Span::styled(" ", Style::default().bg(panel_bg)),
                 Span::styled(
                     wl.text.clone(),
@@ -2332,10 +3667,10 @@ pub fn draw_input(
         }
     }
 
-    // Bottom transition: ╹ (top-half bar) + ▄ so only the top half carries
-    // panel_bg.
+    // Bottom transition: ▀ (upper-half block) bar + ▄ panel so only the top
+    // half carries panel_bg.
     lines.push(Line::from(vec![
-        bar("╹", app_bg),
+        bar("▀", app_bg),
         Span::styled(
             "▄".repeat(content_w),
             Style::default().fg(app_bg).bg(panel_bg),
@@ -2345,14 +3680,13 @@ pub fn draw_input(
     frame.render_widget(Paragraph::new(lines), input_rect);
 
     // Record each visible text row in the layout map so mouse drag selection
-    // and copy work on the live input.  Skipped when the API-key modal masks
+    // and copy work on the live input. Skipped when the API-key modal masks
     // the display (byte offsets wouldn't match the real input).
     if record {
-        for (i, wl) in wrapped.iter().enumerate() {
+        let start = scroll;
+        let end = (scroll + visible_rows).min(wrapped.len());
+        for (i, wl) in wrapped[start..end].iter().enumerate() {
             let row_y = input_rect.y + 1 + i as u16;
-            if row_y >= input_rect.y + input_rect.height.saturating_sub(1) {
-                break;
-            }
             layout_map.push(BlockRegion {
                 message_idx: INPUT_MSG_IDX,
                 block_idx: 0,
@@ -2365,25 +3699,10 @@ pub fn draw_input(
         }
     }
 
-    // Map the caret's display offset onto the wrapped grid.
-    let cursor_x_u = cursor_display_x as usize;
-    let mut line_idx = wrapped.len().saturating_sub(1);
-    let mut col = cursor_x_u;
-    let mut acc = 0usize;
-    for (i, wl) in wrapped.iter().enumerate() {
-        let w = wl.text.width();
-        if cursor_x_u <= acc + w {
-            line_idx = i;
-            col = cursor_x_u.saturating_sub(acc);
-            break;
-        }
-        acc += w;
-    }
-
-    let max_line = (input_rect.height as usize).saturating_sub(2);
-    let line_idx = line_idx.min(max_line);
-    let cursor_y = input_rect.y + 1 + line_idx as u16;
-    let cursor_x = input_rect.x + 2 + col.min(text_width) as u16;
+    // Position the caret relative to the visible slice.
+    let visible_cursor_line = cursor_line.saturating_sub(scroll);
+    let cursor_y = input_rect.y + 1 + visible_cursor_line as u16;
+    let cursor_x = input_rect.x + 2 + cursor_col.min(text_width) as u16;
     frame.set_cursor(cursor_x, cursor_y);
 }
 
@@ -2499,12 +3818,13 @@ pub fn draw_suggestions(
     if y == 0 && anchor.y < popup_height {
         y = 0;
     }
+    let viewport = viewport_rect(frame);
     let x = anchor
         .x
         .saturating_add(2)
-        .min(frame.size().width.saturating_sub(popup_width));
+        .min(viewport.right().saturating_sub(popup_width));
 
-    let area = Rect::new(x, y, popup_width.min(frame.size().width - x), popup_height);
+    let area = Rect::new(x, y, popup_width.min(viewport.right() - x), popup_height);
     frame.render_widget(Clear, area);
 
     let more_hint = if suggestions.len() > MAX_VISIBLE {
@@ -2582,7 +3902,7 @@ pub(crate) fn draw_models_modal(
     theme: &Theme,
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(72, 60, frame.size());
+    let area = centered_rect(72, 60, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(vec![Span::styled(
@@ -2652,7 +3972,7 @@ pub fn draw_solution_input_modal(
     theme: &Theme,
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(60, 30, frame.size());
+    let area = centered_rect(60, 30, viewport_rect(frame));
     frame.render_widget(Clear, area);
     let display = if masked {
         "•".repeat(value.chars().count())
@@ -2691,7 +4011,7 @@ pub fn draw_solution_input_modal(
 /// Draw the API-key entry modal. The key itself is already masked by the caller.
 pub fn draw_api_key_modal(frame: &mut Frame, provider: &str, masked_key: &str, theme: &Theme) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(56, 34, frame.size());
+    let area = centered_rect(56, 34, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let lines = vec![
@@ -2759,7 +4079,7 @@ pub fn draw_sessions_modal(
     theme: &Theme,
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(80, 64, frame.size());
+    let area = centered_rect(80, 64, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
@@ -2816,7 +4136,7 @@ pub fn draw_sessions_modal(
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " ↑↓ navigate · Enter open · Esc close ",
+        " ↑↓ navigate · Enter open · d delete · Esc close ",
         Style::default().fg(theme.text_muted),
     )));
 
@@ -2833,7 +4153,7 @@ pub fn draw_history_modal(
     theme: &Theme,
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(70, 55, frame.size());
+    let area = centered_rect(70, 55, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
@@ -2886,7 +4206,7 @@ pub fn draw_permission_sheet(
     confirm_always: bool,
     theme: &Theme,
 ) {
-    let size = frame.size();
+    let size = viewport_rect(frame);
     let input_h: u16 = 3;
     let bottom = size.height.saturating_sub(input_h);
 
@@ -2993,11 +4313,11 @@ pub fn draw_permission_sheet(
     if sheet_top > 0 {
         draw_dim_backdrop(
             frame,
-            Rect::new(0, 0, size.width, sheet_top),
+            Rect::new(size.x, size.y, size.width, sheet_top),
             theme.backdrop,
         );
     }
-    let area = Rect::new(0, sheet_top, size.width, sheet_h);
+    let area = Rect::new(size.x, size.y + sheet_top, size.width, sheet_h);
     frame.render_widget(Clear, area);
 
     let block = panel_block(theme.warning, theme.panel_bg);
@@ -3019,7 +4339,7 @@ pub fn draw_armed_toast(frame: &mut Frame, message: &str, theme: &Theme) {
 /// Draw the help / keybindings modal.
 pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
-    let area = centered_rect(58, 70, frame.size());
+    let area = centered_rect(58, 70, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let key = |k: &str| {
@@ -3224,6 +4544,7 @@ mod tests {
                         spinner_phase: 0,
                         input: "hello",
                         chrome_hidden: false,
+                        subagent_bar: None,
                         theme: &theme,
                     },
                 );
@@ -3236,6 +4557,7 @@ mod tests {
                     &theme,
                     &mut LayoutMap::new(),
                     true,
+                    &mut 0,
                 );
                 draw_hint(
                     f,
@@ -3308,6 +4630,92 @@ mod tests {
                     scope: "*".to_string(),
                 };
                 draw_permission_sheet(f, &request, 0, false, &theme);
+            })
+            .unwrap();
+    }
+
+    /// Render both the compact sub-agent card (root view) and the zoomed-in
+    /// sub-agent view with its navigation bar, ensuring no layout panics.
+    #[test]
+    fn subagent_card_and_view_render_without_panicking() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Root view: a completed sub-agent task renders as a compact card.
+        let mut task = ChatMessage::tool_step(
+            "task_1",
+            "task",
+            r#"{"description":"explore the codebase","prompt":"..."}"#,
+        );
+        task.push_subtask_event(&neenee_core::SubTaskEvent::ToolCall {
+            id: "inner".into(),
+            name: "grep".into(),
+            arguments: r#"{"pattern":"foo"}"#.into(),
+        });
+        task.finish_tool_step("task_1", "found 3 matches", 1200);
+        let root_messages = vec![
+            ChatMessage::new(neenee_core::Role::User, "explore please"),
+            task,
+        ];
+
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                let _ = draw_chat(
+                    f,
+                    &mut layout_map,
+                    ChatView {
+                        messages: &root_messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        current_provider: "mock",
+                        current_model: "mock-model",
+                        current_mode: AgentMode::Build,
+                        current_goal: None,
+                        activity: "running subagent",
+                        spinner_phase: 0,
+                        input: "",
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        theme: &theme,
+                    },
+                );
+            })
+            .unwrap();
+
+        // Zoomed-in sub-agent view: the task's children are the message stream
+        // and the navigation bar is shown.
+        let children = root_messages[1].subagent_children().unwrap().to_vec();
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                let _ = draw_chat(
+                    f,
+                    &mut layout_map,
+                    ChatView {
+                        messages: &children,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        current_provider: "mock",
+                        current_model: "mock-model",
+                        current_mode: AgentMode::Build,
+                        current_goal: None,
+                        activity: "",
+                        spinner_phase: 0,
+                        input: "",
+                        chrome_hidden: false,
+                        subagent_bar: Some(SubagentBarInfo {
+                            label: "explore the codebase".to_string(),
+                            index: 1,
+                            total: 1,
+                        }),
+                        theme: &theme,
+                    },
+                );
             })
             .unwrap();
     }
@@ -3448,6 +4856,7 @@ mod tests {
                             spinner_phase: 0,
                             input,
                             chrome_hidden: false,
+                            subagent_bar: None,
                             theme,
                         },
                     );
@@ -3498,6 +4907,7 @@ mod tests {
                     &theme,
                     &mut LayoutMap::new(),
                     true,
+                    &mut 0,
                 );
             })
             .unwrap();

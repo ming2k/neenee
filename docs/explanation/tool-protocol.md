@@ -11,21 +11,13 @@ these choices, see [Provider capabilities](provider-capabilities.md).
 Tool schemas are declared by the client and consumed by the serving runtime
 on every request. They are never cached across turns by the runtime.
 
-```text
-Agent::new
-   │
-   ▼  stores tools: Vec<Arc<dyn Tool>>
-run_with_events / run_streaming_with_events
-   │
-   ▼  per turn
-provider.prepare_tools(&self.tools)         lib.rs:684, 777
-   │  Tool::to_openai_function()            lib.rs:183
-   ▼  cached in OpenAIProvider.tools        providers.rs:245-249
-provider.request_body(messages, stream)     providers.rs:128
-   │
-   ▼
-body["tools"]       = cached schemas        providers.rs:168
-body["tool_choice"] = "auto"                providers.rs:169
+```mermaid
+flowchart TD
+    A["Agent::new — stores tools"] --> B["run_with_events / run_streaming_with_events<br/>once per turn"]
+    B --> C["provider.prepare_tools(self.tools)<br/>lib.rs:684, 777"]
+    C --> D["Tool::to_openai_function<br/>cached in OpenAIProvider.tools<br/>providers.rs:245-249"]
+    D --> E["provider.request_body(messages, stream)<br/>providers.rs:128"]
+    E --> F["body.tools = cached schemas<br/>body.tool_choice = auto<br/>providers.rs:168-169"]
 ```
 
 `Tool::to_openai_function` (`crates/neenee-core/src/lib.rs:183`) wraps each
@@ -64,14 +56,12 @@ streaming loop (`crates/neenee-core/src/lib.rs:820-841`) accumulates `id`,
 `name`, and `arguments` per index while text and reasoning deltas render
 live. Tools execute only after the stream terminates:
 
-```text
-stream ends
-   │
-   ▼
-calls.retain(|c| !c.name.is_empty())       lib.rs:851
-assign call_<uuid> to empty ids            lib.rs:852-855
-build Message with tool_calls              lib.rs:857-865
-push to messages, then execute_tool        lib.rs:869, 881
+```mermaid
+flowchart TD
+    A["stream ends — [DONE]"] --> B["calls.retain(name not empty)<br/>lib.rs:851"]
+    B --> C["assign call_uuid to empty ids<br/>lib.rs:852-855"]
+    C --> D["build Message with tool_calls<br/>lib.rs:857-865"]
+    D --> E["push to messages, then execute_tool<br/>lib.rs:869, 881"]
 ```
 
 Side effects never fire mid-stream. This matters for retry: a stream that

@@ -240,6 +240,28 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Delete a session by id or short id prefix. Deleting the active session
+    /// removes its file and resets the store to a fresh empty session; archived
+    /// sessions have their file removed from the sessions directory.
+    pub async fn delete(&self, id: &str) -> Result<(), String> {
+        let data = self.data.lock().await;
+        let resolved = self.resolve_id(id, &data)?;
+        let is_active = data.id == resolved;
+        drop(data);
+
+        if is_active {
+            let _ = fs::remove_file(&self.path);
+            let mut data = self.data.lock().await;
+            *data = SessionData::default();
+            self.persist(&data)
+        } else {
+            let path = self.archive_path(&resolved);
+            fs::remove_file(&path)
+                .map_err(|error| format!("Could not delete session '{}': {}", resolved, error))?;
+            Ok(())
+        }
+    }
+
     pub async fn list(&self) -> Result<Vec<SessionSummary>, String> {
         let data = self.data.lock().await;
         let mut summaries = Vec::new();

@@ -116,6 +116,38 @@ impl LayoutMap {
             .map(|h| (h.message_idx, h.block_idx, h.cell_idx))
     }
 
+    /// Clamp a screen point so it stays inside the hit boxes of the given
+    /// table cell. This lets a drag selection roam freely within one cell —
+    /// across its wrapped lines and full column width — without ever crossing
+    /// a `│` border into a neighbour. Returns `None` if the cell has no
+    /// recorded hit boxes for the current frame.
+    pub fn clamp_to_table_cell(
+        &self,
+        cell: (usize, usize, usize),
+        x: u16,
+        y: u16,
+    ) -> Option<(u16, u16)> {
+        let hits: Vec<&TableCellHit> = self
+            .table_cell_hits
+            .iter()
+            .filter(|h| (h.message_idx, h.block_idx, h.cell_idx) == cell)
+            .collect();
+        if hits.is_empty() {
+            return None;
+        }
+
+        // Prefer the hit box on the same row as `y`; otherwise snap to the
+        // nearest cell row so vertical overflow stays within the cell.
+        let on_row = hits.iter().find(|h| h.rect.y == y).or_else(|| {
+            hits.iter()
+                .min_by_key(|h| (h.rect.y as i32 - y as i32).abs())
+        })?;
+        let row_y = on_row.rect.y;
+        let max_x = on_row.rect.x + on_row.rect.width.saturating_sub(1);
+        let clamped_x = x.max(on_row.rect.x).min(max_x);
+        Some((clamped_x, row_y))
+    }
+
     /// Find the semantic cursor at a given screen coordinate.
     ///
     /// The column is resolved against the region's actual text using Unicode

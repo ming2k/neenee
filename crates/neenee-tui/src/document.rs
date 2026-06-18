@@ -16,6 +16,11 @@ pub enum MessageKind {
         output: Option<String>,
         expanded: bool,
         duration_ms: Option<u64>,
+        /// Wall-clock instant the step started, so the UI can show a live
+        /// elapsed time while the call (or sub-agent) is still running.
+        /// `Instant` is cheap to capture at construction time and is not
+        /// serialized — session restore reconstructs finished steps without it.
+        started_at: Option<std::time::Instant>,
         /// Child events emitted by a sub-agent spawned from this tool step.
         children: Vec<ChatMessage>,
     },
@@ -131,6 +136,7 @@ impl ChatMessage {
                 output: None,
                 expanded: false,
                 duration_ms: None,
+                started_at: Some(std::time::Instant::now()),
                 children: Vec::new(),
             },
         };
@@ -255,6 +261,119 @@ impl ChatMessage {
         }
     }
 
+    /// The `task` tool spawns a sub-agent. Such tool steps are rendered as a
+    /// compact, non-expandable card that navigates into a dedicated sub-agent
+    /// view on activation (see the TUI focus stack) rather than expanding
+    /// inline.
+    pub fn is_subagent_task(&self) -> bool {
+        matches!(&self.kind, MessageKind::ToolStep { name, .. } if name == "task")
+    }
+
+    /// The call id of a tool step, used as the addressable identity of a
+    /// sub-agent task for the focus stack.
+    pub fn tool_step_call_id(&self) -> Option<&str> {
+        match &self.kind {
+            MessageKind::ToolStep { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The nested child messages emitted by a sub-agent task. Returns `None`
+    /// for non-tool-step messages.
+    pub fn subagent_children(&self) -> Option<&[ChatMessage]> {
+        match &self.kind {
+            MessageKind::ToolStep { children, .. } => Some(children),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to a tool step's child messages (used when the view is
+    /// zoomed into a sub-agent and its children are the active message stream).
+    pub fn subagent_children_mut(&mut self) -> Option<&mut Vec<ChatMessage>> {
+        match &mut self.kind {
+            MessageKind::ToolStep { children, .. } => Some(children),
+            _ => None,
+        }
+    }
+
+    /// Short label for the sub-agent (its task description), shown in the
+    /// sub-agent view's navigation bar.
+    pub fn subagent_label(&self) -> String {
+        let MessageKind::ToolStep { arguments, .. } = &self.kind else {
+            return "Subagent".to_string();
+        };
+        let label = parse_arguments_kv(arguments)
+            .into_iter()
+            .find(|(k, _)| k == "description")
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| "Subagent".to_string());
+        truncate(&label, 48)
+    }
+
+    /// One-line live status derived from the sub-agent's children and the
+    /// parent tool step's completion state, e.g. `↳ Running · 3 tool calls ·
+    /// 4.2s · Grep "foo"` or `↳ Completed · 3 tool calls · 1.2s`. Returns
+    /// `None` for non-task steps.
+    pub fn subagent_status_line(&self) -> Option<String> {
+        if !self.is_subagent_task() {
+            return None;
+        }
+        let MessageKind::ToolStep {
+            output,
+            duration_ms,
+            started_at,
+            children,
+            ..
+        } = &self.kind
+        else {
+            return None;
+        };
+        let tool_calls = children
+            .iter()
+            .filter(|child| child.is_tool_step())
+            .count();
+        let line = match output {
+            Some(o) if o.starts_with("Error") => {
+                format!("↳ Failed · {} tool calls", tool_calls)
+            }
+            Some(_) => format!(
+                "↳ Completed · {} tool calls · {}",
+                tool_calls,
+                duration_text(*duration_ms)
+            ),
+            None => {
+                // Running: show accumulated stats (tool count + live elapsed)
+                // followed by the most recent child activity.
+                let elapsed_ms = started_at
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                let stats = format!("· {} tool calls · {}", tool_calls, elapsed_ms);
+                match children.last() {
+                    Some(child)
+                        if child.is_tool_step()
+                            && matches!(
+                                &child.kind,
+                                MessageKind::ToolStep { output: None, .. }
+                            ) =>
+                    {
+                        // A tool step with no output yet is in-flight.
+                        let header = child
+                            .tool_step_header()
+                            .unwrap_or_else(|| "tool".to_string());
+                        format!("↳ Running {} · {}", stats, header)
+                    }
+                    Some(child)
+                        if child.role == Role::Assistant && !child.raw.is_empty() =>
+                    {
+                        format!("↳ Running {} · thinking", stats)
+                    }
+                    _ => format!("↳ Running {}", stats),
+                }
+            }
+        };
+        Some(line)
+    }
+
     pub fn thinking(content: impl Into<String>) -> Self {
         let content = content.into();
         let mut message = Self {
@@ -349,6 +468,7 @@ impl ChatMessage {
             output,
             expanded,
             duration_ms,
+            started_at: _,
             children: _,
         } = &self.kind
         else {
@@ -1181,5 +1301,76 @@ mod tests {
         // Expanded: arguments as compact key-value text + output verbatim.
         assert!(message.raw.contains("path: README.md"));
         assert!(message.raw.contains("contents"));
+    }
+
+    #[test]
+    fn subagent_task_is_detected_and_addressable() {
+        let task = ChatMessage::tool_step(
+            "call_42",
+            "task",
+            r#"{"description":"explore src","prompt":"..."}"#,
+        );
+        assert!(task.is_subagent_task());
+        assert_eq!(task.tool_step_call_id(), Some("call_42"));
+        assert_eq!(task.subagent_children().map(|c| c.len()), Some(0));
+        assert_eq!(task.subagent_label(), "explore src");
+
+        // A regular tool step is not a sub-agent task.
+        let read = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"a"}"#);
+        assert!(!read.is_subagent_task());
+        assert!(read.subagent_status_line().is_none());
+    }
+
+    #[test]
+    fn subagent_status_reflects_children_and_completion() {
+        let mut task = ChatMessage::tool_step(
+            "call_9",
+            "task",
+            r#"{"description":"d","prompt":"p"}"#,
+        );
+
+        // No children yet, still running.
+        let running = task.subagent_status_line().expect("running status");
+        assert!(running.starts_with("↳ Running"), "got: {running}");
+
+        // Streaming assistant text => a "thinking" suffix.
+        task.push_subtask_event(&SubTaskEvent::StreamStart);
+        task.push_subtask_event(&SubTaskEvent::StreamDelta("partial".into()));
+        let thinking = task.subagent_status_line().expect("thinking status");
+        assert!(thinking.starts_with("↳ Running"), "got: {thinking}");
+        assert!(thinking.ends_with("thinking"), "got: {thinking}");
+
+        // An in-flight child tool call surfaces the tool's header.
+        task.push_subtask_event(&SubTaskEvent::ToolCall {
+            id: "inner".into(),
+            name: "grep".into(),
+            arguments: r#"{"pattern":"foo"}"#.into(),
+        });
+        let running = task.subagent_status_line().expect("running status");
+        assert!(running.starts_with("↳ Running"), "got: {running}");
+        assert!(running.contains("Grep"), "got: {running}");
+
+        // Completing the parent summarizes tool-call count + duration.
+        assert!(task.finish_tool_step("call_9", "final answer", 1500));
+        let done = task.subagent_status_line().expect("done status");
+        assert!(done.starts_with("↳ Completed"), "got: {done}");
+        assert!(done.contains("1 tool calls"), "got: {done}");
+        assert!(done.contains("1.5s"), "got: {done}");
+
+        // Children are accessible for the dedicated sub-agent view.
+        assert_eq!(task.subagent_children().map(|c| c.len()), Some(2));
+    }
+
+    #[test]
+    fn subagent_failed_status_reports_failure() {
+        let mut task = ChatMessage::tool_step("c", "task", r#"{"description":"d","prompt":"p"}"#);
+        task.push_subtask_event(&SubTaskEvent::ToolCall {
+            id: "i".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        assert!(task.finish_tool_step("c", "Error: boom", 100));
+        let status = task.subagent_status_line().unwrap();
+        assert!(status.starts_with("↳ Failed"), "got: {status}");
     }
 }

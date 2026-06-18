@@ -27,7 +27,7 @@ All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render.rs`)
 | `accent` | (94, 234, 212) | `┃` bars, model name, spinners |
 | `success` | (74, 222, 128) | Completed tool status |
 | `error_fg` | (243, 139, 168) | Failed tool status |
-| `info` | (125, 211, 252) | Running tool status, thinking arrow |
+| `info` | (125, 211, 252) | Running tool status, thinking card marker |
 | `border_subtle` | (45, 50, 70) | Header separator rule |
 | `primary` | (34, 211, 238) | Hint-line keys |
 | `warning` | (250, 204, 21) | Warnings |

@@ -1191,6 +1191,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model,
                     });
                 }
+                AgentRequest::DeleteSession { id } => {
+                    match session.delete(&id).await {
+                        Ok(()) => {
+                            let _ = resp_tx.send(AgentResponse::SessionsOverview(
+                                build_sessions_overview(&session).await,
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = resp_tx.send(AgentResponse::Error(error));
+                        }
+                    }
+                }
                 AgentRequest::SlashCommand(cmd) => {
                     let parts: Vec<&str> = cmd.split_whitespace().collect();
                     if parts.is_empty() {

@@ -174,11 +174,21 @@ pub struct App {
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
     pub sticky_card: Option<usize>,
     pub sticky_rect: Option<ratatui::layout::Rect>,
+    /// Content-line index of the sticky card's real header. Used to re-anchor
+    /// the scroll offset when the user collapses the pinned card so the header
+    /// lands at the top of the viewport instead of jumping to unrelated content.
+    pub sticky_header_line: Option<usize>,
+    /// Stack of sub-agent task call-ids that the view is zoomed into. Empty
+    /// means the root conversation is shown; a non-empty stack renders the
+    /// focused `task` tool step's child messages as the main stream, with a
+    /// navigation bar to return to the parent or cycle sibling sub-agents.
+    pub focus_stack: Vec<String>,
     pub tx: mpsc::UnboundedSender<AgentRequest>,
     pub should_quit: Arc<AtomicBool>,
     pub suggestion_index: Option<usize>,
     pub custom_commands: Vec<(String, String)>,
     pub cursor_position: usize,
+    pub input_scroll: usize,
     pub active_modal: Modal,
     pub modal_index: usize,
     pub current_provider: String,
@@ -349,6 +359,136 @@ impl App {
                     .map(|(command, description)| (command.as_str(), description.as_str())),
             )
             .collect()
+    }
+
+    /// Toggle the expansion of the tool-step / thinking card at `mi`, keeping
+    /// its header pinned to the screen position the user interacted with.
+    ///
+    /// A toggle inserts or removes the body lines that sit *below* the header,
+    /// so the header's own content-line never moves. That gives a simple rule
+    /// for keeping the header where the user clicked:
+    ///
+    /// - Visible (in-stream) header: leave `scroll` untouched and the header
+    ///   stays on the same row; the body grows or shrinks beneath it.
+    /// - Sticky-overlay header (its real header is scrolled off the top): point
+    ///   `scroll` at the recorded header content-line so the real header lands
+    ///   at row 0 where the overlay sat.
+    /// - Either way `follow_bottom` is cleared: the user is now pinning their
+    ///   attention on this header, so the next frame's auto-follow must not
+    ///   yank it away (this is what previously let an expand push the header
+    ///   off-screen while the view was following the bottom).
+    ///
+    /// Returns `true` when a card was actually toggled, so callers can gate
+    /// side effects like clearing the text selection.
+    fn toggle_card_pinned(&mut self, messages: &mut [ChatMessage], mi: usize) -> bool {
+        let pinned_to_top = self.sticky_card == Some(mi);
+        let sticky_header_line = self.sticky_header_line;
+        let toggled = resolve_focused_mut(messages, &self.focus_stack, mi)
+            .map(|message| {
+                if let Some(expanded) = message.tool_step_expanded() {
+                    message.set_tool_step_expanded(!expanded);
+                    true
+                } else if let Some(expanded) = message.thinking_expanded() {
+                    message.set_thinking_expanded(!expanded);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if toggled {
+            self.follow_bottom = false;
+            if pinned_to_top {
+                if let Some(header_line) = sticky_header_line {
+                    self.scroll = header_line.min(u16::MAX as usize) as u16;
+                }
+            }
+        }
+        toggled
+    }
+
+    /// Whether the view is currently zoomed into a sub-agent task.
+    pub fn in_subagent_view(&self) -> bool {
+        !self.focus_stack.is_empty()
+    }
+
+    /// The message slice currently in view: the root conversation, or the
+    /// focused sub-agent task's child messages.
+    pub fn focused_messages(&self) -> &[ChatMessage] {
+        let Some(call_id) = self.focus_stack.last() else {
+            return &self.messages;
+        };
+        self.messages
+            .iter()
+            .find_map(|message| {
+                if message.is_subagent_task() && message.tool_step_call_id() == Some(call_id.as_str())
+                {
+                    message.subagent_children()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Reset transient view state (scroll, selection, sticky pinning) when the
+    /// focused message slice changes.
+    fn reset_view_state(&mut self) {
+        self.scroll = 0;
+        self.follow_bottom = true;
+        self.selection = SelectionState::None;
+        self.drag.cancel();
+        self.sticky_card = None;
+        self.sticky_rect = None;
+        self.sticky_header_line = None;
+    }
+
+    /// Zoom into a sub-agent task's child messages.
+    pub fn enter_subagent(&mut self, call_id: String) {
+        self.focus_stack.push(call_id);
+        self.reset_view_state();
+    }
+
+    /// Return from the current sub-agent view to its parent. Returns true if a
+    /// view was actually popped.
+    pub fn exit_subagent(&mut self) -> bool {
+        if self.focus_stack.pop().is_some() {
+            self.reset_view_state();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cycle to the previous (`dir < 0`) or next (`dir > 0`) sibling sub-agent
+    /// task at the current focus level. No-op when not in a sub-agent view or
+    /// when there are no siblings.
+    pub fn cycle_sibling(&mut self, dir: i8) {
+        let Some(current) = self.focus_stack.last().cloned() else {
+            return;
+        };
+        let task_ids: Vec<String> = self
+            .messages
+            .iter()
+            .filter_map(|message| {
+                if message.is_subagent_task() {
+                    message.tool_step_call_id().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let Some(idx) = task_ids.iter().position(|id| *id == current) else {
+            return;
+        };
+        if task_ids.len() < 2 {
+            return;
+        }
+        let n = task_ids.len() as isize;
+        let next = ((idx as isize + dir as isize).rem_euclid(n)) as usize;
+        self.focus_stack.pop();
+        self.focus_stack.push(task_ids[next].clone());
+        self.reset_view_state();
     }
 }
 
@@ -661,11 +801,14 @@ pub async fn run_tui(
         max_scroll: 0,
         sticky_card: None,
         sticky_rect: None,
+        sticky_header_line: None,
+        focus_stack: Vec::new(),
         tx,
         should_quit,
         suggestion_index: None,
         custom_commands,
         cursor_position: 0,
+        input_scroll: 0,
         active_modal: Modal::None,
         modal_index: 0,
         current_provider: initial_provider,
@@ -853,11 +996,30 @@ async fn run_app_loop<B: Backend>(
                     | Modal::HistorySearch
             );
 
+            // When zoomed into a sub-agent, render its child messages and show
+            // a navigation bar; otherwise render the root conversation.
+            let view_messages = app.focused_messages();
+            let subagent_bar = app.focus_stack.last().and_then(|current| {
+                let tasks: Vec<&ChatMessage> = app
+                    .messages
+                    .iter()
+                    .filter(|message| message.is_subagent_task())
+                    .collect();
+                let idx = tasks
+                    .iter()
+                    .position(|message| message.tool_step_call_id() == Some(current.as_str()))?;
+                Some(render::SubagentBarInfo {
+                    label: tasks.get(idx)?.subagent_label(),
+                    index: idx + 1,
+                    total: tasks.len(),
+                })
+            });
+
             let chat_render = render::draw_chat(
                 f,
                 &mut layout_map,
                 render::ChatView {
-                    messages: &app.messages,
+                    messages: view_messages,
                     scroll: app.scroll,
                     selection: &app.selection,
                     current_provider: &app.current_provider,
@@ -868,6 +1030,7 @@ async fn run_app_loop<B: Backend>(
                     spinner_phase: app.spinner_tick,
                     input: &masked_input,
                     chrome_hidden,
+                    subagent_bar,
                     theme: &app.theme,
                 },
             );
@@ -878,10 +1041,12 @@ async fn run_app_loop<B: Backend>(
                 Some(info) => {
                     app.sticky_card = Some(info.message_idx);
                     app.sticky_rect = Some(info.rect);
+                    app.sticky_header_line = Some(info.header_line);
                 }
                 None => {
                     app.sticky_card = None;
                     app.sticky_rect = None;
+                    app.sticky_header_line = None;
                 }
             }
 
@@ -896,6 +1061,7 @@ async fn run_app_loop<B: Backend>(
                     &app.theme,
                     &mut layout_map,
                     app.active_modal != Modal::ApiKey,
+                    &mut app.input_scroll,
                 );
 
                 // Right-aligned hint line below the input box.
@@ -1052,6 +1218,7 @@ async fn run_app_loop<B: Backend>(
             let suggestion_count = suggestions.len();
             let has_exact_suggestion = suggestions.iter().any(|(command, _)| *command == app.input);
             let input_starts_with_slash = app.input.starts_with('/');
+            let in_subagent_view = app.in_subagent_view();
             let action = input::process_event(
                 event,
                 &mut app.input,
@@ -1064,6 +1231,7 @@ async fn run_app_loop<B: Backend>(
                     has_exact_suggestion,
                     suggestion_index: app.suggestion_index,
                     permission_confirm_always: app.permission_confirm_always,
+                    in_subagent_view,
                 },
                 &mut app.drag,
             );
@@ -1084,6 +1252,7 @@ async fn run_app_loop<B: Backend>(
 
                     app.active_modal = Modal::None;
                     app.suggestion_index = None;
+                    app.input_scroll = 0;
 
                     if !text.is_empty() {
                         runtime.is_responding.store(true, Ordering::SeqCst);
@@ -1100,16 +1269,28 @@ async fn run_app_loop<B: Backend>(
                         app.follow_bottom = true;
                         let _ = app.tx.send(AgentRequest::Chat(text));
                     } else if let Some((start, end)) = app.selection.normalized_range() {
-                        // Enter on a selected tool-step or thinking card toggles just that card.
+                        // Enter on a selected card: navigate into a sub-agent
+                        // task, otherwise toggle that card's expansion.
                         if start.message_idx == end.message_idx {
                             let mi = start.message_idx;
                             let mut messages = runtime.messages.lock().await;
-                            if let Some(message) = messages.get_mut(mi) {
-                                if let Some(expanded) = message.tool_step_expanded() {
-                                    message.set_tool_step_expanded(!expanded);
-                                    app.selection = SelectionState::None;
-                                } else if let Some(expanded) = message.thinking_expanded() {
-                                    message.set_thinking_expanded(!expanded);
+                            // A sub-agent task navigates into its view instead
+                            // of expanding.
+                            let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
+                                .and_then(|message| {
+                                    if message.is_subagent_task() {
+                                        message.tool_step_call_id().map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(id) = enter_id {
+                                drop(messages);
+                                app.enter_subagent(id);
+                            } else {
+                                let toggled = app.toggle_card_pinned(&mut messages, mi);
+                                drop(messages);
+                                if toggled {
                                     app.selection = SelectionState::None;
                                 }
                             }
@@ -1118,6 +1299,7 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::SendSlash(cmd) => {
                     app.suggestion_index = None;
+                    app.input_scroll = 0;
                     runtime.is_responding.store(true, Ordering::SeqCst);
                     *runtime.activity_status.lock().await = "queued".to_string();
                     app.follow_bottom = true;
@@ -1209,6 +1391,15 @@ async fn run_app_loop<B: Backend>(
                             .send(AgentRequest::SlashCommand(format!("/session open {}", id)));
                     }
                 }
+                input::InputAction::DeleteSelectedSession => {
+                    if let Some(session) = app
+                        .sessions_overview
+                        .get(app.modal_index.min(app.sessions_overview.len().saturating_sub(1)))
+                    {
+                        let id = session.id.clone();
+                        let _ = app.tx.send(AgentRequest::DeleteSession { id });
+                    }
+                }
                 input::InputAction::CloseModal => {
                     if matches!(
                         app.active_modal,
@@ -1258,7 +1449,7 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::CopySelection => {
                     if let Some(text) = extract_selection_text(
                         &app.selection,
-                        &app.messages,
+                        app.focused_messages(),
                         &app.input,
                         &app.layout_map,
                     ) {
@@ -1268,7 +1459,7 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::CtrlC => {
                     if let Some(text) = extract_selection_text(
                         &app.selection,
-                        &app.messages,
+                        app.focused_messages(),
                         &app.input,
                         &app.layout_map,
                     ) {
@@ -1292,6 +1483,7 @@ async fn run_app_loop<B: Backend>(
                     } else if !app.input.is_empty() {
                         app.input.clear();
                         app.cursor_position = 0;
+                        app.input_scroll = 0;
                         app.suggestion_index = None;
                     } else if app.ctrl_c_armed_ticks > 0 {
                         return Ok(());
@@ -1301,14 +1493,33 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::ToggleToolSteps => {
-                    let mut messages = runtime.messages.lock().await;
-                    let expand = messages
+                    // Read the target state from the focused view (a snapshot
+                    // clone), then apply to the live messages.
+                    let expand = app
+                        .focused_messages()
                         .iter()
-                        .any(|message| message.tool_step_expanded() == Some(false));
-                    for message in messages.iter_mut() {
-                        message.set_tool_step_expanded(expand);
+                        .any(|message| {
+                            !message.is_subagent_task()
+                                && message.tool_step_expanded() == Some(false)
+                        });
+                    let mut messages = runtime.messages.lock().await;
+                    for message in focused_messages_mut(&mut messages, &app.focus_stack) {
+                        // Sub-agent task cards are navigated, not expanded.
+                        if !message.is_subagent_task() {
+                            message.set_tool_step_expanded(expand);
+                        }
                     }
+                    drop(messages);
                     app.selection = SelectionState::None;
+                }
+                input::InputAction::ExitSubAgent => {
+                    app.exit_subagent();
+                }
+                input::InputAction::PrevSibling => {
+                    app.cycle_sibling(-1);
+                }
+                input::InputAction::NextSibling => {
+                    app.cycle_sibling(1);
                 }
                 input::InputAction::InsertChar(c) => {
                     // Already handled by process_event mutating app.input
@@ -1502,52 +1713,53 @@ async fn run_app_loop<B: Backend>(
                     {
                         if let Some(mi) = app.sticky_card {
                             let mut messages = runtime.messages.lock().await;
-                            if let Some(message) = messages.get_mut(mi) {
-                                if let Some(expanded) = message.tool_step_expanded() {
-                                    message.set_tool_step_expanded(!expanded);
-                                } else if let Some(expanded) = message.thinking_expanded() {
-                                    message.set_thinking_expanded(!expanded);
-                                }
-                            }
+                            app.toggle_card_pinned(&mut messages, mi);
+                            drop(messages);
                         }
                         app.selection = SelectionState::None;
                         app.drag.cancel();
                     } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
                         if cursor.block_idx == usize::MAX {
-                            // Clicked a tool-step card header: toggle that card.
+                            // Clicked a tool-step card header: navigate into a
+                            // sub-agent task, otherwise toggle that card.
+                            let mi = cursor.message_idx;
                             let mut messages = runtime.messages.lock().await;
-                            if let Some(message) = messages.get_mut(cursor.message_idx) {
-                                if let Some(expanded) = message.tool_step_expanded() {
-                                    message.set_tool_step_expanded(!expanded);
-                                }
+                            let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
+                                .and_then(|message| {
+                                    if message.is_subagent_task() {
+                                        message.tool_step_call_id().map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(id) = enter_id {
+                                drop(messages);
+                                app.enter_subagent(id);
+                            } else {
+                                app.toggle_card_pinned(&mut messages, mi);
+                                drop(messages);
                             }
                             app.selection = SelectionState::None;
                             app.drag.cancel();
                         } else if cursor.block_idx == usize::MAX - 1 {
                             // Clicked a thinking card header: toggle that card.
+                            let mi = cursor.message_idx;
                             let mut messages = runtime.messages.lock().await;
-                            if let Some(message) = messages.get_mut(cursor.message_idx) {
-                                if let Some(expanded) = message.thinking_expanded() {
-                                    message.set_thinking_expanded(!expanded);
-                                }
-                            }
+                            app.toggle_card_pinned(&mut messages, mi);
+                            drop(messages);
                             app.selection = SelectionState::None;
                             app.drag.cancel();
                         } else {
-                            // Tables are selected per cell: a click inside a
-                            // cell selects that whole logical cell (including
-                            // any line-wrapped continuation), never crossing
-                            // `│` borders into adjacent cells. Non-table blocks
-                            // use the normal per-character drag.
+                            // Inside a table cell, a press places the cursor
+                            // and starts a drag confined to that cell: the
+                            // selection can roam across the cell's wrapped
+                            // lines but never crosses `│` borders. A plain
+                            // click (no drag) leaves nothing selected.
                             if let Some((mi, bi, cell)) =
                                 app.layout_map.table_cell_at(x, y)
                             {
-                                app.selection = SelectionState::TableCell {
-                                    message_idx: mi,
-                                    block_idx: bi,
-                                    cell_idx: cell,
-                                };
-                                app.drag.cancel();
+                                app.selection = SelectionState::start_range(cursor);
+                                app.drag.start_in_cell(cursor, (mi, bi, cell));
                             } else {
                                 app.selection = SelectionState::start_range(cursor);
                                 app.drag.start(cursor);
@@ -1559,6 +1771,14 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::SelectionUpdate { x, y } => {
+                    // Keep a cell-confined drag from leaking past `│` borders.
+                    let (x, y) = if let Some(cell) = app.drag.cell_constraint {
+                        app.layout_map
+                            .clamp_to_table_cell(cell, x, y)
+                            .unwrap_or((x, y))
+                    } else {
+                        (x, y)
+                    };
                     if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
                         app.selection.update_head(cursor);
                     }
@@ -1660,6 +1880,49 @@ fn compact_retry_reason(message: &str) -> String {
     }
 }
 
+/// Resolve a mutable reference to the message at index `mi` within the
+/// currently focused view: the root conversation when the focus stack is empty,
+/// or the focused sub-agent task's child stream otherwise. Selection and layout
+/// indices are recorded against whichever slice was rendered, so mutations must
+/// resolve through the same context.
+fn resolve_focused_mut<'a>(
+    messages: &'a mut [ChatMessage],
+    focus_stack: &[String],
+    mi: usize,
+) -> Option<&'a mut ChatMessage> {
+    let Some(current) = focus_stack.last() else {
+        return messages.get_mut(mi);
+    };
+    let task_idx = messages.iter().position(|message| {
+        message.is_subagent_task() && message.tool_step_call_id() == Some(current.as_str())
+    })?;
+    messages[task_idx].subagent_children_mut()?.get_mut(mi)
+}
+
+/// Iterate mutable messages in the currently focused view (the root
+/// conversation, or the focused sub-agent task's child stream) for bulk
+/// expand/collapse operations. Callers filter by kind as needed.
+fn focused_messages_mut<'a>(
+    messages: &'a mut [ChatMessage],
+    focus_stack: &[String],
+) -> Box<dyn Iterator<Item = &'a mut ChatMessage> + 'a> {
+    match focus_stack.last() {
+        None => Box::new(messages.iter_mut()),
+        Some(current) => {
+            let task_idx = messages.iter().position(|message| {
+                message.is_subagent_task() && message.tool_step_call_id() == Some(current.as_str())
+            });
+            match task_idx {
+                Some(idx) => match messages[idx].subagent_children_mut() {
+                    Some(children) => Box::new(children.iter_mut()),
+                    None => Box::new(std::iter::empty()),
+                },
+                None => Box::new(std::iter::empty()),
+            }
+        }
+    }
+}
+
 /// Extract selected text from either chat messages or the live input box,
 /// depending on which the semantic selection covers.
 fn extract_selection_text(
@@ -1667,8 +1930,7 @@ fn extract_selection_text(
     messages: &[crate::document::ChatMessage],
     input: &str,
     layout_map: &crate::layout::LayoutMap,
-) -> Option<String> {
-    let on_input = match sel {
+) -> Option<String> {    let on_input = match sel {
         SelectionState::None => false,
         SelectionState::Block { message_idx, .. } => {
             *message_idx == crate::render::INPUT_MSG_IDX
@@ -1869,7 +2131,6 @@ mod tests {
         assert!(chat_message_from_core(Message::hidden(Role::User, "internal")).is_none());
         assert!(chat_message_from_core(Message::new(Role::System, "system")).is_none());
     }
-
     #[test]
     fn restored_history_uses_command_display_content() {
         let message = Message::new(Role::User, "Expanded internal prompt")
@@ -1966,5 +2227,80 @@ mod tests {
             compact_retry_reason("rate limited\nfull response body"),
             "rate limited"
         );
+    }
+
+    /// Build a small conversation with two sibling sub-agent tasks, each with a
+    /// couple of child messages, for focus-navigation tests.
+    fn conversation_with_subagents() -> Vec<ChatMessage> {
+        let mut a = ChatMessage::tool_step(
+            "task_a",
+            "task",
+            r#"{"description":"explore a","prompt":"..."}"#,
+        );
+        a.subagent_children_mut().unwrap().push(ChatMessage::new(
+            Role::Assistant,
+            "child A1",
+        ));
+        let mut b = ChatMessage::tool_step(
+            "task_b",
+            "task",
+            r#"{"description":"explore b","prompt":"..."}"#,
+        );
+        b.subagent_children_mut()
+            .unwrap()
+            .push(ChatMessage::new(Role::Assistant, "child B1"));
+        vec![
+            ChatMessage::new(Role::User, "hi"),
+            a,
+            ChatMessage::new(Role::Assistant, "ok"),
+            b,
+        ]
+    }
+
+    #[test]
+    fn resolve_focused_mut_indexes_root_when_unfocused() {
+        let mut messages = conversation_with_subagents();
+        let focus: Vec<String> = Vec::new();
+        let resolved = resolve_focused_mut(&mut messages, &focus, 2);
+        assert_eq!(
+            resolved.map(|m| m.raw.clone()).as_deref(),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn resolve_focused_mut_indexes_children_when_focused() {
+        let mut messages = conversation_with_subagents();
+        let focus = vec!["task_b".to_string()];
+        // Index 0 inside task_b's children => "child B1".
+        let resolved = resolve_focused_mut(&mut messages, &focus, 0);
+        assert_eq!(
+            resolved.map(|m| m.raw.clone()).as_deref(),
+            Some("child B1")
+        );
+        // Indexing task_a's children via task_b focus returns none / out of range.
+        assert!(resolve_focused_mut(&mut messages, &focus, 5).is_none());
+    }
+
+    #[test]
+    fn focused_tool_steps_mut_only_touches_focused_subagent_children() {
+        let mut messages = conversation_with_subagents();
+        // Focused on task_a: its single child is an assistant message (not a
+        // tool step), so the focused stream has 1 message and 0 tool steps.
+        let focus = vec!["task_a".to_string()];
+        let total = focused_messages_mut(&mut messages, &focus).count();
+        assert_eq!(total, 1);
+        let tool_steps = focused_messages_mut(&mut messages, &focus)
+            .filter(|m| m.is_tool_step())
+            .count();
+        assert_eq!(tool_steps, 0);
+
+        // Root view: 4 messages total, 2 of which are tool steps.
+        let focus: Vec<String> = Vec::new();
+        assert_eq!(focused_messages_mut(&mut messages, &focus).count(), 4);
+        let tool_steps = focused_messages_mut(&mut messages, &focus)
+            .filter(|m| m.is_tool_step())
+            .count();
+        assert_eq!(tool_steps, 2);
     }
 }

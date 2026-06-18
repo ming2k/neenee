@@ -382,12 +382,25 @@ fn extract_within_message<'a>(
 pub struct SelectionDrag {
     pub active: bool,
     pub anchor: Option<SemanticCursor>,
+    /// When the drag started inside a table cell, this holds
+    /// `(message_idx, block_idx, cell_idx)` so each update can be clamped to
+    /// that cell's hit boxes, preventing the selection from crossing `│`
+    /// borders into adjacent cells.
+    pub cell_constraint: Option<(usize, usize, usize)>,
 }
 
 impl SelectionDrag {
     pub fn start(&mut self, cursor: SemanticCursor) {
         self.active = true;
         self.anchor = Some(cursor);
+        self.cell_constraint = None;
+    }
+
+    /// Start a drag that is confined to a single table cell.
+    pub fn start_in_cell(&mut self, cursor: SemanticCursor, cell: (usize, usize, usize)) {
+        self.active = true;
+        self.anchor = Some(cursor);
+        self.cell_constraint = Some(cell);
     }
 
     pub fn update(&mut self, cursor: SemanticCursor) -> SelectionState {
@@ -402,12 +415,14 @@ impl SelectionDrag {
 
     pub fn end(&mut self) {
         self.active = false;
+        self.cell_constraint = None;
         // Keep anchor so the selection remains; it will be cleared externally.
     }
 
     pub fn cancel(&mut self) {
         self.active = false;
         self.anchor = None;
+        self.cell_constraint = None;
     }
 }
 

@@ -13,6 +13,8 @@ pub struct InputContext {
     pub has_exact_suggestion: bool,
     pub suggestion_index: Option<usize>,
     pub permission_confirm_always: bool,
+    /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
+    pub in_subagent_view: bool,
 }
 
 /// Result of processing an input event.
@@ -43,6 +45,8 @@ pub enum InputAction {
     OpenHelp,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
+    /// Delete the currently-selected session in the sessions picker.
+    DeleteSelectedSession,
     /// Close any modal.
     CloseModal,
     /// Scroll up.
@@ -107,6 +111,34 @@ pub enum InputAction {
     SubmitModelName,
     /// Configure the API key for the selected provider in the models modal.
     ConfigureKey,
+    /// Leave the current sub-agent view and return to the parent.
+    ExitSubAgent,
+    /// Move to the previous sibling sub-agent task.
+    PrevSibling,
+    /// Move to the next sibling sub-agent task.
+    NextSibling,
+}
+
+/// Insert a literal newline at the cursor position, but only in modals that
+/// accept free-text input. Used by the Alt+Enter and Ctrl+J multi-line
+/// entry bindings (plain Enter sends the message).
+fn insert_newline(
+    input: &mut String,
+    cursor_position: &mut usize,
+    active_modal: super::Modal,
+) {
+    if matches!(
+        active_modal,
+        super::Modal::None | super::Modal::ApiKey | super::Modal::Endpoint | super::Modal::ModelName
+    ) {
+        let byte_pos = input
+            .char_indices()
+            .map(|(i, _)| i)
+            .nth(*cursor_position)
+            .unwrap_or(input.len());
+        input.insert(byte_pos, '\n');
+        *cursor_position += 1;
+    }
 }
 
 /// Process a crossterm event into a high-level action.
@@ -191,6 +223,8 @@ pub fn process_event(
                         }
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
+                    } else if context.in_subagent_view {
+                        InputAction::ExitSubAgent
                     } else if context.is_responding {
                         InputAction::Interrupt
                     } else {
@@ -222,6 +256,13 @@ pub fn process_event(
                     if input.is_empty() && context.active_modal == super::Modal::None =>
                 {
                     InputAction::Quit
+                }
+                // Alt+Enter / Ctrl+J: insert a literal newline so the input
+                // box supports multi-line drafting. Plain Enter sends the
+                // message, so these are the only multi-line entry paths.
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                    insert_newline(input, cursor_position, context.active_modal);
+                    InputAction::None
                 }
                 KeyCode::Enter => match context.active_modal {
                     super::Modal::Models => InputAction::SwitchProvider {
@@ -273,9 +314,28 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Ctrl+J: alias for Alt+Enter — insert a literal newline.
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    insert_newline(input, cursor_position, context.active_modal);
+                    InputAction::None
+                }
                 KeyCode::Char(c) => {
+                    // Sibling sub-agent navigation: only when not typing (empty
+                    // input) and zoomed into a sub-agent view.
+                    if context.active_modal == super::Modal::None
+                        && context.in_subagent_view
+                        && input.is_empty()
+                    {
+                        match c {
+                            '[' => return InputAction::PrevSibling,
+                            ']' => return InputAction::NextSibling,
+                            _ => {}
+                        }
+                    }
                     if context.active_modal == super::Modal::Models && c == 'k' {
                         InputAction::ConfigureKey
+                    } else if context.active_modal == super::Modal::Sessions && c == 'd' {
+                        InputAction::DeleteSelectedSession
                     } else if matches!(
                         context.active_modal,
                         super::Modal::None
@@ -438,6 +498,7 @@ mod tests {
                 has_exact_suggestion: exact,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                in_subagent_view: false,
             },
             &mut drag,
         )
@@ -483,6 +544,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: true,
+                in_subagent_view: false,
             },
             &mut drag,
         );
@@ -506,6 +568,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                in_subagent_view: false,
             },
             &mut drag,
         );
@@ -529,6 +592,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                in_subagent_view: false,
             },
             &mut drag,
         );
@@ -555,9 +619,69 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                in_subagent_view: false,
             },
             &mut drag,
         );
         assert_eq!(action, InputAction::ToggleToolSteps);
+    }
+
+    fn key_in_view(code: KeyCode, in_subagent_view: bool, input: &mut String) -> InputAction {
+        let mut cursor = input.chars().count();
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)),
+            input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::None,
+                is_responding: false,
+                input_starts_with_slash: false,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn escape_exits_subagent_view() {
+        let mut input = String::new();
+        assert_eq!(
+            key_in_view(KeyCode::Esc, true, &mut input),
+            InputAction::ExitSubAgent
+        );
+        // Outside a sub-agent view, Esc does nothing when idle (no modal).
+        assert_eq!(
+            key_in_view(KeyCode::Esc, false, &mut input),
+            InputAction::None
+        );
+    }
+
+    #[test]
+    fn bracket_keys_cycle_siblings_only_when_typing_is_empty() {
+        let mut input = String::new();
+        assert_eq!(
+            key_in_view(KeyCode::Char('['), true, &mut input),
+            InputAction::PrevSibling
+        );
+        assert_eq!(
+            key_in_view(KeyCode::Char(']'), true, &mut input),
+            InputAction::NextSibling
+        );
+
+        // While typing (non-empty input), the brackets insert as characters,
+        // not navigation, even inside a sub-agent view.
+        let mut typing = "x".to_string();
+        key_in_view(KeyCode::Char('['), true, &mut typing);
+        assert_eq!(typing, "x[");
+
+        // Outside a sub-agent view, brackets always insert.
+        let mut other = String::new();
+        key_in_view(KeyCode::Char(']'), false, &mut other);
+        assert_eq!(other, "]");
     }
 }

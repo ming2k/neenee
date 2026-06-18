@@ -133,30 +133,25 @@ The loop runs in `Agent::run_streaming_with_events`
 `Agent::run_with_events` (`lib.rs:689-766`) for headless turns. The
 structure is identical; only the transport differs.
 
-```text
-prepare_tools(tools)                         lib.rs:777
-loop {
-    if tool_rounds >= MAX_TOOL_ROUNDS: abort lib.rs:783
-    ensure_system_prompt(messages)           lib.rs:790
-    response = provider.stream_chat_events() lib.rs:795
-    accumulate text/reasoning/tool_calls     lib.rs:802-843
-    push assistant message                   lib.rs:869
-
-    if response has tool_calls:
-        for each call:
-            guard_repeated_call              lib.rs:873
-            execute_tool (local, no HTTP)    lib.rs:881
-            push tool result message         lib.rs:890
-        tool_rounds += 1
-        continue                             lib.rs:895-896   ← next HTTP request
-
-    if parse_tool_call(response.content) succeeds (fallback):
-        attach_fallback_tool_call            lib.rs:904
-        execute_tool; push result            lib.rs:912, 920
-        continue                             ← next HTTP request
-
-    return response                          lib.rs:928       ← loop exits
-}
+```mermaid
+flowchart TD
+    A["prepare_tools<br/>lib.rs:777"] --> B{"tool_rounds ≥ 32?"}
+    B -- yes --> X["abort: too many rounds"]
+    B -- no --> C["ensure_system_prompt<br/>lib.rs:790"]
+    C --> D["stream_chat_events<br/>lib.rs:795"]
+    D --> E["accumulate text / reasoning / tool_calls<br/>lib.rs:802-843"]
+    E --> F["push assistant message<br/>lib.rs:869"]
+    F --> G{"response has<br/>tool_calls?"}
+    G -- yes --> H["guard_repeated_call<br/>lib.rs:873"]
+    H --> I["execute_tool — local, no HTTP<br/>lib.rs:881"]
+    I --> J["push tool result<br/>lib.rs:890"]
+    J --> K["tool_rounds += 1<br/>continue → next HTTP request"]
+    K --> B
+    G -- no --> L{"fallback JSON<br/>parses?"}
+    L -- yes --> M["attach_fallback_tool_call<br/>lib.rs:904"]
+    M --> N["execute_tool; push result<br/>lib.rs:912, 920"]
+    N --> B
+    L -- no --> O["return response<br/>lib.rs:928 — loop exits"]
 ```
 
 ### Messages evolution

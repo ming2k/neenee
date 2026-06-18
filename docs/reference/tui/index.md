@@ -29,6 +29,7 @@ measurements table.
 | [Input box](input-box.md) | Live editable prompt on a brighter panel |
 | [Assistant text](assistant-text.md) | Regular markdown text, 4-space indent |
 | [Code block](code-block.md) | Borderless code with `┃` bar + line-number gutter |
+| [Expandable card](expandable-card.md) | Shared shape for collapsible cards |
 | [Tool-step card](tool-step-card.md) | Expandable card for tool calls |
 | [Thinking card](thinking-card.md) | Expandable card for reasoning text |
 | [Status bar](status-bar.md) | Animated braille spinner + activity label |

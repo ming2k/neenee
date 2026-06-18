@@ -36,19 +36,13 @@ Sampling is stochastic; "high probability" is not "guaranteed."
 Constrained (or guided) decoding guarantees compliance by intervening in
 sampling. The intervention is mechanical, not statistical:
 
-```text
-model.forward(input_ids) -> logits[vocab_size]
-        │
-        ▼
-constraint layer:
-    current_state = fsm.advance(current_state, last_token)
-    allowed = fsm.alphabet(current_state)
-    mask = vector of false over vocab_size
-    mask[allowed_token_ids] = true
-    logits[!mask] = -inf
-        │
-        ▼
-sample from the masked distribution
+```mermaid
+flowchart TD
+    A["model.forward(input_ids)<br/>→ logits over vocab"] --> B["constraint layer"]
+    B --> C["fsm.advance(current_state, last_token)"]
+    C --> D["allowed = fsm.alphabet(current_state)"]
+    D --> E["mask logits: disallowed → -inf"]
+    E --> F["sample from masked distribution"]
 ```
 
 Every token that would leave the language of legal outputs is rendered

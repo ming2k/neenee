@@ -220,6 +220,8 @@ pub enum AgentRequest {
         api_key: Option<String>,
         base_url: Option<String>,
     },
+    /// Delete a session (active or archived) by id or short id prefix.
+    DeleteSession { id: String },
 }
 
 #[derive(Debug)]

@@ -12,6 +12,7 @@ Regular markdown prose from the assistant model.
 | Attribute | Value |
 |-----------|-------|
 | Indent | 4 spaces from the left edge |
+| Right gutter | 2 cols of `app_bg` (`CHAT_H_INSET`); wraps at `area.width - 6` |
 | Color | `assistant_fg` (205, 214, 244) |
 | Background | `app_bg` (transparent, no panel band) |
 | Wrapping | CJK kinsoku rules — closing punctuation does not begin a line |

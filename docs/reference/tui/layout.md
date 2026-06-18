@@ -8,15 +8,15 @@ The terminal frame is divided into three vertical chunks by ratatui's `Layout`:
 |-------|--------|----------|
 | Header | 0 (modal) / 2 / 3 (checklist) | Model name, goal, thin separator |
 | Chat | `Min(0)` | All message content |
-| Bottom | 0 (modal) / `status + input + 2` | Status bar, input box, hint line |
+| Footer | 0 (modal) / `status + input + 2` | Status bar, input box, hint line |
 
 The entire frame is first painted with `app_bg` so the TUI owns every pixel.
 
 ## Chrome hiding
 
 When an overlay modal is open, `chrome_hidden = true` collapses the header and
-bottom heights to 0. The modal gets the full terminal area with no header, input
-box, status bar, or hint line visible.
+footer heights to 0. The modal gets the full terminal area with no header,
+input box, status bar, or hint line visible.
 
 Modal types that hide chrome: Models, Sessions, Help, Permission.
 Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
@@ -32,12 +32,13 @@ Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
 
 | Measurement | Value | Where |
 |------------|-------|-------|
-| Left/right margin (input, user messages) | 2 cols | `app_bg` gutters |
-| `┃` bar column | 2 (after 2-col margin) | User messages, code blocks, input |
-| Assistant text indent | 4 cols | `line_spans("    ", ...)` |
-| Code block indent | 2 cols + `┃` + space | `code_gutter_line(left_indent=2)` |
-| Card header indent | 2 cols | `card_header_line("  {} ", arrow)` |
-| Card body indent | 3 cols (labels 1) | `render_tool_body_section` |
+| Left/right gutter (all chat content) | 2 cols `app_bg` | `CHAT_H_INSET`, applied via `chat_band_rect` (cards) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
+| `┃` bar column | 2 (after 2-col gutter) | User messages, code blocks, input |
+| Assistant text indent | 4 cols (left) + 2-col right gutter | `line_spans("    ", ...)`; wraps at `area.width - 6` |
+| Code block indent | 2 cols (inside band) + `┃` + space | `code_gutter_line(left_indent=2)` |
+| Card marker column | 2 (inside `CHAT_H_INSET` band) | `+` / `-` at band col 0 in `card_header_line` |
+| Card header text column | 4 (2 gutter + 2 after `+ `) | After `+ ` prefix |
+| Card body indent | 4 cols from chat edge (2 inside band) | `render_tool_body_section`, `render_thinking_card` |
 | Line-number gutter min width | 2 chars | `.max(2)` |
 | Mouse scroll step | 4 rows | `ScrollUp/Down` handler |
 | PageUp/PageDown step | `view_height - 1` | One line of overlap |
