@@ -26,7 +26,7 @@ pub mod message;
 pub use message::{ImagePart, Message, Role, ToolCall, ToolResult};
 
 pub mod tool_output;
-pub use tool_output::ToolOutput;
+pub use tool_output::{ToolOutput, ToolStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStreamEvent {
@@ -239,6 +239,7 @@ pub trait Tool: Send + Sync {
         _call_id: &str,
         arguments: &str,
         _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+        _on_stream: &mut (dyn FnMut(ToolStream) + Send + 'a),
     ) -> Result<ToolOutput, String> {
         self.call_structured(arguments).await
     }
@@ -322,6 +323,11 @@ pub enum AgentResponse {
         output: String,
         structured: ToolOutput,
         duration_ms: u64,
+    },
+    /// Incremental output streamed by a running tool (see [`ToolStream`]).
+    ToolStream {
+        id: String,
+        stream: ToolStream,
     },
     ToolCancelled {
         id: String,
@@ -452,6 +458,11 @@ pub enum AgentEvent {
         output: String,
         structured: ToolOutput,
         duration_ms: u64,
+    },
+    /// Incremental output streamed by a running tool (see [`ToolStream`]).
+    ToolStream {
+        id: String,
+        stream: ToolStream,
     },
     ToolCancelled {
         id: String,
@@ -1428,6 +1439,14 @@ impl Agent {
         }
 
         let parent_call_id = call.id.clone();
+        let stream_call_id = call.id.clone();
+        let stream_tx = event_tx.clone();
+        let mut on_stream = move |stream: ToolStream| {
+            let _ = stream_tx.send(AgentEvent::ToolStream {
+                id: stream_call_id.clone(),
+                stream,
+            });
+        };
         match tool
             .call_structured_with_events(
                 &call.id,
@@ -1438,6 +1457,7 @@ impl Agent {
                         event,
                     });
                 }),
+                &mut on_stream,
             )
             .await
         {
@@ -2320,6 +2340,9 @@ mod tests {
                 }
                 AgentEvent::ToolResult { name, output, .. } => {
                     format!("tool-result {name} {output:?}")
+                }
+                AgentEvent::ToolStream { id, stream } => {
+                    format!("tool-stream {} {:?}", id, stream)
                 }
                 AgentEvent::ToolCancelled { name, .. } => {
                     format!("tool-cancelled {name}")

@@ -19,7 +19,7 @@ use crate::layout::{
 };
 use crate::selection::SelectionState;
 
-use super::chrome::spinner_frame;
+use super::chrome::{breathing_color, spinner_glyph};
 use super::message_body::draw_message_body;
 use super::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
@@ -1380,9 +1380,14 @@ pub(super) fn draw_tool_step_card(
         .tool_step_status()
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
-    let status_color = status.color(theme);
+    let status_color = match status {
+        // Breathing dot: luminance sweeps between the header bg and the status
+        // color so a running step reads as "alive" without a frantic spinner.
+        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), theme.element_bg),
+        _ => status.color(theme),
+    };
     let status_glyph: &str = match status {
-        ToolStatus::Running => spinner_frame(spinner_phase),
+        ToolStatus::Running => spinner_glyph(),
         ToolStatus::Ok => "✓",
         ToolStatus::Failed => "✗",
         ToolStatus::Cancelled => "⊘",
@@ -1454,13 +1459,31 @@ pub(super) fn draw_tool_step_card(
     // (if any) appear is owned by each tool's presenter; tools without a
     // preview keep the all-or-nothing collapsed header.
     if !expanded {
-        if let crate::document::MessageKind::ToolStep {
-            name,
-            arguments,
-            output: Some(output),
-            ..
-        } = &msg.kind
-        {
+        // Preview source: the finished `output` text, or — while a streaming
+        // tool is still running — the partial structured stdout accumulated
+        // from `ToolStream` events, so a long bash command shows live output
+        // under the header instead of freezing on a spinner.
+        let preview_output: Option<&str> = match &msg.kind {
+            crate::document::MessageKind::ToolStep {
+                output: Some(output),
+                ..
+            } => Some(output),
+            crate::document::MessageKind::ToolStep {
+                name,
+                structured:
+                    Some(neenee_core::ToolOutput::Shell { stdout, .. }),
+                status: crate::document::ToolStepStatus::Running,
+                ..
+            } if !stdout.is_empty() && name == "bash" => Some(stdout.as_str()),
+            _ => None,
+        };
+        if let Some(output) = preview_output {
+            let (name, arguments) = match &msg.kind {
+                crate::document::MessageKind::ToolStep { name, arguments, .. } => {
+                    (name.as_str(), arguments.as_str())
+                }
+                _ => ("", ""),
+            };
             let preview = super::tools::collapsed_preview_for(name, arguments, output);
             if !preview.is_empty() {
                 draw_tool_preview(
@@ -1890,7 +1913,7 @@ pub(super) fn draw_reasoning_trace(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_cards: &mut Vec<StickyCard>,
-    spinner_phase: usize,
+    _spinner_phase: usize,
     hovered: bool,
 ) {
     let Some(header) = msg.thinking_header() else {
@@ -1929,7 +1952,7 @@ pub(super) fn draw_reasoning_trace(
         full_width,
         mi,
         expanded,
-        running.then(|| spinner_frame(spinner_phase)),
+        running.then(|| spinner_glyph()),
         &header,
         theme,
         layout_map,

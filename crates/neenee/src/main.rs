@@ -733,6 +733,7 @@ fn relay_agent_event(
             duration_ms,
         },
         AgentEvent::ToolCancelled { id, name } => AgentResponse::ToolCancelled { id, name },
+        AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
         AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),

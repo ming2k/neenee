@@ -215,50 +215,94 @@ impl Tool for BashTool {
     }
 
     async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+        // Non-streaming path: delegate with no-op sinks.
+        self.call_structured_with_events("", arguments, Box::new(|_| {}), &mut |_| {})
+            .await
+    }
+
+    /// Spawn the command with piped stdout/stderr, stream stdout line-by-line
+    /// as it arrives, and drain stderr concurrently (so a full stderr pipe
+    /// can't deadlock the child while we read stdout). The `&mut` stream sink
+    /// can't cross a spawned task boundary, so stderr is accumulated rather
+    /// than streamed live; stdout — the primary channel — streams live.
+    async fn call_structured_with_events<'a>(
+        &self,
+        _call_id: &str,
+        arguments: &str,
+        _on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+        on_stream: &mut (dyn FnMut(crate::ToolStream) + Send + 'a),
+    ) -> Result<crate::ToolOutput, String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let command = args["command"].as_str().ok_or("Missing 'command'")?;
         let timeout_secs = args["timeout"].as_u64().unwrap_or(30);
         let timeout_duration = Duration::from_secs(timeout_secs);
 
-        let future = if cfg!(target_os = "windows") {
+        let mut child = if cfg!(target_os = "windows") {
             Command::new("cmd")
                 .args(["/C", command])
                 .kill_on_drop(true)
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
         } else {
             Command::new("sh")
                 .arg("-c")
                 .arg(command)
                 .kill_on_drop(true)
-                .output()
-        };
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        }
+        .map_err(|e| format!("Failed to execute: {}", e))?;
+
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+
+        // Drain stderr on a separate task so the child can't block on a full
+        // stderr pipe while the main task reads stdout.
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = String::new();
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+            buf
+        });
 
         // `kill_on_drop` guarantees the child is terminated when this future is
-        // dropped — both on timeout (the `Timeout` wrapper drops its inner
-        // future when the deadline elapses) and when the turn is interrupted
-        // mid-run (see `execute_tools_concurrent`), so a cancelled command
-        // never leaves an orphaned process behind.
-        let output = timeout(timeout_duration, future)
+        // dropped — on timeout (the `Timeout` wrapper drops the inner future)
+        // and on mid-run interrupt (see `execute_tools_concurrent`).
+        let run = async {
+            let mut stdout_buf = String::new();
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                stdout_buf.push_str(&line);
+                stdout_buf.push('\n');
+                on_stream(crate::ToolStream::Stdout(format!("{}\n", line)));
+            }
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("Failed to wait: {}", e))?;
+            let exit = status.code();
+            let truncated =
+                crate::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len() > 8000;
+            Ok(crate::ToolOutput::Shell {
+                command: command.to_string(),
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+                exit,
+                truncated,
+            }) as Result<crate::ToolOutput, String>
+        };
+
+        timeout(timeout_duration, run)
             .await
             .map_err(|_| format!("Command timed out after {} seconds", timeout_secs))?
-            .map_err(|e| format!("Failed to execute: {}", e))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit = output.status.code();
-
-        // Truncation flag mirrors the legacy 8000-char cap; the wrapping text
-        // is produced by `ToolOutput::to_text()` so this stays a pure data flag.
-        let truncated =
-            crate::tool_output::shell_inner_text(&stdout, &stderr, exit).len() > 8000;
-        Ok(crate::ToolOutput::Shell {
-            command: command.to_string(),
-            stdout,
-            stderr,
-            exit,
-            truncated,
-        })
     }
 }
 
@@ -1092,8 +1136,10 @@ impl Tool for TaskTool {
         call_id: &str,
         arguments: &str,
         on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+        _on_stream: &mut (dyn FnMut(crate::ToolStream) + Send + 'a),
     ) -> Result<crate::ToolOutput, String> {
         // Preserve sub-agent event streaming; the result is a textual summary.
+        // Task output is not streamed byte-by-byte.
         self.call_with_events(call_id, arguments, on_event)
             .await
             .map(crate::ToolOutput::text)

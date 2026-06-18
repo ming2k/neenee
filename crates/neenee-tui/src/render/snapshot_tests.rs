@@ -54,6 +54,27 @@ fn tool_step_structured(
     m
 }
 
+/// A still-running tool step carrying a partial structured payload, mirroring
+/// what `push_tool_stream` produces mid-stream (status stays `Running`).
+fn tool_step_streaming(
+    name: &str,
+    arguments: &str,
+    structured: neenee_core::ToolOutput,
+    expanded: bool,
+) -> TranscriptMessage {
+    let mut m = TranscriptMessage::tool_step("call_test", name, arguments);
+    if let MessageKind::ToolStep {
+        structured: s,
+        expanded: exp,
+        ..
+    } = &mut m.kind
+    {
+        *s = Some(structured);
+        *exp = expanded;
+    }
+    m
+}
+
 /// Render `msg` as a tool-step card into a fresh `width x height` buffer and
 /// return the painted grid as trimmed text rows joined by newlines.
 fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
@@ -275,4 +296,24 @@ fn list_dir_expanded_renders_listing() {
         true,
     );
     insta::assert_snapshot!(render_grid(&m, 80, 30));
+}
+
+#[test]
+fn bash_running_streams_live_preview() {
+    // A long-running bash command mid-stream: status is still Running (header
+    // shows the breathing dot) but partial stdout already shows under the
+    // header via the structured Shell, instead of freezing on a spinner.
+    let m = tool_step_streaming(
+        "bash",
+        r#"{"command":"cargo build"}"#,
+        neenee_core::ToolOutput::Shell {
+            command: "cargo build".into(),
+            stdout: "Compiling neenee-core v0.1.0\nCompiling neenee-tui v0.1.0".into(),
+            stderr: String::new(),
+            exit: None,
+            truncated: false,
+        },
+        false,
+    );
+    insta::assert_snapshot!(render_grid(&m, 80, 24));
 }

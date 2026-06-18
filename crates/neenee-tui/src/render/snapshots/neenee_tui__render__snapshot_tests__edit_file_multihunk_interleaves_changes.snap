@@ -2,7 +2,7 @@
 source: crates/neenee-tui/src/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 40)"
 ---
-  - ⠋ ✎ Edit a.rs +2 -2
+  - ● ✎ Edit a.rs +2 -2
 
     Diff
      1   fn one() {

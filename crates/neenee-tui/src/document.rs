@@ -286,6 +286,43 @@ impl TranscriptMessage {
         true
     }
 
+    /// Accumulate an incremental stream chunk into a still-running tool step,
+    /// so the UI can render partial output (e.g. bash stdout) live. The first
+    /// chunk initializes a partial [`neenee_core::ToolOutput::Shell`]; the
+    /// terminal `finish_tool_step` later overwrites it with the final result.
+    /// Returns `false` if this isn't a matching running step.
+    pub fn push_tool_stream(&mut self, id: &str, stream: &neenee_core::ToolStream) -> bool {
+        let MessageKind::ToolStep {
+            id: step_id,
+            structured,
+            status,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        if step_id != id || !status.is_running() {
+            return false;
+        }
+        if !matches!(structured, Some(neenee_core::ToolOutput::Shell { .. })) {
+            *structured = Some(neenee_core::ToolOutput::Shell {
+                command: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit: None,
+                truncated: false,
+            });
+        }
+        if let Some(neenee_core::ToolOutput::Shell { stdout, stderr, .. }) = structured {
+            match stream {
+                neenee_core::ToolStream::Stdout(s) => stdout.push_str(s),
+                neenee_core::ToolStream::Stderr(s) => stderr.push_str(s),
+            }
+        }
+        self.refresh_tool_step();
+        true
+    }
+
     /// Mark a still-running tool step as cancelled. Idempotent: a step that
     /// already reached a terminal state (`Ok` / `Failed` / `Cancelled`) is left
     /// untouched and returns `false`. When the step is a `task` (sub-agent),

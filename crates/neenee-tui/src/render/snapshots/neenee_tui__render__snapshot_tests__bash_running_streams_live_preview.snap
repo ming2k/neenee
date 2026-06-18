@@ -1,0 +1,15 @@
+---
+source: crates/neenee-tui/src/render/snapshot_tests.rs
+expression: "render_grid(&m, 80, 24)"
+---
+  + ● ❯ Run cargo build
+    $ cargo build
+    Compiling neenee-core v0.1.0
+    Compiling neenee-tui v0.1.0
+
+backgrounds:
+.=reset  B=#151716  C=#111312
+0: .2 B76
+1: .2 C76
+2: .2 C76
+3: .2 C76

@@ -1,5 +1,5 @@
 //! Transient chrome around the input box: the activity status bar with an
-//! animated braille spinner shown above the input, the completion menu
+//! animated breathing-dot indicator shown above the input, the completion menu
 //! anchored above the input, and the persistent hint bar pinned below the
 //! input.
 
@@ -24,19 +24,45 @@ use super::design::{
 use super::primitives::{contrast_fg, viewport_rect};
 use super::Theme;
 
-/// Braille spinner frames used by the transient status bar above the input
-/// box. Cycling through these on each frame gives a clear sense of motion
-/// (10 frames ≈ one revolution per second at the 100ms tick rate).
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Number of distinct luminance steps in one breathing cycle. At the 100ms
+/// spinner tick this is ~1.2s per cycle — calm, not frantic.
+pub const SPINNER_PHASES: usize = 12;
 
-pub fn spinner_frame(spinner_phase: usize) -> &'static str {
-    SPINNER_FRAMES[spinner_phase % SPINNER_FRAMES.len()]
+/// The activity indicator glyph: a single dot whose luminance breathes (see
+/// [`breathing_color`]) rather than a cycling braille frame. Replaces the old
+/// braille spinner for a quieter, less busy feel.
+pub fn spinner_glyph() -> &'static str {
+    "●"
+}
+
+/// Cosine luminance sweep between `bg` (dim, at phase 0) and `base` (bright,
+/// at mid-cycle). Used with [`spinner_glyph`] so the running indicator is a
+/// dot that gently breathes instead of a spinning braille glyph.
+pub fn breathing_color(phase: usize, base: Color, bg: Color) -> Color {
+    let (br, bgc, bb) = rgb_of(bg);
+    let (fr, fgc, fb) = rgb_of(base);
+    let n = SPINNER_PHASES as f32;
+    let t = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (phase % SPINNER_PHASES) as f32 / n).cos();
+    Color::Rgb(lerp_u8(br, fr, t), lerp_u8(bgc, fgc, t), lerp_u8(bb, fb, t))
+}
+
+fn rgb_of(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (119, 125, 117), // text_muted fallback for non-truecolor
+    }
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// Draw the transient activity bar that sits directly above the input box.
 /// Replaces the old inline `┃ neenee ⟳ <status>` indicator: the brand prefix
 /// is dropped (the header already shows it) and the static `⟳` glyph is
-/// replaced by an animated braille spinner so the harness never looks frozen.
+/// replaced by a breathing-dot indicator so the harness never looks frozen.
 pub fn draw_status_bar(
     frame: &mut Frame,
     rect: Rect,
@@ -47,14 +73,13 @@ pub fn draw_status_bar(
     if status.is_empty() || status == "idle" || status == "responding" {
         return;
     }
-    let spinner = spinner_frame(spinner_phase);
+    let spinner = spinner_glyph();
+    let spinner_color = breathing_color(spinner_phase, theme.accent, theme.app_bg);
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
             spinner,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(spinner_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(

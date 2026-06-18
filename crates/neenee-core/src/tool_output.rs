@@ -89,6 +89,18 @@ impl From<String> for ToolOutput {
     }
 }
 
+/// An incremental chunk streamed by a long-running tool before its final
+/// [`ToolOutput`] lands. Lets the UI render partial output (e.g. a bash
+/// command's stdout as it arrives) instead of freezing on a spinner until the
+/// process exits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolStream {
+    /// Bytes appended to the running stdout buffer.
+    Stdout(String),
+    /// Bytes appended to the running stderr buffer.
+    Stderr(String),
+}
+
 /// Compose the non-truncated bash-tool display string from structured fields
 /// (mirrors `BashTool::call`). Pub(crate) so the bash tool can compute the
 /// pre-truncation length to decide its `truncated` flag without duplicating

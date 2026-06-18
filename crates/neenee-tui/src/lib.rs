@@ -1305,6 +1305,16 @@ pub async fn run_tui(
                         msgs.push(message);
                     }
                 }
+                AgentResponse::ToolStream { id, stream } => {
+                    // Live partial output from a running tool (e.g. bash
+                    // stdout). Accumulate into the running card so it updates
+                    // in place instead of freezing on a spinner.
+                    let mut msgs = messages_clone.lock().await;
+                    if !msgs.iter_mut().any(|message| message.push_tool_stream(&id, &stream)) {
+                        // Unknown id: drop silently — the matching ToolCall may
+                        // have been dropped with an aborted turn.
+                    }
+                }
                 AgentResponse::SubTask {
                     parent_call_id,
                     event,
