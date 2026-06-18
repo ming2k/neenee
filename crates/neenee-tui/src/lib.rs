@@ -242,6 +242,19 @@ pub struct App {
     pub setup_model: Option<String>,
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
+    /// Sidebar visibility override. `None` follows the auto rule (show when
+    /// the terminal is wide enough); `Some(true)`/`Some(false)` forces it on
+    /// or off regardless of width. Toggled with Ctrl+B.
+    pub sidebar_forced: Option<bool>,
+    /// Sidebar scroll offset in content lines. Held across frames and clamped
+    /// each draw against the freshly measured content height.
+    pub sidebar_scroll: usize,
+    /// Sidebar content height measured on the most recent draw. Used by the
+    /// app loop to clamp `sidebar_scroll` between redraws.
+    pub sidebar_max_scroll: usize,
+    /// Sidebar screen rect from the most recent draw. Used by mouse-wheel
+    /// routing so scrolling over the pane scrolls it instead of the chat.
+    pub sidebar_rect: Option<ratatui::layout::Rect>,
     /// Theme.
     pub theme: Theme,
 }
@@ -267,6 +280,16 @@ impl App {
             .map(|(i, _)| i)
             .nth(self.cursor_position)
             .unwrap_or(self.input.len())
+    }
+
+    /// Whether the right-side sidebar should render for the given terminal
+    /// width. Honors the user's toggle: `Some(_)` overrides the auto rule,
+    /// `None` shows the pane once the terminal is wide enough.
+    pub fn sidebar_visible(&self, width: u16) -> bool {
+        match self.sidebar_forced {
+            Some(forced) => forced,
+            None => width >= render::SIDEBAR_AUTO_WIDTH,
+        }
     }
 
     pub fn cursor_display_x(&self) -> u16 {
@@ -901,6 +924,10 @@ pub async fn run_tui(
         setup_endpoint: None,
         setup_model: None,
         key_status: HashMap::new(),
+        sidebar_forced: None,
+        sidebar_scroll: 0,
+        sidebar_max_scroll: 0,
+        sidebar_rect: None,
         theme: Theme::default(),
     };
 
@@ -1121,12 +1148,17 @@ async fn run_app_loop<B: Backend>(
                     input: &masked_input,
                     chrome_hidden,
                     subagent_bar,
+                    sidebar_visible: app.sidebar_visible(f.size().width),
+                    loop_status: &app.loop_status,
+                    sidebar_scroll: app.sidebar_scroll,
                     theme: &app.theme,
                 },
             );
             let input_rect = chat_render.input_rect;
             app.content_lines = chat_render.content_lines;
             app.view_height = chat_render.view_height;
+            app.sidebar_rect = chat_render.sidebar.rect;
+            app.sidebar_max_scroll = chat_render.sidebar.content_lines;
             match chat_render.sticky {
                 Some(info) => {
                     app.sticky_card = Some(info.message_idx);
@@ -1297,6 +1329,15 @@ async fn run_app_loop<B: Backend>(
             app.scroll = app.scroll.min(limit);
         }
 
+        // Clamp the sidebar scroll against the freshly measured content
+        // height. The sidebar cannot follow the bottom (its content is static
+        // per frame), so a simple saturating clamp is enough.
+        let sidebar_view_height = app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0);
+        let sidebar_max = app
+            .sidebar_max_scroll
+            .saturating_sub(sidebar_view_height);
+        app.sidebar_scroll = app.sidebar_scroll.min(sidebar_max);
+
         // Drain all currently-ready input events before redrawing. The first
         // event blocks for the normal poll interval; any further events the
         // terminal has already queued are coalesced with non-blocking polls
@@ -1338,6 +1379,7 @@ async fn run_app_loop<B: Backend>(
                     suggestion_index: app.suggestion_index,
                     permission_confirm_always: app.permission_confirm_always,
                     in_subagent_view,
+                    sidebar_rect: app.sidebar_rect,
                 },
                 &mut app.drag,
             );
@@ -1675,6 +1717,47 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::NextSibling => {
                     app.cycle_sibling(1);
+                }
+                input::InputAction::ToggleSidebar => {
+                    // Cycle: auto → forced on → forced off → auto. Starting
+                    // from `None` (auto), always force on first so the user
+                    // sees an immediate effect even on a wide terminal where
+                    // auto already shows the pane.
+                    app.sidebar_forced = match app.sidebar_forced {
+                        None => Some(true),
+                        Some(true) => Some(false),
+                        Some(false) => None,
+                    };
+                    // Reset scroll so a freshly shown pane starts at the top.
+                    if app.sidebar_forced == Some(true) {
+                        app.sidebar_scroll = 0;
+                    }
+                }
+                input::InputAction::SidebarScrollUp => {
+                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(2);
+                }
+                input::InputAction::SidebarScrollDown => {
+                    let max = app.sidebar_max_scroll.saturating_sub(
+                        app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0),
+                    );
+                    app.sidebar_scroll = (app.sidebar_scroll + 2).min(max);
+                }
+                input::InputAction::SidebarScrollPageUp => {
+                    let page = app
+                        .sidebar_rect
+                        .map(|r| (r.height as usize).saturating_sub(1).max(1))
+                        .unwrap_or(1);
+                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(page);
+                }
+                input::InputAction::SidebarScrollPageDown => {
+                    let page = app
+                        .sidebar_rect
+                        .map(|r| (r.height as usize).saturating_sub(1).max(1))
+                        .unwrap_or(1);
+                    let max = app.sidebar_max_scroll.saturating_sub(
+                        app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0),
+                    );
+                    app.sidebar_scroll = (app.sidebar_scroll + page).min(max);
                 }
                 input::InputAction::InsertChar(c) => {
                     // Already handled by process_event mutating app.input

@@ -34,6 +34,7 @@ measurements table.
 | [Thinking card](thinking-card.md) | Expandable card for reasoning text |
 | [Status bar](status-bar.md) | Animated braille spinner + activity label |
 | [Hint line](hint-line.md) | Right-aligned keybinding hints |
+| [Sidebar](layout.md#sidebar-column) | Right-side persistent pane (goal, plans, loop) |
 | [Modals](modals.md) | Models, Sessions, History, Permission, API key, Help |
 
 ## Other reference

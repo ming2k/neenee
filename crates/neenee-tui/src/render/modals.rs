@@ -579,6 +579,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         row("ctrl+m", "switch model"),
         row("ctrl+r", "search history"),
         row("ctrl+t", "toggle tool steps"),
+        row("ctrl+b", "toggle sidebar (plans)"),
         row("/", "slash commands"),
         Line::from(""),
         Line::from(section("Modes")),

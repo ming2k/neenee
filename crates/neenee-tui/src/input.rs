@@ -15,6 +15,10 @@ pub struct InputContext {
     pub permission_confirm_always: bool,
     /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
     pub in_subagent_view: bool,
+    /// Current screen rect of the right-side sidebar, when visible. Mouse
+    /// wheel events whose coordinates fall inside route to the sidebar's own
+    /// scroll state instead of the main chat viewport.
+    pub sidebar_rect: Option<ratatui::layout::Rect>,
 }
 
 /// Result of processing an input event.
@@ -120,6 +124,17 @@ pub enum InputAction {
     PrevSibling,
     /// Move to the next sibling sub-agent task.
     NextSibling,
+    /// Toggle the right-side persistent sidebar on/off. Overrides the
+    /// width-based auto-show rule until pressed again.
+    ToggleSidebar,
+    /// Scroll the sidebar up by one wheel tick (mouse wheel over the pane).
+    SidebarScrollUp,
+    /// Scroll the sidebar down by one wheel tick (mouse wheel over the pane).
+    SidebarScrollDown,
+    /// Scroll the sidebar up by one viewport page.
+    SidebarScrollPageUp,
+    /// Scroll the sidebar down by one viewport page.
+    SidebarScrollPageDown,
 }
 
 /// Insert a literal newline at the cursor position, but only in modals that
@@ -157,9 +172,24 @@ pub fn process_event(
         Event::Mouse(mouse) => {
             let x = mouse.column;
             let y = mouse.row;
+            let in_sidebar = context.sidebar_rect.is_some_and(|r| {
+                r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+            });
             match mouse.kind {
-                MouseEventKind::ScrollUp => InputAction::ScrollUp,
-                MouseEventKind::ScrollDown => InputAction::ScrollDown,
+                MouseEventKind::ScrollUp => {
+                    if in_sidebar {
+                        InputAction::SidebarScrollUp
+                    } else {
+                        InputAction::ScrollUp
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if in_sidebar {
+                        InputAction::SidebarScrollDown
+                    } else {
+                        InputAction::ScrollDown
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if context.active_modal == super::Modal::None {
                         drag.start(SemanticCursor::new(0, 0, 0));
@@ -213,6 +243,15 @@ pub fn process_event(
                 && context.active_modal == super::Modal::None
             {
                 return InputAction::ToggleToolSteps;
+            }
+            // Ctrl+B: toggle the right-side persistent sidebar. Overrides the
+            // width-based auto-show rule so the user can hide it on wide
+            // terminals or reveal it on narrow ones.
+            if key.code == KeyCode::Char('b')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && context.active_modal == super::Modal::None
+            {
+                return InputAction::ToggleSidebar;
             }
 
             match key.code {
@@ -544,6 +583,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         )
@@ -590,6 +630,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: true,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         );
@@ -614,6 +655,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         );
@@ -638,6 +680,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         );
@@ -665,6 +708,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         );
@@ -685,6 +729,7 @@ mod tests {
             suggestion_index: None,
             permission_confirm_always: false,
             in_subagent_view: false,
+            sidebar_rect: None,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -716,6 +761,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
+                sidebar_rect: None,
             },
             &mut drag,
         );
@@ -738,6 +784,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view,
+                sidebar_rect: None,
             },
             &mut drag,
         )

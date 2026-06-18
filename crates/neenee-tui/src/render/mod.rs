@@ -5,6 +5,7 @@ mod blocks;
 mod cards;
 mod input_box;
 mod modals;
+mod sidebar;
 mod status;
 mod table;
 mod text;
@@ -23,6 +24,7 @@ pub use modals::{
     draw_permission_sheet, draw_sessions_modal, draw_solution_input_modal, relative_time,
 };
 pub use status::{draw_hint, draw_status_bar, draw_suggestions};
+pub use sidebar::{draw_sidebar, SidebarRender, SidebarView, SIDEBAR_AUTO_WIDTH, SIDEBAR_WIDTH};
 #[cfg(test)]
 use table::{build_table_render, shrink_column_widths};
 use text::wrap_text;
@@ -94,6 +96,15 @@ pub struct ChatView<'a> {
     /// When set, the view is zoomed into a sub-agent task: a navigation bar is
     /// rendered and `messages` is the focused task's child stream.
     pub subagent_bar: Option<SubagentBarInfo>,
+    /// When `true`, the right-side persistent sidebar is rendered alongside
+    /// the chat. The chat area shrinks by [`SIDEBAR_WIDTH`] columns.
+    pub sidebar_visible: bool,
+    /// Harness loop status string mirrored into the sidebar (e.g. `"idle"`,
+    /// `"loop 3/8"`). Only shown when non-idle.
+    pub loop_status: &'a str,
+    /// Sidebar scroll offset (content lines) the caller is holding. Used only
+    /// when `sidebar_visible` is `true`.
+    pub sidebar_scroll: usize,
     pub theme: &'a Theme,
 }
 
@@ -120,6 +131,9 @@ pub struct ChatRender {
     /// can render/click a sticky header pinned under the HUD bar. `None` when no
     /// expanded card body covers the top of the viewport.
     pub sticky: Option<StickyInfo>,
+    /// Sidebar render result for this frame. `rect: None` means the sidebar
+    /// was hidden (terminal too narrow and not forced on).
+    pub sidebar: SidebarRender,
 }
 
 /// A sticky pinned card header (returned to the app for click handling).
@@ -142,21 +156,24 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         messages,
         scroll,
         selection,
-        current_provider: _,
+        current_provider,
         current_model,
-        current_mode: _,
+        current_mode,
         current_goal,
         activity,
         spinner_phase,
         input,
         chrome_hidden,
         subagent_bar,
+        sidebar_visible,
+        loop_status,
+        sidebar_scroll,
         theme,
     } = view;
     let full = frame.size();
     // Components render inside the vertical viewport margins (1 cell top and
     // bottom); only the background fill uses the full terminal rect.
-    let size = viewport_rect(frame);
+    let viewport = viewport_rect(frame);
 
     // Paint the entire frame with the app background so the TUI owns every
     // pixel rather than leaving gaps at the terminal emulator's default color.
@@ -164,6 +181,21 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         RtBlock::default().style(Style::default().bg(theme.app_bg)),
         full,
     );
+
+    // Reserve the right-side sidebar column before computing the chat layout
+    // so every chat-area component (header, cards, input) shrinks to match.
+    // The sidebar itself renders against the right edge of the viewport.
+    let size = if sidebar_visible && viewport.width > SIDEBAR_WIDTH {
+        Rect {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width - SIDEBAR_WIDTH,
+            height: viewport.height,
+        }
+    } else {
+        viewport
+    };
+    let sidebar_visible_effective = sidebar_visible && viewport.width > SIDEBAR_WIDTH;
 
     let checklist = current_goal.and_then(goal_checklist_summary);
     // +1 for the thin separator rule drawn beneath the header content.
@@ -400,11 +432,33 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     // directly under the HUD bar so the user can always collapse it.
     let sticky_info = draw_sticky_header_if_needed(frame, chat_area, &sticky_cards, scroll, theme);
 
+    // Render the persistent right-side sidebar. It draws against the full
+    // viewport (not the chat-narrowed `size`) so it spans top-to-bottom
+    // independently of the chat's vertical layout. Hidden overlay modals skip
+    // the sidebar too so the modal reads as a full-screen focus change.
+    let sidebar = if sidebar_visible_effective && !chrome_hidden {
+        draw_sidebar(
+            frame,
+            SidebarView {
+                current_provider,
+                current_model,
+                current_mode,
+                current_goal,
+                loop_status,
+                scroll: sidebar_scroll,
+                theme,
+            },
+        )
+    } else {
+        SidebarRender::empty()
+    };
+
     ChatRender {
         input_rect,
         content_lines,
         view_height: chat_area.height,
         sticky: sticky_info,
+        sidebar,
     }
 }
 
@@ -486,6 +540,9 @@ mod tests {
                         input: "hello",
                         chrome_hidden: false,
                         subagent_bar: None,
+                        sidebar_visible: false,
+                        loop_status: "idle",
+                        sidebar_scroll: 0,
                         theme: &theme,
                     },
                 );
@@ -622,6 +679,9 @@ mod tests {
                         input: "",
                         chrome_hidden: false,
                         subagent_bar: None,
+                        sidebar_visible: false,
+                        loop_status: "idle",
+                        sidebar_scroll: 0,
                         theme: &theme,
                     },
                 );
@@ -654,11 +714,87 @@ mod tests {
                             index: 1,
                             total: 1,
                         }),
+                        sidebar_visible: false,
+                        loop_status: "idle",
+                        sidebar_scroll: 0,
                         theme: &theme,
                     },
                 );
             })
             .unwrap();
+    }
+
+    /// End-to-end check that turning the sidebar on at a wide terminal width
+    /// shrinks the chat column and renders the sidebar pane alongside it
+    /// without any layout panic.
+    #[test]
+    fn chat_with_sidebar_shrinks_chat_and_renders_sidebar() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(160, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let goal = Goal {
+            objective: "Render the sidebar end to end".to_string(),
+            status: GoalStatus::Active,
+            checklist: vec![
+                neenee_core::GoalChecklistItem {
+                    content: "Add module".to_string(),
+                    status: neenee_core::GoalChecklistStatus::Completed,
+                },
+                neenee_core::GoalChecklistItem {
+                    content: "Wire scroll".to_string(),
+                    status: neenee_core::GoalChecklistStatus::InProgress,
+                },
+            ],
+            tokens_used: 5_000,
+            token_budget: Some(50_000),
+            time_used_seconds: 120,
+        };
+        let messages = vec![ChatMessage::new(neenee_core::Role::User, "ping")];
+
+        let mut captured_sidebar_rect: Option<Rect> = None;
+        let mut captured_chat_width: u16 = 0;
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                let r = draw_chat(
+                    f,
+                    &mut layout_map,
+                    ChatView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        current_provider: "mock",
+                        current_model: "mock-model",
+                        current_mode: AgentMode::Build,
+                        current_goal: Some(&goal),
+                        activity: "thinking",
+                        spinner_phase: 0,
+                        input: "hello",
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        sidebar_visible: true,
+                        loop_status: "loop 1/4",
+                        sidebar_scroll: 0,
+                        theme: &theme,
+                    },
+                );
+                captured_sidebar_rect = r.sidebar.rect;
+                // The chat-area width is reported indirectly via `view_height`
+                // and the input rect: the input box sits inside the chat
+                // column, so its x+width bounds the chat column.
+                captured_chat_width = r.input_rect.x + r.input_rect.width;
+            })
+            .unwrap();
+
+        // Sidebar should be visible and sit at the right edge of the frame.
+        let sidebar = captured_sidebar_rect.expect("sidebar should render when visible");
+        assert_eq!(sidebar.width, SIDEBAR_WIDTH);
+        assert_eq!(sidebar.x + sidebar.width, 160);
+        // Chat column ends well before the sidebar begins.
+        assert!(captured_chat_width <= sidebar.x);
     }
 
     #[test]
@@ -801,6 +937,9 @@ mod tests {
                             input,
                             chrome_hidden: false,
                             subagent_bar: None,
+                            sidebar_visible: false,
+                            loop_status: "idle",
+                            sidebar_scroll: 0,
                             theme,
                         },
                     );

@@ -12,11 +12,33 @@ The terminal frame is divided into three vertical chunks by ratatui's `Layout`:
 
 The entire frame is first painted with `app_bg` so the TUI owns every pixel.
 
+## Sidebar column
+
+When the terminal is at least `SIDEBAR_AUTO_WIDTH` cols wide (or when the
+user toggles it on with `Ctrl+B`), the right `SIDEBAR_WIDTH` cols are docked
+as a persistent sidebar that spans the full viewport height. The chat column
+shrinks by `SIDEBAR_WIDTH`; the sidebar has its own scroll offset and shows
+state that does not scroll with the conversation:
+
+- Model + provider
+- Active goal (objective + status pill)
+- Goal checklist (plans/todos) with per-item status glyphs
+- Loop status (when running)
+- Token/time budget bar
+
+| Measurement | Value |
+|------------|-------|
+| `SIDEBAR_WIDTH` | 32 cols |
+| `SIDEBAR_AUTO_WIDTH` | 132 cols (auto-show threshold) |
+| Toggle keybinding | `Ctrl+B` (cycles auto → on → off → auto) |
+| Mouse wheel over the pane | Scrolls the sidebar instead of the chat |
+
 ## Chrome hiding
 
 When an overlay modal is open, `chrome_hidden = true` collapses the header and
 footer heights to 0. The modal gets the full terminal area with no header,
-input box, status bar, or hint line visible.
+input box, status bar, or hint line visible. The sidebar is also hidden while
+a chrome-collapsing modal is open.
 
 Modal types that hide chrome: Models, Sessions, Help, Permission.
 Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
