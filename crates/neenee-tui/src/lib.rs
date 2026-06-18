@@ -6,7 +6,10 @@ pub mod render;
 pub mod selection;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -36,24 +39,24 @@ use crate::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionDrag, SelectionState,
 };
 
+// Canonical command list. The descriptions here are the single source of
+// truth and must stay in sync with the `/help` text in `crates/neenee/src/main.rs`
+// and `docs/reference/commands.md`. Order is logical grouping, not alphabetical.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/models", "List available LLM backends"),
-    ("/mode", "Switch between Build and Plan modes"),
-    ("/mcp", "Show MCP server connections and discovered tools"),
-    ("/permissions", "Show or clear always-allowed tool rules"),
-    ("/session", "Inspect or reset the durable session"),
-    ("/sessions", "Browse and resume past sessions"),
-    ("/resume", "Resume the most recent cached session"),
+    ("/models", "Select an LLM provider"),
+    ("/mode", "Show or switch mode (build, plan)"),
+    ("/mcp", "Show configured MCP server status"),
     ("/compact", "Compact older complete turns now"),
-    ("/goal", "Set or inspect the persistent harness goal"),
-    (
-        "/loop",
-        "Run the active goal for bounded autonomous iterations",
-    ),
-    ("/init", "Initialize a .neenee/ config tree in this project"),
-    ("/exit", "Gracefully exit the program"),
-    ("/help", "Show available commands and usage"),
     ("/clear", "Clear the conversation history"),
+    ("/permissions", "Show or clear always-allowed tool rules"),
+    ("/session", "Manage durable sessions"),
+    ("/sessions", "Browse past sessions"),
+    ("/resume", "Resume the most recent or selected session"),
+    ("/goal", "Set, inspect, complete, or clear the active goal"),
+    ("/loop", "Run or resume bounded autonomous goal work"),
+    ("/init", "Initialize a .neenee/ config tree"),
+    ("/help", "Show available commands and keybindings"),
+    ("/exit", "Exit the program"),
 ];
 
 #[derive(Clone, Copy)]
@@ -178,6 +181,12 @@ pub struct App {
     /// the scroll offset when the user collapses the pinned card so the header
     /// lands at the top of the viewport instead of jumping to unrelated content.
     pub sticky_header_line: Option<usize>,
+    /// Content-line the user asked to keep pinned at the top of the viewport by
+    /// collapsing a sticky header. While set, the per-frame scroll clamp is
+    /// allowed to scroll past the natural `max_scroll` so a short tail of
+    /// content below the collapsed card does not yank the header back down.
+    /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
+    pub pin_header_line: Option<usize>,
     /// Stack of sub-agent task call-ids that the view is zoomed into. Empty
     /// means the root conversation is shown; a non-empty stack renders the
     /// focused `task` tool step's child messages as the main stream, with a
@@ -201,6 +210,8 @@ pub struct App {
     /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
     pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
+    pub permission_scroll: usize,
+    pub permission_max_scroll: usize,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     /// Semantic selection state.
@@ -334,7 +345,10 @@ impl App {
             return [
                 ("/session status", "Show session id and loop checkpoint"),
                 ("/session list", "List durable session branches"),
-                ("/session resume", "Resume the most recent cached session"),
+                (
+                    "/session resume",
+                    "Resume the most recent or selected session",
+                ),
                 ("/session fork", "Fork the current conversation"),
                 ("/session new", "Start a new durable session"),
             ]
@@ -372,7 +386,9 @@ impl App {
     ///   stays on the same row; the body grows or shrinks beneath it.
     /// - Sticky-overlay header (its real header is scrolled off the top): point
     ///   `scroll` at the recorded header content-line so the real header lands
-    ///   at row 0 where the overlay sat.
+    ///   at row 0 where the overlay sat. The line is also recorded in
+    ///   `pin_header_line` so the per-frame clamp does not pull it back down
+    ///   once the collapsed body shortens the stream.
     /// - Either way `follow_bottom` is cleared: the user is now pinning their
     ///   attention on this header, so the next frame's auto-follow must not
     ///   yank it away (this is what previously let an expand push the header
@@ -401,7 +417,17 @@ impl App {
             if pinned_to_top {
                 if let Some(header_line) = sticky_header_line {
                     self.scroll = header_line.min(u16::MAX as usize) as u16;
+                    // Remember the line so the per-frame clamp (which runs after
+                    // this, once the collapsed body has shrunk the stream) keeps
+                    // allowing scroll up to it instead of yanking the header
+                    // back down to `max_scroll`.
+                    self.pin_header_line = Some(header_line);
                 }
+            } else {
+                // Any other toggle (e.g. expanding) is no longer pinning a
+                // collapsed header at the top: drop a stale pin so normal
+                // clamping resumes.
+                self.pin_header_line = None;
             }
         }
         toggled
@@ -421,7 +447,8 @@ impl App {
         self.messages
             .iter()
             .find_map(|message| {
-                if message.is_subagent_task() && message.tool_step_call_id() == Some(call_id.as_str())
+                if message.is_subagent_task()
+                    && message.tool_step_call_id() == Some(call_id.as_str())
                 {
                     message.subagent_children()
                 } else {
@@ -441,6 +468,7 @@ impl App {
         self.sticky_card = None;
         self.sticky_rect = None;
         self.sticky_header_line = None;
+        self.pin_header_line = None;
     }
 
     /// Zoom into a sub-agent task's child messages.
@@ -499,7 +527,12 @@ impl App {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        stdout,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     use std::io::Write;
     let _ = stdout.flush();
 }
@@ -551,7 +584,16 @@ pub async fn run_tui(
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Request the Kitty enhanced-keyboard protocol so modifier-bearing keys
+    // that collide with legacy control bytes (notably Ctrl+M == Enter) are
+    // reported distinctly. crossterm only emits the request when the terminal
+    // advertises support, so this is a no-op elsewhere.
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.show_cursor()?;
@@ -802,6 +844,7 @@ pub async fn run_tui(
         sticky_card: None,
         sticky_rect: None,
         sticky_header_line: None,
+        pin_header_line: None,
         focus_stack: Vec::new(),
         tx,
         should_quit,
@@ -820,6 +863,8 @@ pub async fn run_tui(
         pending_permission: None,
         sessions_overview: Vec::new(),
         permission_confirm_always: false,
+        permission_scroll: 0,
+        permission_max_scroll: 0,
         input_history,
         history_index: None,
         selection: SelectionState::None,
@@ -862,6 +907,7 @@ pub async fn run_tui(
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
@@ -895,11 +941,11 @@ async fn run_app_loop<B: Backend>(
         }
 
         // Apply any completed background clipboard copies.
-            while let Ok(result) = copy_rx.try_recv() {
-                set_copy_feedback(app, result);
-                app.copy_toast_until =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
-            }
+        while let Ok(result) = copy_rx.try_recv() {
+            set_copy_feedback(app, result);
+            app.copy_toast_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
+        }
 
         // Sync provider/model from listener
         {
@@ -915,10 +961,13 @@ async fn run_app_loop<B: Backend>(
             if app.pending_permission.is_some() && app.active_modal == Modal::None {
                 app.active_modal = Modal::Permission;
                 app.modal_index = 0;
+                app.permission_scroll = 0;
             } else if app.pending_permission.is_none() && app.active_modal == Modal::Permission {
                 app.active_modal = Modal::None;
                 app.modal_index = 0;
                 app.permission_confirm_always = false;
+                app.permission_scroll = 0;
+                app.permission_max_scroll = 0;
             }
             // Sessions picker: refresh rows and open the modal on request.
             app.sessions_overview = runtime.sessions_overview.lock().await.clone();
@@ -1122,13 +1171,16 @@ async fn run_app_loop<B: Backend>(
                 }
                 Modal::Permission => {
                     if let Some(request) = app.pending_permission.as_ref() {
-                        render::draw_permission_sheet(
+                        let max_scroll = render::draw_permission_sheet(
                             f,
                             request,
                             app.modal_index,
                             app.permission_confirm_always,
+                            app.permission_scroll,
                             &app.theme,
                         );
+                        app.permission_max_scroll = max_scroll;
+                        app.permission_scroll = app.permission_scroll.min(app.permission_max_scroll);
                     }
                 }
                 Modal::ApiKey => {
@@ -1159,7 +1211,8 @@ async fn run_app_loop<B: Backend>(
                 Modal::Sessions => render::draw_sessions_modal(
                     f,
                     &app.sessions_overview,
-                    app.modal_index.min(app.sessions_overview.len().saturating_sub(1)),
+                    app.modal_index
+                        .min(app.sessions_overview.len().saturating_sub(1)),
                     &app.theme,
                 ),
                 Modal::None => {}
@@ -1186,9 +1239,20 @@ async fn run_app_loop<B: Backend>(
 
         // Recompute the bottom scroll offset for the next frame and keep the
         // manual scroll position within bounds when not following.
-        app.max_scroll = app.content_lines.saturating_sub(app.view_height as usize) as u16;
+        let natural_max = app.content_lines.saturating_sub(app.view_height as usize) as u16;
+        // `app.max_scroll` stays at the natural bottom so scroll shortcuts
+        // (ScrollBottom / wheel down) still land on the real last page.
+        app.max_scroll = natural_max;
         if !app.follow_bottom {
-            app.scroll = app.scroll.min(app.max_scroll);
+            // A collapsed sticky header may leave too little content below it
+            // for `natural_max` to reach the header line; while a pin is
+            // active, allow scrolling up to that line so the header stays at
+            // the top of the viewport instead of being dragged back down.
+            let limit = app
+                .pin_header_line
+                .map(|line| natural_max.max(line.min(u16::MAX as usize) as u16))
+                .unwrap_or(natural_max);
+            app.scroll = app.scroll.min(limit);
         }
 
         // Drain all currently-ready input events before redrawing. The first
@@ -1267,6 +1331,7 @@ async fn run_app_loop<B: Backend>(
                         }
                         app.history_index = None;
                         app.follow_bottom = true;
+                        app.pin_header_line = None;
                         let _ = app.tx.send(AgentRequest::Chat(text));
                     } else if let Some((start, end)) = app.selection.normalized_range() {
                         // Enter on a selected card: navigate into a sub-agent
@@ -1303,6 +1368,7 @@ async fn run_app_loop<B: Backend>(
                     runtime.is_responding.store(true, Ordering::SeqCst);
                     *runtime.activity_status.lock().await = "queued".to_string();
                     app.follow_bottom = true;
+                    app.pin_header_line = None;
                     runtime
                         .messages
                         .lock()
@@ -1379,10 +1445,10 @@ async fn run_app_loop<B: Backend>(
                     app.modal_index = 0;
                 }
                 input::InputAction::OpenSelectedSession => {
-                    if let Some(session) = app
-                        .sessions_overview
-                        .get(app.modal_index.min(app.sessions_overview.len().saturating_sub(1)))
-                    {
+                    if let Some(session) = app.sessions_overview.get(
+                        app.modal_index
+                            .min(app.sessions_overview.len().saturating_sub(1)),
+                    ) {
                         let id = session.id.clone();
                         app.active_modal = Modal::None;
                         app.modal_index = 0;
@@ -1392,10 +1458,10 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::DeleteSelectedSession => {
-                    if let Some(session) = app
-                        .sessions_overview
-                        .get(app.modal_index.min(app.sessions_overview.len().saturating_sub(1)))
-                    {
+                    if let Some(session) = app.sessions_overview.get(
+                        app.modal_index
+                            .min(app.sessions_overview.len().saturating_sub(1)),
+                    ) {
                         let id = session.id.clone();
                         let _ = app.tx.send(AgentRequest::DeleteSession { id });
                     }
@@ -1414,37 +1480,75 @@ async fn run_app_loop<B: Backend>(
                     app.active_modal = Modal::None;
                 }
                 input::InputAction::ScrollUp => {
-                    app.follow_bottom = false;
-                    // Mouse wheel tick = 4 lines, not 1, so scrolling feels fast
-                    // and responsive instead of crawling line-by-line.
-                    app.scroll = app.scroll.saturating_sub(4);
+                    if app.active_modal == Modal::Permission {
+                        app.permission_scroll = app.permission_scroll.saturating_sub(4);
+                    } else {
+                        app.follow_bottom = false;
+                        app.pin_header_line = None;
+                        // Mouse wheel tick = 4 lines, not 1, so scrolling feels fast
+                        // and responsive instead of crawling line-by-line.
+                        app.scroll = app.scroll.saturating_sub(4);
+                    }
                 }
                 input::InputAction::ScrollDown => {
-                    app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
-                    if app.scroll >= app.max_scroll {
-                        app.follow_bottom = true;
+                    if app.active_modal == Modal::Permission {
+                        app.permission_scroll = app
+                            .permission_scroll
+                            .saturating_add(4)
+                            .min(app.permission_max_scroll);
+                    } else {
+                        app.pin_header_line = None;
+                        app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
+                        if app.scroll >= app.max_scroll {
+                            app.follow_bottom = true;
+                        }
                     }
                 }
                 input::InputAction::ScrollPageUp => {
-                    app.follow_bottom = false;
-                    // Leave one line of overlap so the reader keeps context.
-                    let step = app.view_height.saturating_sub(1).max(1);
-                    app.scroll = app.scroll.saturating_sub(step);
+                    if app.active_modal == Modal::Permission {
+                        let step = app.view_height.saturating_sub(1).max(1) as usize;
+                        app.permission_scroll = app.permission_scroll.saturating_sub(step);
+                    } else {
+                        app.follow_bottom = false;
+                        app.pin_header_line = None;
+                        // Leave one line of overlap so the reader keeps context.
+                        let step = app.view_height.saturating_sub(1).max(1);
+                        app.scroll = app.scroll.saturating_sub(step);
+                    }
                 }
                 input::InputAction::ScrollPageDown => {
-                    let step = app.view_height.saturating_sub(1).max(1);
-                    app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
-                    if app.scroll >= app.max_scroll {
-                        app.follow_bottom = true;
+                    if app.active_modal == Modal::Permission {
+                        let step = app.view_height.saturating_sub(1).max(1) as usize;
+                        app.permission_scroll = app
+                            .permission_scroll
+                            .saturating_add(step)
+                            .min(app.permission_max_scroll);
+                    } else {
+                        app.pin_header_line = None;
+                        let step = app.view_height.saturating_sub(1).max(1);
+                        app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
+                        if app.scroll >= app.max_scroll {
+                            app.follow_bottom = true;
+                        }
                     }
                 }
                 input::InputAction::ScrollTop => {
-                    app.follow_bottom = false;
-                    app.scroll = 0;
+                    if app.active_modal == Modal::Permission {
+                        app.permission_scroll = 0;
+                    } else {
+                        app.follow_bottom = false;
+                        app.pin_header_line = None;
+                        app.scroll = 0;
+                    }
                 }
                 input::InputAction::ScrollBottom => {
-                    app.scroll = app.max_scroll;
-                    app.follow_bottom = true;
+                    if app.active_modal == Modal::Permission {
+                        app.permission_scroll = app.permission_max_scroll;
+                    } else {
+                        app.pin_header_line = None;
+                        app.scroll = app.max_scroll;
+                        app.follow_bottom = true;
+                    }
                 }
                 input::InputAction::CopySelection => {
                     if let Some(text) = extract_selection_text(
@@ -1495,13 +1599,9 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::ToggleToolSteps => {
                     // Read the target state from the focused view (a snapshot
                     // clone), then apply to the live messages.
-                    let expand = app
-                        .focused_messages()
-                        .iter()
-                        .any(|message| {
-                            !message.is_subagent_task()
-                                && message.tool_step_expanded() == Some(false)
-                        });
+                    let expand = app.focused_messages().iter().any(|message| {
+                        !message.is_subagent_task() && message.tool_step_expanded() == Some(false)
+                    });
                     let mut messages = runtime.messages.lock().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
                         // Sub-agent task cards are navigated, not expanded.
@@ -1707,10 +1807,9 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::SelectionStart { x, y } => {
                     // Sticky pinned card header: collapse it on click.
-                    if app
-                        .sticky_rect
-                        .is_some_and(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
-                    {
+                    if app.sticky_rect.is_some_and(|r| {
+                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                    }) {
                         if let Some(mi) = app.sticky_card {
                             let mut messages = runtime.messages.lock().await;
                             app.toggle_card_pinned(&mut messages, mi);
@@ -1755,9 +1854,7 @@ async fn run_app_loop<B: Backend>(
                             // selection can roam across the cell's wrapped
                             // lines but never crosses `│` borders. A plain
                             // click (no drag) leaves nothing selected.
-                            if let Some((mi, bi, cell)) =
-                                app.layout_map.table_cell_at(x, y)
-                            {
+                            if let Some((mi, bi, cell)) = app.layout_map.table_cell_at(x, y) {
                                 app.selection = SelectionState::start_range(cursor);
                                 app.drag.start_in_cell(cursor, (mi, bi, cell));
                             } else {
@@ -1930,11 +2027,10 @@ fn extract_selection_text(
     messages: &[crate::document::ChatMessage],
     input: &str,
     layout_map: &crate::layout::LayoutMap,
-) -> Option<String> {    let on_input = match sel {
+) -> Option<String> {
+    let on_input = match sel {
         SelectionState::None => false,
-        SelectionState::Block { message_idx, .. } => {
-            *message_idx == crate::render::INPUT_MSG_IDX
-        }
+        SelectionState::Block { message_idx, .. } => *message_idx == crate::render::INPUT_MSG_IDX,
         SelectionState::TableCell { message_idx, .. } => {
             *message_idx == crate::render::INPUT_MSG_IDX
         }
@@ -2237,10 +2333,9 @@ mod tests {
             "task",
             r#"{"description":"explore a","prompt":"..."}"#,
         );
-        a.subagent_children_mut().unwrap().push(ChatMessage::new(
-            Role::Assistant,
-            "child A1",
-        ));
+        a.subagent_children_mut()
+            .unwrap()
+            .push(ChatMessage::new(Role::Assistant, "child A1"));
         let mut b = ChatMessage::tool_step(
             "task_b",
             "task",
@@ -2262,10 +2357,7 @@ mod tests {
         let mut messages = conversation_with_subagents();
         let focus: Vec<String> = Vec::new();
         let resolved = resolve_focused_mut(&mut messages, &focus, 2);
-        assert_eq!(
-            resolved.map(|m| m.raw.clone()).as_deref(),
-            Some("ok")
-        );
+        assert_eq!(resolved.map(|m| m.raw.clone()).as_deref(), Some("ok"));
     }
 
     #[test]
@@ -2274,10 +2366,7 @@ mod tests {
         let focus = vec!["task_b".to_string()];
         // Index 0 inside task_b's children => "child B1".
         let resolved = resolve_focused_mut(&mut messages, &focus, 0);
-        assert_eq!(
-            resolved.map(|m| m.raw.clone()).as_deref(),
-            Some("child B1")
-        );
+        assert_eq!(resolved.map(|m| m.raw.clone()).as_deref(), Some("child B1"));
         // Indexing task_a's children via task_b focus returns none / out of range.
         assert!(resolve_focused_mut(&mut messages, &focus, 5).is_none());
     }

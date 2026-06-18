@@ -252,6 +252,18 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Ctrl+M: open the models modal. In a raw terminal Ctrl+M is
+                // byte-identical to Enter, so this only fires when the Kitty
+                // enhanced-keyboard protocol is active (enabled in `run_tui`).
+                // On terminals without it, Ctrl+M arrives as Enter and leaves
+                // input behavior untouched — no regression.
+                KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if context.active_modal == super::Modal::None {
+                        InputAction::OpenModels
+                    } else {
+                        InputAction::None
+                    }
+                }
                 KeyCode::Char('q')
                     if input.is_empty() && context.active_modal == super::Modal::None =>
                 {
@@ -412,8 +424,8 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
-                    super::Modal::Permission
-                    | super::Modal::ApiKey
+                    super::Modal::Permission => InputAction::ScrollUp,
+                    super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
@@ -429,8 +441,8 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
-                    super::Modal::Permission
-                    | super::Modal::ApiKey
+                    super::Modal::Permission => InputAction::ScrollDown,
+                    super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
@@ -442,16 +454,36 @@ pub fn process_event(
                         }
                     }
                 },
-                KeyCode::PageUp if context.active_modal == super::Modal::None => {
+                KeyCode::PageUp
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) =>
+                {
                     InputAction::ScrollPageUp
                 }
-                KeyCode::PageDown if context.active_modal == super::Modal::None => {
+                KeyCode::PageDown
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) =>
+                {
                     InputAction::ScrollPageDown
                 }
-                KeyCode::Home if context.active_modal == super::Modal::None => {
+                KeyCode::Home
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) =>
+                {
                     InputAction::ScrollTop
                 }
-                KeyCode::End if context.active_modal == super::Modal::None => {
+                KeyCode::End
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) =>
+                {
                     InputAction::ScrollBottom
                 }
                 _ => InputAction::None,
@@ -624,6 +656,57 @@ mod tests {
             &mut drag,
         );
         assert_eq!(action, InputAction::ToggleToolSteps);
+    }
+
+    #[test]
+    fn ctrl_m_opens_models_modal_when_no_modal_is_open() {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let context = InputContext {
+            active_modal: crate::Modal::None,
+            is_responding: false,
+            input_starts_with_slash: false,
+            suggestion_count: 0,
+            has_exact_suggestion: false,
+            suggestion_index: None,
+            permission_confirm_always: false,
+            in_subagent_view: false,
+        };
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut input,
+            &mut cursor,
+            context,
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::OpenModels);
+
+        // While a modal is already open, Ctrl+M is ignored so it cannot yank
+        // the user out of another modal mid-interaction.
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::Help,
+                is_responding: false,
+                input_starts_with_slash: false,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::None);
     }
 
     fn key_in_view(code: KeyCode, in_subagent_view: bool, input: &mut String) -> InputAction {

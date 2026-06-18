@@ -1191,18 +1191,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model,
                     });
                 }
-                AgentRequest::DeleteSession { id } => {
-                    match session.delete(&id).await {
-                        Ok(()) => {
-                            let _ = resp_tx.send(AgentResponse::SessionsOverview(
-                                build_sessions_overview(&session).await,
-                            ));
-                        }
-                        Err(error) => {
-                            let _ = resp_tx.send(AgentResponse::Error(error));
-                        }
+                AgentRequest::DeleteSession { id } => match session.delete(&id).await {
+                    Ok(()) => {
+                        let _ = resp_tx.send(AgentResponse::SessionsOverview(
+                            build_sessions_overview(&session).await,
+                        ));
                     }
-                }
+                    Err(error) => {
+                        let _ = resp_tx.send(AgentResponse::Error(error));
+                    }
+                },
                 AgentRequest::SlashCommand(cmd) => {
                     let parts: Vec<&str> = cmd.split_whitespace().collect();
                     if parts.is_empty() {
@@ -1736,19 +1734,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let _ = resp_tx.send(AgentResponse::Text(
                                 format!("Slash commands:\n\
-                                /models   — Select LLM provider\n\
-                                /mode     — Show or change mode (build | plan)\n\
+                                /models   — Select an LLM provider\n\
+                                /mode     — Show or switch mode (build, plan)\n\
                                 /mcp      — Show configured MCP server status\n\
-                                /permissions [clear] — Show or clear always-allowed tools\n\
-                                /resume [id] — Resume the most recent or selected session\n\
-                                /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
                                 /compact  — Compact older complete turns now\n\
+                                /clear    — Clear the conversation history\n\
+                                /permissions [clear] — Show or clear always-allowed tool rules\n\
+                                /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
+                                /sessions — Browse past sessions\n\
+                                /resume [id] — Resume the most recent or selected session\n\
                                 /goal     — Set, inspect, complete, or clear the active goal\n\
-                                /loop [N|resume|status|stop] — Run or resume bounded autonomous work\n\
+                                /loop [N|resume|status|stop] — Run or resume bounded autonomous goal work\n\
                                 /init [path] — Initialize a .neenee/ config tree\n\
-                                /clear    — Clear conversation history\n\
-                                /exit     — Exit the program\n\
-                                /help     — Show this message{}", custom_help)
+                                /help     — Show available commands and keybindings\n\
+                                /exit     — Exit the program{}", custom_help)
                             ));
                         }
                         "/exit" => {

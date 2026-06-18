@@ -28,6 +28,11 @@ status bar, and hint line are hidden (`chrome_hidden`).
 Centered list of provider presets. `↑`/`↓` navigate, `Enter` selects, `k`
 configures the API key for the highlighted provider.
 
+`Ctrl+M` opens this modal only on terminals that support the Kitty enhanced
+keyboard protocol. In a raw terminal `Ctrl+M` is byte-identical to `Enter`, so
+on unsupported terminals the key falls through to `Enter` and `/models` is the
+reliable trigger.
+
 ## Sessions modal
 
 Centered list of past sessions showing overview text, timestamps, and message

@@ -170,7 +170,7 @@ impl Tool for ReadFileTool {
                 "[Output truncated: {} lines, {} chars total]\n{}\n\n[Use offset/limit or read_file to see more]",
                 lines.len(),
                 content.len(),
-                &result[..4000]
+                truncate_utf8(&result, 4000)
             ));
         }
         Ok(result)
@@ -345,7 +345,7 @@ impl Tool for BashTool {
             return Ok(format!(
                 "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_file if you need specific parts]",
                 result.len(),
-                &result[..4000]
+                truncate_utf8(&result, 4000)
             ));
         }
         Ok(result)
@@ -693,36 +693,56 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Naive HTML → text conversion. Collapses whitespace and strips tags/scripts.
 fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut skip = false;
     let lower = html.to_ascii_lowercase();
-    let bytes: Vec<char> = html.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if !in_tag && lower[i..].starts_with("<script") {
+    let mut chars = html.char_indices().peekable();
+    while let Some((byte_idx, c)) = chars.next() {
+        if !in_tag && lower[byte_idx..].starts_with("<script") {
             skip = true;
-        } else if skip && lower[i..].starts_with("</script") {
+        } else if skip && lower[byte_idx..].starts_with("</script") {
             skip = false;
             // jump to end of tag
-            if let Some(idx) = lower[i..].find('>') {
-                i += idx + 1;
+            if let Some(idx) = lower[byte_idx..].find('>') {
+                let next_byte = byte_idx + idx + 1;
+                while chars
+                    .peek()
+                    .is_some_and(|(peek_byte, _)| *peek_byte < next_byte)
+                {
+                    chars.next();
+                }
                 continue;
             }
-        } else if !in_tag && lower[i..].starts_with("<style") {
+        } else if !in_tag && lower[byte_idx..].starts_with("<style") {
             skip = true;
-        } else if skip && lower[i..].starts_with("</style") {
+        } else if skip && lower[byte_idx..].starts_with("</style") {
             skip = false;
-            if let Some(idx) = lower[i..].find('>') {
-                i += idx + 1;
+            if let Some(idx) = lower[byte_idx..].find('>') {
+                let next_byte = byte_idx + idx + 1;
+                while chars
+                    .peek()
+                    .is_some_and(|(peek_byte, _)| *peek_byte < next_byte)
+                {
+                    chars.next();
+                }
                 continue;
             }
         }
         if skip {
-            i += 1;
             continue;
         }
         if c == '<' {
@@ -733,7 +753,6 @@ fn html_to_text(html: &str) -> String {
         } else if !in_tag {
             out.push(c);
         }
-        i += 1;
     }
     // Decode a handful of common entities
     let decoded = out
@@ -820,7 +839,7 @@ impl Tool for WebFetchTool {
                 "[Fetched {} chars from {}, truncated]\n{}\n\n[Use raw=true or a more specific URL for full content]",
                 body.len(),
                 url,
-                &body[..8_000]
+                truncate_utf8(&body, 8_000)
             ));
         }
         Ok(body)
@@ -1406,5 +1425,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("At most one"));
+    }
+
+    #[test]
+    fn html_to_text_handles_multibyte_before_script_tags() {
+        let html = "人工<script>hidden</script>智能<style>.x{}</style>新闻";
+
+        assert_eq!(html_to_text(html), "人工智能新闻");
+    }
+
+    #[test]
+    fn truncate_utf8_does_not_split_multibyte_chars() {
+        let text = "prefix ’ suffix";
+        let inside_curly_quote = text.find('’').unwrap() + 1;
+
+        assert_eq!(truncate_utf8(text, inside_curly_quote), "prefix ");
     }
 }

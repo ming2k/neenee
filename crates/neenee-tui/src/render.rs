@@ -30,6 +30,14 @@ const VIEWPORT_V_MARGIN: u16 = 1;
 /// and code blocks render their own equivalent gutters; markdown text wraps
 /// with `CHAT_H_INSET` cells of slack on the right.
 const CHAT_H_INSET: u16 = 2;
+const PERMISSION_SHEET_MAX_WIDTH: u16 = 118;
+const PERMISSION_SHEET_MIN_WIDTH: u16 = 64;
+const PERMISSION_SHEET_WIDTH_PERCENT: u16 = 72;
+const PERMISSION_SHEET_H_PADDING: u16 = 3;
+const PERMISSION_SHEET_TOP_PADDING: u16 = 1;
+const PERMISSION_SHEET_BOTTOM_PADDING: u16 = 1;
+const PERMISSION_SHEET_INPUT_GAP: u16 = 1;
+const PERMISSION_SHEET_MAX_HEIGHT: u16 = 18;
 
 /// The usable area after reserving the global viewport margins (1 cell top
 /// and bottom). The full `frame.size()` is only used to paint the app
@@ -463,26 +471,27 @@ fn build_table_render(
     };
 
     // Build one data line and record each column's padded-content byte span.
-    let format_data_line = |cells: &[Vec<String>], line_idx: usize| -> (String, Vec<(usize, usize)>) {
-        let mut line = String::from("│ ");
-        let mut spans = Vec::with_capacity(ncols);
-        for i in 0..ncols {
-            let cell_line = cells[i].get(line_idx).map(String::as_str).unwrap_or("");
-            let part = pad_cell_text(
-                cell_line,
-                widths[i],
-                aligns.get(i).copied().unwrap_or(TableAlignment::None),
-            );
-            let start = line.len();
-            line.push_str(&part);
-            spans.push((start, line.len()));
-            if i + 1 < ncols {
-                line.push_str(" │ ");
+    let format_data_line =
+        |cells: &[Vec<String>], line_idx: usize| -> (String, Vec<(usize, usize)>) {
+            let mut line = String::from("│ ");
+            let mut spans = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                let cell_line = cells[i].get(line_idx).map(String::as_str).unwrap_or("");
+                let part = pad_cell_text(
+                    cell_line,
+                    widths[i],
+                    aligns.get(i).copied().unwrap_or(TableAlignment::None),
+                );
+                let start = line.len();
+                line.push_str(&part);
+                spans.push((start, line.len()));
+                if i + 1 < ncols {
+                    line.push_str(" │ ");
+                }
             }
-        }
-        line.push_str(" │");
-        (line, spans)
-    };
+            line.push_str(" │");
+            (line, spans)
+        };
 
     let mut lines = Vec::new();
     let mut line_info: Vec<Option<TableRowInfo>> = Vec::new();
@@ -494,7 +503,10 @@ fn build_table_render(
     for line_idx in 0..header_height {
         let (l, spans) = format_data_line(&wrapped_headers, line_idx);
         lines.push(l);
-        line_info.push(Some(TableRowInfo { row: 0, col_spans: spans }));
+        line_info.push(Some(TableRowInfo {
+            row: 0,
+            col_spans: spans,
+        }));
     }
 
     lines.push(format!("├{}┤", join_horizontal("┼")));
@@ -766,10 +778,7 @@ fn render_message_blocks(
                         // at the exact 50% mark.
                         let pad = Line::from(vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled(
-                                "▄",
-                                Style::default().bg(theme.app_bg).fg(theme.accent),
-                            ),
+                            Span::styled("▄", Style::default().bg(theme.app_bg).fg(theme.accent)),
                             Span::styled(
                                 "▄".repeat(user_content_w.saturating_sub(1)),
                                 Style::default().fg(user_bg).bg(theme.app_bg),
@@ -798,42 +807,26 @@ fn render_message_blocks(
                         // highlight arbitrary substrings.
                         let bg = user_bg;
                         let text_style = Style::default().bg(bg).fg(theme.text_muted);
-                        let sel_style =
-                            Style::default().bg(theme.selected_bg).fg(theme.text);
+                        let sel_style = Style::default().bg(theme.selected_bg).fg(theme.text);
                         let sel = line_selection(sel_range, wl);
 
                         let mut spans = vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled(
-                                "█",
-                                Style::default().bg(bg).fg(theme.accent),
-                            ),
+                            Span::styled("█", Style::default().bg(bg).fg(theme.accent)),
                             Span::styled(" ", Style::default().bg(bg)),
                         ];
 
                         match sel {
                             None => {
-                                spans.push(Span::styled(
-                                    wl.text.clone(),
-                                    text_style,
-                                ));
+                                spans.push(Span::styled(wl.text.clone(), text_style));
                             }
                             Some((lo, hi)) => {
                                 if lo > 0 {
-                                    spans.push(Span::styled(
-                                        wl.text[..lo].to_string(),
-                                        text_style,
-                                    ));
+                                    spans.push(Span::styled(wl.text[..lo].to_string(), text_style));
                                 }
-                                spans.push(Span::styled(
-                                    wl.text[lo..hi].to_string(),
-                                    sel_style,
-                                ));
+                                spans.push(Span::styled(wl.text[lo..hi].to_string(), sel_style));
                                 if hi < wl.text.len() {
-                                    spans.push(Span::styled(
-                                        wl.text[hi..].to_string(),
-                                        text_style,
-                                    ));
+                                    spans.push(Span::styled(wl.text[hi..].to_string(), text_style));
                                 }
                             }
                         }
@@ -843,10 +836,7 @@ fn render_message_blocks(
                             padded_tail(user_content_w, used),
                             Style::default().bg(bg),
                         ));
-                        spans.push(Span::styled(
-                            "  ",
-                            Style::default().bg(theme.app_bg),
-                        ));
+                        spans.push(Span::styled("  ", Style::default().bg(theme.app_bg)));
                         Line::from(spans)
                     } else {
                         line_spans(
@@ -886,10 +876,7 @@ fn render_message_blocks(
                         // the top transition's pixel-accurate half boundary.
                         let pad = Line::from(vec![
                             Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled(
-                                "▀",
-                                Style::default().bg(theme.app_bg).fg(theme.accent),
-                            ),
+                            Span::styled("▀", Style::default().bg(theme.app_bg).fg(theme.accent)),
                             Span::styled(
                                 "▀".repeat(user_content_w.saturating_sub(1)),
                                 Style::default().fg(user_bg).bg(theme.app_bg),
@@ -1131,10 +1118,7 @@ fn render_message_blocks(
                     } else if *current_y < area.y + area.height {
                         let used = left_indent + 1 + lang.len();
                         let line = Line::from(vec![
-                            Span::styled(
-                                " ".repeat(left_indent),
-                                Style::default().bg(code_bg),
-                            ),
+                            Span::styled(" ".repeat(left_indent), Style::default().bg(code_bg)),
                             Span::styled(" ", Style::default().bg(code_bg)),
                             Span::styled(
                                 lang.to_string(),
@@ -1151,8 +1135,7 @@ fn render_message_blocks(
                     }
                 }
 
-                for (line_idx, (line_start_byte, logical_line)) in
-                    logical_lines.iter().enumerate()
+                for (line_idx, (line_start_byte, logical_line)) in logical_lines.iter().enumerate()
                 {
                     let wrapped = wrap_text(logical_line, wrap_width);
                     let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
@@ -1433,10 +1416,7 @@ fn card_header_line(
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            padded_tail(full_width, used),
-            Style::default().bg(bg),
-        ),
+        Span::styled(padded_tail(full_width, used), Style::default().bg(bg)),
     ])
 }
 
@@ -1517,10 +1497,7 @@ fn draw_blank_line(
     } else if *current_y < chat_area.y + chat_area.height {
         let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                padded_tail(full_width, 0),
-                style,
-            ))),
+            Paragraph::new(Line::from(Span::styled(padded_tail(full_width, 0), style))),
             rect,
         );
         *current_y += 1;
@@ -1551,6 +1528,65 @@ fn draw_section_label(
         let line = Line::from(vec![
             Span::styled(" ", pad_style),
             Span::styled(label, label_style),
+            Span::styled(padded_tail(full_width, used), pad_style),
+        ]);
+        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(Paragraph::new(line), rect);
+        *current_y += 1;
+    }
+}
+
+/// Render a shell command line inside an expanded bash tool card. Long
+/// commands wrap under the prompt so the expanded view stays compact without
+/// losing the actual command that ran.
+#[allow(clippy::too_many_arguments)]
+fn render_shell_command_line(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    command: &str,
+    pad_style: Style,
+    prompt_style: Style,
+    command_style: Style,
+    indent: usize,
+    inner_w: usize,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    let command = command.trim_end();
+    if command.is_empty() {
+        return;
+    }
+
+    let wrap_w = inner_w.saturating_sub(2).max(1);
+    let wrapped = wrap_text(command, wrap_w);
+    let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+        vec![WrappedLine {
+            text: String::new(),
+            start_byte: 0,
+            end_byte: 0,
+        }]
+    } else {
+        wrapped
+    };
+
+    *content_lines += wrapped.len();
+    for (idx, wl) in wrapped.iter().enumerate() {
+        if *skip_rows > 0 {
+            *skip_rows = skip_rows.saturating_sub(1);
+            continue;
+        }
+        if *current_y >= chat_area.y + chat_area.height {
+            break;
+        }
+
+        let prompt = if idx == 0 { "$ " } else { "  " };
+        let used = indent + prompt.width() + wl.text.width();
+        let line = Line::from(vec![
+            Span::styled(" ".repeat(indent), pad_style),
+            Span::styled(prompt, prompt_style),
+            Span::styled(wl.text.clone(), command_style),
             Span::styled(padded_tail(full_width, used), pad_style),
         ]);
         let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
@@ -2273,18 +2309,21 @@ fn render_tool_result_section(
     content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
+    separator: bool,
     body_pad: Style,
     body_label: Style,
 ) {
-    draw_blank_line(
-        frame,
-        chat_area,
-        full_width,
-        body_pad,
-        skip_rows,
-        current_y,
-        content_lines,
-    );
+    if separator {
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            body_pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
+    }
     draw_section_label(
         frame,
         chat_area,
@@ -2483,12 +2522,7 @@ fn render_subagent_inline_card(
 /// Render the sub-agent navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full chat width inside the app_bg gutters.
-fn draw_subagent_bar(
-    frame: &mut Frame,
-    rect: Rect,
-    bar: &SubagentBarInfo,
-    theme: &Theme,
-) {
+fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, theme: &Theme) {
     let band = chat_band_rect(rect);
     let full_width = band.width as usize;
     if full_width < 8 {
@@ -2664,107 +2698,175 @@ fn render_tool_step_card(
             ..
         } = &msg.kind
         {
-            // Blank line after the header band — separates `element_bg`
-            // header from `menu_bg` body with a row of body background.
-            draw_blank_line(
-                frame,
-                chat_area,
-                full_width,
-                pad,
-                skip_rows,
-                current_y,
-                content_lines,
-            );
-
-            // ── Tool ── (technical name, only visible when expanded).
-            draw_section_label(
-                frame,
-                chat_area,
-                full_width,
-                "Tool",
-                pad,
-                label_style,
-                skip_rows,
-                current_y,
-                content_lines,
-            );
-            *content_lines += 1;
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-            } else if *current_y < chat_area.y + chat_area.height {
-                let used = indent + name.len();
-                let line = Line::from(vec![
-                    Span::styled(" ".repeat(indent), pad),
-                    Span::styled(
-                        name.as_str(),
-                        Style::default().bg(body_bg).fg(theme.dim_fg),
-                    ),
-                    Span::styled(padded_tail(full_width, used), pad),
-                ]);
-                let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                frame.render_widget(Paragraph::new(line), rect);
-                *current_y += 1;
-            }
-
-            // ── Arguments ── (blank-separated from Tool above).
             let kv = crate::document::parse_arguments_kv(arguments);
-            let display_args: String = kv
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !display_args.is_empty() {
-                render_tool_body_section(
+            if name == "bash" {
+                let command = kv
+                    .iter()
+                    .find(|(k, _)| k == "command")
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or_default();
+                draw_section_label(
                     frame,
                     chat_area,
                     full_width,
-                    mi,
-                    0,
-                    "Arguments",
-                    &display_args,
-                    arg_style,
+                    "Tool",
                     pad,
                     label_style,
-                    indent,
-                    inner_w,
-                    true,
-                    false,
-                    selection,
-                    theme,
-                    layout_map,
                     skip_rows,
                     current_y,
                     content_lines,
                 );
-            }
+                *content_lines += 1;
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < chat_area.y + chat_area.height {
+                    let used = indent + name.len();
+                    let line = Line::from(vec![
+                        Span::styled(" ".repeat(indent), pad),
+                        Span::styled(
+                            name.as_str(),
+                            Style::default().bg(body_bg).fg(theme.dim_fg),
+                        ),
+                        Span::styled(padded_tail(full_width, used), pad),
+                    ]);
+                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+                    frame.render_widget(Paragraph::new(line), rect);
+                    *current_y += 1;
+                }
 
-            // ── Result ── (only when output exists). Dispatched per tool
-            // name so listings, grep matches, and command output each get a
-            // purpose-built renderer; unknown tools fall back to a
-            // line-numbered code block. The separator + label always sit on
-            // the body background so "Result" aligns with "Tool" /
-            // "Arguments"; only the result content sits on the recessed
-            // `code_bg`.
-            if let Some(output_str) = output {
-                if !output_str.is_empty() {
-                    render_tool_result_section(
+                draw_section_label(
+                    frame,
+                    chat_area,
+                    full_width,
+                    "Arguments",
+                    pad,
+                    label_style,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+                render_shell_command_line(
+                    frame,
+                    chat_area,
+                    full_width,
+                    command,
+                    pad,
+                    Style::default().bg(body_bg).fg(theme.info),
+                    Style::default().bg(body_bg).fg(theme.text),
+                    indent,
+                    inner_w,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+                if let Some(output_str) = output {
+                    if !output_str.is_empty() {
+                        render_tool_result_section(
+                            frame,
+                            chat_area,
+                            full_width,
+                            mi,
+                            name,
+                            output_str,
+                            selection,
+                            theme,
+                            layout_map,
+                            skip_rows,
+                            current_y,
+                            content_lines,
+                            indent,
+                            inner_w,
+                            false,
+                            pad,
+                            label_style,
+                        );
+                    }
+                }
+            } else {
+                // ── Tool ── (technical name, only visible when expanded).
+                draw_section_label(
+                    frame,
+                    chat_area,
+                    full_width,
+                    "Tool",
+                    pad,
+                    label_style,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+                *content_lines += 1;
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < chat_area.y + chat_area.height {
+                    let used = indent + name.len();
+                    let line = Line::from(vec![
+                        Span::styled(" ".repeat(indent), pad),
+                        Span::styled(name.as_str(), Style::default().bg(body_bg).fg(theme.dim_fg)),
+                        Span::styled(padded_tail(full_width, used), pad),
+                    ]);
+                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+                    frame.render_widget(Paragraph::new(line), rect);
+                    *current_y += 1;
+                }
+
+                let display_args: String = kv
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !display_args.is_empty() {
+                    render_tool_body_section(
                         frame,
                         chat_area,
                         full_width,
                         mi,
-                        name,
-                        output_str,
+                        0,
+                        "Arguments",
+                        &display_args,
+                        arg_style,
+                        pad,
+                        label_style,
+                        indent,
+                        inner_w,
+                        false,
+                        false,
                         selection,
                         theme,
                         layout_map,
                         skip_rows,
                         current_y,
                         content_lines,
-                        indent,
-                        inner_w,
-                        pad,
-                        label_style,
                     );
+                }
+
+                // ── Result ── (only when output exists). Dispatched per tool
+                // name so listings, grep matches, and command output each get a
+                // purpose-built renderer; unknown tools fall back to a
+                // line-numbered code block. The label sits on the body
+                // background while only the result content uses `code_bg`.
+                if let Some(output_str) = output {
+                    if !output_str.is_empty() {
+                        render_tool_result_section(
+                            frame,
+                            chat_area,
+                            full_width,
+                            mi,
+                            name,
+                            output_str,
+                            selection,
+                            theme,
+                            layout_map,
+                            skip_rows,
+                            current_y,
+                            content_lines,
+                            indent,
+                            inner_w,
+                            false,
+                            pad,
+                            label_style,
+                        );
+                    }
                 }
             }
         }
@@ -2821,18 +2923,6 @@ fn render_tool_step_card(
                 }
             }
         }
-
-        // Trailing blank line: mirrors the header-side breathing room so the
-        // body closes with the same `menu_bg` band before whatever follows.
-        draw_blank_line(
-            frame,
-            chat_area,
-            full_width,
-            pad,
-            skip_rows,
-            current_y,
-            content_lines,
-        );
     }
 
     // Bottom border.
@@ -2843,10 +2933,11 @@ fn render_tool_step_card(
             header,
             color: match &msg.kind {
                 crate::document::MessageKind::ToolStep {
-                    output: Some(o),
-                    ..
+                    output: Some(o), ..
                 } if o.starts_with("Error") => theme.error_fg,
-                crate::document::MessageKind::ToolStep { output: Some(_), .. } => theme.success,
+                crate::document::MessageKind::ToolStep {
+                    output: Some(_), ..
+                } => theme.success,
                 _ => theme.info,
             },
             block_idx: usize::MAX,
@@ -3052,7 +3143,11 @@ fn render_thinking_card(
                             wl.text.clone(),
                             Style::default()
                                 .bg(if selected { theme.selected_bg } else { body_bg })
-                                .fg(if selected { theme.text } else { theme.text_muted }),
+                                .fg(if selected {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                }),
                         ),
                         Span::styled(padded_tail(full_width, used), pad),
                     ]);
@@ -3071,9 +3166,6 @@ fn render_thinking_card(
                 }
             }
         }
-
-        // Trailing blank line: mirrors the header-side breathing room so the
-        // body closes with the same `menu_bg` band before whatever follows.
         draw_blank_line(
             frame,
             chat_area,
@@ -3267,10 +3359,8 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     // The status bar (animated spinner + activity text) sits on its own line
     // directly above the input box. It is shown only for non-streaming,
     // non-idle activity so the chat reclaims that row when nothing is running.
-    let status_active = !chrome_hidden
-        && !activity.is_empty()
-        && activity != "idle"
-        && activity != "responding";
+    let status_active =
+        !chrome_hidden && !activity.is_empty() && activity != "idle" && activity != "responding";
     let status_height: u16 = if status_active { 1 } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new
@@ -3278,9 +3368,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     // chat history always stays visible. The inner text width reserves the
     // thick left bar and a leading padding space.
     let input_text_width = (size.width as usize).saturating_sub(6).max(1);
-    let input_wrapped_lines = wrap_text(input, input_text_width)
-        .len()
-        .max(1);
+    let input_wrapped_lines = wrap_text(input, input_text_width).len().max(1);
     let desired_input_height = input_wrapped_lines as u16 + 2; // top/bottom padding rows
     let max_input_height = (size.height / 2).max(3);
     let input_box_height = desired_input_height.min(max_input_height);
@@ -3309,50 +3397,47 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 ""
             };
             let mark = if goal.status == GoalStatus::Completed {
-            "✓"
-        } else {
-            "◎"
-        };
-        let progress = checklist
-            .as_ref()
-            .map(|(done, total, _)| format!(" [{}/{}]", done, total))
-            .unwrap_or_default();
-        format!("{} {}{}{}", mark, objective, suffix, progress)
-    });
-    let mut header_spans = vec![
-        Span::raw(" "),
-        Span::styled(
-            current_model.to_string(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if let Some(goal) = goal {
-        header_spans.push(Span::raw("   "));
-        header_spans.push(Span::styled(goal, Style::default().fg(theme.text_muted)));
-    }
-    let mut header_lines = vec![Line::from(header_spans)];
-    if let Some((done, total, current)) = checklist {
-        header_lines.push(Line::from(vec![
+                "✓"
+            } else {
+                "◎"
+            };
+            let progress = checklist
+                .as_ref()
+                .map(|(done, total, _)| format!(" [{}/{}]", done, total))
+                .unwrap_or_default();
+            format!("{} {}{}{}", mark, objective, suffix, progress)
+        });
+        let mut header_spans = vec![
             Span::raw(" "),
             Span::styled(
-                format!("Tasks {}/{}  ", done, total),
+                current_model.to_string(),
                 Style::default()
-                    .fg(theme.primary)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(current, Style::default().fg(theme.text_muted)),
-        ]));
-    }
-    // Header content with a thin separator rule along the bottom edge.
-    let header_block = RtBlock::default()
-        .borders(Borders::BOTTOM)
-        .border_style(Style::default().fg(theme.border_subtle));
-    frame.render_widget(
-        Paragraph::new(header_lines).block(header_block),
-        chunks[0],
-    );
+        ];
+        if let Some(goal) = goal {
+            header_spans.push(Span::raw("   "));
+            header_spans.push(Span::styled(goal, Style::default().fg(theme.text_muted)));
+        }
+        let mut header_lines = vec![Line::from(header_spans)];
+        if let Some((done, total, current)) = checklist {
+            header_lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("Tasks {}/{}  ", done, total),
+                    Style::default()
+                        .fg(theme.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(current, Style::default().fg(theme.text_muted)),
+            ]));
+        }
+        // Header content with a thin separator rule along the bottom edge.
+        let header_block = RtBlock::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(theme.border_subtle));
+        frame.render_widget(Paragraph::new(header_lines).block(header_block), chunks[0]);
     } // end !chrome_hidden
 
     // 2. Chat History
@@ -3584,9 +3669,8 @@ pub fn draw_input(
     let text_width = content_w.saturating_sub(1).max(1); // minus leading space
     let wrapped = wrap_text(input, text_width);
 
-    let bar = |ch: &str, bg: Color| {
-        Span::styled(ch.to_string(), Style::default().bg(bg).fg(accent))
-    };
+    let bar =
+        |ch: &str, bg: Color| Span::styled(ch.to_string(), Style::default().bg(bg).fg(accent));
 
     // Number of text rows that fit inside the box (top/bottom transition rows
     // consume two lines). The box is sized by draw_chat to fit the wrapped text
@@ -3659,10 +3743,7 @@ pub fn draw_input(
                     wl.text.clone(),
                     Style::default().bg(panel_bg).fg(theme.text),
                 ),
-                Span::styled(
-                    padded_tail(content_w, used),
-                    Style::default().bg(panel_bg),
-                ),
+                Span::styled(padded_tail(content_w, used), Style::default().bg(panel_bg)),
             ]));
         }
     }
@@ -4128,7 +4209,10 @@ pub fn draw_sessions_modal(
         let inner_width = area.width.saturating_sub(2) as usize;
         let gap = inner_width.saturating_sub(overview_used.min(inner_width / 2) + meta_used);
         lines.push(Line::from(vec![
-            Span::styled(format!(" {}{}", badge, overview), Style::default().bg(bg).fg(fg)),
+            Span::styled(
+                format!(" {}{}", badge, overview),
+                Style::default().bg(bg).fg(fg),
+            ),
             Span::styled(" ".repeat(gap), Style::default().bg(bg)),
             Span::styled(format!("  {}  ", meta), Style::default().bg(bg).fg(muted)),
         ]));
@@ -4204,11 +4288,11 @@ pub fn draw_permission_sheet(
     request: &PermissionRequest,
     selected: usize,
     confirm_always: bool,
+    scroll: usize,
     theme: &Theme,
-) {
+) -> usize {
     let size = viewport_rect(frame);
-    let input_h: u16 = 3;
-    let bottom = size.height.saturating_sub(input_h);
+    let bottom = size.height;
 
     let arguments = serde_json::from_str::<serde_json::Value>(&request.arguments)
         .ok()
@@ -4222,11 +4306,113 @@ pub fn draw_permission_sheet(
         &["Allow once", "Always allow", "Reject"]
     };
 
-    // Build the option footer as a single full-width element_bg line.
-    let mut footer_spans: Vec<Span> = vec![Span::styled(
-        " ".to_string(),
-        Style::default().bg(theme.element_bg),
-    )];
+    let mut body_lines: Vec<Line> = Vec::new();
+    body_lines.push(Line::from(vec![
+        Span::styled("△ ", Style::default().fg(theme.warning)),
+        Span::styled(
+            "Permission required",
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    body_lines.push(Line::from(""));
+    body_lines.push(Line::from(vec![
+        Span::styled("Tool ", Style::default().fg(theme.text_muted)),
+        Span::styled(
+            request.tool.clone(),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Scope ", Style::default().fg(theme.text_muted)),
+        Span::styled(request.scope.clone(), Style::default().fg(theme.info)),
+    ]));
+    body_lines.push(Line::from(Span::styled(
+        request.description.clone(),
+        Style::default().fg(theme.text),
+    )));
+    body_lines.push(Line::from(""));
+    body_lines.push(Line::from(Span::styled(
+        "Arguments",
+        Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+    )));
+    body_lines.extend(
+        arg_lines
+            .into_iter()
+            .map(|line| line.style(Style::default().fg(theme.code_fg))),
+    );
+    if confirm_always {
+        body_lines.push(Line::from(""));
+        body_lines.push(Line::from(Span::styled(
+            "This permits the tool until neenee exits.",
+            Style::default().fg(theme.warning),
+        )));
+    }
+
+    let available_width = size.width.saturating_sub(2 * CHAT_H_INSET).max(1);
+    let preferred_width = available_width.saturating_mul(PERMISSION_SHEET_WIDTH_PERCENT) / 100;
+    let min_width = PERMISSION_SHEET_MIN_WIDTH.min(available_width);
+    let sheet_width = preferred_width
+        .max(min_width)
+        .min(PERMISSION_SHEET_MAX_WIDTH)
+        .min(available_width)
+        .max(1);
+    let sheet_x = size.x + size.width.saturating_sub(sheet_width) / 2;
+
+    let input_gap = PERMISSION_SHEET_INPUT_GAP.min(bottom);
+    let sheet_bottom = bottom.saturating_sub(input_gap);
+    let footer_height: u16 = 1;
+    let footer_gap: u16 = 1;
+    let fixed_height =
+        PERMISSION_SHEET_TOP_PADDING + footer_gap + footer_height + PERMISSION_SHEET_BOTTOM_PADDING;
+    let max_h = PERMISSION_SHEET_MAX_HEIGHT.min(sheet_bottom).max(1);
+    let content_w = sheet_width
+        .saturating_sub(1 + 2 * PERMISSION_SHEET_H_PADDING)
+        .max(1);
+    let body_total_rows: usize = body_lines
+        .iter()
+        .map(|line| {
+            let width: usize = line.spans.iter().map(|span| span.content.width()).sum();
+            width.max(1).div_ceil(content_w as usize)
+        })
+        .sum();
+    let body_capacity = max_h.saturating_sub(fixed_height).max(1);
+    let body_h = (body_total_rows as u16).min(body_capacity);
+    let max_scroll = body_total_rows.saturating_sub(body_h as usize);
+    let body_scroll = scroll.min(max_scroll);
+    let sheet_h = (fixed_height + body_h).min(sheet_bottom).max(1);
+    let sheet_top = sheet_bottom.saturating_sub(sheet_h);
+
+    draw_dim_backdrop(frame, size, theme.backdrop);
+
+    let area = Rect::new(sheet_x, size.y + sheet_top, sheet_width, sheet_h);
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel_block(theme.warning, theme.panel_bg), area);
+
+    let content_x = area.x + 1 + PERMISSION_SHEET_H_PADDING;
+    let body_area = Rect::new(
+        content_x,
+        area.y + PERMISSION_SHEET_TOP_PADDING,
+        content_w,
+        body_h,
+    );
+    frame.render_widget(
+        Paragraph::new(body_lines)
+            .scroll((body_scroll.min(u16::MAX as usize) as u16, 0))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        body_area,
+    );
+
+    let footer_y = area
+        .y
+        .saturating_add(sheet_h)
+        .saturating_sub(PERMISSION_SHEET_BOTTOM_PADDING + footer_height);
+    let footer_band = Rect::new(area.x + 1, footer_y, area.width.saturating_sub(1), 1);
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(theme.element_bg)),
+        footer_band,
+    );
+
+    let mut footer_spans: Vec<Span> = Vec::new();
     for (index, label) in labels.iter().enumerate() {
         let is_reject = !confirm_always && index == 2;
         let is_selected = index == selected;
@@ -4252,81 +4438,35 @@ pub fn draw_permission_sheet(
             Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
         ));
     }
-    // trailing hint, right-aligned-ish (just appended after options).
-    footer_spans.push(Span::styled(
-        "   ←→ select · enter confirm · esc reject ",
-        Style::default().bg(theme.element_bg).fg(theme.text_muted),
-    ));
-    // Pad footer to the full width so the element bar spans the inner area.
-    let inner_width = size.width.saturating_sub(1) as usize; // minus left bar
+    let hint = if max_scroll > 0 {
+        " ↑↓/PgUp/PgDn scroll · ←→ select · Enter confirm · Esc reject "
+    } else {
+        " ←→ select · Enter confirm · Esc reject "
+    };
+    let hint_width = hint.width();
+    let footer_width = content_w as usize;
     let used: usize = footer_spans.iter().map(|s| s.content.width()).sum();
-    if used < inner_width {
+    if used + hint_width <= footer_width {
         footer_spans.push(Span::styled(
-            " ".repeat(inner_width - used),
+            " ".repeat(footer_width - used - hint_width),
+            Style::default().bg(theme.element_bg),
+        ));
+        footer_spans.push(Span::styled(
+            hint,
+            Style::default().bg(theme.element_bg).fg(theme.text_muted),
+        ));
+    } else if used < footer_width {
+        footer_spans.push(Span::styled(
+            " ".repeat(footer_width - used),
             Style::default().bg(theme.element_bg),
         ));
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("△ ", Style::default().fg(theme.warning)),
-        Span::styled(
-            "Permission required",
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" Tool  ", Style::default().fg(theme.text_muted)),
-        Span::styled(
-            request.tool.clone(),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   Scope ", Style::default().fg(theme.text_muted)),
-        Span::styled(request.scope.clone(), Style::default().fg(theme.info)),
-    ]));
-    lines.push(Line::from(Span::styled(
-        format!(" {}", request.description),
-        Style::default().fg(theme.text),
-    )));
-    lines.push(Line::from(Span::styled(
-        "Arguments",
-        Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
-    )));
-    lines.extend(arg_lines);
-    if confirm_always {
-        lines.push(Line::from(Span::styled(
-            " This permits the tool until neenee exits.",
-            Style::default().fg(theme.warning),
-        )));
-    }
-    lines.push(Line::from("")); // spacer
-    lines.push(Line::from(footer_spans));
-
-    // Cap height and anchor to the bottom (just above the input box).
-    let max_h: u16 = 16;
-    let sheet_h = (lines.len() as u16).min(max_h).min(bottom);
-    let sheet_top = bottom.saturating_sub(sheet_h);
-
-    // Dim the chat area above the sheet; leave the input visible below.
-    if sheet_top > 0 {
-        draw_dim_backdrop(
-            frame,
-            Rect::new(size.x, size.y, size.width, sheet_top),
-            theme.backdrop,
-        );
-    }
-    let area = Rect::new(size.x, size.y + sheet_top, size.width, sheet_h);
-    frame.render_widget(Clear, area);
-
-    let block = panel_block(theme.warning, theme.panel_bg);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(block),
-        area,
+        Paragraph::new(Line::from(footer_spans)),
+        Rect::new(content_x, footer_y, content_w, 1),
     );
+    max_scroll
 }
 
 /// Draw an armed-action toast (e.g. "press Ctrl+C again to exit",
@@ -4370,6 +4510,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(section("General")),
         row("ctrl+p", "command palette"),
         row("enter", "send message"),
+        row("alt+enter", "insert newline (ctrl+j)"),
         row("esc", "interrupt (×2) / close"),
         row("ctrl+c", "copy · interrupt · quit (×2)"),
         row("↑ / ↓", "history · navigate"),
@@ -4384,7 +4525,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(section("Modes")),
         row("/mode", "build · plan"),
-        row("/goal", "set a persistent goal"),
+        row("/goal", "set or manage the goal"),
         row("/loop N", "bounded autonomous work"),
         Line::from(""),
         Line::from(desc("Drag to select · Ctrl+C or Ctrl+Shift+C to copy.")),
@@ -4629,7 +4770,7 @@ mod tests {
                     arguments: r#"{"command":"ls"}"#.to_string(),
                     scope: "*".to_string(),
                 };
-                draw_permission_sheet(f, &request, 0, false, &theme);
+                let _ = draw_permission_sheet(f, &request, 0, false, 0, &theme);
             })
             .unwrap();
     }

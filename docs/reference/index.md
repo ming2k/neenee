@@ -7,6 +7,10 @@ Lookup-oriented documentation — tables, lists, and exact values.
 - [Built-in tools](tools.md) — tool catalog, access classes, parameter schemas
 - [Providers](providers.md) — capability matrix, endpoint and env var catalog
 
+## Commands
+
+- [Slash commands](commands.md) — built-in commands, subcommands, custom commands
+
 ## TUI
 
 - [TUI overview](tui/) — component map, file responsibilities
