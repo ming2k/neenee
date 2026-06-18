@@ -852,6 +852,7 @@ impl Agent {
         .await
     }
 
+    #[tracing::instrument(skip_all, name = "turn", fields(streaming = false))]
     pub async fn run_with_events<F>(
         &self,
         messages: &mut Vec<Message>,
@@ -903,6 +904,7 @@ impl Agent {
         }
     }
 
+    #[tracing::instrument(skip_all, name = "turn", fields(streaming = true))]
     pub async fn run_streaming_with_events<F>(
         &self,
         messages: &mut Vec<Message>,
@@ -918,6 +920,7 @@ impl Agent {
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
+                tracing::warn!(max_rounds = MAX_TOOL_ROUNDS, "turn aborted: tool-round limit");
                 return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
@@ -926,6 +929,7 @@ impl Agent {
 
             remove_empty_assistant_messages(messages);
             self.ensure_system_prompt(messages);
+            tracing::debug!(tool_round = tool_rounds, "requesting model completion");
             on_event(AgentEvent::ModelRequestStarted {
                 tool_round: tool_rounds,
             });
@@ -1063,7 +1067,9 @@ impl Agent {
                 .iter()
                 .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
                 .collect();
+            tracing::info!(count = tool_calls.len(), "dispatching native tool calls");
             for (call, id) in tool_calls.iter().zip(&call_ids) {
+                tracing::debug!(tool = %call.name, "tool call");
                 on_event(AgentEvent::ToolCall {
                     id: id.clone(),
                     name: call.name.clone(),
@@ -1086,6 +1092,7 @@ impl Agent {
                 on_event(AgentEvent::AssistantDiscard);
             }
             self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls)?;
+            tracing::debug!(tool = %call.name, "tool call (text fallback)");
             Self::attach_fallback_tool_call(messages, &call);
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
             on_event(AgentEvent::ToolCall {
@@ -1120,6 +1127,7 @@ impl Agent {
         F: FnMut(AgentEvent) + Send,
     {
         state.token_usage.total_tokens += estimate_string_tokens(result);
+        tracing::info!(tool = %call.name, duration_ms, bytes = result.len(), "tool result");
         self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
         on_event(AgentEvent::ToolResult {
@@ -1191,6 +1199,7 @@ impl Agent {
         };
 
         if self.get_mode() == AgentMode::Plan && !tool.allowed_in_plan_mode(&call.arguments) {
+            tracing::warn!(tool = %call.name, "tool blocked in plan mode");
             return format!(
                 "[Plan mode] Tool '{}' is blocked. Switch to Build mode to execute it.",
                 call.name
@@ -1223,11 +1232,15 @@ impl Agent {
                     .unwrap_or_else(|e| e.into_inner())
                     .pending
                     .insert(request.id.clone(), sender);
+                tracing::info!(tool = %request.tool, scope = %request.scope, "permission requested");
                 let _ = event_tx.send(AgentEvent::PermissionRequest(request.clone()));
 
                 match receiver.await.unwrap_or(PermissionDecision::Reject) {
-                    PermissionDecision::Once => {}
+                    PermissionDecision::Once => {
+                        tracing::info!(tool = %tool.name(), decision = "once", "permission granted");
+                    }
                     PermissionDecision::Always => {
+                        tracing::info!(tool = %tool.name(), decision = "always", "permission granted");
                         self.permissions
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -1235,6 +1248,7 @@ impl Agent {
                             .insert(rule);
                     }
                     PermissionDecision::Reject => {
+                        tracing::warn!(tool = %tool.name(), "permission denied");
                         return format!(
                             "Permission denied for tool '{}'. Do not retry the same call.",
                             tool.name()

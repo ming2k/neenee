@@ -454,6 +454,12 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, Ha
             let _ = tx.send(AgentResponse::StreamDiscard);
         }
         let delay_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
+        tracing::warn!(
+            attempt = attempt + 1,
+            max_attempts = retry_limit,
+            delay_ms,
+            "retrying after transient provider error"
+        );
         let _ = tx.send(AgentResponse::RetryScheduled {
             attempt: attempt + 1,
             max_attempts: retry_limit,
@@ -897,8 +903,35 @@ async fn build_sessions_overview(session: &SessionStore) -> Vec<SessionOverview>
     }
 }
 
+/// Initialise file-based tracing when `NEENEE_LOG` names a log file.
+///
+/// A TUI cannot log to stdout (it would corrupt the display), so tracing is
+/// opt-in and always writes to a file. Verbosity comes from `RUST_LOG`,
+/// defaulting to `info` for the neenee crates. The returned guard flushes the
+/// non-blocking writer on drop and must live for the whole process.
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let path = std::path::PathBuf::from(std::env::var_os("NEENEE_LOG")?);
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = path.file_name()?.to_owned();
+    let (writer, guard) =
+        tracing_appender::non_blocking(tracing_appender::rolling::never(dir, file_name));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("neenee=info,neenee_core=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(writer)
+        .with_ansi(false)
+        .init();
+    tracing::info!("neenee tracing initialised");
+    Some(guard)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _tracing_guard = init_tracing();
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
     let (resp_tx, resp_rx) = mpsc::unbounded_channel::<AgentResponse>();
     let custom_commands = discover_commands()
