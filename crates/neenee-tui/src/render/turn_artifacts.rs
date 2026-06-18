@@ -34,6 +34,115 @@ use super::{
     TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 
+/// Cursor + environment carried through the tool-step body renderers.
+///
+/// Bundles the per-frame paint state (frame, viewport rect, scroll
+/// accumulators, theme, layout map) so content renderers take a single
+/// `&mut RenderCtx` plus their content-specific arguments, instead of 6-8
+/// positional cursor args threaded through every helper. This is the
+/// extraction seam for the tool-rendering redesign (ADR-0001); higher-level
+/// orchestration still constructs a `RenderCtx` at the boundary.
+pub(super) struct RenderCtx<'a, 'f: 'a> {
+    pub frame: &'a mut Frame<'f>,
+    pub area: Rect,
+    pub full_width: usize,
+    pub theme: &'a Theme,
+    pub layout_map: &'a mut LayoutMap,
+    pub skip_rows: &'a mut usize,
+    pub y: &'a mut u16,
+    pub content_lines: &'a mut usize,
+}
+
+impl<'a, 'f: 'a> RenderCtx<'a, 'f> {
+    /// Assemble a render context from the raw cursor state owned by a caller.
+    pub fn from_cursor(
+        frame: &'a mut Frame<'f>,
+        area: Rect,
+        full_width: usize,
+        theme: &'a Theme,
+        layout_map: &'a mut LayoutMap,
+        skip_rows: &'a mut usize,
+        y: &'a mut u16,
+        content_lines: &'a mut usize,
+    ) -> Self {
+        Self {
+            frame,
+            area,
+            full_width,
+            theme,
+            layout_map,
+            skip_rows,
+            y,
+            content_lines,
+        }
+    }
+
+    /// Paint one already-built line at the cursor, honoring scroll-skip and
+    /// viewport clip. Always accounts the row in `content_lines`, so callers
+    /// must iterate every logical row even once the viewport is full —
+    /// short-circuiting would undercount the scroll height. This reproduces
+    /// the original "bulk-count then paint until clip" accounting per-row.
+    ///
+    /// Returns the painted `Rect` when the row was actually drawn (so callers
+    /// can record a selectable [`BlockRegion`] for it), or `None` when the row
+    /// was skipped or fell outside the viewport.
+    pub fn paint(&mut self, line: Line<'static>) -> Option<Rect> {
+        *self.content_lines += 1;
+        if *self.skip_rows > 0 {
+            *self.skip_rows = self.skip_rows.saturating_sub(1);
+            return None;
+        }
+        if *self.y >= self.area.y + self.area.height {
+            return None;
+        }
+        let rect = Rect::new(self.area.x, *self.y, self.area.width, 1);
+        self.frame.render_widget(Paragraph::new(line), rect);
+        *self.y += 1;
+        Some(rect)
+    }
+
+    /// Paint `line` and, when drawn, record a selectable text region anchored
+    /// at `wl`'s byte range under `(mi, block_idx)`. Collapses the per-row
+    /// skip/clip/paint/record boilerplate that was duplicated across every
+    /// content renderer.
+    pub fn paint_text_row(
+        &mut self,
+        line: Line<'static>,
+        mi: usize,
+        block_idx: usize,
+        wl: &WrappedLine,
+        prefix_cols: u16,
+    ) {
+        if let Some(rect) = self.paint(line) {
+            self.layout_map.push(BlockRegion {
+                message_idx: mi,
+                block_idx,
+                start_byte: wl.start_byte,
+                end_byte: wl.end_byte,
+                text: wl.text.clone(),
+                prefix_cols,
+                rect,
+            });
+        }
+    }
+}
+
+
+/// `WrappedLine::empty()`-on-empty fallback used by every content renderer so
+/// a blank logical line still occupies one rendered row (matching the
+/// original inline `if wrapped.is_empty() { vec![empty] } else { wrapped }`).
+fn nonempty_wrapped(wrapped: Vec<WrappedLine>) -> Vec<WrappedLine> {
+    if wrapped.is_empty() {
+        vec![WrappedLine {
+            text: String::new(),
+            start_byte: 0,
+            end_byte: 0,
+        }]
+    } else {
+        wrapped
+    }
+}
+
 /// Tracked info for an expanded card, used to render a sticky header pinned
 /// under the HUD bar while the card's body is scrolled into view.
 pub(super) struct StickyCard {
@@ -351,62 +460,40 @@ fn draw_tool_body_section(
     );
 
     // Content lines.
+    let mut ctx = RenderCtx::from_cursor(
+        frame,
+        transcript_area,
+        full_width,
+        theme,
+        layout_map,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
     let sel_range = block_selection_range(selection, mi, block_idx);
-    let _ = sel_range;
     if code_mode {
-        draw_code_content(
-            frame,
-            transcript_area,
-            full_width,
-            mi,
-            block_idx,
-            content,
-            selection,
-            theme,
-            layout_map,
-            skip_rows,
-            current_y,
-            content_lines,
-            indent,
-            inner_w,
-        );
+        draw_code_content(&mut ctx, mi, block_idx, content, selection, indent, inner_w);
     } else {
         // Plain-text rendering: simple indent + wrap.
-        let wrapped = wrap_text(content, inner_w);
-        *content_lines += wrapped.len();
+        let wrapped = nonempty_wrapped(wrap_text(content, inner_w));
         for wl in &wrapped {
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-                continue;
-            }
-            if *current_y >= transcript_area.y + transcript_area.height {
-                break;
-            }
-
+            let block_wl = WrappedLine {
+                text: wl.text.clone(),
+                start_byte: wl.start_byte,
+                end_byte: wl.end_byte,
+            };
             let mut line = line_spans(
                 &" ".repeat(indent),
                 pad_style,
                 &wl.text,
-                line_selection(sel_range, wl),
+                line_selection(sel_range, &block_wl),
                 content_style,
-                theme.selected_bg,
+                ctx.theme.selected_bg,
             );
             let used = indent + wl.text.width();
             line.spans
-                .push(Span::styled(padded_tail(full_width, used), pad_style));
-
-            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(Paragraph::new(line), rect);
-            layout_map.push(BlockRegion {
-                message_idx: mi,
-                block_idx,
-                start_byte: wl.start_byte,
-                end_byte: wl.end_byte,
-                text: wl.text.clone(),
-                prefix_cols: indent as u16,
-                rect,
-            });
-            *current_y += 1;
+                .push(Span::styled(padded_tail(ctx.full_width, used), pad_style));
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
         }
     }
 }
@@ -415,24 +502,16 @@ fn draw_tool_body_section(
 /// `code_bg`. Used for `read_file` / `edit_file` results and as the
 /// fallback for unrecognized tools. The gutter starts at column `indent`
 /// so the code aligns with the rest of the card body.
-#[allow(clippy::too_many_arguments)]
 fn draw_code_content(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
     selection: &SelectionState,
-    theme: &Theme,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = theme.code_bg;
+    let code_bg = ctx.theme.code_bg;
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split('\n') {
@@ -447,26 +526,8 @@ fn draw_code_content(
     let sel_range = block_selection_range(selection, mi, block_idx);
 
     for (line_idx, (line_start_byte, logical_line)) in logical_lines.iter().enumerate() {
-        let wrapped = wrap_text(logical_line, wrap_width);
-        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-            vec![WrappedLine {
-                text: String::new(),
-                start_byte: 0,
-                end_byte: 0,
-            }]
-        } else {
-            wrapped
-        };
-        *content_lines += wrapped.len();
+        let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_width));
         for (wrap_idx, wl) in wrapped.iter().enumerate() {
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-                continue;
-            }
-            if *current_y >= transcript_area.y + transcript_area.height {
-                break;
-            }
-
             let gutter = if wrap_idx == 0 {
                 format!("{:>width$}", line_idx + 1, width = gutter_width)
             } else {
@@ -485,25 +546,14 @@ fn draw_code_content(
                 &gutter,
                 gutter_gap,
                 code_bg,
-                theme.dim_fg,
+                ctx.theme.dim_fg,
                 &wl.text,
                 line_selection(sel_range, &block_wl),
-                theme.code_fg,
-                theme.selected_bg,
-                full_width,
+                ctx.theme.code_fg,
+                ctx.theme.selected_bg,
+                ctx.full_width,
             );
-            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(Paragraph::new(line), rect);
-            layout_map.push(BlockRegion {
-                message_idx: mi,
-                block_idx,
-                start_byte: line_start_byte + wl.start_byte,
-                end_byte: line_start_byte + wl.end_byte,
-                text: wl.text.clone(),
-                prefix_cols: gutter_indent as u16,
-                rect,
-            });
-            *current_y += 1;
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, gutter_indent as u16);
         }
     }
 }
@@ -511,27 +561,19 @@ fn draw_code_content(
 /// Render a `list_dir` / `glob` result: one entry per row on `code_bg`,
 /// directories (entries ending in `/`) in `info`, files in `code_fg`. No
 /// line-number gutter since listing rows have no meaningful line index.
-#[allow(clippy::too_many_arguments)]
 fn draw_listing_content(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
     selection: &SelectionState,
-    theme: &Theme,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = theme.code_bg;
+    let code_bg = ctx.theme.code_bg;
     let pad = Style::default().bg(code_bg);
-    let dir_fg = theme.info;
-    let file_fg = theme.code_fg;
+    let dir_fg = ctx.theme.info;
+    let file_fg = ctx.theme.code_fg;
     let sel_range = block_selection_range(selection, mi, block_idx);
     let wrap_w = inner_w.saturating_sub(indent).max(1);
 
@@ -546,25 +588,8 @@ fn draw_listing_content(
         let is_dir = logical_line.ends_with('/');
         let fg = if is_dir { dir_fg } else { file_fg };
         let base = Style::default().bg(code_bg).fg(fg);
-        let wrapped = wrap_text(logical_line, wrap_w);
-        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-            vec![WrappedLine {
-                text: String::new(),
-                start_byte: 0,
-                end_byte: 0,
-            }]
-        } else {
-            wrapped
-        };
-        *content_lines += wrapped.len();
+        let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_w));
         for wl in &wrapped {
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-                continue;
-            }
-            if *current_y >= transcript_area.y + transcript_area.height {
-                break;
-            }
             let block_wl = WrappedLine {
                 text: wl.text.clone(),
                 start_byte: line_start_byte + wl.start_byte,
@@ -576,23 +601,12 @@ fn draw_listing_content(
                 &wl.text,
                 line_selection(sel_range, &block_wl),
                 base,
-                theme.selected_bg,
+                ctx.theme.selected_bg,
             );
             let used = indent + wl.text.width();
             line.spans
-                .push(Span::styled(padded_tail(full_width, used), pad));
-            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(Paragraph::new(line), rect);
-            layout_map.push(BlockRegion {
-                message_idx: mi,
-                block_idx,
-                start_byte: line_start_byte + wl.start_byte,
-                end_byte: line_start_byte + wl.end_byte,
-                text: wl.text.clone(),
-                prefix_cols: indent as u16,
-                rect,
-            });
-            *current_y += 1;
+                .push(Span::styled(padded_tail(ctx.full_width, used), pad));
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
         }
     }
 }
@@ -649,9 +663,7 @@ fn parse_grep_line(line: &str) -> Option<GrepLine<'_>> {
 /// other "simple" result row that doesn't need a line-number gutter.
 #[allow(clippy::too_many_arguments)]
 fn emit_simple_rows(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     indent: usize,
@@ -660,32 +672,10 @@ fn emit_simple_rows(
     pad: Style,
     style: Style,
     sel_range: Option<(usize, Option<usize>)>,
-    selected_bg: Color,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
 ) {
-    let wrap_w = full_width.saturating_sub(indent).max(1);
-    let wrapped = wrap_text(text, wrap_w);
-    let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-        vec![WrappedLine {
-            text: String::new(),
-            start_byte: 0,
-            end_byte: 0,
-        }]
-    } else {
-        wrapped
-    };
-    *content_lines += wrapped.len();
+    let wrap_w = ctx.full_width.saturating_sub(indent).max(1);
+    let wrapped = nonempty_wrapped(wrap_text(text, wrap_w));
     for wl in &wrapped {
-        if *skip_rows > 0 {
-            *skip_rows = skip_rows.saturating_sub(1);
-            continue;
-        }
-        if *current_y >= transcript_area.y + transcript_area.height {
-            break;
-        }
         let block_wl = WrappedLine {
             text: wl.text.clone(),
             start_byte: abs_start + wl.start_byte,
@@ -697,23 +687,12 @@ fn emit_simple_rows(
             &wl.text,
             line_selection(sel_range, &block_wl),
             style,
-            selected_bg,
+            ctx.theme.selected_bg,
         );
         let used = indent + wl.text.width();
         line.spans
-            .push(Span::styled(padded_tail(full_width, used), pad));
-        let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-        frame.render_widget(Paragraph::new(line), rect);
-        layout_map.push(BlockRegion {
-            message_idx: mi,
-            block_idx,
-            start_byte: block_wl.start_byte,
-            end_byte: block_wl.end_byte,
-            text: wl.text.clone(),
-            prefix_cols: indent as u16,
-            rect,
-        });
-        *current_y += 1;
+            .push(Span::styled(padded_tail(ctx.full_width, used), pad));
+        ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
     }
 }
 
@@ -726,29 +705,22 @@ fn emit_simple_rows(
 /// copy/cut works across the visible match content.
 #[allow(clippy::too_many_arguments)]
 fn draw_grep_content(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
     selection: &SelectionState,
-    theme: &Theme,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = theme.code_bg;
+    let code_bg = ctx.theme.code_bg;
     let pad = Style::default().bg(code_bg);
     let header_style = Style::default()
         .bg(code_bg)
-        .fg(theme.heading_fg)
+        .fg(ctx.theme.heading_fg)
         .add_modifier(Modifier::BOLD);
-    let dim = Style::default().bg(code_bg).fg(theme.dim_fg);
-    let match_style = Style::default().bg(code_bg).fg(theme.code_fg);
+    let dim = Style::default().bg(code_bg).fg(ctx.theme.dim_fg);
+    let match_style = Style::default().bg(code_bg).fg(ctx.theme.code_fg);
     let sel_range = block_selection_range(selection, mi, block_idx);
 
     // Walk logical lines with their byte offsets in `content`.
@@ -779,9 +751,7 @@ fn draw_grep_content(
                 if current_path != Some(parsed.path) {
                     current_path = Some(parsed.path);
                     emit_simple_rows(
-                        frame,
-                        transcript_area,
-                        full_width,
+                        ctx,
                         mi,
                         block_idx,
                         indent,
@@ -790,34 +760,12 @@ fn draw_grep_content(
                         pad,
                         header_style,
                         sel_range,
-                        theme.selected_bg,
-                        layout_map,
-                        skip_rows,
-                        current_y,
-                        content_lines,
                     );
                 }
                 // Absolute byte offset of `content` within the tool output.
                 let content_abs = line_start_byte + parsed.content_offset;
-                let wrapped = wrap_text(parsed.content, content_wrap_w);
-                let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-                    vec![WrappedLine {
-                        text: String::new(),
-                        start_byte: 0,
-                        end_byte: 0,
-                    }]
-                } else {
-                    wrapped
-                };
-                *content_lines += wrapped.len();
+                let wrapped = nonempty_wrapped(wrap_text(parsed.content, content_wrap_w));
                 for (wrap_idx, wl) in wrapped.iter().enumerate() {
-                    if *skip_rows > 0 {
-                        *skip_rows = skip_rows.saturating_sub(1);
-                        continue;
-                    }
-                    if *current_y >= transcript_area.y + transcript_area.height {
-                        break;
-                    }
                     let lineno_span = if wrap_idx == 0 {
                         let lpad = lineno_width.saturating_sub(parsed.lineno.len());
                         Span::styled(format!("{}{}", " ".repeat(lpad), parsed.lineno), dim)
@@ -843,7 +791,7 @@ fn draw_grep_content(
                             }
                             spans.push(Span::styled(
                                 wl.text[lo..hi].to_string(),
-                                match_style.bg(theme.selected_bg),
+                                match_style.bg(ctx.theme.selected_bg),
                             ));
                             if hi < wl.text.len() {
                                 spans.push(Span::styled(wl.text[hi..].to_string(), match_style));
@@ -851,26 +799,19 @@ fn draw_grep_content(
                         }
                     }
                     let used = content_cols + wl.text.width();
-                    spans.push(Span::styled(padded_tail(full_width, used), pad));
-                    let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-                    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-                    layout_map.push(BlockRegion {
-                        message_idx: mi,
+                    spans.push(Span::styled(padded_tail(ctx.full_width, used), pad));
+                    ctx.paint_text_row(
+                        Line::from(spans),
+                        mi,
                         block_idx,
-                        start_byte: block_wl.start_byte,
-                        end_byte: block_wl.end_byte,
-                        text: wl.text.clone(),
-                        prefix_cols: content_cols as u16,
-                        rect,
-                    });
-                    *current_y += 1;
+                        &block_wl,
+                        content_cols as u16,
+                    );
                 }
             }
             None => {
                 emit_simple_rows(
-                    frame,
-                    transcript_area,
-                    full_width,
+                    ctx,
                     mi,
                     block_idx,
                     indent,
@@ -879,11 +820,6 @@ fn draw_grep_content(
                     pad,
                     dim,
                     sel_range,
-                    theme.selected_bg,
-                    layout_map,
-                    skip_rows,
-                    current_y,
-                    content_lines,
                 );
             }
         }
@@ -895,44 +831,79 @@ fn draw_grep_content(
 /// Section markers emitted by the tool (`Exit N`, `STDOUT:`, `STDERR:`,
 /// `(success, stderr):`, `[Output truncated`, `[Output was large`) are
 /// highlighted in `warning` so they stand out from the output itself.
-#[allow(clippy::too_many_arguments)]
 fn draw_bash_content(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
+    structured: Option<&neenee_core::ToolOutput>,
     selection: &SelectionState,
-    theme: &Theme,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
 ) {
-    let result_bg = theme.menu_bg;
+    let result_bg = ctx.theme.menu_bg;
     let pad = Style::default().bg(result_bg);
-    let base = Style::default().bg(result_bg).fg(theme.code_fg);
+    let base = Style::default().bg(result_bg).fg(ctx.theme.code_fg);
+    let stderr_style = Style::default().bg(result_bg).fg(ctx.theme.error_fg);
     let marker_style = Style::default()
         .bg(result_bg)
-        .fg(theme.warning)
+        .fg(ctx.theme.warning)
         .add_modifier(Modifier::BOLD);
+    let sel_range = block_selection_range(selection, mi, block_idx);
+    let wrap_w = inner_w.saturating_sub(indent).max(1);
+
+    if let Some(neenee_core::ToolOutput::Shell {
+        stdout,
+        stderr,
+        exit,
+        truncated,
+        ..
+    }) = structured
+    {
+        // Render from structured fields: stdout then stderr (distinguished by
+        // color) then an exit/truncation footer — replacing the old sniffing
+        // of `Exit N` / `STDERR:` markers embedded in the composed text.
+        let mut byte_offset = 0usize;
+        if !stdout.is_empty() {
+            byte_offset = emit_bash_lines(
+                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, stdout, base, byte_offset,
+            );
+        }
+        if !stderr.is_empty() {
+            byte_offset = emit_bash_lines(
+                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, stderr, stderr_style,
+                byte_offset,
+            );
+        }
+        if *truncated {
+            byte_offset = emit_bash_lines(
+                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, "[output truncated]",
+                marker_style, byte_offset,
+            );
+        }
+        if matches!(exit, Some(c) if *c != 0) {
+            let m = format!("exit {}", exit.unwrap());
+            let _ = emit_bash_lines(
+                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, &m, marker_style,
+                byte_offset,
+            );
+        }
+        return;
+    }
+
+    // Legacy fallback for non-Shell results (e.g. restored sessions whose
+    // structured payload was not persisted): render the composed `content`
+    // string, highlighting the conventional section markers.
     let content = content.trim_end_matches(&['\r', '\n'][..]);
     if content.is_empty() {
         return;
     }
-    let sel_range = block_selection_range(selection, mi, block_idx);
-    let wrap_w = inner_w.saturating_sub(indent).max(1);
-
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split('\n') {
         logical_lines.push((offset, line));
         offset += line.len() + 1;
     }
-
     for (line_start_byte, logical_line) in logical_lines.iter() {
         let trimmed = logical_line.trim_end();
         let is_marker = trimmed.starts_with("Exit ")
@@ -941,31 +912,37 @@ fn draw_bash_content(
             || trimmed.starts_with("(success, stderr):")
             || trimmed.starts_with("[Output truncated")
             || trimmed.starts_with("[Output was large");
-
         let style = if is_marker { marker_style } else { base };
-        let wrapped = wrap_text(logical_line, wrap_w);
-        let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
-            vec![WrappedLine {
-                text: String::new(),
-                start_byte: 0,
-                end_byte: 0,
-            }]
-        } else {
-            wrapped
-        };
-        *content_lines += wrapped.len();
+        let _ = emit_bash_lines(
+            ctx, mi, block_idx, indent, wrap_w, pad, sel_range, logical_line, style,
+            *line_start_byte,
+        );
+    }
+}
+
+/// Emit a (possibly multi-line) bash body section at `indent`, wrapping to
+/// `wrap_w`, all rows in `style`, anchoring selection byte ranges at
+/// `*byte_offset` (advanced past the section). Shared by the structured and
+/// legacy bash renderers.
+fn emit_bash_lines(
+    ctx: &mut RenderCtx<'_, '_>,
+    mi: usize,
+    block_idx: usize,
+    indent: usize,
+    wrap_w: usize,
+    pad: Style,
+    sel_range: Option<(usize, Option<usize>)>,
+    text: &str,
+    style: Style,
+    mut byte_offset: usize,
+) -> usize {
+    for logical_line in text.split('\n') {
+        let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_w));
         for wl in &wrapped {
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-                continue;
-            }
-            if *current_y >= transcript_area.y + transcript_area.height {
-                break;
-            }
             let block_wl = WrappedLine {
                 text: wl.text.clone(),
-                start_byte: line_start_byte + wl.start_byte,
-                end_byte: line_start_byte + wl.end_byte,
+                start_byte: byte_offset + wl.start_byte,
+                end_byte: byte_offset + wl.end_byte,
             };
             let mut line = line_spans(
                 &" ".repeat(indent),
@@ -973,25 +950,16 @@ fn draw_bash_content(
                 &wl.text,
                 line_selection(sel_range, &block_wl),
                 style,
-                theme.selected_bg,
+                ctx.theme.selected_bg,
             );
             let used = indent + wl.text.width();
             line.spans
-                .push(Span::styled(padded_tail(full_width, used), pad));
-            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(Paragraph::new(line), rect);
-            layout_map.push(BlockRegion {
-                message_idx: mi,
-                block_idx,
-                start_byte: line_start_byte + wl.start_byte,
-                end_byte: line_start_byte + wl.end_byte,
-                text: wl.text.clone(),
-                prefix_cols: indent as u16,
-                rect,
-            });
-            *current_y += 1;
+                .push(Span::styled(padded_tail(ctx.full_width, used), pad));
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
         }
+        byte_offset += logical_line.len() + 1;
     }
+    byte_offset
 }
 
 /// Render the "Result" section of an expanded tool-step card. Draws the
@@ -1009,6 +977,7 @@ fn draw_tool_result_section(
     name: &str,
     arguments: &str,
     output: &str,
+    structured: Option<&neenee_core::ToolOutput>,
     selection: &SelectionState,
     theme: &Theme,
     layout_map: &mut LayoutMap,
@@ -1053,80 +1022,57 @@ fn draw_tool_result_section(
     );
 
     let block_idx = 1usize;
+    let mut ctx = RenderCtx::from_cursor(
+        frame,
+        transcript_area,
+        full_width,
+        theme,
+        layout_map,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
     match kind {
         ResultKind::Listing => draw_listing_content(
-            frame,
-            transcript_area,
-            full_width,
+            &mut ctx,
             mi,
             block_idx,
             output,
             selection,
-            theme,
-            layout_map,
-            skip_rows,
-            current_y,
-            content_lines,
             indent,
             inner_w,
         ),
         ResultKind::Grep => draw_grep_content(
-            frame,
-            transcript_area,
-            full_width,
+            &mut ctx,
             mi,
             block_idx,
             output,
             selection,
-            theme,
-            layout_map,
-            skip_rows,
-            current_y,
-            content_lines,
             indent,
             inner_w,
         ),
         ResultKind::Bash => draw_bash_content(
-            frame,
-            transcript_area,
-            full_width,
+            &mut ctx,
             mi,
             block_idx,
             output,
+            structured,
             selection,
-            theme,
-            layout_map,
-            skip_rows,
-            current_y,
-            content_lines,
             indent + 2,
             inner_w.saturating_sub(2),
         ),
         ResultKind::Code => draw_code_content(
-            frame,
-            transcript_area,
-            full_width,
+            &mut ctx,
             mi,
             block_idx,
             output,
             selection,
-            theme,
-            layout_map,
-            skip_rows,
-            current_y,
-            content_lines,
             indent,
             inner_w,
         ),
         ResultKind::Diff => draw_diff_content(
-            frame,
-            transcript_area,
-            full_width,
+            &mut ctx,
             &super::tools::diff_lines_for(name, arguments),
-            theme,
-            skip_rows,
-            current_y,
-            content_lines,
             indent,
             inner_w,
         ),
@@ -1137,68 +1083,92 @@ fn draw_tool_result_section(
 /// [`DiffLine`] is a row in the `code_bg` block: a colored `+`/`-`/` ` sign
 /// gutter then the (wrapped) line text. The diff is a derived view of the
 /// tool's arguments, so rows aren't registered for text selection.
-#[allow(clippy::too_many_arguments)]
 fn draw_diff_content(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     diff: &[DiffLine],
-    theme: &Theme,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     indent: usize,
     inner_w: usize,
 ) {
-    let bg = theme.code_bg;
+    let bg = ctx.theme.code_bg;
     let pad = Style::default().bg(bg);
-    let sign_w = 2usize; // `+ ` / `- ` / `  `
-    let text_w = inner_w.saturating_sub(sign_w).max(1);
+    let gutter_fg = ctx.theme.dim_fg;
+    // Gutter width from the widest 1-based line number, min 2 so single-digit
+    // files still align with a leading space.
+    let max_no = diff
+        .iter()
+        .filter_map(|l| l.old_no.or(l.new_no))
+        .max()
+        .unwrap_or(0);
+    let gutter_w = max_no.to_string().len().max(2);
+    let sign_w = 2usize; // "+ " / "- " / "  "
+    let text_w = inner_w.saturating_sub(gutter_w + 1 + sign_w).max(1);
+    // Tinted backgrounds for the changed word spans (low-chroma, Zen-palette
+    // derived) so the exact edit reads without repainting whole lines.
+    let add_hi_bg = Color::Rgb(40, 58, 45);
+    let del_hi_bg = Color::Rgb(58, 38, 38);
 
     for line in diff {
-        let (sign, fg) = match line.op {
-            DiffOp::Add => ('+', theme.success),
-            DiffOp::Remove => ('-', theme.error_fg),
-            DiffOp::Context => (' ', theme.dim_fg),
+        let (sign, base_fg, hi_bg) = match line.op {
+            DiffOp::Add => ('+', ctx.theme.success, add_hi_bg),
+            DiffOp::Remove => ('-', ctx.theme.error_fg, del_hi_bg),
+            DiffOp::Context => (' ', ctx.theme.dim_fg, bg),
         };
-        let wrapped = wrap_text(&line.text, text_w);
-        let wrapped = if wrapped.is_empty() {
-            vec![WrappedLine {
-                text: String::new(),
-                start_byte: 0,
-                end_byte: 0,
-            }]
-        } else {
-            wrapped
-        };
+        let no = line.old_no.or(line.new_no).unwrap_or(0);
+        let gutter = format!("{:>width$} ", no, width = gutter_w);
+
+        let full = line.text();
+        let wrapped = nonempty_wrapped(wrap_text(&full, text_w));
+        // Word-level highlighting only fits cleanly on a single rendered row;
+        // wrapped (overflowing) lines fall back to plain base-color rows.
+        let highlight_frags = wrapped.len() <= 1;
+
         for (i, wl) in wrapped.iter().enumerate() {
-            *content_lines += 1;
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
+            let mut spans: Vec<Span<'static>> = vec![
+                Span::styled(" ".repeat(indent), pad),
+                Span::styled(gutter.clone(), Style::default().bg(bg).fg(gutter_fg)),
+                Span::styled(
+                    if i == 0 {
+                        format!("{} ", sign)
+                    } else {
+                        "  ".to_string()
+                    },
+                    Style::default().bg(bg).fg(base_fg),
+                ),
+            ];
+            if highlight_frags && i == 0 {
+                for frag in &line.frags {
+                    let style = if frag.changed {
+                        Style::default()
+                            .bg(hi_bg)
+                            .fg(base_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().bg(bg).fg(base_fg)
+                    };
+                    spans.push(Span::styled(frag.text.clone(), style));
+                }
+            } else {
+                spans.push(Span::styled(
+                    wl.text.clone(),
+                    Style::default().bg(bg).fg(base_fg),
+                ));
+            }
+            let used = indent + gutter_w + 1 + sign_w + wl.text.width();
+            spans.push(Span::styled(padded_tail(ctx.full_width, used), pad));
+            let row = Line::from(spans);
+            // Diff counts per-row and breaks on clip (distinct from the
+            // bulk-counted content renderers), preserved verbatim.
+            *ctx.content_lines += 1;
+            if *ctx.skip_rows > 0 {
+                *ctx.skip_rows = ctx.skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= transcript_area.y + transcript_area.height {
+            if *ctx.y >= ctx.area.y + ctx.area.height {
                 break;
             }
-            // The sign only marks the first wrapped row; continuations align
-            // under the text with a blank gutter.
-            let gutter = if i == 0 {
-                format!("{} ", sign)
-            } else {
-                "  ".to_string()
-            };
-            let used = indent + sign_w + wl.text.width();
-            let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" ".repeat(indent), pad),
-                    Span::styled(gutter, Style::default().bg(bg).fg(fg)),
-                    Span::styled(wl.text.clone(), Style::default().bg(bg).fg(fg)),
-                    Span::styled(padded_tail(full_width, used), pad),
-                ])),
-                line_rect,
-            );
-            *current_y += 1;
+            let line_rect = Rect::new(ctx.area.x, *ctx.y, ctx.area.width, 1);
+            ctx.frame.render_widget(Paragraph::new(row), line_rect);
+            *ctx.y += 1;
         }
     }
 }
@@ -1546,6 +1516,7 @@ pub(super) fn draw_tool_step_card(
             name,
             arguments,
             output,
+            structured,
             ..
         } = &msg.kind
         {
@@ -1625,6 +1596,7 @@ pub(super) fn draw_tool_step_card(
                         name,
                         arguments,
                         output_str,
+                        structured.as_ref(),
                         selection,
                         theme,
                         layout_map,

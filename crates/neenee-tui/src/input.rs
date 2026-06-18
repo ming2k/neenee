@@ -140,6 +140,11 @@ pub enum InputAction {
     HistoryPrev,
     /// Navigate history down.
     HistoryNext,
+    /// Accept the highlighted fuzzy match from the Ctrl+R history-search modal:
+    /// insert the selected entry into the input box (replacing the query) and
+    /// close the modal. The message is not sent — the user can edit and press
+    /// Enter again to ship it.
+    HistoryInsert,
     /// Select modal item up.
     ModalUp,
     /// Select modal item down.
@@ -401,7 +406,7 @@ pub fn process_event(
                         provider_type: String::new(),
                         model: String::new(),
                     },
-                    super::Modal::HistorySearch => InputAction::SendChat(String::new()),
+                    super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
                     super::Modal::Permission => InputAction::PermissionSubmit,
                     super::Modal::ApiKey => InputAction::SubmitApiKey,
@@ -496,6 +501,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) {
                         cursor_line_start(input, cursor_position);
                     }
@@ -509,6 +515,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) {
                         cursor_line_end(input, cursor_position);
                     }
@@ -561,6 +568,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) {
                         let byte_pos = input
                             .char_indices()
@@ -581,6 +589,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -605,6 +614,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -621,6 +631,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) && *cursor_position < input.chars().count()
                     {
                         *cursor_position += 1;
@@ -703,6 +714,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
@@ -722,6 +734,7 @@ pub fn process_event(
                             | super::Modal::ApiKey
                             | super::Modal::Endpoint
                             | super::Modal::ModelName
+                            | super::Modal::HistorySearch
                     ) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
@@ -1451,5 +1464,153 @@ mod tests {
             FocusZone::Compose,
         );
         assert_eq!(cursor, 11);
+    }
+
+    /// Drive the history-search modal with `code` (+ `modifiers`) and return
+    /// the resulting action plus the final cursor position. The modal is open
+    /// and the focus zone is Compose, matching the live state while the user
+    /// is editing the fuzzy query.
+    fn run_history_key(
+        input: &mut String,
+        cursor: &mut usize,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> InputAction {
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            input,
+            cursor,
+            InputContext {
+                active_modal: crate::Modal::HistorySearch,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn typing_in_history_modal_appends_to_query() {
+        // The history modal borrows the input line as the fuzzy query, so each
+        // printable char must insert into `input` exactly like the ApiKey /
+        // Endpoint / ModelName modals do.
+        let mut input = String::new();
+        let mut cursor = 0;
+        run_history_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('g'),
+            KeyModifiers::NONE,
+        );
+        run_history_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        );
+        run_history_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('t'),
+            KeyModifiers::NONE,
+        );
+        assert_eq!(input, "git");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn backspace_in_history_modal_trims_query() {
+        let mut input = "rust".to_string();
+        let mut cursor = 4;
+        run_history_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        );
+        assert_eq!(input, "rus");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn enter_in_history_modal_emits_history_insert() {
+        // Enter must NOT send a chat — it inserts the highlighted match into
+        // the input box for further editing. The dedicated HistoryInsert
+        // action lets the app loop distinguish the two intents.
+        let mut input = "go".to_string();
+        let mut cursor = 2;
+        let action = run_history_key(&mut input, &mut cursor, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(action, InputAction::HistoryInsert);
+        assert_eq!(input, "go", "Enter must not consume the query");
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn ctrl_r_opens_history_modal_when_no_modal_is_open() {
+        // With no modal open, Ctrl+R routes through OpenHistory so the app
+        // loop can stash the in-progress draft and show the fuzzy picker.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::None,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::OpenHistory);
+
+        // Once any modal is open (including HistorySearch itself), Ctrl+R is
+        // a no-op so it cannot yank the user out of the in-progress query.
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::HistorySearch,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::None);
     }
 }

@@ -521,7 +521,7 @@ mod tests {
                 thinking.set_thinking_expanded(true);
                 let mut tool = TranscriptMessage::tool_step("call_1", "list_dir", r#"{"path":"."}"#);
                 tool.set_tool_step_expanded(true);
-                tool.finish_tool_step("call_1", "file_a\nfile_b", 12);
+                tool.finish_tool_step("call_1", "file_a\nfile_b", neenee_core::ToolOutput::text("file_a\nfile_b"), 12);
                 let messages = vec![
                     TranscriptMessage::new(neenee_core::Role::User, "hi"),
                     TranscriptMessage::new(
@@ -598,7 +598,18 @@ mod tests {
                     &HashMap::new(),
                     &theme,
                 );
-                draw_history_modal(f, &mut LayoutMap::new(), &["a".to_string()], 0, &theme);
+                let history_roster: Vec<String> = vec!["a".to_string()];
+                let ranked: Vec<(usize, crate::fuzzy::FuzzyMatch)> =
+                    crate::fuzzy::rank(&history_roster, "");
+                draw_history_modal(
+                    f,
+                    &mut LayoutMap::new(),
+                    &history_roster,
+                    "",
+                    &ranked,
+                    0,
+                    &theme,
+                );
                 draw_api_key_modal(f, "openai", "sk-•••", &theme);
                 draw_solution_input_modal(f, " Endpoint", "url", "https://x", false, &theme);
                 draw_help_modal(f, &theme);
@@ -664,7 +675,7 @@ mod tests {
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
         });
-        task.finish_tool_step("task_1", "found 3 matches", 1200);
+        task.finish_tool_step("task_1", "found 3 matches", neenee_core::ToolOutput::text("found 3 matches"), 1200);
         let root_messages = vec![
             TranscriptMessage::new(neenee_core::Role::User, "explore please"),
             task,
@@ -1151,5 +1162,69 @@ mod tests {
     fn shrink_columns_with_tiny_target_returns_all_minimum() {
         let result = shrink_column_widths(&[10, 20, 30], 5, 3);
         assert_eq!(result, vec![3, 3, 3]);
+    }
+
+    /// Drive `draw_history_modal` against a real buffer across every input
+    /// state the Ctrl+R picker can land in. The assertions are deliberately
+    /// structural ("does not panic, produces a non-empty frame") because the
+    /// fuzzy highlight math is already covered by `fuzzy::tests`; here we
+    /// only need to prove the renderer consumes each state without exploding.
+    #[test]
+    fn history_modal_renders_every_query_state() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let history = vec![
+            "git status".to_string(),
+            "git commit -am 'ship it'".to_string(),
+            "cargo test".to_string(),
+            "review the diff before sending".to_string(),
+        ];
+
+        let cases: &[(&str, usize)] = &[
+            ("", history.len()), // empty query → everything surfaces
+            ("git", 2),          // partial match → subset with highlights
+            ("zzz", 0),          // no subsequence → empty placeholder
+        ];
+
+        for (query, expected_matches) in cases {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut ranked = crate::fuzzy::rank(&history, query);
+            crate::fuzzy::sort_by_score(&mut ranked);
+            assert_eq!(
+                ranked.len(),
+                *expected_matches,
+                "query {:?} should surface {} entries",
+                query,
+                expected_matches
+            );
+            terminal
+                .draw(|f| {
+                    draw_history_modal(
+                        f,
+                        &mut LayoutMap::new(),
+                        &history,
+                        query,
+                        &ranked,
+                        0,
+                        &theme,
+                    );
+                })
+                .expect("draw must not panic");
+        }
+
+        // Empty history must render the "(no history yet)" placeholder rather
+        // than indexing into an empty slice.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let empty: Vec<String> = Vec::new();
+        let ranked: Vec<(usize, crate::fuzzy::FuzzyMatch)> = crate::fuzzy::rank(&empty, "");
+        terminal
+            .draw(|f| {
+                draw_history_modal(f, &mut LayoutMap::new(), &empty, "", &ranked, 0, &theme);
+            })
+            .expect("empty-history draw must not panic");
     }
 }

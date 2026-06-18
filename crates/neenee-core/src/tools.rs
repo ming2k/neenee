@@ -211,6 +211,10 @@ impl Tool for BashTool {
         json_string(arguments, "command")
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
+        self.call_structured(arguments).await.map(|o| o.to_text())
+    }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let command = args["command"].as_str().ok_or("Missing 'command'")?;
@@ -242,31 +246,19 @@ impl Tool for BashTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit = output.status.code();
 
-        let result = if output.status.success() {
-            if stdout.is_empty() && !stderr.is_empty() {
-                format!("(success, stderr):\n{}", stderr)
-            } else {
-                stdout
-            }
-        } else {
-            format!(
-                "Exit {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-                output.status.code().unwrap_or(-1),
-                stdout,
-                stderr
-            )
-        };
-
-        // Truncate large outputs
-        if result.len() > 8000 {
-            return Ok(format!(
-                "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_file if you need specific parts]",
-                result.len(),
-                truncate_utf8(&result, 4000)
-            ));
-        }
-        Ok(result)
+        // Truncation flag mirrors the legacy 8000-char cap; the wrapping text
+        // is produced by `ToolOutput::to_text()` so this stays a pure data flag.
+        let truncated =
+            crate::tool_output::shell_inner_text(&stdout, &stderr, exit).len() > 8000;
+        Ok(crate::ToolOutput::Shell {
+            command: command.to_string(),
+            stdout,
+            stderr,
+            exit,
+            truncated,
+        })
     }
 }
 
@@ -1094,6 +1086,18 @@ impl Tool for TaskTool {
     ) -> Result<String, String> {
         self.run_sub_agent(arguments, on_event).await
     }
+
+    async fn call_structured_with_events<'a>(
+        &self,
+        call_id: &str,
+        arguments: &str,
+        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+    ) -> Result<crate::ToolOutput, String> {
+        // Preserve sub-agent event streaming; the result is a textual summary.
+        self.call_with_events(call_id, arguments, on_event)
+            .await
+            .map(crate::ToolOutput::text)
+    }
 }
 
 impl TaskTool {
@@ -1204,6 +1208,7 @@ impl TaskTool {
                 name,
                 output,
                 duration_ms,
+                ..
             } => {
                 on_event(crate::SubTaskEvent::ToolResult {
                     id,

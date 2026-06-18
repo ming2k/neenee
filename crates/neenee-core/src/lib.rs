@@ -25,6 +25,9 @@ pub use error::{
 pub mod message;
 pub use message::{ImagePart, Message, Role, ToolCall, ToolResult};
 
+pub mod tool_output;
+pub use tool_output::ToolOutput;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStreamEvent {
     TextDelta(String),
@@ -82,6 +85,122 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Character-size estimate of a message list: byte length of `content` +
+/// `reasoning_content` + tool-call `name`+`arguments`. A cheap context-pressure
+/// proxy used when a provider does not report token usage.
+pub fn estimate_chars(messages: &[Message]) -> usize {
+    messages.iter().map(message_chars).sum()
+}
+
+/// Token estimate (~4 chars/token) of a message list.
+pub fn estimate_tokens(messages: &[Message]) -> usize {
+    (estimate_chars(messages) / 4).max(1)
+}
+
+fn message_chars(message: &Message) -> usize {
+    message.content.len()
+        + message
+            .reasoning_content
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0)
+        + message
+            .tool_calls
+            .as_ref()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|c| c.name.len() + c.arguments.len())
+                    .sum::<usize>()
+            })
+            .unwrap_or(0)
+}
+
+/// Placeholder written into a tool-result message whose content has been
+/// pruned to relieve context pressure. Kept on a `Tool`-role message so the
+/// OpenAI `tool_call_id` chain stays intact for providers that require it.
+pub const PRUNED_TOOL_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+#[derive(Debug, Clone, Default)]
+pub struct PruneOutcome {
+    /// Number of tool-result messages whose content was cleared.
+    pub cleared_count: usize,
+    /// Character bytes reclaimed by clearing.
+    pub reclaimed_chars: usize,
+    /// Original (pre-clear) tool messages, oldest-first, for durable archival.
+    pub originals: Vec<Message>,
+}
+
+/// Clear the content of older `Tool`-role messages to relieve context pressure,
+/// protecting the most recent `protect_recent_chars` of tool results. Mutates
+/// `messages` in place. Returns `Some(PruneOutcome)` only when at least
+/// `min_reclaim_chars` would be reclaimed; otherwise returns `None` and leaves
+/// the messages untouched. Idempotent: already-pruned tool results are skipped.
+pub fn prune_tool_results(
+    messages: &mut [Message],
+    protect_recent_chars: usize,
+    min_reclaim_chars: usize,
+) -> Option<PruneOutcome> {
+    let tools: Vec<(usize, usize)> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            message.role == Role::Tool && message.content != PRUNED_TOOL_PLACEHOLDER
+        })
+        .map(|(index, message)| (index, message_chars(message)))
+        .collect();
+    if tools.is_empty() {
+        return None;
+    }
+
+    // Walk the most recent tool results backward, protecting them until the
+    // protected budget is met. Older tool results become pruning candidates.
+    let mut protected_chars = 0usize;
+    let mut protected_count = 0usize;
+    for &(_, chars) in tools.iter().rev() {
+        if protected_chars >= protect_recent_chars {
+            break;
+        }
+        protected_chars += chars;
+        protected_count += 1;
+    }
+    let prunable_count = tools.len().saturating_sub(protected_count);
+    if prunable_count == 0 {
+        return None;
+    }
+
+    let reclaimable: usize = tools
+        .iter()
+        .take(prunable_count)
+        .map(|(_, chars)| chars.saturating_sub(PRUNED_TOOL_PLACEHOLDER.len()))
+        .sum();
+    if reclaimable < min_reclaim_chars {
+        return None;
+    }
+
+    let mut outcome = PruneOutcome::default();
+    for &(index, _) in tools.iter().take(prunable_count) {
+        let original = messages[index].clone();
+        outcome.reclaimed_chars += message_chars(&messages[index]).saturating_sub(PRUNED_TOOL_PLACEHOLDER.len());
+        outcome.cleared_count += 1;
+        outcome.originals.push(original);
+        messages[index].content = PRUNED_TOOL_PLACEHOLDER.to_string();
+        messages[index].reasoning_content = None;
+    }
+    Some(outcome)
+}
+
+/// Mid-turn context-relief hook. After each tool round, when context pressure
+/// crosses the agent's configured budget, the harness hands the live message
+/// list to the gate and asks it to relieve pressure (e.g. by pruning old tool
+/// results durably). Returning `Some(replacement)` swaps the live message list;
+/// returning `None` leaves it untouched. The gate owns durability policy
+/// (archiving originals before the replacement takes effect).
+#[async_trait]
+pub trait CompactionGate: Send + Sync {
+    async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>>;
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -100,6 +219,29 @@ pub trait Tool: Send + Sync {
         "*".to_string()
     }
     async fn call(&self, arguments: &str) -> Result<String, String>;
+
+    /// Structured result. Default delegates to [`call`](Self::call), wrapping
+    /// the text as [`ToolOutput::Text`]. Tools override this to return richer
+    /// variants (e.g. a shell exit code, a file patch) so callers render from
+    /// data instead of string-sniffing. See ADR-0001. Migration is additive:
+    /// unmigrated tools keep working through this default.
+    async fn call_structured(&self, arguments: &str) -> Result<ToolOutput, String> {
+        self.call(arguments).await.map(ToolOutput::text)
+    }
+
+    /// Structured, event-emitting execution — the method the harness actually
+    /// invokes so typed output reaches the transcript. Default delegates to
+    /// [`call_structured`](Self::call_structured) and emits no events. Tools
+    /// that spawn sub-agents (e.g. `task`) override this to forward child
+    /// events while still returning a [`ToolOutput`] (typically [`ToolOutput::Text`]).
+    async fn call_structured_with_events<'a>(
+        &self,
+        _call_id: &str,
+        arguments: &str,
+        _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+    ) -> Result<ToolOutput, String> {
+        self.call_structured(arguments).await
+    }
 
     /// Execute the tool while optionally emitting events (e.g. sub-agent steps).
     ///
@@ -178,6 +320,7 @@ pub enum AgentResponse {
         id: String,
         name: String,
         output: String,
+        structured: ToolOutput,
         duration_ms: u64,
     },
     ToolCancelled {
@@ -307,12 +450,9 @@ pub enum AgentEvent {
         id: String,
         name: String,
         output: String,
+        structured: ToolOutput,
         duration_ms: u64,
     },
-    /// A tool call was aborted mid-flight (e.g. the user interrupted the turn).
-    /// Emitted in addition to the original [`AgentEvent::ToolCall`] so every
-    /// dispatched call converges on exactly one terminal event; downstream
-    /// renderers must move the matching card out of its "running" state.
     ToolCancelled {
         id: String,
         name: String,
@@ -367,6 +507,12 @@ pub struct Agent {
     skills_registry: skills::SkillRegistry,
     goal_service: GoalService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Context-pressure threshold (in chars) above which the harness asks the
+    /// [`CompactionGate`] to relieve pressure between tool rounds. `0` disables
+    /// mid-turn relief.
+    context_budget_chars: Arc<std::sync::Mutex<usize>>,
+    /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
+    compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
 }
 
 /// Mutable bookkeeping threaded through a single turn's tool-dispatch rounds.
@@ -429,7 +575,62 @@ impl Agent {
             skills_registry,
             goal_service,
             thread_id,
+            context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
+            compaction_gate: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Context-pressure threshold (in chars) for mid-turn relief. `0` (the
+    /// default) disables the mid-turn [`CompactionGate`].
+    pub fn set_context_budget_chars(&self, budget: usize) {
+        *self
+            .context_budget_chars
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = budget;
+    }
+
+    /// Install (or clear with `None`) the mid-turn context-relief gate.
+    pub fn set_compaction_gate(&self, gate: Option<Arc<dyn CompactionGate>>) {
+        *self
+            .compaction_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = gate;
+    }
+
+    /// Between tool rounds, if context pressure exceeds the configured budget,
+    /// hand the live message list to the [`CompactionGate`] for relief (e.g.
+    /// pruning old tool results). The gate owns durability of any originals.
+    async fn relieve_pressure_if_needed(
+        &self,
+        messages: &mut Vec<Message>,
+        cancel: &CancellationToken,
+    ) -> Result<(), HarnessError> {
+        let budget = *self
+            .context_budget_chars
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if budget == 0 || estimate_chars(messages) <= budget {
+            return Ok(());
+        }
+        let gate = self
+            .compaction_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return Ok(());
+        };
+        let replacement = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
+            replacement = gate.relieve_pressure(messages.clone()) => replacement,
+        };
+        if let Some(replacement) = replacement {
+            if !replacement.is_empty() {
+                *messages = replacement;
+            }
+        }
+        Ok(())
     }
 
     pub fn set_thread_id(&self, thread_id: impl Into<String>) {
@@ -800,6 +1001,7 @@ impl Agent {
                 .await?
             {
                 tool_rounds += 1;
+                self.relieve_pressure_if_needed(messages, cancel).await?;
                 continue;
             }
 
@@ -961,6 +1163,7 @@ impl Agent {
                 .await?
             {
                 tool_rounds += 1;
+                self.relieve_pressure_if_needed(messages, cancel).await?;
                 continue;
             }
 
@@ -1082,7 +1285,7 @@ impl Agent {
         &self,
         call: &ToolCall,
         call_id: &str,
-        result: &str,
+        result: &ToolOutput,
         duration_ms: u64,
         messages: &mut Vec<Message>,
         state: &mut TurnState,
@@ -1090,19 +1293,21 @@ impl Agent {
     ) where
         F: FnMut(AgentEvent) + Send,
     {
-        state.token_usage.total_tokens += estimate_string_tokens(result);
-        tracing::info!(tool = %call.name, duration_ms, bytes = result.len(), "tool result");
+        let text = result.to_text();
+        state.token_usage.total_tokens += estimate_string_tokens(&text);
+        tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
         on_event(AgentEvent::ToolResult {
             id: call_id.to_string(),
             name: call.name.clone(),
-            output: result.to_string(),
+            output: text.clone(),
+            structured: result.clone(),
             duration_ms,
         });
         messages.push(Message::tool_result(
             call,
-            format!("[{} result]:\n{}", call.name, result),
+            format!("[{} result]:\n{}", call.name, text),
         ));
     }
 
@@ -1156,18 +1361,18 @@ impl Agent {
         &self,
         call: &ToolCall,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    ) -> String {
+    ) -> ToolOutput {
         let tool = match self.tools.iter().find(|t| t.name() == call.name) {
             Some(t) => t,
-            None => return format!("Error: Tool '{}' not found", call.name),
+            None => return ToolOutput::Text(format!("Error: Tool '{}' not found", call.name)),
         };
 
         if self.get_mode() == AgentMode::Plan && !tool.allowed_in_plan_mode(&call.arguments) {
             tracing::warn!(tool = %call.name, "tool blocked in plan mode");
-            return format!(
+            return ToolOutput::Text(format!(
                 "[Plan mode] Tool '{}' is blocked. Switch to Build mode to execute it.",
                 call.name
-            );
+            ));
         }
 
         if tool.access() == ToolAccess::Write {
@@ -1213,10 +1418,10 @@ impl Agent {
                     }
                     PermissionDecision::Reject => {
                         tracing::warn!(tool = %tool.name(), "permission denied");
-                        return format!(
+                        return ToolOutput::Text(format!(
                             "Permission denied for tool '{}'. Do not retry the same call.",
                             tool.name()
-                        );
+                        ));
                     }
                 }
             }
@@ -1224,7 +1429,7 @@ impl Agent {
 
         let parent_call_id = call.id.clone();
         match tool
-            .call_with_events(
+            .call_structured_with_events(
                 &call.id,
                 &call.arguments,
                 Box::new(|event| {
@@ -1237,7 +1442,7 @@ impl Agent {
             .await
         {
             Ok(output) => output,
-            Err(err) => format!("Error executing {}: {}", call.name, err),
+            Err(err) => ToolOutput::Text(format!("Error executing {}: {}", call.name, err)),
         }
     }
 
@@ -1254,7 +1459,7 @@ impl Agent {
         call_id: &str,
         cancel: &CancellationToken,
         on_event: &mut F,
-    ) -> Result<String, HarnessError>
+    ) -> Result<ToolOutput, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1303,7 +1508,7 @@ impl Agent {
         call_ids: &[String],
         cancel: &CancellationToken,
         on_event: &mut F,
-    ) -> Result<Vec<(String, u64)>, HarnessError>
+    ) -> Result<Vec<(ToolOutput, u64)>, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1852,6 +2057,7 @@ mod tests {
             .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |_| {})
             .await
             .unwrap()
+            .to_text()
             .contains("[Plan mode]"));
     }
 
@@ -1886,7 +2092,7 @@ mod tests {
         };
         assert!(!task.is_finished());
         assert!(agent.reply_permission(&request.id, PermissionDecision::Always));
-        assert_eq!(task.await.unwrap().unwrap(), "should not run");
+        assert_eq!(task.await.unwrap().unwrap().to_text(), "should not run");
         assert_eq!(agent.allowed_tools(), vec!["write_test *".to_string()]);
 
         let mut prompted_again = false;
@@ -1898,7 +2104,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(output, "should not run");
+        assert_eq!(output.to_text(), "should not run");
         assert!(!prompted_again);
     }
 
@@ -1931,7 +2137,12 @@ mod tests {
             event => panic!("unexpected event: {:?}", event),
         };
         assert!(agent.reply_permission(&request.id, PermissionDecision::Reject));
-        assert!(task.await.unwrap().unwrap().contains("Permission denied"));
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .contains("Permission denied"));
     }
 
     #[tokio::test]
@@ -2305,5 +2516,61 @@ mod tests {
                 "reasoning-end \"think\"",
             ]
         );
+    }
+
+    #[test]
+    fn prune_protects_recent_tool_results_and_skips_already_pruned() {
+        let big = "Y".repeat(2_000);
+        let mut messages = vec![
+            Message::new(Role::User, "q1"),
+            Message::tool_result(
+                &ToolCall {
+                    id: "c1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                big.clone(),
+            ),
+            Message::tool_result(
+                &ToolCall {
+                    id: "c2".to_string(),
+                    name: "bash".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                big.clone(),
+            ),
+            Message::new(Role::User, "q2"),
+        ];
+
+        // Protect nothing (0), require at least 1 char reclaimed: the two old
+        // tool results are both prunable.
+        let outcome = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert_eq!(outcome.cleared_count, 2);
+        assert_eq!(outcome.originals.len(), 2);
+        assert_eq!(messages[1].content, PRUNED_TOOL_PLACEHOLDER);
+        assert_eq!(messages[2].content, PRUNED_TOOL_PLACEHOLDER);
+
+        // Idempotent: a second pass finds nothing to prune (placeholders skipped).
+        assert!(prune_tool_results(&mut messages, 0, 1).is_none());
+    }
+
+    #[test]
+    fn prune_respects_protect_budget_and_min_reclaim() {
+        let big = "Z".repeat(2_000);
+        let mut messages = vec![Message::tool_result(
+            &ToolCall {
+                id: "c".to_string(),
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+            big,
+        )];
+
+        // The single tool result is fully protected by a large budget.
+        assert!(prune_tool_results(&mut messages, 10_000, 1).is_none());
+        // With no protection but a reclaim minimum larger than what's available,
+        // it still returns None and leaves content intact.
+        assert!(prune_tool_results(&mut messages, 0, 10_000).is_none());
+        assert_ne!(messages[0].content, PRUNED_TOOL_PLACEHOLDER);
     }
 }

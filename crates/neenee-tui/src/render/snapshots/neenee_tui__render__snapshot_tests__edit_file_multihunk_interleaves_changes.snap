@@ -1,0 +1,32 @@
+---
+source: crates/neenee-tui/src/render/snapshot_tests.rs
+expression: "render_grid(&m, 80, 40)"
+---
+  - ⠋ ✎ Edit a.rs +2 -2
+
+    Diff
+     1   fn one() {
+     2 -     return 1;
+     2 +     return 10;
+     3   }
+     4
+     5   fn two() {
+     6 -     return 2;
+     6 +     return 20;
+     7   }
+
+backgrounds:
+.=reset  B=#151716  C=#111312  D=#3A2626  E=#283A2D
+0: .2 B76
+1: .2 C76
+2: .2 C76
+3: .2 C76
+4: .2 C18 D2 C56
+5: .2 C18 E3 C55
+6: .2 C76
+7: .2 C76
+8: .2 C76
+9: .2 C18 D2 C56
+10: .2 C18 E3 C55
+11: .2 C76
+12: .2 C76

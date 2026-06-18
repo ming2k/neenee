@@ -289,10 +289,21 @@ pub fn draw_sessions_modal(
 }
 
 /// Draw the history search modal.
+///
+/// `query` is the fuzzy query the user is typing into the (borrowed) input
+/// box; `ranked` is the pre-computed `(original_history_index, FuzzyMatch)`
+/// list produced by [`crate::App::history_filtered`] — passing it in avoids a
+/// second fuzzy pass per frame. `modal_index` selects into `ranked`.
+///
+/// Each result line highlights the matched characters of the query so the
+/// user can see why an entry surfaced. Empty query → show everything with no
+/// highlights; query with no matches → "no matches" placeholder.
 pub fn draw_history_modal(
     frame: &mut Frame,
     _layout_map: &mut LayoutMap,
     history: &[String],
+    query: &str,
+    ranked: &[(usize, crate::fuzzy::FuzzyMatch)],
     modal_index: usize,
     theme: &Theme,
 ) {
@@ -300,38 +311,97 @@ pub fn draw_history_modal(
     let area = centered_rect(70, 55, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        " Input History",
-        Style::default()
-            .fg(theme.primary)
-            .add_modifier(Modifier::BOLD),
-    ))];
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(
+            " Input History",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("❯ ", Style::default().fg(theme.text_muted)),
+        Span::styled(
+            if query.is_empty() {
+                "type to fuzzy-filter"
+            } else {
+                query
+            },
+            Style::default()
+                .fg(if query.is_empty() {
+                    theme.text_muted
+                } else {
+                    theme.text
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
 
-    for (i, h) in history.iter().enumerate() {
-        let is_selected = i == modal_index;
-        let bg = if is_selected {
-            theme.primary
-        } else {
-            theme.panel_bg
-        };
-        let fg = if is_selected {
-            contrast_fg(theme.primary)
-        } else {
-            theme.text
-        };
-        let num_style = if is_selected {
-            Style::default().bg(bg).fg(contrast_fg(theme.primary))
-        } else {
-            Style::default().fg(theme.text_muted)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:>3} ", i + 1), num_style),
-            Span::styled(h, Style::default().bg(bg).fg(fg)),
-        ]));
+    if history.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  (no history yet — send a message to populate this list)",
+            Style::default().fg(theme.text_muted),
+        )));
+    } else if ranked.is_empty() {
+        // Query produced no matches.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  (no matches — try a shorter or different query)",
+            Style::default().fg(theme.text_muted),
+        )));
+    } else {
+        // Build a char-index set per row for O(1) "is this char matched?"
+        // checks during rendering.
+        for (row, (orig_idx, m)) in ranked.iter().enumerate() {
+            let is_selected = row == modal_index;
+            let bg = if is_selected {
+                theme.primary
+            } else {
+                theme.panel_bg
+            };
+            let fg = if is_selected {
+                contrast_fg(theme.primary)
+            } else {
+                theme.text
+            };
+            let num_style = if is_selected {
+                Style::default().bg(bg).fg(contrast_fg(theme.primary))
+            } else {
+                Style::default().fg(theme.text_muted)
+            };
+            let base_style = Style::default().bg(bg).fg(fg);
+            let matched_style = if is_selected {
+                // On the highlighted row, keep the match underline but stay
+                // readable on the primary-color background.
+                Style::default()
+                    .bg(bg)
+                    .fg(contrast_fg(theme.primary))
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default()
+                    .bg(bg)
+                    .fg(theme.primary)
+                    .add_modifier(Modifier::BOLD)
+            };
+
+            let entry = history.get(*orig_idx).map(String::as_str).unwrap_or("");
+            let mut spans: Vec<Span> = Vec::with_capacity(entry.chars().count() + 1);
+            spans.push(Span::styled(format!(" {:>3} ", row + 1), num_style));
+            let matched: std::collections::HashSet<usize> = m.positions.iter().copied().collect();
+            for (char_idx, c) in entry.chars().enumerate() {
+                let style = if matched.contains(&char_idx) {
+                    matched_style
+                } else {
+                    base_style
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            lines.push(Line::from(spans));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " ↑↓ navigate · Enter insert · Esc close ",
+        " type to filter · ↑↓ navigate · Enter insert · Esc close ",
         Style::default().fg(theme.text_muted),
     )));
 

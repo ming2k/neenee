@@ -14,6 +14,16 @@ pub struct Config {
     pub mcp: HashMap<String, McpServerConfig>,
     pub compaction_max_chars: usize,
     pub compaction_preserve_turns: usize,
+    /// Use the active model to produce an anchored, structured summary when
+    /// compacting. When `false` (or when the summarization call fails) compaction
+    /// falls back to the deterministic message-excerpt summary.
+    pub compaction_summarize: bool,
+    /// Enable cheap tool-result pruning (pre-turn and mid-turn) that clears old
+    /// tool outputs in place to relieve context pressure before a full
+    /// compaction is needed.
+    pub compaction_prune: bool,
+    /// Character budget of the most recent tool results protected from pruning.
+    pub compaction_prune_protect_chars: usize,
     pub provider_retry_max_attempts: usize,
     pub provider_retry_base_ms: u64,
     pub provider_retry_max_ms: u64,
@@ -63,6 +73,9 @@ impl Default for Config {
             mcp: HashMap::new(),
             compaction_max_chars: 120_000,
             compaction_preserve_turns: 6,
+            compaction_summarize: true,
+            compaction_prune: true,
+            compaction_prune_protect_chars: 24_000,
             provider_retry_max_attempts: 4,
             provider_retry_base_ms: 1_000,
             provider_retry_max_ms: 30_000,

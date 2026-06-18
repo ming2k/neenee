@@ -233,14 +233,24 @@ session id.
 
 ## Context compaction
 
-Before provider execution, the CLI estimates active request size by UTF-8
-characters. If it exceeds `compaction_max_chars`, it chooses a boundary at the
-start of an older complete user turn:
+The runner relieves context pressure in three layers, cheapest first:
 
-- Earlier messages move to the durable archive.
-- System messages are regenerated rather than archived into model context.
-- A hidden deterministic checkpoint summarizes bounded excerpts.
-- The latest `compaction_preserve_turns` remain provider-native.
+1. **Tool-result pruning** (`compaction_prune`, on by default). Old `Tool`-role
+   results are cleared in place to `[Old tool result content cleared]`,
+   protecting the most recent `compaction_prune_protect_chars` of tool output.
+   This runs both before a turn and, via a mid-turn `CompactionGate`, between
+   tool rounds once pressure crosses ~¾ of `compaction_max_chars`. Pruned
+   originals are archived for durability; the `tool_call_id` chain is preserved
+   so providers that require it stay valid.
+2. **Summarizing compaction** when size still exceeds `compaction_max_chars`.
+   The boundary is the start of an older complete user turn:
+   - Earlier messages move to the durable archive.
+   - System messages are regenerated rather than archived into model context.
+   - When `compaction_summarize` is on (default), the active model writes an
+     anchored, structured summary; the previous summary is carried forward in a
+     `<previous-summary>` block so each compaction updates rather than restarts.
+     Any failure falls back to a deterministic newest-first excerpt summary.
+   - The latest `compaction_preserve_turns` remain provider-native.
 
 This preserves the complete transcript while replacing only the model-visible
 prefix. `/compact` runs the same operation manually.

@@ -54,7 +54,7 @@ impl Default for Theme {
             error_fg: Color::Rgb(190, 111, 104),
             system_fg: Color::Rgb(111, 116, 110),
             code_fg: Color::Rgb(166, 178, 163),
-            code_bg: Color::Rgb(13, 14, 14),
+            code_bg: Color::Rgb(17, 19, 18),
             heading_fg: Color::Rgb(190, 194, 181),
             quote_fg: Color::Rgb(156, 145, 118),
             dim_fg: Color::Rgb(94, 99, 94),

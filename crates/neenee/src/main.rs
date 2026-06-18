@@ -93,9 +93,103 @@ mod config;
 mod session;
 use config::Config;
 use session::{
-    compact_messages, discard_trailing_loop_prompts, estimate_chars, goals_db_path,
-    CompactionCheckpoint, LoopCheckpoint, SessionStore,
+    discard_trailing_loop_prompts, estimate_chars, goals_db_path, run_compaction,
+    CompactionCheckpoint, CompactionDecision, CompactionHooks, CompactionResult,
+    LoopCheckpoint, SessionStore,
 };
+
+/// Compaction-related settings threaded through every turn.
+#[derive(Clone)]
+struct CompactionSettings {
+    max_chars: usize,
+    preserve_turns: usize,
+    /// Use the active model to produce an anchored structured summary.
+    summarize: bool,
+    /// Enable cheap tool-result pruning (pre-turn and mid-turn).
+    prune: bool,
+    /// Character budget of the most recent tool results protected from pruning.
+    prune_protect_chars: usize,
+}
+
+impl CompactionSettings {
+    /// Mid-turn pruning only fires when it can reclaim at least this many chars,
+    /// to avoid pruning churn for negligible gains.
+    const PRUNE_MIN_RECLAIM_CHARS: usize = 8_000;
+
+    /// Mid-turn relief trigger: prune between tool rounds once context pressure
+    /// crosses this fraction of `max_chars` (`NUM/DEN` = 3/4), before the full
+    /// pre-turn compaction threshold at `max_chars`.
+    const MID_TURN_TRIGGER_NUM: usize = 3;
+    const MID_TURN_TRIGGER_DEN: usize = 4;
+}
+
+impl From<&Config> for CompactionSettings {
+    fn from(config: &Config) -> Self {
+        Self {
+            max_chars: config.compaction_max_chars,
+            preserve_turns: config.compaction_preserve_turns,
+            summarize: config.compaction_summarize,
+            prune: config.compaction_prune,
+            prune_protect_chars: config.compaction_prune_protect_chars,
+        }
+    }
+}
+
+/// Mid-turn context-relief gate: prunes old tool results durably when the
+/// harness reports context pressure between tool rounds.
+struct MidTurnCompactionGate {
+    session: Arc<SessionStore>,
+    prune_protect_chars: usize,
+}
+
+#[async_trait]
+impl neenee_core::CompactionGate for MidTurnCompactionGate {
+    async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
+        let mut messages = messages;
+        let outcome = neenee_core::prune_tool_results(
+            &mut messages,
+            self.prune_protect_chars,
+            CompactionSettings::PRUNE_MIN_RECLAIM_CHARS,
+        )?;
+        let after_chars = estimate_chars(&messages);
+        let checkpoint = CompactionCheckpoint {
+            archived_messages: outcome.originals.len(),
+            active_messages: messages.len(),
+            before_chars: after_chars + outcome.reclaimed_chars,
+            after_chars,
+        };
+        let result = CompactionResult {
+            active: messages.clone(),
+            archived: outcome.originals,
+            checkpoint,
+        };
+        if let Err(error) = self.session.commit_compaction(result).await {
+            tracing::warn!(?error, "mid-turn prune commit failed");
+        }
+        Some(messages)
+    }
+}
+
+/// Compaction hooks that relay activity status to the TUI.
+struct RelayCompactionHooks {
+    tx: mpsc::UnboundedSender<AgentResponse>,
+}
+
+#[async_trait]
+impl CompactionHooks for RelayCompactionHooks {
+    async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
+        let _ = self
+            .tx
+            .send(AgentResponse::Activity("compacting context".to_string()));
+        CompactionDecision::proceed()
+    }
+
+    async fn post_compact(&self, _checkpoint: &CompactionCheckpoint) {
+        let _ = self
+            .tx
+            .send(AgentResponse::Activity("preparing context".to_string()));
+    }
+}
 
 /// The per-provider API key stored in config (environment variables still take
 /// precedence at the call site). Kept as a single match so config field access
@@ -238,8 +332,7 @@ struct TurnContext {
     token: CancellationToken,
     session: Arc<SessionStore>,
     goal_service: GoalService,
-    compaction_max_chars: usize,
-    compaction_preserve_turns: usize,
+    compaction: CompactionSettings,
     retry_max_attempts: usize,
     retry_base_ms: u64,
     retry_max_ms: u64,
@@ -262,8 +355,7 @@ struct InteractiveTurnContext {
     generation_counter: Arc<AtomicU64>,
     session: Arc<SessionStore>,
     goal_service: GoalService,
-    compaction_max_chars: usize,
-    compaction_preserve_turns: usize,
+    compaction: CompactionSettings,
     retry_max_attempts: usize,
     retry_base_ms: u64,
     retry_max_ms: u64,
@@ -291,8 +383,7 @@ async fn start_interactive_turn(context: InteractiveTurnContext, input: TurnInpu
                 token: token.clone(),
                 session: context.session,
                 goal_service: context.goal_service,
-                compaction_max_chars: context.compaction_max_chars,
-                compaction_preserve_turns: context.compaction_preserve_turns,
+                compaction: context.compaction,
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,
                 retry_max_ms: context.retry_max_ms,
@@ -365,8 +456,7 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, Ha
         token,
         session,
         goal_service,
-        compaction_max_chars,
-        compaction_preserve_turns,
+        compaction,
         retry_max_attempts,
         retry_base_ms,
         retry_max_ms,
@@ -395,13 +485,19 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, Ha
     };
     session.replace_messages(turn_history.clone()).await?;
     let _ = tx.send(AgentResponse::Activity("preparing context".to_string()));
-    if estimate_chars(&turn_history) > compaction_max_chars {
-        let _ = tx.send(AgentResponse::Activity("compacting context".to_string()));
+    // Cheap tool-result pruning to relieve pressure before considering a full
+    // compaction. Only prunes when it can reclaim meaningful space.
+    if compaction.prune {
+        prune_and_commit(&mut turn_history, &session, &tx, &compaction).await?;
+    }
+    if estimate_chars(&turn_history) > compaction.max_chars {
+        let hooks = RelayCompactionHooks { tx: tx.clone() };
         if let Some(checkpoint) = compact_turn_history(
             &mut turn_history,
             &session,
-            compaction_max_chars,
-            compaction_preserve_turns,
+            &compaction,
+            Some(agent.provider.clone()),
+            &hooks,
         )
         .await?
         {
@@ -435,12 +531,17 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, Ha
             && !compacted_after_overflow
             && !tool_activity.load(Ordering::SeqCst)
         {
-            let _ = tx.send(AgentResponse::Activity("compacting context".to_string()));
+            let hooks = RelayCompactionHooks { tx: tx.clone() };
+            let overflow_settings = CompactionSettings {
+                preserve_turns: compaction.preserve_turns.max(1),
+                ..compaction.clone()
+            };
             if compact_turn_history(
                 &mut turn_history,
                 &session,
-                compaction_max_chars,
-                compaction_preserve_turns.max(1),
+                &overflow_settings,
+                Some(agent.provider.clone()),
+                &hooks,
             )
             .await?
             .is_some()
@@ -622,11 +723,13 @@ fn relay_agent_event(
             id,
             name,
             output,
+            structured,
             duration_ms,
         } => AgentResponse::ToolResult {
             id,
             name,
             output,
+            structured,
             duration_ms,
         },
         AgentEvent::ToolCancelled { id, name } => AgentResponse::ToolCancelled { id, name },
@@ -647,16 +750,55 @@ fn relay_agent_event(
 async fn compact_turn_history(
     history: &mut Vec<Message>,
     session: &SessionStore,
-    max_chars: usize,
-    preserve_turns: usize,
+    settings: &CompactionSettings,
+    provider: Option<Arc<dyn Provider>>,
+    hooks: &dyn CompactionHooks,
 ) -> Result<Option<CompactionCheckpoint>, String> {
-    let Some(result) = compact_messages(history, max_chars, preserve_turns) else {
+    // Skip the model call entirely when summarization is disabled; the excerpt
+    // fallback inside `run_compaction` still produces a checkpoint.
+    let provider = if settings.summarize { provider } else { None };
+    let Some(result) =
+        run_compaction(history, settings.max_chars, settings.preserve_turns, provider, hooks)
+            .await?
+    else {
         return Ok(None);
     };
     let checkpoint = result.checkpoint.clone();
-    *history = result.active.clone();
     session.commit_compaction(result).await?;
     Ok(Some(checkpoint))
+}
+
+/// Prune old tool results in place and durably commit the change. Emits a
+/// `Compacted` event only when pruning actually reclaims space.
+async fn prune_and_commit(
+    history: &mut [Message],
+    session: &SessionStore,
+    tx: &mpsc::UnboundedSender<AgentResponse>,
+    settings: &CompactionSettings,
+) -> Result<(), String> {
+    let before_chars = estimate_chars(history);
+    let Some(outcome) = neenee_core::prune_tool_results(
+        history,
+        settings.prune_protect_chars,
+        CompactionSettings::PRUNE_MIN_RECLAIM_CHARS,
+    ) else {
+        return Ok(());
+    };
+    let after_chars = estimate_chars(history);
+    let checkpoint = CompactionCheckpoint {
+        archived_messages: outcome.originals.len(),
+        active_messages: history.len(),
+        before_chars,
+        after_chars,
+    };
+    let result = CompactionResult {
+        active: history.to_owned(),
+        archived: outcome.originals,
+        checkpoint: checkpoint.clone(),
+    };
+    session.commit_compaction(result).await?;
+    send_compaction(tx, &checkpoint);
+    Ok(())
 }
 
 fn send_compaction(tx: &mpsc::UnboundedSender<AgentResponse>, checkpoint: &CompactionCheckpoint) {
@@ -680,8 +822,7 @@ struct LoopRunContext {
     generation_counter: Arc<AtomicU64>,
     session: Arc<SessionStore>,
     goal_service: GoalService,
-    compaction_max_chars: usize,
-    compaction_preserve_turns: usize,
+    compaction: CompactionSettings,
     retry_max_attempts: usize,
     retry_base_ms: u64,
     retry_max_ms: u64,
@@ -744,8 +885,7 @@ async fn start_goal_loop(
                     token: token.clone(),
                     session: context.session.clone(),
                     goal_service: context.goal_service.clone(),
-                    compaction_max_chars: context.compaction_max_chars,
-                    compaction_preserve_turns: context.compaction_preserve_turns,
+                    compaction: context.compaction.clone(),
                     retry_max_attempts: context.retry_max_attempts,
                     retry_base_ms: context.retry_base_ms,
                     retry_max_ms: context.retry_max_ms,
@@ -1137,6 +1277,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_messages = session.messages().await;
     let restored_messages = session.transcript().await;
     let history = Arc::new(tokio::sync::Mutex::new(active_messages));
+
+    // Mid-turn context relief: when pruning is enabled, install a gate that
+    // clears old tool results between tool rounds once pressure crosses the
+    // mid-turn threshold (before the full pre-turn compaction threshold).
+    if config.compaction_prune {
+        let mid_turn_budget = config.compaction_max_chars
+            * CompactionSettings::MID_TURN_TRIGGER_NUM
+            / CompactionSettings::MID_TURN_TRIGGER_DEN;
+        agent.set_context_budget_chars(mid_turn_budget);
+        agent.set_compaction_gate(Some(Arc::new(MidTurnCompactionGate {
+            session: session.clone(),
+            prune_protect_chars: config.compaction_prune_protect_chars,
+        })));
+    }
 
     // Tie the agent and its goal persistence to this session/thread.
     let thread_id = session.id().await;
@@ -1585,11 +1739,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         "/compact" => {
                             let mut current = history.lock().await.clone();
+                            let settings = CompactionSettings::from(&config);
+                            let hooks = RelayCompactionHooks { tx: resp_tx.clone() };
                             match compact_turn_history(
                                 &mut current,
                                 &session,
-                                config.compaction_max_chars,
-                                config.compaction_preserve_turns,
+                                &settings,
+                                Some(agent.provider.clone()),
+                                &hooks,
                             )
                             .await
                             {
@@ -1902,8 +2059,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         generation_counter: generation_clone.clone(),
                                         session: session.clone(),
                                         goal_service: goal_service.clone(),
-                                        compaction_max_chars: config.compaction_max_chars,
-                                        compaction_preserve_turns: config.compaction_preserve_turns,
+                                        compaction: CompactionSettings::from(&config),
                                         retry_max_attempts: config.provider_retry_max_attempts,
                                         retry_base_ms: config.provider_retry_base_ms,
                                         retry_max_ms: config.provider_retry_max_ms,
@@ -1947,8 +2103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
                                     goal_service: goal_service.clone(),
-                                    compaction_max_chars: config.compaction_max_chars,
-                                    compaction_preserve_turns: config.compaction_preserve_turns,
+                                    compaction: CompactionSettings::from(&config),
                                     retry_max_attempts: config.provider_retry_max_attempts,
                                     retry_base_ms: config.provider_retry_base_ms,
                                     retry_max_ms: config.provider_retry_max_ms,
@@ -2112,8 +2267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
                                     goal_service: goal_service.clone(),
-                                    compaction_max_chars: config.compaction_max_chars,
-                                    compaction_preserve_turns: config.compaction_preserve_turns,
+                                    compaction: CompactionSettings::from(&config),
                                     retry_max_attempts: config.provider_retry_max_attempts,
                                     retry_base_ms: config.provider_retry_base_ms,
                                     retry_max_ms: config.provider_retry_max_ms,
@@ -2139,8 +2293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             generation_counter: generation_clone.clone(),
                             session: session.clone(),
                             goal_service: goal_service.clone(),
-                            compaction_max_chars: config.compaction_max_chars,
-                            compaction_preserve_turns: config.compaction_preserve_turns,
+                            compaction: CompactionSettings::from(&config),
                             retry_max_attempts: config.provider_retry_max_attempts,
                             retry_base_ms: config.provider_retry_base_ms,
                             retry_max_ms: config.provider_retry_max_ms,
@@ -2455,8 +2608,13 @@ mod tests {
                 token: CancellationToken::new(),
                 session,
                 goal_service,
-                compaction_max_chars: 100_000,
-                compaction_preserve_turns: 6,
+                compaction: CompactionSettings {
+                    max_chars: 100_000,
+                    preserve_turns: 6,
+                    summarize: false,
+                    prune: false,
+                    prune_protect_chars: 0,
+                },
                 retry_max_attempts: 3,
                 retry_base_ms: 1,
                 retry_max_ms: 10,
@@ -2532,8 +2690,13 @@ mod tests {
                 token: CancellationToken::new(),
                 session,
                 goal_service,
-                compaction_max_chars: 100_000,
-                compaction_preserve_turns: 6,
+                compaction: CompactionSettings {
+                    max_chars: 100_000,
+                    preserve_turns: 6,
+                    summarize: false,
+                    prune: false,
+                    prune_protect_chars: 0,
+                },
                 retry_max_attempts: 4,
                 retry_base_ms: 1,
                 retry_max_ms: 10,

@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod document;
+pub mod fuzzy;
 pub mod input;
 pub mod layout;
 pub mod render;
@@ -1007,6 +1008,20 @@ impl App {
         self.focus_stack.push(task_ids[next].clone());
         self.reset_view_state();
     }
+
+    /// Fuzzy-filtered view of [`App::input_history`] for the Ctrl+R
+    /// (`Modal::HistorySearch`) modal. Returns `(original_index, FuzzyMatch)`
+    /// pairs sorted by descending match score, with input order as the stable
+    /// tiebreaker so equally-good matches keep their top-to-bottom history
+    /// order. Computed from scratch on every call: history is small and this
+    /// is invoked at most a few times per frame (modal navigation, Enter
+    /// accept, and rendering), so a cached field would just add stale-state
+    /// risk for no measurable win.
+    pub fn history_filtered(&self) -> Vec<(usize, fuzzy::FuzzyMatch)> {
+        let mut ranked = fuzzy::rank(&self.input_history, &self.input);
+        fuzzy::sort_by_score(&mut ranked);
+        ranked
+    }
 }
 
 /// Undo raw mode, leave the alternate screen, and turn off mouse tracking.
@@ -1259,19 +1274,19 @@ pub async fn run_tui(
                     id,
                     name,
                     output,
+                    structured,
                     duration_ms,
                 } => {
                     *activity_clone.lock().await = "thinking".to_string();
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    if !msgs
-                        .iter_mut()
-                        .any(|message| message.finish_tool_step(&id, output.clone(), duration_ms))
-                    {
+                    if !msgs.iter_mut().any(|message| {
+                        message.finish_tool_step(&id, output.clone(), structured.clone(), duration_ms)
+                    }) {
                         let mut message =
                             TranscriptMessage::tool_step(id.clone(), name.clone(), "{}")
                                 .with_attribution(provider, model);
-                        message.finish_tool_step(&id, output, duration_ms);
+                        message.finish_tool_step(&id, output, structured, duration_ms);
                         msgs.push(message);
                     }
                 }
@@ -1793,10 +1808,13 @@ async fn run_app_loop<B: Backend>(
                     );
                 }
                 Modal::HistorySearch => {
+                    let ranked = app.history_filtered();
                     render::draw_history_modal(
                         f,
                         &mut layout_map,
                         &app.input_history,
+                        &app.input,
+                        &ranked,
                         app.modal_index,
                         &app.theme,
                     );
@@ -1928,8 +1946,17 @@ async fn run_app_loop<B: Backend>(
             }
             events_drained = true;
             let event = event::read()?;
+            // The Ctrl+R history-search modal borrows the input line as its
+            // fuzzy query, so a literal `/foo` query must NOT trigger the slash
+            // completion popup (or `@path` mentions). Suppress completions
+            // entirely while that modal is open.
+            let suppress_completions = app.active_modal == Modal::HistorySearch;
             // Pre-compute completion data to avoid borrow conflicts with process_event.
-            let completions = app.completions();
+            let completions = if suppress_completions {
+                Vec::new()
+            } else {
+                app.completions()
+            };
             let suggestion_count = completions.len();
             // The "exact match" auto-accept on Enter only makes sense for slash
             // commands: there, typing an unambiguous prefix and pressing Enter
@@ -1939,7 +1966,11 @@ async fn run_app_loop<B: Backend>(
             let has_exact_suggestion = completions
                 .iter()
                 .any(|c| c.replace_start == 0 && c.replace_end == app.input.len() && c.label == app.input);
-            let completion_kind = app.completion_kind();
+            let completion_kind = if suppress_completions {
+                crate::CompletionKind::None
+            } else {
+                app.completion_kind()
+            };
             let in_subagent_view = app.in_subagent_view();
             let action = input::process_event(
                 event,
@@ -1970,16 +2001,10 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::None => {}
                 input::InputAction::Quit => return Ok(()),
                 input::InputAction::SendChat(text) => {
-                    let text = if text.is_empty() && app.active_modal == Modal::HistorySearch {
-                        // History search selection
-                        app.input_history
-                            .get(app.modal_index)
-                            .cloned()
-                            .unwrap_or_default()
-                    } else {
-                        text
-                    };
-
+                    // Note: history-search selection no longer flows through
+                    // here — Enter in `Modal::HistorySearch` emits the dedicated
+                    // `HistoryInsert` action so the chosen entry lands in the
+                    // input box for editing instead of being sent immediately.
                     app.active_modal = Modal::None;
                     app.suggestion_index = None;
                     app.input_scroll = 0;
@@ -2099,8 +2124,38 @@ async fn run_app_loop<B: Backend>(
                     app.suggestion_index = None;
                 }
                 input::InputAction::OpenHistory => {
+                    // Stash whatever the user was composing so Esc restores it
+                    // unchanged; the input box is reused as the fuzzy query
+                    // while the modal is open (mirrors the ApiKey / Endpoint /
+                    // ModelName modals that also borrow the input line).
+                    app.stashed_input = std::mem::take(&mut app.input);
+                    app.cursor_position = 0;
+                    app.input_scroll = 0;
+                    app.suggestion_index = None;
                     app.active_modal = Modal::HistorySearch;
+                    // Default to the most-recent entry so an immediate Enter
+                    // re-inserts the last-typed item. Empty history → 0.
                     app.modal_index = app.input_history.len().saturating_sub(1);
+                }
+                input::InputAction::HistoryInsert => {
+                    // Enter inside the Ctrl+R modal: pull the highlighted fuzzy
+                    // match out of the filtered list and drop it into the input
+                    // box for further editing / sending. The message is not
+                    // shipped here — the user hits Enter again to send.
+                    let ranked = app.history_filtered();
+                    let pick = ranked.get(app.modal_index).or_else(|| ranked.first());
+                    if let Some((orig_idx, _)) = pick {
+                        let original = *orig_idx;
+                        app.input = app.input_history[original].clone();
+                        app.cursor_position = app.input.chars().count();
+                    }
+                    // The selection replaces the in-progress draft, so the
+                    // stash is dropped (not restored).
+                    app.stashed_input.clear();
+                    app.input_scroll = 0;
+                    app.suggestion_index = None;
+                    app.modal_index = 0;
+                    app.active_modal = Modal::None;
                 }
                 input::InputAction::OpenCommands => {
                     // Command palette: seed the input with "/" so the existing
@@ -2147,6 +2202,14 @@ async fn run_app_loop<B: Backend>(
                         app.setup_solution = None;
                         app.setup_endpoint = None;
                         app.setup_model = None;
+                    } else if app.active_modal == Modal::HistorySearch {
+                        // The input box was borrowed as the fuzzy query; hand
+                        // the in-progress draft back so Esc is a true cancel.
+                        app.input = std::mem::take(&mut app.stashed_input);
+                        app.cursor_position = app.input.chars().count();
+                        app.input_scroll = 0;
+                        app.suggestion_index = None;
+                        app.modal_index = 0;
                     }
                     app.active_modal = Modal::None;
                 }
@@ -2248,6 +2311,15 @@ async fn run_app_loop<B: Backend>(
                         app.setup_solution = None;
                         app.setup_endpoint = None;
                         app.setup_model = None;
+                        app.active_modal = Modal::None;
+                    } else if app.active_modal == Modal::HistorySearch {
+                        // Cancel the fuzzy query: restore the in-progress draft
+                        // the user was composing before Ctrl+R.
+                        app.input = std::mem::take(&mut app.stashed_input);
+                        app.cursor_position = app.input.chars().count();
+                        app.input_scroll = 0;
+                        app.suggestion_index = None;
+                        app.modal_index = 0;
                         app.active_modal = Modal::None;
                     } else if app.active_modal != Modal::None
                         && app.active_modal != Modal::Permission
@@ -2477,8 +2549,14 @@ async fn run_app_loop<B: Backend>(
                         };
                     }
                     Modal::HistorySearch => {
-                        app.modal_index = if app.modal_index == 0 {
-                            app.input_history.len().saturating_sub(1)
+                        // Up/Down walk the fuzzy-filtered list, not the raw
+                        // history, so the cursor never lands on an entry the
+                        // user cannot actually see or select.
+                        let count = app.history_filtered().len();
+                        app.modal_index = if count == 0 {
+                            0
+                        } else if app.modal_index == 0 {
+                            count - 1
                         } else {
                             app.modal_index - 1
                         };
@@ -2512,7 +2590,8 @@ async fn run_app_loop<B: Backend>(
                         app.modal_index = (app.modal_index + 1) % SOLUTIONS.len();
                     }
                     Modal::HistorySearch => {
-                        app.modal_index = (app.modal_index + 1) % app.input_history.len().max(1);
+                        let count = app.history_filtered().len().max(1);
+                        app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::Permission => {
                         let count = if app.permission_confirm_always { 2 } else { 3 };
@@ -3125,7 +3204,14 @@ fn transcript_messages_from_core(messages: Vec<Message>) -> Vec<TranscriptMessag
             if let Some((name, output)) = parse_tool_result(&message.content) {
                 if restored
                     .iter_mut()
-                    .any(|item| item.finish_tool_step(name, output, 0))
+                    .any(|item| {
+                        item.finish_tool_step(
+                            name,
+                            output,
+                            neenee_core::ToolOutput::text(output),
+                            0,
+                        )
+                    })
                 {
                     continue;
                 }
@@ -3471,6 +3557,51 @@ mod tests {
         // filename match.
         assert!(!path_query_match("src/components/foo.rs", "src/foo"));
         assert!(!path_query_match("src/bar.rs", "src/foo"));
+    }
+
+    #[test]
+    fn history_filtered_ranks_and_filters_input_history() {
+        // The App-level view of the Ctrl+R modal: an empty query surfaces
+        // every entry unhighlighted, a fuzzy query surfaces only the
+        // subsequence matches ordered by score with input order on ties.
+        let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+        app.input_history = vec![
+            "scatter".to_string(),     // idx 0 — 'cat' mid-word, lowest score
+            "catalog".to_string(),     // idx 1 — 'cat' at boundary, high score
+            "cargo build".to_string(), // idx 2 — 'cat' is not a subsequence
+            "the cat sat".to_string(), // idx 3 — 'cat' at boundary, high score
+        ];
+
+        // Empty query → all four entries, score 0, no highlight positions.
+        app.input.clear();
+        let ranked = app.history_filtered();
+        assert_eq!(ranked.len(), 4);
+        for (_, m) in &ranked {
+            assert_eq!(m.score, 0);
+            assert!(m.positions.is_empty());
+        }
+
+        // Query "cat" → matches catalog, "the cat sat", and scatter; not
+        // "cargo build" (no 't' after the 'ca'). Boundary matches outrank
+        // scatter, and stable-sort keeps catalog before "the cat sat".
+        app.input = "cat".to_string();
+        let ranked = app.history_filtered();
+        let indices: Vec<usize> = ranked.iter().map(|(i, _)| *i).collect();
+        assert_eq!(
+            indices,
+            vec![1, 3, 0],
+            "boundary matches first, then scatter"
+        );
+        assert!(ranked[0].1.score > ranked[2].1.score);
+        // Every matched entry exposes highlight positions, one per query char.
+        for (_, m) in &ranked {
+            assert_eq!(m.positions.len(), 3);
+        }
+
+        // Query with no subsequence match → empty filtered list (the renderer
+        // turns this into the "no matches" placeholder).
+        app.input = "xyz".to_string();
+        assert!(app.history_filtered().is_empty());
     }
 
     /// Build a minimal `App` scoped to a tempdir project so we can exercise

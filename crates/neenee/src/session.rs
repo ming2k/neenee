@@ -1,10 +1,16 @@
 use directories::ProjectDirs;
-use neenee_core::Message;
+use neenee_core::async_trait;
+use neenee_core::{Message, Provider, Role};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+
+// Re-export the cheap context estimators so callers keep using
+// `session::estimate_chars` / `session::estimate_tokens`.
+pub use neenee_core::{estimate_chars, estimate_tokens};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopCheckpoint {
@@ -407,25 +413,6 @@ pub struct CompactionResult {
     pub checkpoint: CompactionCheckpoint,
 }
 
-pub fn estimate_chars(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|message| {
-            message.content.len()
-                + message
-                    .tool_calls
-                    .as_ref()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|call| call.name.len() + call.arguments.len())
-                            .sum::<usize>()
-                    })
-                    .unwrap_or(0)
-        })
-        .sum()
-}
-
 pub fn discard_trailing_loop_prompts(messages: &mut Vec<Message>) -> usize {
     let original_len = messages.len();
     while messages.last().is_some_and(|message| {
@@ -440,18 +427,36 @@ pub fn discard_trailing_loop_prompts(messages: &mut Vec<Message>) -> usize {
     original_len - messages.len()
 }
 
-pub fn compact_messages(
+/// Header prepended to every compaction checkpoint message. Doubles as the
+/// classifier that excludes checkpoints from the user-turn count and lets a
+/// later compaction extract the previous summary for incremental updates.
+const CHECKPOINT_HEADER: &str = "[Conversation checkpoint]\n\
+     Earlier complete turns were compacted. Treat this as durable context, not a new user request.\n\n";
+
+/// Per-message excerpt cap used by the deterministic excerpt fallback.
+const EXCERPT_CAP: usize = 1_500;
+
+pub struct CompactionSelection {
+    /// Older complete turns moved out of the model-visible window.
+    pub archived: Vec<Message>,
+    /// Recent turns preserved verbatim after the checkpoint.
+    pub tail: Vec<Message>,
+    /// Body of a prior checkpoint message, when present, fed forward as the
+    /// anchored summary so each compaction updates rather than restarts.
+    pub previous_summary: Option<String>,
+}
+
+/// Split a message list into the archived head and the verbatim tail. Returns
+/// `None` when there are not enough complete user turns to compact.
+pub fn select_compaction(
     messages: &[Message],
-    max_chars: usize,
     preserve_turns: usize,
-) -> Option<CompactionResult> {
-    let before_chars = estimate_chars(messages);
+) -> Option<CompactionSelection> {
     let user_indices = messages
         .iter()
         .enumerate()
         .filter(|(_, message)| {
-            message.role == neenee_core::Role::User
-                && !message.content.starts_with("[Conversation checkpoint]")
+            message.role == Role::User && !message.content.starts_with("[Conversation checkpoint]")
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
@@ -462,27 +467,68 @@ pub fn compact_messages(
     let keep_from = user_indices[user_indices.len() - preserve_turns];
     let archived = messages[..keep_from]
         .iter()
-        .filter(|message| message.role != neenee_core::Role::System)
+        .filter(|message| message.role != Role::System)
         .cloned()
         .collect::<Vec<_>>();
     if archived.is_empty() {
         return None;
     }
+    let tail = messages[keep_from..].to_vec();
 
-    let summary_budget = (max_chars / 8).clamp(2_000, 16_000);
-    let summary = build_summary(&archived, summary_budget);
-    let mut active = vec![Message::hidden(
-        neenee_core::Role::User,
-        format!(
-            "[Conversation checkpoint]\nEarlier complete turns were compacted. \
-             Treat this as durable context, not a new user request.\n\n{}",
-            summary
-        ),
-    )];
-    active.extend_from_slice(&messages[keep_from..]);
+    // A prior checkpoint message (hidden user, `[Conversation checkpoint]`
+    // prefix) carries the previous summary; surface it for incremental updates.
+    let previous_summary = messages.iter().rev().find_map(|message| {
+        if message.role == Role::User
+            && message.hidden
+            && message.content.starts_with("[Conversation checkpoint]")
+        {
+            message
+                .content
+                .strip_prefix(CHECKPOINT_HEADER)
+                .map(|body| body.trim().to_string())
+                .filter(|body| !body.is_empty())
+        } else {
+            None
+        }
+    });
+
+    Some(CompactionSelection {
+        archived,
+        tail,
+        previous_summary,
+    })
+}
+
+fn summary_budget(max_chars: usize) -> usize {
+    (max_chars / 8).clamp(2_000, 16_000)
+}
+
+fn label_for(role: Role) -> Option<&'static str> {
+    match role {
+        Role::User => Some("User"),
+        Role::Assistant => Some("Assistant"),
+        Role::Tool => Some("Tool"),
+        Role::System => None,
+    }
+}
+
+/// Build a checkpoint message wrapping `summary` with the durable header.
+pub fn checkpoint_message(summary: &str) -> Message {
+    Message::hidden(Role::User, format!("{CHECKPOINT_HEADER}{summary}"))
+}
+
+/// Assemble the final [`CompactionResult`] from a selection and a summary.
+pub fn build_compaction_result(
+    before_chars: usize,
+    selection: CompactionSelection,
+    summary: String,
+) -> CompactionResult {
+    let CompactionSelection { archived, tail, .. } = selection;
+    let mut active = Vec::with_capacity(tail.len() + 1);
+    active.push(checkpoint_message(&summary));
+    active.extend(tail);
     let after_chars = estimate_chars(&active);
-
-    Some(CompactionResult {
+    CompactionResult {
         checkpoint: CompactionCheckpoint {
             archived_messages: archived.len(),
             active_messages: active.len(),
@@ -491,33 +537,357 @@ pub fn compact_messages(
         },
         active,
         archived,
-    })
+    }
 }
 
-fn build_summary(messages: &[Message], max_chars: usize) -> String {
-    let mut output = String::new();
-    for message in messages {
-        let label = match message.role {
-            neenee_core::Role::User => "User",
-            neenee_core::Role::Assistant => "Assistant",
-            neenee_core::Role::Tool => "Tool",
-            neenee_core::Role::System => continue,
+/// Deterministic excerpt fallback used when no provider is available or the
+/// LLM summarization call fails. Budget is allocated **newest-first** so recent
+/// context is never crowded out by older verbose messages; selected excerpts
+/// are then emitted in chronological order for readability. When a previous
+/// summary exists it is carried forward as anchored context.
+pub fn build_excerpt_summary(
+    archived: &[Message],
+    max_chars: usize,
+    previous_summary: Option<&str>,
+) -> String {
+    // Pass 1 (newest-first): pick which messages fit the remaining budget.
+    let mut used = 0usize;
+    let mut chosen: Vec<usize> = Vec::new();
+    for (index, message) in archived.iter().enumerate().rev() {
+        let Some(label) = label_for(message.role) else {
+            continue;
         };
         let content = message.content.trim();
         if content.is_empty() {
             continue;
         }
+        let remaining = max_chars.saturating_sub(used);
+        if remaining < 64 {
+            break;
+        }
+        let cost = content.len().min(EXCERPT_CAP) + label.len() + 4;
+        used += cost;
+        chosen.push(index);
+    }
+    chosen.reverse(); // chronological
+
+    // Pass 2: render the chosen messages in order, hard-truncating each.
+    let mut output = String::new();
+    for index in chosen {
+        let message = &archived[index];
+        let label = label_for(message.role).unwrap();
+        let content = message.content.trim();
         let remaining = max_chars.saturating_sub(output.len());
         if remaining < 64 {
             break;
         }
-        let excerpt = truncate_utf8(content, remaining.min(1_500));
+        let excerpt = truncate_utf8(content, remaining.min(EXCERPT_CAP));
         output.push_str(label);
         output.push_str(": ");
         output.push_str(excerpt);
         output.push_str("\n\n");
     }
-    output.trim_end().to_string()
+    let history = output.trim_end().to_string();
+
+    if let Some(previous) = previous_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        let previous_budget = (max_chars / 4).clamp(500, 4_000);
+        let previous_excerpt = truncate_utf8(previous, previous_budget);
+        format!("[Previous summary]\n{previous_excerpt}\n\n[Recent history]\n{history}")
+    } else {
+        history
+    }
+}
+
+/// Pure, provider-less compaction using the deterministic excerpt fallback.
+/// Kept as a testable building block and as the ultimate fallback when LLM
+/// summarization is disabled or unavailable.
+#[allow(dead_code)]
+pub fn compact_messages(
+    messages: &[Message],
+    max_chars: usize,
+    preserve_turns: usize,
+) -> Option<CompactionResult> {
+    let before_chars = estimate_chars(messages);
+    let selection = select_compaction(messages, preserve_turns)?;
+    let budget = summary_budget(max_chars);
+    let summary = build_excerpt_summary(&selection.archived, budget, selection.previous_summary.as_deref());
+    Some(build_compaction_result(before_chars, selection, summary))
+}
+
+// ---------------------------------------------------------------------------
+// LLM-based summarization
+// ---------------------------------------------------------------------------
+
+const SUMMARIZATION_SYSTEM_PROMPT: &str = "\
+You are an anchored context summarization assistant for coding sessions.\n\
+Summarize only the conversation history you are given. The newest turns may be \
+kept verbatim outside your summary, so focus on the older context that still \
+matters for continuing the work.\n\
+If a <previous-summary> block is included, treat it as the current anchored \
+summary: preserve still-true details, remove stale details, and merge in new \
+facts.\n\
+Always follow the exact output structure requested. Keep every section, \
+preserve exact file paths and identifiers when known, and prefer terse bullets \
+over paragraphs.\n\
+Do not answer the conversation itself. Do not mention that you are summarizing \
+or compacting. Respond in the same language as the conversation.";
+
+const SUMMARY_TEMPLATE: &str = "\
+Output exactly the Markdown structure shown inside <template> and keep the \
+section order unchanged. Do not include the <template> tags in your response.\n\
+<template>\n\
+## Goal\n\
+- [single-sentence task summary]\n\
+\n\
+## Constraints & Preferences\n\
+- [user constraints, preferences, specs, or \"(none)\"]\n\
+\n\
+## Progress\n\
+### Done\n\
+- [completed work or \"(none)\"]\n\
+\n\
+### In Progress\n\
+- [current work or \"(none)\"]\n\
+\n\
+### Blocked\n\
+- [blockers or \"(none)\"]\n\
+\n\
+## Key Decisions\n\
+- [decision and why, or \"(none)\"]\n\
+\n\
+## Next Steps\n\
+- [ordered next actions or \"(none)\"]\n\
+\n\
+## Critical Context\n\
+- [important technical facts, errors, open questions, or \"(none)\"]\n\
+\n\
+## Relevant Files\n\
+- [file or directory path: why it matters, or \"(none)\"]\n\
+</template>\n\
+\n\
+Rules:\n\
+- Keep every section, even when empty.\n\
+- Use terse bullets, not prose paragraphs.\n\
+- Preserve exact file paths, commands, error strings, and identifiers when known.\n\
+- Do not mention the summary process or that context was compacted.";
+
+/// Cap applied to each tool-result when serializing history for the summarizer.
+const SUMMARY_TOOL_OUTPUT_CAP: usize = 1_500;
+
+/// Render `archived` as a readable transcript for the summarizer, capping tool
+/// outputs and dropping the oldest messages when the result exceeds `budget`.
+pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for message in archived {
+        let Some(label) = label_for(message.role) else {
+            continue;
+        };
+        let mut body = message.content.trim().to_string();
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                body.push_str(&format!("\n[tool call: {}({})]", call.name, call.arguments));
+            }
+        }
+        if message.role == Role::Tool {
+            body = truncate_utf8(body.trim(), SUMMARY_TOOL_OUTPUT_CAP).to_string();
+        }
+        if body.trim().is_empty() {
+            continue;
+        }
+        lines.push(format!("{label}: {body}"));
+    }
+
+    let joined = lines.join("\n\n");
+    if joined.len() <= budget {
+        return joined;
+    }
+
+    // Over budget: keep the most recent lines that fit.
+    let mut kept: Vec<&String> = Vec::new();
+    let mut total = 0usize;
+    for line in lines.iter().rev() {
+        if total + line.len() + 2 > budget {
+            break;
+        }
+        total += line.len() + 2;
+        kept.push(line);
+    }
+    kept.reverse();
+    let kept_str: Vec<&str> = kept.iter().map(|s| s.as_str()).collect();
+    format!(
+        "...[earlier history omitted]...\n\n{}",
+        kept_str.join("\n\n")
+    )
+}
+
+fn build_summarization_user_prompt(
+    transcript: &str,
+    previous_summary: Option<&str>,
+    extra_context: &[String],
+) -> String {
+    let mut parts = Vec::new();
+    match previous_summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(previous) => parts.push(format!(
+            "Update the anchored summary below using the conversation history that \
+             follows. Preserve still-true details, remove stale details, and merge in \
+             new facts.\n<previous-summary>\n{previous}\n</previous-summary>"
+        )),
+        None => parts.push(
+            "Create a new anchored summary from the conversation history below."
+                .to_string(),
+        ),
+    }
+    parts.push(SUMMARY_TEMPLATE.to_string());
+    for context in extra_context {
+        let context = context.trim();
+        if !context.is_empty() {
+            parts.push(context.to_string());
+        }
+    }
+    parts.push(format!("Conversation history:\n{transcript}"));
+    parts.join("\n\n")
+}
+
+/// Ask `provider` to summarize `archived`. Returns the summary text, or an
+/// error that the caller maps to the deterministic excerpt fallback.
+pub async fn summarize_with_provider(
+    provider: &Arc<dyn Provider>,
+    archived: &[Message],
+    previous_summary: Option<&str>,
+    extra_context: &[String],
+    budget: usize,
+) -> Result<String, String> {
+    let transcript = serialize_for_summary(archived, budget);
+    let user_prompt = build_summarization_user_prompt(&transcript, previous_summary, extra_context);
+    let messages = vec![
+        Message::new(Role::System, SUMMARIZATION_SYSTEM_PROMPT),
+        Message::new(Role::User, user_prompt),
+    ];
+    let response = provider.chat(messages).await?;
+    let summary = response.content.trim().to_string();
+    if summary.is_empty() {
+        return Err("Summarization returned an empty summary.".to_string());
+    }
+    Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// Hooks + orchestrator
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct CompactionDecision {
+    /// Set to `false` to veto the compaction. Defaults to `true`.
+    pub proceed: bool,
+    /// Extra context strings folded into the summarization prompt.
+    pub extra_context: Vec<String>,
+}
+
+impl CompactionDecision {
+    pub fn proceed() -> Self {
+        Self {
+            proceed: true,
+            extra_context: Vec::new(),
+        }
+
+    }
+
+    #[allow(dead_code)]
+    pub fn veto() -> Self {
+        Self {
+            proceed: false,
+            extra_context: Vec::new(),
+        }
+    }
+}
+
+/// Pre/post-compaction hooks. `pre_compact` can veto a compaction or inject
+/// extra summarization context; `post_compact` is informational.
+#[async_trait]
+pub trait CompactionHooks: Send + Sync {
+    async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
+        CompactionDecision::proceed()
+    }
+
+    async fn post_compact(&self, _checkpoint: &CompactionCheckpoint) {}
+}
+
+/// No-op hooks used as the default.
+#[allow(dead_code)]
+pub struct NoopCompactionHooks;
+
+#[async_trait]
+impl CompactionHooks for NoopCompactionHooks {}
+
+/// Run a compaction over `history` in place.
+///
+/// When `provider` is `Some`, an LLM produces an anchored structured summary
+/// (with the previous summary carried forward for incremental updates); on any
+/// failure it falls back to the deterministic excerpt summary. When `provider`
+/// is `None`, the excerpt summary is used directly. `hooks.pre_compact` may
+/// veto the run or supply extra context.
+pub async fn run_compaction(
+    history: &mut Vec<Message>,
+    max_chars: usize,
+    preserve_turns: usize,
+    provider: Option<Arc<dyn Provider>>,
+    hooks: &dyn CompactionHooks,
+) -> Result<Option<CompactionResult>, String> {
+    let decision = hooks.pre_compact(history).await;
+    if !decision.proceed {
+        return Ok(None);
+    }
+
+    let before_chars = estimate_chars(history);
+    let before_tokens = estimate_tokens(history);
+    let Some(selection) = select_compaction(history, preserve_turns) else {
+        return Ok(None);
+    };
+
+    let budget = summary_budget(max_chars);
+    let summary = match provider.as_ref() {
+        Some(provider) => {
+            match summarize_with_provider(
+                provider,
+                &selection.archived,
+                selection.previous_summary.as_deref(),
+                &decision.extra_context,
+                budget,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "LLM summarization failed; falling back to excerpt compaction"
+                    );
+                    build_excerpt_summary(
+                        &selection.archived,
+                        budget,
+                        selection.previous_summary.as_deref(),
+                    )
+                }
+            }
+        }
+        None => build_excerpt_summary(
+            &selection.archived,
+            budget,
+            selection.previous_summary.as_deref(),
+        ),
+    };
+
+    let result = build_compaction_result(before_chars, selection, summary);
+    tracing::debug!(
+        before_chars,
+        after_chars = result.checkpoint.after_chars,
+        before_tokens,
+        "compaction complete"
+    );
+    hooks.post_compact(&result.checkpoint).await;
+    let active = result.active.clone();
+    *history = active;
+    Ok(Some(result))
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
@@ -738,5 +1108,155 @@ mod tests {
             };
             assert!(checkpoint.resume_iteration().is_err());
         }
+    }
+
+    #[test]
+    fn excerpt_summary_keeps_recent_first_under_budget() {
+        // A large old tool result and a small recent user message. With a tiny
+        // budget only the recent message (chosen newest-first) survives; the old
+        // verbose tool result is omitted instead of crowding it out.
+        let archived = vec![
+            Message::new(Role::Tool, "X".repeat(3_000)),
+            Message::new(Role::User, "recent critical detail"),
+        ];
+
+        let summary = build_excerpt_summary(&archived, 90, None);
+
+        assert!(summary.contains("recent critical detail"));
+        assert!(!summary.contains('X'));
+    }
+
+    #[test]
+    fn excerpt_summary_carries_forward_previous_summary() {
+        let archived = vec![Message::new(Role::User, "what is 2+2")];
+        let summary = build_excerpt_summary(&archived, 4_000, Some("prev anchored facts"));
+
+        assert!(summary.starts_with("[Previous summary]\n"));
+        assert!(summary.contains("prev anchored facts"));
+        assert!(summary.contains("[Recent history]"));
+        assert!(summary.contains("what is 2+2"));
+    }
+
+    #[test]
+    fn select_compaction_extracts_previous_summary() {
+        let prior = checkpoint_message("prev summary body");
+        let messages = vec![
+            Message::new(Role::System, "system"),
+            prior,
+            Message::new(Role::User, "q1"),
+            Message::new(Role::Assistant, "a1"),
+            Message::new(Role::User, "q2"),
+            Message::new(Role::Assistant, "a2"),
+        ];
+
+        let selection = select_compaction(&messages, 1).unwrap();
+        assert_eq!(selection.previous_summary.as_deref(), Some("prev summary body"));
+        // The prior checkpoint lands in the archived head, not the tail.
+        assert!(selection
+            .archived
+            .iter()
+            .any(|message| message
+                .content
+                .starts_with("[Conversation checkpoint]")));
+        assert_eq!(selection.tail.last().unwrap().content, "a2");
+    }
+
+    #[tokio::test]
+    async fn run_compaction_uses_provider_summary() {
+        use neenee_core::providers::MockProvider;
+
+        let mut history = vec![
+            Message::new(Role::System, "system"),
+            Message::new(Role::User, "old question"),
+            Message::new(Role::Assistant, "old answer"),
+            Message::new(Role::User, "recent question"),
+            Message::new(Role::Assistant, "recent answer"),
+        ];
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+
+        let result = run_compaction(&mut history, 10_000, 1, Some(provider), &NoopCompactionHooks)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The mock provider's canned reply becomes the checkpoint summary.
+        assert!(result.active[0].content.contains("mock AI"));
+        assert_eq!(result.active[1].content, "recent question");
+        assert!(result.active[0].hidden);
+    }
+
+    #[tokio::test]
+    async fn run_compaction_vetoed_by_hook_leaves_history_untouched() {
+        struct VetoHooks;
+        #[async_trait]
+        impl CompactionHooks for VetoHooks {
+            async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
+                CompactionDecision::veto()
+            }
+        }
+
+        let original = vec![
+            Message::new(Role::System, "system"),
+            Message::new(Role::User, "old question"),
+            Message::new(Role::Assistant, "old answer"),
+            Message::new(Role::User, "recent question"),
+            Message::new(Role::Assistant, "recent answer"),
+        ];
+        let mut history = original.clone();
+
+        let outcome = run_compaction(&mut history, 10_000, 1, None, &VetoHooks)
+            .await
+            .unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(history.len(), original.len());
+        assert_eq!(
+            history.last().unwrap().content,
+            original.last().unwrap().content
+        );
+        assert!(history.iter().all(|message| !message.hidden
+            || message.role != Role::User
+            || !message.content.starts_with("[Conversation checkpoint]")));
+    }
+
+    #[tokio::test]
+    async fn run_compaction_falls_back_when_provider_errors() {
+        use neenee_core::providers::MockProvider;
+
+        // MockProvider succeeds, so to exercise the fallback we instead pass a
+        // provider that always errors and assert we still get an excerpt-based
+        // checkpoint.
+        struct FailingProvider;
+        #[async_trait]
+        impl Provider for FailingProvider {
+            async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+                Err("boom".to_string())
+            }
+            async fn stream_chat(
+                &self,
+                _messages: Vec<Message>,
+            ) -> Result<futures::stream::BoxStream<'static, Result<String, String>>, String> {
+                Err("boom".to_string())
+            }
+        }
+
+        let mut history = vec![
+            Message::new(Role::User, "old question"),
+            Message::new(Role::Assistant, "old answer"),
+            Message::new(Role::User, "recent question"),
+            Message::new(Role::Assistant, "recent answer"),
+        ];
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider);
+
+        let result = run_compaction(&mut history, 10_000, 1, Some(provider), &NoopCompactionHooks)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Fallback excerpt summary references the old question.
+        assert!(result.active[0].content.contains("old question"));
+        // Silence the unused MockProvider import warning while keeping the path
+        // documented for the success-case test above.
+        let _: &dyn Provider = &MockProvider;
     }
 }

@@ -188,7 +188,7 @@ read_only = false
 
 - **Fresh session** — Starting neenee without arguments creates a new empty session while keeping the last selected provider and model.
 - **Resume** — `/resume` restores the most recent conversation; `/resume <short-id>` targets a specific one; `/session list` shows all available.
-- **Compaction** — Older complete turns are compacted automatically when active context exceeds the configured character budget. Full history remains archived in `session.json`. `/compact` triggers this manually.
+- **Compaction** — Context pressure is relieved in layers: old tool results are pruned (between tool rounds and before turns), and when size still exceeds the configured character budget older complete turns are replaced by an anchored LLM-generated summary (with a deterministic excerpt fallback). Full history remains archived in `session.json`. `/compact` triggers a summary manually.
 - **Context Overflow** — Retried once only before any tool activity has occurred.
 
 ---

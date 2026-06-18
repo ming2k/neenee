@@ -10,3 +10,15 @@ expression: "render_grid(&m, 80, 40)"
     22  foo();
     src/b.rs
      5  foo,
+
+backgrounds:
+.=reset  B=#151716  C=#111312
+0: .2 B76
+1: .2 C76
+2: .2 C76
+3: .2 C76
+4: .2 C76
+5: .2 C76
+6: .2 C76
+7: .2 C76
+8: .2 C76

@@ -39,6 +39,12 @@ pub enum MessageKind {
         name: String,
         arguments: String,
         output: Option<String>,
+        /// Typed result (ADR-0001). `None` until the result lands, then a
+        /// [`neenee_core::ToolOutput`] carrying structured data (e.g. a shell
+        /// exit code) alongside the legacy `output` text. Currently stored but
+        /// not yet consumed by the renderer — the classification/rendering
+        /// switch is a follow-up slice.
+        structured: Option<neenee_core::ToolOutput>,
         /// Explicit lifecycle. Kept in sync with `output` by the
         /// `finish_tool_step` / `cancel_tool_step` transitions below.
         status: ToolStepStatus,
@@ -225,6 +231,7 @@ impl TranscriptMessage {
                 name: name.into(),
                 arguments: arguments.into(),
                 output: None,
+                structured: None,
                 status: ToolStepStatus::Running,
                 expanded: false,
                 duration_ms: None,
@@ -242,11 +249,13 @@ impl TranscriptMessage {
         &mut self,
         id: &str,
         output: impl Into<String>,
+        structured: neenee_core::ToolOutput,
         duration_ms: u64,
     ) -> bool {
         let MessageKind::ToolStep {
             id: step_id,
             output: step_output,
+            structured: step_structured,
             status,
             duration_ms: step_duration,
             ..
@@ -258,12 +267,20 @@ impl TranscriptMessage {
             return false;
         }
         let output = output.into();
-        *status = if output.starts_with("Error") {
+        // Classify from the structured result first (data-level: a non-zero
+        // shell exit, an explicit `ToolOutput::Error`). The `starts_with`
+        // text fallback is kept so unmigrated tools that still embed
+        // `"Error: …"` in a `Text` result keep classifying as failed — and so
+        // this fixes the latent bug where a bash failure (`Exit N …`, which
+        // does NOT start with "Error") was misclassified as `Ok`.
+        let failed = structured.is_error() || output.starts_with("Error");
+        *status = if failed {
             ToolStepStatus::Failed
         } else {
             ToolStepStatus::Ok
         };
         *step_output = Some(output);
+        *step_structured = Some(structured);
         *step_duration = Some(duration_ms);
         self.refresh_tool_step();
         true
@@ -400,10 +417,20 @@ impl TranscriptMessage {
                             false
                         }
                 }) {
-                    child.finish_tool_step(id, output.clone(), *duration_ms);
+                    child.finish_tool_step(
+                        id,
+                        output.clone(),
+                        neenee_core::ToolOutput::text(output.clone()),
+                        *duration_ms,
+                    );
                 } else {
                     let mut msg = TranscriptMessage::tool_step(id.clone(), "tool", "{}");
-                    msg.finish_tool_step(id, output.clone(), *duration_ms);
+                    msg.finish_tool_step(
+                        id,
+                        output.clone(),
+                        neenee_core::ToolOutput::text(output.clone()),
+                        *duration_ms,
+                    );
                     children.push(msg);
                 }
             }
@@ -638,6 +665,7 @@ impl TranscriptMessage {
             name,
             arguments,
             output,
+            structured: _,
             status,
             expanded,
             duration_ms,
@@ -1400,7 +1428,7 @@ mod tests {
         assert!(message.raw.contains("Read README.md"));
         assert!(!message.raw.contains("read_file"));
 
-        assert!(message.finish_tool_step("call_1", "contents", 1234));
+        assert!(message.finish_tool_step("call_1", "contents", neenee_core::ToolOutput::text("contents"), 1234));
         // Collapsed completed: summary + duration suffix.
         assert!(message.raw.contains("Read README.md"));
         assert!(message.raw.contains("1.2s"));
@@ -1456,7 +1484,7 @@ mod tests {
         assert!(running.contains("Grep"), "got: {running}");
 
         // Completing the parent summarizes tool-call count + duration.
-        assert!(task.finish_tool_step("call_9", "final answer", 1500));
+        assert!(task.finish_tool_step("call_9", "final answer", neenee_core::ToolOutput::text("final answer"), 1500));
         let done = task.subagent_status_line().expect("done status");
         assert!(done.starts_with("↳ Completed"), "got: {done}");
         assert!(done.contains("1 tool calls"), "got: {done}");
@@ -1475,9 +1503,44 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
         });
-        assert!(task.finish_tool_step("c", "Error: boom", 100));
+        assert!(task.finish_tool_step("c", "Error: boom", neenee_core::ToolOutput::text("Error: boom"), 100));
         let status = task.subagent_status_line().unwrap();
         assert!(status.starts_with("↳ Failed"), "got: {status}");
+    }
+
+    #[test]
+    fn bash_failure_is_classified_failed_from_structured_exit_code() {
+        // Regression: a bash failure emits `Exit N …` which does NOT start with
+        // "Error", so the legacy text sniff misclassified it as `Ok`. With
+        // structured `ToolOutput::Shell { exit: Some(1) }`, `is_error()` now
+        // drives the classification and the step correctly reads `Failed`.
+        let mut step = TranscriptMessage::tool_step("c", "bash", r#"{"command":"false"}"#);
+        let structured = neenee_core::ToolOutput::Shell {
+            command: "false".into(),
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit: Some(1),
+            truncated: false,
+        };
+        let text = structured.to_text();
+        assert!(!text.starts_with("Error"), "precondition: text is not Error-prefixed");
+        assert!(step.finish_tool_step("c", text, structured, 50));
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Failed));
+    }
+
+    #[test]
+    fn bash_success_is_classified_ok() {
+        let mut step = TranscriptMessage::tool_step("c", "bash", r#"{"command":"true"}"#);
+        let structured = neenee_core::ToolOutput::Shell {
+            command: "true".into(),
+            stdout: "ok\n".into(),
+            stderr: String::new(),
+            exit: Some(0),
+            truncated: false,
+        };
+        let text = structured.to_text();
+        assert!(step.finish_tool_step("c", text, structured, 5));
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Ok));
     }
 
     #[test]
@@ -1495,7 +1558,7 @@ mod tests {
         assert!(step.raw.contains("cancelled"), "got: {}", step.raw);
 
         // Cancelled is terminal: a late result or another cancel is ignored.
-        assert!(!step.finish_tool_step("call_1", "late result", 10));
+        assert!(!step.finish_tool_step("call_1", "late result", neenee_core::ToolOutput::text("late result"), 10));
         assert!(!step.cancel_tool_step("call_1"));
         assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Cancelled));
     }
@@ -1541,7 +1604,7 @@ mod tests {
         let mut a = TranscriptMessage::tool_step("a", "read_file", "{}");
         let mut b = TranscriptMessage::tool_step("b", "read_file", "{}");
         // `b` already finished successfully; the sweep must not clobber it.
-        assert!(b.finish_tool_step("b", "contents", 5));
+        assert!(b.finish_tool_step("b", "contents", neenee_core::ToolOutput::text("contents"), 5));
         assert_eq!(b.tool_step_status(), Some(ToolStepStatus::Ok));
 
         // The sweep cancels a running step and is then a no-op on it.
