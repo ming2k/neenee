@@ -14,13 +14,13 @@ on every request. They are never cached across turns by the runtime.
 ```mermaid
 flowchart TD
     A["Agent::new — stores tools"] --> B["run_with_events / run_streaming_with_events<br/>once per turn"]
-    B --> C["provider.prepare_tools(self.tools)<br/>lib.rs:684, 777"]
-    C --> D["Tool::to_openai_function<br/>cached in OpenAIProvider.tools<br/>providers.rs:245-249"]
-    D --> E["provider.request_body(messages, stream)<br/>providers.rs:128"]
-    E --> F["body.tools = cached schemas<br/>body.tool_choice = auto<br/>providers.rs:168-169"]
+    B --> C["provider.prepare_tools(self.tools)"]
+    C --> D["Tool::to_openai_function<br/>cached in OpenAIProvider.tools"]
+    D --> E["provider.request_body(messages, stream)"]
+    E --> F["body.tools = cached schemas<br/>body.tool_choice = auto"]
 ```
 
-`Tool::to_openai_function` (`crates/neenee-core/src/lib.rs:183`) wraps each
+`Tool::to_openai_function` (`crates/neenee-core/src/lib.rs`) wraps each
 tool's `parameters()` JSON Schema in the OpenAI function envelope
 `{"type":"function","function":{"name","description","parameters"}}`. No
 tool overrides this default; the schema the model sees is exactly what
@@ -31,9 +31,9 @@ returns tool results to the model — re-sends the full schema set alongside
 the full message history. The serving runtime is stateless across turns.
 
 Providers that do not override `prepare_tools` (`GeminiProvider`,
-`LlamaServerProvider`, `MockProvider`) keep the trait default no-op
-(`crates/neenee-core/src/lib.rs:152`) and never send a `tools` field. Tool
-calls on those providers travel only through the universal fallback below.
+`LlamaServerProvider`, `MockProvider`) keep the trait default no-op and
+never send a `tools` field. Tool calls on those providers travel only
+through the universal fallback below.
 
 ## Native transport
 
@@ -41,9 +41,9 @@ OpenAI-compatible providers return tool calls through two equivalent paths.
 
 ### Streaming
 
-`stream_chat_events` (`providers.rs:357`) consumes the SSE stream. Each
-chunk is parsed by `parse_openai_stream_data` (`providers.rs:212`), which
-reads three optional delta fields:
+`stream_chat_events` (`providers.rs`) consumes the SSE stream. Each
+chunk is parsed by `parse_openai_stream_data`, which reads three optional
+delta fields:
 
 | Delta field | Event emitted | Used to reconstruct |
 |-------------|---------------|---------------------|
@@ -52,16 +52,17 @@ reads three optional delta fields:
 | `tool_calls[]` | `ToolCallDelta` per index | tool calls |
 
 Tool calls arrive as fragments keyed by `delta.tool_calls[].index`. The
-streaming loop (`crates/neenee-core/src/lib.rs:820-841`) accumulates `id`,
-`name`, and `arguments` per index while text and reasoning deltas render
-live. Tools execute only after the stream terminates:
+streaming loop inside `Agent::run_streaming_with_events`
+(`crates/neenee-core/src/lib.rs`) accumulates `id`, `name`, and `arguments`
+per index while text and reasoning deltas render live. Tools execute only
+after the stream terminates:
 
 ```mermaid
 flowchart TD
-    A["stream ends — [DONE]"] --> B["calls.retain(name not empty)<br/>lib.rs:851"]
-    B --> C["assign call_uuid to empty ids<br/>lib.rs:852-855"]
-    C --> D["build Message with tool_calls<br/>lib.rs:857-865"]
-    D --> E["push to messages, then execute_tool<br/>lib.rs:869, 881"]
+    A["stream ends — [DONE]"] --> B["calls.retain(name not empty)"]
+    B --> C["assign call_uuid to empty ids"]
+    C --> D["build Message with tool_calls"]
+    D --> E["push to messages, then execute_tool"]
 ```
 
 Side effects never fire mid-stream. This matters for retry: a stream that
@@ -69,23 +70,23 @@ fails before `[DONE]` can be retried without leaving partial tool state.
 
 ### Non-streaming
 
-`chat` (`providers.rs:252`) issues a single HTTP round trip and reads
-`choices[0].message.tool_calls` complete (`providers.rs:280-297`). This is
-the path used by `Agent::run` and `Agent::run_with_events`.
+`chat` (`providers.rs`) issues a single HTTP round trip and reads
+`choices[0].message.tool_calls` complete. This is the path used by
+`Agent::run` and `Agent::run_with_events`.
 
 ### Orphan tool result filtering
 
 OpenAI-compatible runtimes reject any `tool` message whose `tool_call_id`
 does not match a `tool_call` on a preceding assistant message.
-`request_body` (`providers.rs:134-157`) drops orphan tool results before
-sending so a stale session cannot fail with `tool_call_id is not found`:
+`request_body` drops orphan tool results before sending so a stale session
+cannot fail with `tool_call_id is not found`:
 
 - A first pass records every `tool_call.id` from preceding assistant
   messages.
 - A `Tool` message is kept only if its `tool_call_id` is non-empty and
   present in the recorded set.
 - Empty assistant messages are filtered by `valid_provider_message`
-  (`providers.rs:175`).
+  (`providers.rs`).
 
 ## Universal fallback
 
@@ -95,7 +96,7 @@ after the response completes.
 
 ### Expected shape
 
-`Agent::parse_tool_call` (`crates/neenee-core/src/lib.rs:634`) expects a
+`Agent::parse_tool_call` (`crates/neenee-core/src/lib.rs`) expects a
 top-level JSON object with a `"tool"` string key:
 
 ```text
@@ -103,18 +104,17 @@ top-level JSON object with a `"tool"` string key:
 ```
 
 The `"arguments"` key is optional and defaults to `{}`. The parser calls
-`text.trim()` then `serde_json::from_str` on the entire trimmed string
-(`lib.rs:636-637`). It does **not** strip code fences and does **not**
-scan for embedded JSON substrings. A model that wraps the call in
-` ```json … ``` ` will fail to parse and the turn ends without a tool
-invocation.
+`text.trim()` then `serde_json::from_str` on the entire trimmed string.
+It does **not** strip code fences and does **not** scan for embedded JSON
+substrings. A model that wraps the call in ` ```json … ``` ` will fail to
+parse and the turn ends without a tool invocation.
 
 ### Promoting fallback calls to native tool_calls
 
 OpenAI-compatible runtimes require every `tool` message to reference a
 preceding assistant `tool_calls` entry. A fallback call extracted from text
 has no such entry. `Agent::attach_fallback_tool_call`
-(`crates/neenee-core/src/lib.rs:659`) fixes this by promoting the parsed
+(`crates/neenee-core/src/lib.rs`) fixes this by promoting the parsed
 call onto the preceding assistant message:
 
 ```rust
@@ -131,30 +131,28 @@ even though the original response was plain text.
 
 Fallback JSON is rendered to the user as live assistant text while the
 model streams it. Once `parse_tool_call` succeeds the agent emits
-`AgentEvent::AssistantDiscard` (`crates/neenee-core/src/lib.rs:901`) so the
-TUI withdraws the raw JSON before drawing the tool card. The native
-streaming path does not need this because tool-call deltas never enter the
-visible text buffer.
+`AgentEvent::AssistantDiscard` so the TUI withdraws the raw JSON before
+drawing the tool card. The native streaming path does not need this because
+tool-call deltas never enter the visible text buffer.
 
 ## Execution
 
 Both transport paths converge on `Agent::execute_tool`
-(`crates/neenee-core/src/lib.rs:967`). The dispatcher:
+(`crates/neenee-core/src/lib.rs`). The dispatcher:
 
-1. Looks up the tool by name (`lib.rs:971`). Unknown tools return
+1. Looks up the tool by name. Unknown tools return
    `Error: Tool '{}' not found`.
-2. Enforces the Plan-mode gate (`lib.rs:976-981`). A non-read-only tool in
-   `AgentMode::Plan` returns
+2. Enforces the Plan-mode gate. A non-read-only tool in `AgentMode::Plan`
+   returns
    `[Plan mode] Tool '{name}' is blocked. Switch to Build mode to execute it.`
-3. Routes `ToolAccess::Write` tools through the permission broker
-   (`lib.rs:983-1025`).
-4. Invokes `tool.call_with_events` (`lib.rs:1031-1042`), rewrapping
-   `SubTaskEvent` from tools that emit them (only `TaskTool` does today).
+3. Routes `ToolAccess::Write` tools through the permission broker.
+4. Invokes `tool.call_with_events`, rewrapping `SubTaskEvent` from tools
+   that emit them (only `TaskTool` does today).
 
-Permission scope is computed via `tool.permission_scope(&call.arguments)`
-(`lib.rs:984`). The returned string identifies the resource a cached
-`Always` rule must match — a path for file tools, the full command for
-`bash`, or `"*"` for tools that do not override the default.
+Permission scope is computed via `tool.permission_scope(&call.arguments)`.
+The returned string identifies the resource a cached `Always` rule must
+match — a path for file tools, the full command for `bash`, or `"*"` for
+tools that do not override the default.
 
 ## Design notes
 

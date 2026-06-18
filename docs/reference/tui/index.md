@@ -48,6 +48,7 @@ measurements table.
 | File | Responsibility |
 |------|---------------|
 | `render/mod.rs` | Draw orchestration: `draw_chat`, `ChatView`, `ChatRender`, `chat_band_rect`, `CHAT_H_INSET` |
+| `render/design.rs` | Non-color design tokens: spacing, gutters, fixed row counts, text measurement limits |
 | `render/theme.rs` | `Theme` (all color tokens) |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop`, color helpers |
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |

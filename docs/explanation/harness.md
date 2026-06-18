@@ -50,12 +50,14 @@ Tool schemas are request-scoped. Every ReAct round, including the round that
 carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
-`OpenAIProvider` declares schemas natively. The OpenAI-compatible wrappers
-(`DeepSeekProvider`, `QwenProvider`, `GLMProvider`, `VolcengineProvider`,
-Moonshot, Ollama) inherit the same path by delegating to it. `GeminiProvider`
-does not override the default `prepare_tools` and never sends a `tools`
-field; tool calls on Gemini travel only through the universal fallback
-below.
+`OpenAIProvider` declares schemas natively. The OpenAI-compatible registry
+presets (`kimi-code`, `kimi`, `deepseek`, `qwen`, `glm`, `volcengine`) and
+the bespoke `custom` entry all inherit the same path: each is built by
+`OpenAiCompatProvider::build` (or `OpenAIProvider::with_base_url` for
+`custom`) into an `OpenAIProvider`, so they delegate to its
+`prepare_tools`. `GeminiProvider` and `LlamaServerProvider` do not override
+the default `prepare_tools` and never send a `tools` field; tool calls on
+those providers travel only through the universal fallback below.
 
 ### Observed: reasoning
 

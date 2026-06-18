@@ -14,7 +14,7 @@ matches the tool's domain: filesystem tools go in
 ## Implement the `Tool` trait
 
 Define a struct and implement `Tool`
-(`crates/neenee-core/src/lib.rs:156`). The four required members are
+(`crates/neenee-core/src/lib.rs`). The four required members are
 `name`, `description`, `parameters`, and `call`.
 
 ```rust
@@ -54,13 +54,13 @@ impl Tool for CountLinesTool {
 ```
 
 `parameters()` returns a JSON Schema. It is forwarded verbatim to the model
-through `Tool::to_openai_function()` (`lib.rs:183`); no tool overrides that
+through `Tool::to_openai_function()`; no tool overrides that
 default. Keep the schema strict: set `additionalProperties: false` and list
 every required field so the model cannot invent extra keys.
 
 ## Choose a `ToolAccess`
 
-Override `access()` (`crates/neenee-core/src/lib.rs:160`) only when the
+Override `access()` (`crates/neenee-core/src/lib.rs`) only when the
 tool is read-only. The default is `ToolAccess::Write`, which is the safe
 choice for any tool with side effects.
 
@@ -78,7 +78,7 @@ full gating matrix.
 ## Override `permission_scope` for write tools
 
 A `Write` tool should override `permission_scope`
-(`crates/neenee-core/src/lib.rs:163`) so cached `Always` rules match the
+(`crates/neenee-core/src/lib.rs`) so cached `Always` rules match the
 smallest stable resource identifier. The default `"*"` causes any approval
 to authorize all future calls to that tool, which is rarely what users
 want.
@@ -89,7 +89,7 @@ fn permission_scope(&self, arguments: &str) -> String {
 }
 ```
 
-`json_string` (`crates/neenee-core/src/tools.rs:355`) extracts a JSON field
+`json_string` (`crates/neenee-core/src/tools.rs`) extracts a JSON field
 from the arguments string and falls back to `"*"`. Existing scopes: file
 tools use the `path` argument, `bash` uses the full `command` text,
 `create_project` uses `{path}/{name}`. Pick a scope that distinguishes
@@ -99,11 +99,11 @@ invocation.
 ## Optional: stream sub-task events
 
 If the tool spawns long-running work that should surface in the TUI,
-override `call_with_events` (`crates/neenee-core/src/lib.rs:173`) instead
+override `call_with_events` (`crates/neenee-core/src/lib.rs`) instead
 of `call`. The default implementation delegates to `call`, so overriding
 `call` alone is enough for synchronous tools.
 
-`TaskTool` (`crates/neenee-core/src/tools.rs:1194`) is currently the only
+`TaskTool` (`crates/neenee-core/src/tools.rs`) is currently the only
 tool that overrides `call_with_events`. It forwards `SubTaskEvent`s from
 the sub-agent so the parent harness can render live progress. Read its
 implementation before adopting the same pattern; the event surface is
@@ -111,7 +111,8 @@ narrow.
 
 ## Register the tool
 
-Add the tool to the literal registry in `crates/neenee/src/main.rs:899-915`,
+Add the tool to the literal registry in `crates/neenee/src/main.rs` (the
+`let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![ … ]` block),
 preserving the existing order (write tools first, then read tools, then
 `use_skill`, then MCP extension).
 
@@ -124,11 +125,12 @@ let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
 ];
 ```
 
-Tools added before `tools.extend(mcp.tools)` (`main.rs:916`) are visible
-to the `task` sub-agent, which inherits the parent toolset filtered to
-`ReadOnly`. Tools added after that line are not. Place read-only tools
-before the MCP extension to make them sub-agent-callable; place write tools
-or tools that should never recurse anywhere in the list.
+Tools added before `tools.extend(mcp.tools)` are visible to the `task`
+sub-agent, which inherits the parent toolset filtered to `ReadOnly`. Tools
+added after that line are not. Place read-only tools before the MCP
+extension to make them sub-agent-callable; place write tools or tools that
+should never recurse anywhere in the list. `TaskTool` is pushed last, after
+the MCP extension, so it snapshots the fully assembled toolset.
 
 ## Verify
 

@@ -37,21 +37,21 @@ Content-Type: application/json
 ```
 
 The body is assembled by `OpenAIProvider::request_body`
-(`crates/neenee-core/src/providers.rs:128`). Two fields are conditional:
+(`crates/neenee-core/src/providers.rs`). Two fields are conditional:
 
 | Field | When present | Source |
 |-------|--------------|--------|
-| `tools` | cached schema set is non-empty | `providers.rs:167-168` |
-| `tool_choice` | same condition as `tools` | `providers.rs:169` |
+| `tools` | cached schema set is non-empty | `request_body` (`if let Some(tools) …` guard) |
+| `tool_choice` | same condition as `tools` | `request_body` |
 
 When the provider has no native function calling (`GeminiProvider`,
 `LlamaServerProvider`), neither field is sent and the body uses a
 different shape. See [Tool protocol](tool-protocol.md) for the fallback.
 
 Orphan `tool` messages whose `tool_call_id` has no matching preceding
-assistant `tool_calls` are filtered before the body is serialized
-(`providers.rs:134-157`). This keeps the runtime contract satisfied on
-restored or forked sessions.
+assistant `tool_calls` are filtered before the body is serialized inside
+`request_body`. This keeps the runtime contract satisfied on restored or
+forked sessions.
 
 ### Response shape
 
@@ -76,15 +76,14 @@ HTTP/2 streaming) and is the mechanism OpenAI-compatible servers use to
 stream tokens.
 
 neenee reads the stream via `reqwest::Response::bytes_stream()` and splits
-on newlines (`crates/neenee-core/src/providers.rs:378-385`). Each
-`data:`-prefixed line is one SSE event. The literal `data: [DONE]`
-terminates the stream.
+on newlines inside `OpenAIProvider::stream_chat_events`
+(`crates/neenee-core/src/providers.rs`). Each `data:`-prefixed line is one
+SSE event. The literal `data: [DONE]` terminates the stream.
 
 ### SSE event shapes
 
-Each `data:` payload is parsed by `parse_openai_stream_data`
-(`providers.rs:212`). The parser reads three optional fields from
-`choices[0].delta`:
+Each `data:` payload is parsed by `parse_openai_stream_data` (`providers.rs`).
+The parser reads three optional fields from `choices[0].delta`:
 
 | Delta field | Event emitted | Reconstructed into |
 |-------------|---------------|--------------------|
@@ -104,7 +103,8 @@ single call may be split across many SSE events: the first fragment
 typically carries `id` and `function.name`; subsequent fragments carry
 pieces of `function.arguments` that must be concatenated.
 
-The streaming loop accumulates them in `crates/neenee-core/src/lib.rs:820-841`:
+The streaming loop accumulates them inside
+`Agent::run_streaming_with_events` (`crates/neenee-core/src/lib.rs`):
 
 ```text
 for each ToolCallDelta:
@@ -115,43 +115,43 @@ for each ToolCallDelta:
 Reassembly completes only when the stream ends. After `[DONE]`:
 
 ```text
-calls.retain(|c| !c.name.is_empty())     lib.rs:851
-assign call_<uuid> to empty ids          lib.rs:852-855
-build assistant Message with tool_calls  lib.rs:857-865
-push to messages, then execute           lib.rs:869, 881
+calls.retain(|c| !c.name.is_empty())
+assign call_<uuid> to empty ids
+build assistant Message with tool_calls
+push to messages, then execute
 ```
 
 Side effects never fire mid-stream. This is what makes retry safe: a stream
 that errors before `[DONE]` can be re-issued without leaving partial tool
 state behind. Once any tool has executed, retryable errors become terminal
-(`crates/neenee/src/main.rs:326-328`).
+(see [Retry interaction](#retry-interaction)).
 
 ## The ReAct loop
 
 The loop runs in `Agent::run_streaming_with_events`
-(`crates/neenee-core/src/lib.rs:782-897`) for interactive turns and
-`Agent::run_with_events` (`lib.rs:689-766`) for headless turns. The
-structure is identical; only the transport differs.
+(`crates/neenee-core/src/lib.rs`) for interactive turns and
+`Agent::run_with_events` for headless turns. The structure is identical;
+only the transport differs.
 
 ```mermaid
 flowchart TD
-    A["prepare_tools<br/>lib.rs:777"] --> B{"tool_rounds ≥ 32?"}
+    A["prepare_tools"] --> B{"tool_rounds ≥ 32?"}
     B -- yes --> X["abort: too many rounds"]
-    B -- no --> C["ensure_system_prompt<br/>lib.rs:790"]
-    C --> D["stream_chat_events<br/>lib.rs:795"]
-    D --> E["accumulate text / reasoning / tool_calls<br/>lib.rs:802-843"]
-    E --> F["push assistant message<br/>lib.rs:869"]
+    B -- no --> C["ensure_system_prompt"]
+    C --> D["stream_chat_events"]
+    D --> E["accumulate text / reasoning / tool_calls"]
+    E --> F["push assistant message"]
     F --> G{"response has<br/>tool_calls?"}
-    G -- yes --> H["guard_repeated_call<br/>lib.rs:873"]
-    H --> I["execute_tool — local, no HTTP<br/>lib.rs:881"]
-    I --> J["push tool result<br/>lib.rs:890"]
+    G -- yes --> H["guard_repeated_call"]
+    H -- I["execute_tool — local, no HTTP"]
+    I --> J["push tool result"]
     J --> K["tool_rounds += 1<br/>continue → next HTTP request"]
     K --> B
     G -- no --> L{"fallback JSON<br/>parses?"}
-    L -- yes --> M["attach_fallback_tool_call<br/>lib.rs:904"]
-    M --> N["execute_tool; push result<br/>lib.rs:912, 920"]
+    L -- yes --> M["attach_fallback_tool_call"]
+    M --> N["execute_tool; push result"]
     N --> B
-    L -- no --> O["return response<br/>lib.rs:928 — loop exits"]
+    L -- no --> O["return response — loop exits"]
 ```
 
 ### Messages evolution
@@ -217,22 +217,22 @@ The loop returns a final assistant message when any of these holds:
 
 | Condition | Where | Result |
 |-----------|-------|--------|
-| Response has no `tool_calls` and no fallback JSON parses | `lib.rs:928` | Success; assistant text is the answer |
-| `tool_rounds >= MAX_TOOL_ROUNDS` (32) | `lib.rs:783` | Error; turn aborts |
-| `guard_repeated_call` rejects a 4th consecutive identical call | `lib.rs:933-951` | Error; turn aborts |
+| Response has no `tool_calls` and no fallback JSON parses | `run_streaming_with_events` tail | Success; assistant text is the answer |
+| `tool_rounds >= MAX_TOOL_ROUNDS` (32) | `run_streaming_with_events` head | Error; turn aborts |
+| `guard_repeated_call` rejects a 4th consecutive identical call | `guard_repeated_call` | Error; turn aborts |
 | Provider or tool pipeline returns an error | propagated | Error; turn aborts |
 | Context overflow before any tool event | retry layer | Compact and retry once |
 
 ### Safety bounds
 
-Two bounds prevent runaway loops (`crates/neenee-core/src/lib.rs:8-9`):
+Two bounds prevent runaway loops (`crates/neenee-core/src/lib.rs`):
 
 - `MAX_TOOL_ROUNDS = 32`. A single turn cannot exceed 32 tool rounds
   (each round may contain multiple parallel tool calls).
-- `MAX_REPEATED_TOOL_CALLS = 3`. `guard_repeated_call` (`lib.rs:933`)
-  tracks the previous `(name, arguments)` pair. After three consecutive
-  identical calls the fourth is rejected with an error. Distinct calls
-  and interleaved text resets the counter.
+- `MAX_REPEATED_TOOL_CALLS = 3`. `guard_repeated_call` tracks the previous
+  `(name, arguments)` pair. After three consecutive identical calls the
+  fourth is rejected with an error. Distinct calls and interleaved text
+  resets the counter.
 
 These are execution bounds, not a security sandbox. See
 [Harness architecture](harness.md) for the full safety surface.
@@ -248,12 +248,12 @@ call as ordinary assistant text:
 ```
 
 After the stream completes, `Agent::parse_tool_call`
-(`crates/neenee-core/src/lib.rs:634`) extracts the JSON from the
-assistant `content`. `Agent::attach_fallback_tool_call` (`lib.rs:659`)
-then promotes the parsed call onto the preceding assistant message as a
-synthetic `tool_calls` entry, so the next request's `messages` array
-carries a valid `tool_calls` / `tool_call_id` pair even though the
-original response was plain text.
+(`crates/neenee-core/src/lib.rs`) extracts the JSON from the
+assistant `content`. `Agent::attach_fallback_tool_call` then promotes the
+parsed call onto the preceding assistant message as a synthetic
+`tool_calls` entry, so the next request's `messages` array carries a valid
+`tool_calls` / `tool_call_id` pair even though the original response was
+plain text.
 
 The resulting `messages` evolution is identical to the native path. The
 only difference is whether the tool call arrives as a structured
@@ -262,9 +262,10 @@ only difference is whether the tool call arrives as a structured
 
 ## Retry interaction
 
-Retry lives at the turn level (`crates/neenee/src/main.rs:280-342`), not
-inside the provider. A retryable failure (HTTP 408, 429, 5xx, connection,
-timeout) is wrapped in `RetryableError` and re-issued after backoff.
+Retry lives at the turn level (inside `execute_turn` in
+`crates/neenee/src/main.rs`), not inside the provider. A retryable failure
+(HTTP 408, 429, 5xx, connection, timeout) is wrapped in `RetryableError`
+and re-issued after backoff.
 
 Two invariants shape the interaction between retry and the ReAct loop:
 
@@ -273,8 +274,8 @@ Two invariants shape the interaction between retry and the ReAct loop:
   occurred; the `messages` array is unchanged.
 - **Post-tool retry is terminal.** Once `execute_tool` has run for any
   call in the current round, retryable errors become terminal
-  (`main.rs:326-328`). Re-issuing would risk replaying side effects
-  (a second file write, a second shell command).
+  (the `tool_activity` check in `execute_turn`). Re-issuing would risk
+  replaying side effects (a second file write, a second shell command).
 
 The deferred-execution rule from [Tool call reassembly](#tool-call-
 reassembly) is what makes the first invariant hold. Because tools only

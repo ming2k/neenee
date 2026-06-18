@@ -7,7 +7,7 @@ tool name, its access class, parameter schema, permission scope, and source
 location.
 
 All production tools live in the `neenee-core` crate. The `Tool` trait is
-defined at `crates/neenee-core/src/lib.rs:156`.
+defined in `crates/neenee-core/src/lib.rs`.
 
 ## Tool access
 
@@ -66,7 +66,7 @@ cached `Always` rule matches against.
 ## Parameters
 
 Parameters are exposed to the model as JSON Schema via
-`Tool::to_openai_function()` (`crates/neenee-core/src/lib.rs:183`), which
+`Tool::to_openai_function()` (`crates/neenee-core/src/lib.rs`), which
 wraps `Tool::parameters()`.
 
 ### `bash`
@@ -116,7 +116,7 @@ Backed by ripgrep.
 | `pattern` | string | yes | — | Glob, e.g. `**/*.rs` |
 | `path` | string | no | `.` | Search root |
 
-Capped at `GLOB_MAX_RESULTS = 200` (`crates/neenee-core/src/tools.rs:583`).
+Capped at `GLOB_MAX_RESULTS = 200` (`crates/neenee-core/src/tools.rs`).
 
 ### `list_dir`
 
@@ -245,9 +245,8 @@ Idempotent; existing files are never overwritten.
 ### `mcp__<server>__<tool>`
 
 Parameters come from the MCP server's `inputSchema`, falling back to
-`{"type":"object"}` when absent (`crates/neenee-core/src/mcp.rs:199-202`). The
-public name is `mcp__{sanitized_server}__{sanitized_original}`
-(`crates/neenee-core/src/mcp.rs:189-193`).
+`{"type":"object"}` when absent (`crates/neenee-core/src/mcp.rs`). The
+public name is `mcp__{sanitized_server}__{sanitized_original}`.
 
 ## Special tools
 
@@ -288,11 +287,11 @@ indicator. The Plan-mode gate exempts `.neenee/plans/` writes through
 ### MCP tools
 
 Each MCP server's tools are wrapped in `McpTool`
-(`crates/neenee-core/src/mcp.rs:230`) and dispatch `tools/call` JSON-RPC over
+(`crates/neenee-core/src/mcp.rs`) and dispatch `tools/call` JSON-RPC over
 stdio to the server child process. The wrapper inherits the server's
-`read_only` flag as its `ToolAccess` (`mcp.rs:208-212`). Connect and
-`tools/list` are bounded by `MCP_CONNECT_TIMEOUT = 8s` (`mcp.rs:23, 277-281`).
-Configuration lives in `config.toml` under `[mcp.<server>]`.
+`read_only` flag as its `ToolAccess`. Connect and `tools/list` are bounded
+by `MCP_CONNECT_TIMEOUT = 8s`. Configuration lives in `config.toml` under
+`[mcp.<server>]`.
 
 ## Skills
 
@@ -307,13 +306,15 @@ description: When to invoke this skill
 Skill body injected into the system prompt on demand.
 ```
 
-Discovery (`crates/neenee-core/src/skills.rs:40`) searches, in order:
+Discovery (`crates/neenee-core/src/skills.rs`, `discover_skills`) searches,
+in order:
 
 1. `.neenee/skills/` in the project root.
 2. `~/.neenee/skills/` in the user home.
 
 First-seen wins; project-local overrides user-global. The skill index is
-injected into the system prompt at `crates/neenee-core/src/lib.rs:612-615`.
+built by `build_skills_index` and injected into the system prompt by
+`Agent::ensure_system_prompt` (`crates/neenee-core/src/lib.rs`).
 
 ## See also
 

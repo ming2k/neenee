@@ -633,6 +633,51 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     }
 }
 
+/// Draw a single-line model attribution badge above an assistant turn.
+///
+/// The badge labels which provider/model produced the following response, so a
+/// session that mixes models stays traceable. It occupies one content line
+/// (scrollable like any other), sits flush with the chat body prefix, and is
+/// rendered in muted text so it reads as metadata rather than content. The
+/// provider half is dropped when empty (e.g. providers without an id).
+fn draw_attribution_badge(
+    frame: &mut Frame,
+    area: Rect,
+    attribution: &(String, String),
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    theme: &Theme,
+) {
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+        return;
+    }
+    if *current_y >= area.y + area.height {
+        return;
+    }
+
+    let (provider, model) = attribution;
+    let prefix = " ".repeat(CHAT_BODY_PREFIX_COLS as usize);
+    // `provider · model`, dropping the provider half (and separator) when the
+    // provider id is empty so untagged/legacy providers show just the model.
+    let label = if provider.is_empty() {
+        model.clone()
+    } else {
+        format!("{} · {}", provider, model)
+    };
+
+    let line = Line::from(vec![
+        Span::styled(prefix, Style::default()),
+        Span::styled("◆ ", Style::default().fg(theme.dim_fg)),
+        Span::styled(label, Style::default().fg(theme.text_muted)),
+    ]);
+    let rect = Rect::new(area.x, *current_y, area.width, 1);
+    frame.render_widget(Paragraph::new(line), rect);
+    *current_y += 1;
+}
+
 fn goal_checklist_summary(goal: &Goal) -> Option<(usize, usize, String)> {
     if goal.checklist.is_empty() {
         return None;

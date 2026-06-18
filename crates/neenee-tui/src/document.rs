@@ -140,6 +140,12 @@ pub struct ChatMessage {
     /// The original raw markdown/text, preserved for exact copy.
     pub raw: String,
     pub kind: MessageKind,
+    /// Provider/solution id that produced this message, mirrored from the
+    /// core [`Message`] so the transcript stays traceable across model
+    /// switches. `None` for messages that don't carry attribution.
+    pub provider: Option<String>,
+    /// Model id that produced this message, companion to [`ChatMessage::provider`].
+    pub model: Option<String>,
 }
 
 impl ChatMessage {
@@ -151,7 +157,30 @@ impl ChatMessage {
             blocks,
             raw,
             kind: MessageKind::Chat,
+            provider: None,
+            model: None,
         }
+    }
+
+    /// Stamp the provider/solution id and model that produced this message.
+    pub fn with_attribution(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.provider = Some(provider.into());
+        self.model = Some(model.into());
+        self
+    }
+
+    /// The `(provider, model)` pair to show as an attribution badge, when this
+    /// message carries at least a model. Used by the renderer to label which
+    /// model produced a turn; `None` when the message has no attribution
+    /// (user/system messages, or untagged history).
+    pub fn attribution_label(&self) -> Option<(String, String)> {
+        let model = self.model.clone()?;
+        let provider = self.provider.clone().unwrap_or_default();
+        Some((provider, model))
     }
 
     pub fn tool_step(
@@ -173,6 +202,8 @@ impl ChatMessage {
                 started_at: Some(std::time::Instant::now()),
                 children: Vec::new(),
             },
+            provider: None,
+            model: None,
         };
         message.refresh_tool_step();
         message
@@ -415,6 +446,8 @@ impl ChatMessage {
                 duration_ms: None,
                 expanded: false,
             },
+            provider: None,
+            model: None,
         };
         message.raw = content;
         message.blocks = parse_blocks(&message.raw);

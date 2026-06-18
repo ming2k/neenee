@@ -16,7 +16,6 @@ uses to call tools, see [Tool protocol](tool-protocol.md).
 | Model weights | Behavior under tool-use prompts; whether reasoning is emitted at all | `deepseek-reasoner`, `glm-4-plus`, `qwen-coder-plus`, `gemini-2.0-flash` |
 | Serving runtime | HTTP API shape, `tools` / `tool_choice` field parsing, guided JSON decoding, SSE chunking, `reasoning_content` field passthrough | vLLM, SGLang, TGI, TensorRT-LLM, and the hosted gateways (`api.openai.com`, `dashscope.aliyuncs.com`, `open.bigmodel.cn`, Moonshot, Volcengine Ark) |
 | Client (neenee) | Schema declaration, delta reconstruction, fallback parsing, registry, permission brokering | `crates/neenee-core` |
-
 A tool call only succeeds when all three layers agree. A model whose weights
 were never tool-tuned will emit free text even if the runtime accepts a
 `tools` field; a runtime without guided decoding may return malformed JSON
@@ -48,8 +47,8 @@ differently on the same `tools` payload.
 
 neenee trusts the runtime to deliver well-formed OpenAI-shaped tool calls.
 The `OpenAIProvider` declares schemas via `prepare_tools`
-(`crates/neenee-core/src/providers.rs:245`) and injects them into every
-request body (`providers.rs:167-170`). It does not implement its own guided
+(`crates/neenee-core/src/providers.rs`) and injects them into every
+request body through `request_body`. It does not implement its own guided
 decoding or prompt templating — that is the runtime's job. For the
 mechanics of constrained decoding and chat templates, see
 [Guided decoding](guided-decoding.md).
@@ -63,11 +62,10 @@ and passed through verbatim by the serving runtime as a sibling of `content`
 in the response object.
 
 neenee never declares reasoning support and never sends a flag that would
-enable it. `parse_openai_stream_data` (`providers.rs:212`) and the non-
-streaming `chat` parser (`providers.rs:275`) simply observe the field when
-it is present and forward it as `ProviderStreamEvent::ReasoningDelta`. A
-non-reasoning model produces no such events; no capability negotiation is
-involved.
+enable it. `parse_openai_stream_data` and the non-streaming `chat` parser
+(both in `providers.rs`) simply observe the field when it is present and
+forward it as `ProviderStreamEvent::ReasoningDelta`. A non-reasoning model
+produces no such events; no capability negotiation is involved.
 
 This makes reasoning cheap to consume but also impossible to enable from the
 client side. Switching the same provider from `deepseek-chat` to
@@ -80,13 +78,12 @@ runtimes implement. Two runtime behaviors matter to neenee:
 
 - **Delta fragmentation.** The runtime is allowed to split a single tool
   call across many SSE chunks, indexed by `delta.tool_calls[].index`. neenee
-  reassembles them by index in the streaming loop
-  (`crates/neenee-core/src/lib.rs:820-841`) and does not execute a tool
-  until the stream terminates.
+  reassembles them by index in the streaming loop inside
+  `Agent::run_streaming_with_events` (`crates/neenee-core/src/lib.rs`) and
+  does not execute a tool until the stream terminates.
 - **Field selection.** A runtime may omit `reasoning_content` or
   `tool_calls` entirely from deltas where they have no new data. neenee's
-  parser treats every delta field as optional
-  (`providers.rs:218, 221, 227`).
+  parser treats every delta field as optional.
 
 Providers that do not implement `stream_chat_events` (Gemini,
 LlamaServer) fall back to the trait default, which wraps `stream_chat` and
@@ -98,12 +95,14 @@ tool-call deltas even when the underlying service might support them.
 neenee's provider adapters encode an opinionated mapping between the three
 layers:
 
-- **OpenAI-compatible wrappers** (`OpenAIProvider`, `DeepSeekProvider`,
-  `QwenProvider`, `GLMProvider`, `VolcengineProvider`, `KimiProvider`,
-  `KimiCodeProvider`) assume a runtime that fully implements the OpenAI
-  Chat Completions contract including `tools`, `tool_choice`,
-  `reasoning_content`, and SSE tool-call deltas. They delegate to a shared
-  `OpenAIProvider` and inherit every capability.
+- **OpenAI-compatible registry presets** (`kimi-code`, `kimi`, `deepseek`,
+  `qwen`, `glm`, `volcengine`, plus the bespoke `openai` and `custom`
+  entries, all backed by `OpenAIProvider`) assume a runtime that fully
+  implements the OpenAI Chat Completions contract including `tools`,
+  `tool_choice`, `reasoning_content`, and SSE tool-call deltas. The
+  registry presets are pure data in `OPENAI_COMPAT_PROVIDERS`;
+  `OpenAiCompatProvider::build` constructs an `OpenAIProvider` for each, so
+  they inherit every capability from one shared implementation.
 - **Gemini** (`GeminiProvider`) speaks a different request shape
   (`systemInstruction`, `model`/`user` roles, no `tools` field). neenee does
   not bridge Gemini's native function-calling API; tool calls fall through
@@ -116,7 +115,7 @@ layers:
 
 The practical consequence: on Gemini and LlamaServer the model must emit
 `{"tool": "<name>", "arguments": {…}}` as ordinary assistant text, which
-`Agent::parse_tool_call` (`crates/neenee-core/src/lib.rs:634`) extracts
+`Agent::parse_tool_call` (`crates/neenee-core/src/lib.rs`) extracts
 after the fact. See [Tool protocol](tool-protocol.md) for the fallback
 mechanics.
 

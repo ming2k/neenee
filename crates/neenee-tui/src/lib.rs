@@ -695,8 +695,11 @@ pub async fn run_tui(
         while let Some(resp) = rx.recv().await {
             match resp {
                 AgentResponse::Text(t) => {
+                    let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::new(Role::Assistant, t));
+                    msgs.push(
+                        ChatMessage::new(Role::Assistant, t).with_attribution(provider, model),
+                    );
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
                 }
@@ -705,8 +708,11 @@ pub async fn run_tui(
                     ir_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::StreamStart => {
+                    let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::new(Role::Assistant, ""));
+                    msgs.push(
+                        ChatMessage::new(Role::Assistant, "").with_attribution(provider, model),
+                    );
                     ir_clone.store(true, Ordering::SeqCst);
                     *activity_clone.lock().await = "responding".to_string();
                 }
@@ -755,7 +761,10 @@ pub async fn run_tui(
                         {
                             msgs.pop();
                         }
-                        msgs.push(ChatMessage::thinking(delta));
+                        let (provider, model) = attribution(&cp_clone, &cm_clone).await;
+                        msgs.push(
+                            ChatMessage::thinking(delta).with_attribution(provider, model),
+                        );
                         reasoning_start = Some(std::time::Instant::now());
                     }
                 }
@@ -799,8 +808,12 @@ pub async fn run_tui(
                     arguments,
                 } => {
                     *activity_clone.lock().await = tool_activity_status(&name).to_string();
+                    let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::tool_step(id, name, arguments));
+                    msgs.push(
+                        ChatMessage::tool_step(id, name, arguments)
+                            .with_attribution(provider, model),
+                    );
                     ir_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::ToolResult {
@@ -810,12 +823,15 @@ pub async fn run_tui(
                     duration_ms,
                 } => {
                     *activity_clone.lock().await = "thinking".to_string();
+                    let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     if !msgs
                         .iter_mut()
                         .any(|message| message.finish_tool_step(&id, output.clone(), duration_ms))
                     {
-                        let mut message = ChatMessage::tool_step(id.clone(), name.clone(), "{}");
+                        let mut message =
+                            ChatMessage::tool_step(id.clone(), name.clone(), "{}")
+                                .with_attribution(provider, model);
                         message.finish_tool_step(&id, output, duration_ms);
                         msgs.push(message);
                     }
@@ -2153,6 +2169,17 @@ fn tool_activity_status(name: &str) -> &'static str {
     }
 }
 
+/// Snapshot the currently active provider id and model so a freshly created
+/// message can be attributed to the model that produced it. The listener keeps
+/// these in sync with the harness via `ProviderSwitched` and the initial
+/// selection, so live messages stay traceable just like restored ones.
+async fn attribution(
+    provider: &Arc<Mutex<String>>,
+    model: &Arc<Mutex<String>>,
+) -> (String, String) {
+    (provider.lock().await.clone(), model.lock().await.clone())
+}
+
 fn compact_retry_reason(message: &str) -> String {
     let first_line = message.lines().next().unwrap_or(message).trim();
     let mut chars = first_line.chars();
@@ -2397,6 +2424,8 @@ fn chat_message_from_core(message: Message) -> Option<ChatMessage> {
     if message.hidden || message.role == Role::System {
         return None;
     }
+    let provider = message.provider.clone();
+    let model = message.model.clone();
     let content = if let Some(display_content) = message.display_content {
         display_content
     } else if message.content.is_empty() {
@@ -2413,7 +2442,10 @@ fn chat_message_from_core(message: Message) -> Option<ChatMessage> {
     if content.is_empty() {
         None
     } else {
-        Some(ChatMessage::new(message.role, content))
+        let mut chat = ChatMessage::new(message.role, content);
+        chat.provider = provider;
+        chat.model = model;
+        Some(chat)
     }
 }
 
@@ -2423,20 +2455,25 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
         if message.hidden || message.role == Role::System {
             continue;
         }
+        // Attribution travels on every part so a resumed session that mixed
+        // models still shows which model produced each turn.
+        let provider = message.provider.clone();
+        let model = message.model.clone();
         if message.role == Role::Assistant {
             if let Some(reasoning) = message.reasoning_content.take() {
                 let mut thinking = ChatMessage::thinking(reasoning);
+                thinking.provider = provider.clone();
+                thinking.model = model.clone();
                 thinking.set_thinking_duration(0);
                 restored.push(thinking);
             }
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
                     // Historical results match by tool name, so use it as the id.
-                    restored.push(ChatMessage::tool_step(
-                        call.name.clone(),
-                        call.name,
-                        call.arguments,
-                    ));
+                    let mut step = ChatMessage::tool_step(call.name.clone(), call.name, call.arguments);
+                    step.provider = provider.clone();
+                    step.model = model.clone();
+                    restored.push(step);
                 }
                 if message.content.is_empty() {
                     continue;
@@ -2493,6 +2530,31 @@ mod tests {
     }
 
     #[test]
+    fn restored_assistant_carries_provider_and_model_attribution() {
+        // A persisted assistant message stamped by the harness keeps its
+        // provider/model so a resumed session that mixed models stays
+        // traceable in the transcript.
+        let message = Message::new(Role::Assistant, "Hello from kimi")
+            .with_attribution("kimi-code", "kimi-for-coding");
+        let restored = chat_message_from_core(message).unwrap();
+        assert_eq!(restored.provider.as_deref(), Some("kimi-code"));
+        assert_eq!(restored.model.as_deref(), Some("kimi-for-coding"));
+        assert_eq!(
+            restored.attribution_label(),
+            Some(("kimi-code".to_string(), "kimi-for-coding".to_string()))
+        );
+
+        // A plain user message carries no attribution.
+        let user = chat_message_from_core(Message::new(Role::User, "hi")).unwrap();
+        assert!(user.attribution_label().is_none());
+
+        // A provider without an id still surfaces the model alone.
+        let model_only = Message::new(Role::Assistant, "x").with_attribution("", "gpt-4o");
+        let restored = chat_message_from_core(model_only).unwrap();
+        assert_eq!(restored.attribution_label(), Some((String::new(), "gpt-4o".to_string())));
+    }
+
+    #[test]
     fn restored_reasoning_is_not_shown_as_running() {
         let message = Message {
             role: Role::Assistant,
@@ -2502,6 +2564,8 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         };
 
@@ -2531,6 +2595,8 @@ mod tests {
             }]),
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         };
 
@@ -2560,6 +2626,8 @@ mod tests {
                 ]),
                 tool_call_id: None,
                 images: None,
+                provider: None,
+                model: None,
                 hidden: false,
             },
             Message::tool_result(

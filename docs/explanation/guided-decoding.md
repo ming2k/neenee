@@ -140,9 +140,9 @@ text, not the per-token probability distribution. Constrained decoding
 must run inside the serving runtime where the logits live.
 
 This is the load-bearing assumption behind `OpenAIProvider`. When
-`prepare_tools` injects the `tools` field (`crates/neenee-core/src/
-providers.rs:167-170`), it is implicitly asserting two things about the
-upstream runtime:
+`prepare_tools` injects the `tools` field through `request_body`
+(`crates/neenee-core/src/providers.rs`), it is implicitly asserting two
+things about the upstream runtime:
 
 1. The runtime renders a tool-use chat template for the requested model.
 2. The runtime applies guided decoding to the tool-call region of the

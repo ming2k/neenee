@@ -8,64 +8,98 @@ decides which path to take, see
 [Provider capabilities](../explanation/provider-capabilities.md).
 
 All provider implementations live in
-`crates/neenee-core/src/providers.rs`. Dispatch (turning a provider name
-into a constructor call) lives in `crates/neenee/src/main.rs`.
+`crates/neenee-core/src/providers.rs`. Construction dispatch (turning a
+provider name into a concrete provider) lives in
+`crates/neenee/src/main.rs`.
 
 ## Choose a path
 
 | Provider speaks... | Path | Effort |
 |--------------------|------|--------|
-| OpenAI Chat Completions (`/v1/chat/completions`, `tools`, `tool_choice`, `reasoning_content`, SSE) | Wrap `OpenAIProvider` | Small |
+| OpenAI Chat Completions (`/v1/chat/completions`, `tools`, `tool_choice`, `reasoning_content`, SSE) | Add a `OPENAI_COMPAT_PROVIDERS` registry entry | Tiny |
 | A custom contract (different roles, no `tools` field, different streaming) | Standalone adapter | Medium |
 
-Pick the wrapper path whenever possible. The wrapper inherits native tools,
-reasoning, and structured streaming for free.
+Pick the registry path whenever possible. A registry entry inherits native
+tools, reasoning, and structured streaming for free by delegating to
+`OpenAIProvider`.
 
-## Wrap `OpenAIProvider`
+## Add a registry entry
 
-Add a tuple struct around `OpenAIProvider` and a constructor that fixes the
-base URL. Follow the existing wrappers (`DeepSeekProvider`,
-`QwenProvider`, `GLMProvider`, `VolcengineProvider`, `KimiProvider`).
+The `OPENAI_COMPAT_PROVIDERS` const table in `providers.rs` is the source of
+truth for every OpenAI-compatible vendor. Each row is an `OpenAiCompatProvider`
+spec; adding a provider is a single new entry instead of a delegating struct
+plus trait boilerplate.
 
 ```rust
-/// Acme — OpenAI-compatible endpoint.
-/// Base URL: https://api.acme.example/v1/chat/completions
-/// Env: `ACME_API_KEY`
-/// Popular models: acme-1, acme-1-mini
-pub struct AcmeProvider(OpenAIProvider);
-
-impl AcmeProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://api.acme.example/v1/chat/completions",
-        ))
-    }
-}
+OpenAiCompatProvider {
+    id: "acme",
+    base_url: "https://api.acme.example/v1/chat/completions",
+    default_model: "acme-1",
+    env_api_key: "ACME_API_KEY",
+    env_model: "ACME_MODEL",
+    fixed_model: None,
+    default_user_agent: None,
+},
 ```
 
-Implement `Provider` by delegating every method to the inner
-`OpenAIProvider`. The four methods are `prepare_tools`, `chat`,
-`stream_chat`, and `stream_chat_events`. Copy the delegation block from
-`QwenProvider` (`crates/neenee-core/src/providers.rs:844-864`) verbatim and
-it will be correct.
+| Field | Purpose |
+|-------|---------|
+| `id` | Stable identifier used in `config.toml` (`default_provider`), `/provider switch`, and the TUI |
+| `base_url` | Full chat-completions endpoint URL |
+| `default_model` | Model used when neither config nor environment specifies one |
+| `env_api_key` | Environment variable consulted for the API key |
+| `env_model` | Environment variable consulted for a model override |
+| `fixed_model` | When set, the endpoint pins this model and ignores any override (e.g. the Kimi coding endpoint) |
+| `default_user_agent` | When set, the endpoint requires this user agent unless overridden |
 
-Do **not** skip `prepare_tools` or `stream_chat_events`. Skipping
-`prepare_tools` silently disables native tools; skipping
-`stream_chat_events` silently disables reasoning and streaming tool-call
-deltas. Both force the universal fallback even when the runtime supports
-the native path.
+`OpenAiCompatProvider::build` turns the spec into a concrete `OpenAIProvider`,
+calling `OpenAIProvider::with_base_url_and_user_agent` and setting the
+provider's `id` field so assistant messages are attributed correctly. The
+built provider inherits `prepare_tools`, `stream_chat_events`, and the full
+`chat`/`stream_chat` implementations from `OpenAIProvider`.
 
-If the provider requires a non-standard `User-Agent` (Kimi Code does), use
-`OpenAIProvider::with_base_url_and_user_agent` instead and accept a
-`user_agent` parameter in the constructor.
+That single table entry is the entire core change. The remaining steps wire
+the new `id` into the per-provider config fields and TUI status reporting in
+`main.rs`.
+
+## Register the config fields
+
+`crates/neenee/src/main.rs` keeps a `Config` field per provider for the
+API key and model so values entered in the TUI survive a restart. Add the
+new provider to these helpers, all keyed by the same `id` string:
+
+| Helper | What to add |
+|--------|-------------|
+| `config_api_key` | An arm returning `config.acme_api_key.clone()` |
+| `config_model` | An arm returning `config.acme_model.clone()` |
+| `provider_key_status` | A row checking `ACME_API_KEY` and the config field |
+| `AgentRequest::SwitchProvider` api-key persistence match | An arm assigning `config.acme_api_key = Some(key)` |
+| `AgentRequest::SwitchProvider` model persistence match | An arm assigning `config.acme_model = Some(model.clone())` |
+
+Add the matching `acme_api_key` and `acme_model` fields to the `Config`
+struct in `crates/neenee/src/config.rs`, with serde rename rules matching
+the existing providers.
+
+The startup dispatch and runtime switch already route through
+`make_provider`, which consults `openai_compat_provider` first. Because the
+new `id` is in the registry, no new `match` arm is needed in
+`make_provider` itself.
+
+Mirror the env var names, model env var, and default model in the
+[Providers](../reference/providers.md) catalog table.
+
+### Optional: model-name mirror
+
+If the TUI header should show a friendly default model name when no model is
+configured, the registry entry already supplies it through
+`spec.resolve_model(...)`, which the `initial_m_name` block consults. No
+extra code is needed for registry providers.
 
 ## Build a standalone adapter
 
 Use this path only when the provider's contract is genuinely incompatible
-with OpenAI Chat Completions. `GeminiProvider` (`providers.rs:397`) and
-`LlamaServerProvider` (`providers.rs:565`) are the existing examples.
+with OpenAI Chat Completions. `GeminiProvider` and `LlamaServerProvider` are
+the existing examples.
 
 The standalone adapter must implement at minimum `chat` and `stream_chat`.
 Decide explicitly for each optional method:
@@ -77,60 +111,16 @@ Decide explicitly for each optional method:
 
 Standalone adapters that omit `prepare_tools` should hard-code
 `tool_calls: None` and `reasoning_content: None` in the returned `Message`,
-matching `LlamaServerProvider` (`providers.rs:619-627`). This keeps the
-internal contract honest: the agent knows the provider cannot deliver those
-fields and routes through `parse_tool_call` instead.
+matching `LlamaServerProvider`. This keeps the internal contract honest: the
+agent knows the provider cannot deliver those fields and routes through
+`parse_tool_call` instead.
 
 Map neenee's `Role` enum to the provider's role names in both `chat` and
 `stream_chat`. The universal fallback assumes assistant text is reachable
 through the standard message channel; a misnamed role breaks it.
 
-## Register the provider
-
-Three sites in `crates/neenee/src/main.rs` must learn the new provider
-name. All three use the same string key.
-
-### Startup dispatch
-
-Add an arm to `match config.default_provider.as_str()` at `main.rs:777`.
-Read the API key from an env var with a `config.toml` fallback:
-
-```rust
-"acme" => {
-    let api_key = std::env::var("ACME_API_KEY")
-        .ok()
-        .or(config.acme_api_key.clone());
-    OpenAIProvider::with_base_url(
-        api_key.unwrap_or_default(),
-        std::env::var("ACME_MODEL")
-            .ok()
-            .or(config.acme_model.clone())
-            .unwrap_or_else(|| "acme-1".to_string()),
-        "https://api.acme.example/v1/chat/completions",
-    ) as Arc<dyn Provider>
-}
-```
-
-Mirror the env var name, model env var, and default model in the
-[Providers](../reference/providers.md) catalog table.
-
-### Runtime switch
-
-Add the same arm to the second dispatch at `main.rs:1079` (inside the
-`AgentRequest::SwitchProvider` handler). The model comes from the request
-payload rather than an env var. Persist any TUI-entered API key by
-following the pattern at `main.rs:1058-1071`.
-
-### API-key status
-
-Add a row to `provider_key_status` at `main.rs:662-706` so the TUI reports
-whether the provider is usable. Providers without an API key (`llama`,
-`mock`) return `true` unconditionally.
-
-### Optional: model-name mirror
-
-If the TUI header should show a friendly default model name when no model
-is configured, add an arm to `main.rs:979-1012`.
+Add a `match` arm for the new `id` in `make_provider` so the standalone
+constructor is reached, and add the config/status rows described above.
 
 ## Verify
 
@@ -147,7 +137,7 @@ Then exercise the provider end-to-end:
    `default_provider = "acme"` in `config.toml`.
 2. Send a prompt that should trigger a tool call. Confirm the tool-step
    card renders with the right arguments and result.
-3. If the model advertises reasoning support (for example a
+3. If the model advertises reasoning support (for example an
    `acme-reasoner` variant), switch to it and confirm a thinking card
    appears.
 4. Run `/provider switch acme <model>` from inside the TUI and confirm the
@@ -160,9 +150,10 @@ Then exercise the provider end-to-end:
 
 Update these surfaces in the same change:
 
-- Add a row to both tables in [Providers](../reference/providers.md)
-  (capability matrix and provider catalog).
-- If the provider introduces a new capability shape (for example a second
+- Add a row to the appropriate table in [Providers](../reference/providers.md)
+  (registry preset table for OpenAI-compatible providers, bespoke table for
+  standalone adapters).
+- If the provider introduces a new capability shape (for example a third
   standalone adapter), update
   [Provider capabilities](../explanation/provider-capabilities.md).
 - If the provider's env vars or `default_provider` key differ from the
@@ -173,5 +164,5 @@ Update these surfaces in the same change:
 - [Providers](../reference/providers.md) — existing provider matrix
 - [Provider capabilities](../explanation/provider-capabilities.md) —
   capability layering and why providers differ
-- [Tool protocol](../explanation/tool-protocol.md) — what the wrapper path
+- [Tool protocol](../explanation/tool-protocol.md) — what the registry path
   inherits
