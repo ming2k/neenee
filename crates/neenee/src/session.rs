@@ -543,6 +543,12 @@ fn session_archive_dir(path: &std::path::Path) -> PathBuf {
         .join("sessions")
 }
 
+pub fn goals_db_path() -> PathBuf {
+    let project =
+        ProjectDirs::from("ai", "neenee", "neenee").expect("Could not determine config directory");
+    project.config_dir().join("goals.db")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

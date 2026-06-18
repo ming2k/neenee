@@ -16,3 +16,5 @@ walkdir = "2"
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 httpdate = "1"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }

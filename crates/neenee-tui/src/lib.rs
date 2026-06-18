@@ -14,8 +14,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot, Message, PermissionDecision,
-    PermissionRequest, Role, SessionOverview,
+    AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot, ImagePart, Message,
+    PermissionDecision, PermissionRequest, Role, SessionOverview,
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -214,6 +214,8 @@ pub struct App {
     pub permission_max_scroll: usize,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
+    /// Images pasted (Ctrl+V) and waiting to be sent with the next message.
+    pub pending_images: Vec<ImagePart>,
     /// Semantic selection state.
     pub selection: SelectionState,
     /// Drag gesture state.
@@ -684,26 +686,40 @@ pub async fn run_tui(
                             content.push_str(&delta);
                         }
                     } else {
+                        // StreamStart inserts an empty assistant placeholder before
+                        // the first reasoning delta. Reasoning renders as its own
+                        // thinking card, so that placeholder is never used and only
+                        // leaves an extra blank line between the user message and the
+                        // thinking header. Drop it before creating the thinking card
+                        // so restored history and live reasoning have identical
+                        // spacing.
+                        if msgs
+                            .last()
+                            .is_some_and(|m| m.role == Role::Assistant && m.raw.is_empty())
+                        {
+                            msgs.pop();
+                        }
                         msgs.push(ChatMessage::thinking(delta));
                         reasoning_start = Some(std::time::Instant::now());
                     }
                 }
                 AgentResponse::StreamReasoningEnd(content) => {
-                    if let Some(started) = reasoning_start.take() {
-                        let duration_ms = started.elapsed().as_millis() as u64;
-                        let mut msgs = messages_clone.lock().await;
-                        if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking())
+                    let duration_ms = reasoning_start
+                        .take()
+                        .map(|started| started.elapsed().as_millis() as u64);
+                    let mut msgs = messages_clone.lock().await;
+                    if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking()) {
+                        last.raw = content.clone();
+                        last.reparse();
+                        if let MessageKind::Thinking {
+                            content: current,
+                            duration_ms: d,
+                            ..
+                        } = &mut last.kind
                         {
-                            last.raw = content.clone();
-                            last.reparse();
-                            if let MessageKind::Thinking {
-                                content: current,
-                                duration_ms: d,
-                                ..
-                            } = &mut last.kind
-                            {
-                                *current = content;
-                                *d = Some(duration_ms);
+                            *current = content;
+                            if d.is_none() {
+                                *d = Some(duration_ms.unwrap_or(0));
                             }
                         }
                     }
@@ -793,6 +809,9 @@ pub async fn run_tui(
                 AgentResponse::GoalUpdated(goal) => {
                     harness_clone.lock().await.goal = Some(goal);
                 }
+                AgentResponse::ModeChanged(mode) => {
+                    harness_clone.lock().await.mode = mode;
+                }
                 AgentResponse::RetryScheduled {
                     attempt,
                     max_attempts,
@@ -867,6 +886,7 @@ pub async fn run_tui(
         permission_max_scroll: 0,
         input_history,
         history_index: None,
+        pending_images: Vec::new(),
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
@@ -935,6 +955,10 @@ async fn run_app_loop<B: Backend>(
     // within ~16ms of completion instead of waiting up to the full idle tick.
     let copy_pending = Arc::new(AtomicUsize::new(0));
 
+    // Clipboard paste reads (Ctrl+V) run in background tasks for the same
+    // reason: arboard/wl-paste must never block the event loop.
+    let (paste_tx, mut paste_rx) = mpsc::unbounded_channel::<clipboard::ClipboardRead>();
+
     loop {
         if app.should_quit.load(Ordering::SeqCst) {
             return Ok(());
@@ -945,6 +969,11 @@ async fn run_app_loop<B: Backend>(
             set_copy_feedback(app, result);
             app.copy_toast_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
+        }
+
+        // Apply any completed clipboard paste reads.
+        while let Ok(read) = paste_rx.try_recv() {
+            apply_clipboard_paste(app, read);
         }
 
         // Sync provider/model from listener
@@ -984,6 +1013,18 @@ async fn run_app_loop<B: Backend>(
             if std::time::Instant::now() >= until {
                 app.copy_toast_until = None;
             }
+        }
+        // While images are staged for the next message, keep a persistent
+        // indicator visible so the user knows Enter will send them.
+        if !app.pending_images.is_empty() {
+            let n = app.pending_images.len();
+            app.copy_toast_message = format!(
+                "{n} image{} attached — enter to send",
+                if n == 1 { "" } else { "s" }
+            );
+            app.copy_toast_failed = false;
+            app.copy_toast_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
         }
         if app.ctrl_c_armed_ticks > 0 {
             app.ctrl_c_armed_ticks -= 1;
@@ -1180,7 +1221,8 @@ async fn run_app_loop<B: Backend>(
                             &app.theme,
                         );
                         app.permission_max_scroll = max_scroll;
-                        app.permission_scroll = app.permission_scroll.min(app.permission_max_scroll);
+                        app.permission_scroll =
+                            app.permission_scroll.min(app.permission_max_scroll);
                     }
                 }
                 Modal::ApiKey => {
@@ -1318,7 +1360,12 @@ async fn run_app_loop<B: Backend>(
                     app.suggestion_index = None;
                     app.input_scroll = 0;
 
-                    if !text.is_empty() {
+                    // Take any images staged by Ctrl+V so they ship with this
+                    // message and are cleared whether or not there is text.
+                    let images = std::mem::take(&mut app.pending_images);
+                    let has_images = !images.is_empty();
+
+                    if !text.is_empty() || has_images {
                         runtime.is_responding.store(true, Ordering::SeqCst);
                         *runtime.activity_status.lock().await = "queued".to_string();
                         runtime
@@ -1326,13 +1373,13 @@ async fn run_app_loop<B: Backend>(
                             .lock()
                             .await
                             .push(ChatMessage::new(Role::User, text.clone()));
-                        if app.input_history.last() != Some(&text) {
+                        if !text.is_empty() && app.input_history.last() != Some(&text) {
                             app.input_history.push(text.clone());
                         }
                         app.history_index = None;
                         app.follow_bottom = true;
                         app.pin_header_line = None;
-                        let _ = app.tx.send(AgentRequest::Chat(text));
+                        let _ = app.tx.send(AgentRequest::Chat { text, images });
                     } else if let Some((start, end)) = app.selection.normalized_range() {
                         // Enter on a selected card: navigate into a sub-agent
                         // task, otherwise toggle that card's expansion.
@@ -1611,6 +1658,14 @@ async fn run_app_loop<B: Backend>(
                     }
                     drop(messages);
                     app.selection = SelectionState::None;
+                }
+                input::InputAction::Paste => {
+                    // Ctrl+V: read the system clipboard off the event loop.
+                    // The result is delivered back through `paste_rx` and
+                    // applied on a later frame (image -> attach, text -> insert).
+                    if app.active_modal == Modal::None {
+                        spawn_clipboard_paste(&paste_tx);
+                    }
                 }
                 input::InputAction::ExitSubAgent => {
                     app.exit_subagent();
@@ -2080,6 +2135,68 @@ fn spawn_clipboard_copy(
     });
 }
 
+/// Read the system clipboard in a background task and deliver the result to
+/// the event loop. Bounded by a timeout so a stuck clipboard reader can never
+/// freeze paste feedback.
+fn spawn_clipboard_paste(tx: &mpsc::UnboundedSender<clipboard::ClipboardRead>) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let read = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::clipboard::read(),
+        )
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_) => clipboard::ClipboardRead::Empty,
+        };
+        let _ = tx.send(read);
+    });
+}
+
+/// Apply a completed clipboard paste: attach an image, insert text at the
+/// cursor, or surface an error toast.
+fn apply_clipboard_paste(app: &mut App, read: clipboard::ClipboardRead) {
+    if app.active_modal != Modal::None {
+        return;
+    }
+    match read {
+        clipboard::ClipboardRead::Image { data, mime } => {
+            let encoded = crate::clipboard::base64_image(&data);
+            app.pending_images.push(ImagePart { mime, data: encoded });
+            let n = app.pending_images.len();
+            app.copy_toast_message = format!(
+                "{n} image{} attached — enter to send",
+                if n == 1 { "" } else { "s" }
+            );
+            app.copy_toast_failed = false;
+            app.copy_toast_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
+        }
+        clipboard::ClipboardRead::Text(text) => {
+            let chars_to_insert = text.chars().count();
+            let byte_pos = app
+                .input
+                .char_indices()
+                .map(|(i, _)| i)
+                .nth(app.cursor_position)
+                .unwrap_or(app.input.len());
+            app.input.insert_str(byte_pos, &text);
+            app.cursor_position += chars_to_insert;
+            app.copy_toast_message = format!("pasted {chars_to_insert} char{}", if chars_to_insert == 1 { "" } else { "s" });
+            app.copy_toast_failed = false;
+            app.copy_toast_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(1200));
+        }
+        clipboard::ClipboardRead::Empty => {
+            app.copy_toast_message = "clipboard is empty".to_string();
+            app.copy_toast_failed = true;
+            app.copy_toast_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(1200));
+        }
+    }
+}
+
 fn set_copy_feedback(app: &mut App, result: Result<clipboard::CopyOutcome, String>) {
     match result {
         Ok(clipboard::CopyOutcome::Native) => {
@@ -2170,7 +2287,9 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
         }
         if message.role == Role::Assistant {
             if let Some(reasoning) = message.reasoning_content.take() {
-                restored.push(ChatMessage::thinking(reasoning));
+                let mut thinking = ChatMessage::thinking(reasoning);
+                thinking.set_thinking_duration(0);
+                restored.push(thinking);
             }
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
@@ -2236,6 +2355,31 @@ mod tests {
     }
 
     #[test]
+    fn restored_reasoning_is_not_shown_as_running() {
+        let message = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            display_content: None,
+            reasoning_content: Some("step-by-step reasoning".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            images: None,
+            hidden: false,
+        };
+
+        let restored = chat_messages_from_core(vec![message]);
+        assert_eq!(restored.len(), 1);
+        let thinking = &restored[0];
+        assert!(thinking.is_thinking());
+        // A finished reasoning block must not be rendered with a live spinner.
+        assert!(
+            thinking.thinking_header().unwrap().contains("0ms"),
+            "restored thinking should have a finished duration, got {:?}",
+            thinking.thinking_header()
+        );
+    }
+
+    #[test]
     fn restored_native_tool_calls_are_visible() {
         let message = Message {
             role: Role::Assistant,
@@ -2248,6 +2392,7 @@ mod tests {
                 arguments: "{\"path\":\"README.md\"}".to_string(),
             }]),
             tool_call_id: None,
+            images: None,
             hidden: false,
         };
 
@@ -2276,6 +2421,7 @@ mod tests {
                     },
                 ]),
                 tool_call_id: None,
+                images: None,
                 hidden: false,
             },
             Message::tool_result(

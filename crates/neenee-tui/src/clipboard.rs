@@ -116,9 +116,9 @@ async fn copy_system(text: &str) -> Result<(), Box<dyn std::error::Error + Send 
 }
 
 /// Simple base64 encoder (no external crate needed).
-fn base64_encode(input: &str) -> String {
+fn base64_encode_bytes(input: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
+    let bytes = input;
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
     for chunk in bytes.chunks(3) {
@@ -144,6 +144,138 @@ fn base64_encode(input: &str) -> String {
     }
 
     out
+}
+
+/// Encode a UTF-8 string to base64.
+fn base64_encode(input: &str) -> String {
+    base64_encode_bytes(input.as_bytes())
+}
+
+/// What `read()` found on the system clipboard.
+#[derive(Debug, Clone)]
+pub enum ClipboardRead {
+    /// An image (PNG bytes) plus its MIME type.
+    Image { data: Vec<u8>, mime: String },
+    /// Plain text.
+    Text(String),
+    /// The clipboard is empty or unreadable.
+    Empty,
+}
+
+/// Read the system clipboard, preferring an image over text (mirrors opencode).
+///
+/// Image bytes come straight from the platform clipboard owner (`wl-paste` on
+/// Wayland, `xclip` on X11, `osascript` on macOS) as PNG, so no re-encoding is
+/// needed. Text falls back to `arboard`. Everything runs off the event loop:
+/// external commands are awaited asynchronously and arboard (which is `!Send`)
+/// runs in a blocking task.
+pub async fn read() -> ClipboardRead {
+    if let Some(bytes) = read_image_bytes().await {
+        return ClipboardRead::Image {
+            data: bytes,
+            mime: "image/png".to_string(),
+        };
+    }
+    match read_text().await {
+        Ok(Some(text)) if !text.is_empty() => ClipboardRead::Text(text),
+        _ => ClipboardRead::Empty,
+    }
+}
+
+/// Encode raw bytes as a base64 string (used to build image data URLs/parts).
+pub fn base64_image(bytes: &[u8]) -> String {
+    base64_encode_bytes(bytes)
+}
+
+async fn read_image_bytes() -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(bytes) = read_command_output("wl-paste", &["-t", "image/png"]).await {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+        if let Some(bytes) = read_command_output(
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        )
+        .await
+        {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bytes) = read_macos_png().await {
+            return Some(bytes);
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = ();
+    }
+    None
+}
+
+/// Capture a command's stdout as bytes, returning `None` if the command is
+/// missing or exits non-zero (e.g. the clipboard holds no image).
+async fn read_command_output(command: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = tokio::process::Command::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if output.status.success() {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn read_macos_png() -> Option<Vec<u8>> {
+    let file = std::env::temp_dir().join("neenee-clipboard.png");
+    let path = file.to_str()?.to_string();
+    let script = format!(
+        "set imageData to the clipboard as \"PNGf\"\n\
+         set fileRef to open for access POSIX file \"{path}\" with write permission\n\
+         set eof fileRef to 0\n\
+         write imageData to fileRef\n\
+         close access fileRef"
+    );
+    let status = tokio::process::Command::new("osascript")
+        .args(["-e", &script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .ok()?;
+    let result = if status.success() {
+        std::fs::read(&file).ok().filter(|bytes| !bytes.is_empty())
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(&file);
+    result
+}
+
+/// Read plain text from the system clipboard via arboard (runs in a blocking
+/// task because arboard's `Clipboard` is `!Send`).
+async fn read_text() -> Result<Option<String>, ()> {
+    tokio::task::spawn_blocking(|| {
+        let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
+        match clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+    .map_err(|_| ())?
 }
 
 #[cfg(test)]

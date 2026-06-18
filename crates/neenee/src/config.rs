@@ -1,5 +1,5 @@
 use directories::ProjectDirs;
-use neenee_core::{mcp::McpServerConfig, GoalChecklistItem};
+use neenee_core::mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -9,9 +9,6 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub default_provider: String,
-    pub harness_goal: Option<String>,
-    pub harness_goal_completed: bool,
-    pub harness_goal_checklist: Vec<GoalChecklistItem>,
     pub mcp: HashMap<String, McpServerConfig>,
     pub compaction_max_chars: usize,
     pub compaction_preserve_turns: usize,
@@ -55,9 +52,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_provider: "mock".to_string(),
-            harness_goal: None,
-            harness_goal_completed: false,
-            harness_goal_checklist: Vec::new(),
             mcp: HashMap::new(),
             compaction_max_chars: 120_000,
             compaction_preserve_turns: 6,
@@ -109,7 +103,7 @@ impl Config {
         Ok(())
     }
 
-    fn config_file_path() -> PathBuf {
+    pub fn config_file_path() -> PathBuf {
         let proj_dirs = ProjectDirs::from("ai", "neenee", "neenee")
             .expect("Could not determine config directory");
         proj_dirs.config_dir().join("config.toml")

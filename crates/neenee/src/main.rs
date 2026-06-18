@@ -6,15 +6,16 @@ use neenee_core::{
     parse_retryable_error,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
     providers::{
-        DeepSeekProvider, GLMProvider, GeminiProvider, KimiCodeProvider, KimiProvider,
-        LlamaServerProvider, MockProvider, OpenAIProvider, QwenProvider, VolcengineProvider,
+        openai_compat_provider, GeminiProvider, LlamaServerProvider, MockProvider, OpenAIProvider,
+        KIMI_CODE_USER_AGENT,
     },
     tools::{
         BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, TaskTool,
         TodoWriteTool, UseSkillTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
-    Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalStatus, HarnessSnapshot,
-    Message, Provider, ProviderStreamEvent, Role, SessionOverview, GOAL_COMPLETE_MARKER,
+    Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalAccountingResult,
+    GoalService, GoalStatus, GoalStore, HarnessSnapshot, ImagePart, Message, Provider,
+    ProviderStreamEvent, Role, SessionOverview, TurnTimer, GOAL_COMPLETE_MARKER,
 };
 use neenee_tui::start_tui;
 use std::collections::HashMap;
@@ -77,9 +78,104 @@ mod config;
 mod session;
 use config::Config;
 use session::{
-    compact_messages, discard_trailing_loop_prompts, estimate_chars, CompactionCheckpoint,
-    LoopCheckpoint, SessionStore,
+    compact_messages, discard_trailing_loop_prompts, estimate_chars, goals_db_path,
+    CompactionCheckpoint, LoopCheckpoint, SessionStore,
 };
+
+/// The per-provider API key stored in config (environment variables still take
+/// precedence at the call site). Kept as a single match so config field access
+/// lives in one place rather than scattered across construction sites.
+fn config_api_key(config: &Config, provider_type: &str) -> Option<String> {
+    match provider_type {
+        "openai" => config.openai_api_key.clone(),
+        "gemini" => config.gemini_api_key.clone(),
+        "kimi-code" => config.kimi_code_api_key.clone(),
+        "kimi" => config.kimi_api_key.clone(),
+        "deepseek" => config.deepseek_api_key.clone(),
+        "qwen" => config.qwen_api_key.clone(),
+        "glm" => config.glm_api_key.clone(),
+        "volcengine" => config.volcengine_api_key.clone(),
+        "custom" => config.custom_api_key.clone(),
+        _ => None,
+    }
+}
+
+/// The per-provider model override stored in config.
+fn config_model(config: &Config, provider_type: &str) -> Option<String> {
+    match provider_type {
+        "openai" => config.openai_model.clone(),
+        "gemini" => config.gemini_model.clone(),
+        "llama" => config.llama_model.clone(),
+        "kimi" => config.kimi_model.clone(),
+        "deepseek" => config.deepseek_model.clone(),
+        "qwen" => config.qwen_model.clone(),
+        "glm" => config.glm_model.clone(),
+        "volcengine" => config.volcengine_model.clone(),
+        "custom" => config.custom_model.clone(),
+        _ => None,
+    }
+}
+
+/// Construct a provider from an already-resolved identifier, API key, model and
+/// optional overrides. Centralising the provider-type → concrete-provider
+/// mapping means startup and runtime `/models` switching share one source of
+/// truth: the OpenAI-compatible registry plus the few bespoke providers.
+fn make_provider(
+    provider_type: &str,
+    api_key: String,
+    model: String,
+    base_url: Option<String>,
+    user_agent: Option<String>,
+) -> Arc<dyn Provider> {
+    if let Some(spec) = openai_compat_provider(provider_type) {
+        return Arc::new(spec.build(api_key, Some(model), user_agent));
+    }
+    match provider_type {
+        "gemini" => Arc::new(GeminiProvider::new(api_key, model)),
+        "llama" => Arc::new(LlamaServerProvider::new(
+            base_url.unwrap_or_else(|| "http://localhost:8080".to_string()),
+            model,
+        )),
+        "custom" => Arc::new(OpenAIProvider::with_base_url(
+            api_key,
+            model,
+            &base_url.unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string()),
+        )),
+        "openai" => Arc::new(OpenAIProvider::new(api_key, model)),
+        _ => Arc::new(MockProvider),
+    }
+}
+
+/// One-time migration for the pre-SQLite `harness_goal*` config fields.
+/// Returns a `Goal` if the old config had one, so the caller can store it in
+/// the current thread's SQLite record.
+fn load_legacy_goal_from_config() -> Option<Goal> {
+    #[derive(serde::Deserialize)]
+    struct LegacyGoal {
+        harness_goal: Option<String>,
+        #[serde(default)]
+        harness_goal_completed: bool,
+        #[serde(default)]
+        harness_goal_checklist: Vec<neenee_core::GoalChecklistItem>,
+    }
+
+    let path = Config::config_file_path();
+    let content = std::fs::read_to_string(path).ok()?;
+    let legacy: LegacyGoal = toml::from_str(&content).ok()?;
+    let objective = legacy.harness_goal?;
+    Some(Goal {
+        objective,
+        status: if legacy.harness_goal_completed {
+            GoalStatus::Complete
+        } else {
+            GoalStatus::Active
+        },
+        checklist: legacy.harness_goal_checklist,
+        tokens_used: 0,
+        token_budget: None,
+        time_used_seconds: 0,
+    })
+}
 
 fn send_harness_state(
     tx: &mpsc::UnboundedSender<AgentResponse>,
@@ -93,18 +189,30 @@ fn send_harness_state(
     }));
 }
 
-fn persist_goal(agent: &Agent) {
-    let mut config = Config::load();
-    if let Some(goal) = agent.get_goal() {
-        config.harness_goal = Some(goal.objective);
-        config.harness_goal_completed = goal.status == GoalStatus::Completed;
-        config.harness_goal_checklist = goal.checklist;
-    } else {
-        config.harness_goal = None;
-        config.harness_goal_completed = false;
-        config.harness_goal_checklist.clear();
+async fn refresh_agent_goal(
+    agent: &Agent,
+    goal_service: &GoalService,
+    thread_id: &str,
+) -> Option<Goal> {
+    match goal_service.get_goal(thread_id).await {
+        Ok(Some(db_goal)) => {
+            let mut goal = db_goal;
+            if let Some(mut current) = agent.get_goal() {
+                goal.checklist = std::mem::take(&mut current.checklist);
+            }
+            agent.set_goal(goal.clone());
+            Some(goal)
+        }
+        Ok(None) => {
+            agent.clear_goal();
+            None
+        }
+        Err(_) => agent.get_goal(),
     }
-    let _ = config.save();
+}
+
+fn emit_goal_updated(tx: &mpsc::UnboundedSender<AgentResponse>, goal: &Goal) {
+    let _ = tx.send(AgentResponse::GoalUpdated(goal.clone()));
 }
 
 #[derive(Clone)]
@@ -114,6 +222,7 @@ struct TurnContext {
     tx: mpsc::UnboundedSender<AgentResponse>,
     token: CancellationToken,
     session: Arc<SessionStore>,
+    goal_service: GoalService,
     compaction_max_chars: usize,
     compaction_preserve_turns: usize,
     retry_max_attempts: usize,
@@ -125,6 +234,8 @@ struct TurnInput {
     prompt: String,
     hidden: bool,
     display_prompt: Option<String>,
+    /// Inline images pasted into the prompt, attached to the user message.
+    images: Vec<ImagePart>,
 }
 
 #[derive(Clone)]
@@ -135,6 +246,7 @@ struct InteractiveTurnContext {
     token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     generation_counter: Arc<AtomicU64>,
     session: Arc<SessionStore>,
+    goal_service: GoalService,
     compaction_max_chars: usize,
     compaction_preserve_turns: usize,
     retry_max_attempts: usize,
@@ -163,6 +275,7 @@ async fn start_interactive_turn(context: InteractiveTurnContext, input: TurnInpu
                 tx: context.tx.clone(),
                 token: token.clone(),
                 session: context.session,
+                goal_service: context.goal_service,
                 compaction_max_chars: context.compaction_max_chars,
                 compaction_preserve_turns: context.compaction_preserve_turns,
                 retry_max_attempts: context.retry_max_attempts,
@@ -234,6 +347,7 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
         tx,
         token,
         session,
+        goal_service,
         compaction_max_chars,
         compaction_preserve_turns,
         retry_max_attempts,
@@ -242,15 +356,22 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
     } = context;
     let _ = tx.send(AgentResponse::Activity("saving request".to_string()));
     let admitted_session_id = session.id().await;
+    let thread_id = admitted_session_id.clone();
+    let timer = TurnTimer::new();
     let mut turn_history = {
         let mut history = history.lock().await;
         history.push(if input.hidden {
             Message::hidden(Role::User, input.prompt)
         } else {
             let message = Message::new(Role::User, input.prompt);
-            match input.display_prompt {
+            let message = match input.display_prompt {
                 Some(display) => message.with_display_content(display),
                 None => message,
+            };
+            if input.images.is_empty() {
+                message
+            } else {
+                message.with_images(input.images)
             }
         });
         history.clone()
@@ -347,11 +468,52 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
     let _ = tx.send(AgentResponse::Activity("saving response".to_string()));
     *history.lock().await = turn_history.clone();
     session.replace_messages(turn_history).await?;
-    let result = result?;
+    let outcome = result?;
 
-    let requested_completion = result.content.contains(GOAL_COMPLETE_MARKER);
-    let completed = requested_completion && agent.goal_can_complete();
-    let visible = result
+    // Account the time and token cost of this turn against the persisted goal.
+    match goal_service
+        .account_turn(&thread_id, outcome.token_usage, timer.elapsed_seconds())
+        .await
+    {
+        Ok(GoalAccountingResult::Updated(goal)) => {
+            agent.set_goal(goal.clone());
+            emit_goal_updated(&tx, &goal);
+        }
+        Ok(GoalAccountingResult::Unchanged) => {}
+        Err(error) => {
+            let _ = tx.send(AgentResponse::Error(format!(
+                "Goal accounting failed: {error}"
+            )));
+        }
+    }
+
+    // Legacy /loop marker support: if the model explicitly emitted the completion
+    // marker and the goal checklist allows completion, mark it complete in the DB.
+    let requested_completion = outcome.message.content.contains(GOAL_COMPLETE_MARKER);
+    let mut completed = false;
+    if requested_completion && agent.goal_can_complete() {
+        match goal_service.mark_complete(&thread_id).await {
+            Ok(Some(goal)) => {
+                agent.set_goal(goal.clone());
+                emit_goal_updated(&tx, &goal);
+                completed = true;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = tx.send(AgentResponse::Error(format!(
+                    "Failed to mark goal complete: {error}"
+                )));
+            }
+        }
+    } else if agent
+        .get_goal()
+        .is_some_and(|goal| goal.status == GoalStatus::Complete)
+    {
+        completed = true;
+    }
+
+    let visible = outcome
+        .message
         .content
         .replace(GOAL_COMPLETE_MARKER, "")
         .trim()
@@ -366,9 +528,18 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
         ));
     }
     if completed {
-        agent.complete_goal();
-        persist_goal(&agent);
+        let _ = tx.send(AgentResponse::Text("Goal completed.".to_string()));
     }
+
+    if agent
+        .get_goal()
+        .is_some_and(|goal| goal.status == GoalStatus::BudgetLimited)
+    {
+        let _ = tx.send(AgentResponse::Text(
+            "Goal token budget exhausted. Use /goal budget <tokens> to increase it or /goal resume after reviewing.".to_string(),
+        ));
+    }
+
     Ok(completed)
 }
 
@@ -432,10 +603,8 @@ fn relay_agent_event(
             output,
             duration_ms,
         },
-        AgentEvent::GoalUpdated(goal) => {
-            persist_goal_snapshot(&goal);
-            AgentResponse::GoalUpdated(goal)
-        }
+        AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
+        AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
         AgentEvent::SubTask {
             parent_call_id,
@@ -446,14 +615,6 @@ fn relay_agent_event(
         },
     };
     let _ = tx.send(response);
-}
-
-fn persist_goal_snapshot(goal: &Goal) {
-    let mut config = Config::load();
-    config.harness_goal = Some(goal.objective.clone());
-    config.harness_goal_completed = goal.status == GoalStatus::Completed;
-    config.harness_goal_checklist = goal.checklist.clone();
-    let _ = config.save();
 }
 
 async fn compact_turn_history(
@@ -506,6 +667,7 @@ struct LoopRunContext {
     token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     generation_counter: Arc<AtomicU64>,
     session: Arc<SessionStore>,
+    goal_service: GoalService,
     compaction_max_chars: usize,
     compaction_preserve_turns: usize,
     retry_max_attempts: usize,
@@ -569,6 +731,7 @@ async fn start_goal_loop(
                     tx: context.tx.clone(),
                     token: token.clone(),
                     session: context.session.clone(),
+                    goal_service: context.goal_service.clone(),
                     compaction_max_chars: context.compaction_max_chars,
                     compaction_preserve_turns: context.compaction_preserve_turns,
                     retry_max_attempts: context.retry_max_attempts,
@@ -579,6 +742,7 @@ async fn start_goal_loop(
                     prompt,
                     hidden: true,
                     display_prompt: None,
+                    images: Vec::new(),
                 },
             )
             .await
@@ -772,114 +936,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut config = Config::load();
+    let goal_store = GoalStore::open(goals_db_path()).await?;
+    let goal_service = GoalService::new(goal_store);
 
     // Initialize Agent logic
-    let initial_provider: Arc<dyn Provider> = match config.default_provider.as_str() {
-        "llama" => Arc::new(LlamaServerProvider::new(
-            std::env::var("LLAMA_BASE_URL")
+    let initial_provider: Arc<dyn Provider> = {
+        let provider_type = config.default_provider.clone();
+        if let Some(spec) = openai_compat_provider(&provider_type) {
+            let api_key = std::env::var(spec.env_api_key)
                 .ok()
-                .or(config.llama_base_url.clone())
-                .unwrap_or_else(|| "http://localhost:8080".to_string()),
-            std::env::var("LLAMA_MODEL")
+                .or_else(|| config_api_key(&config, &provider_type))
+                .unwrap_or_default();
+            let model = std::env::var(spec.env_model)
                 .ok()
-                .or(config.llama_model.clone())
-                .unwrap_or_else(|| "local-model".to_string()),
-        )),
-        "gemini" => Arc::new(GeminiProvider::new(
-            std::env::var("GEMINI_API_KEY")
-                .ok()
-                .or(config.gemini_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("GEMINI_MODEL")
-                .ok()
-                .or(config.gemini_model.clone())
-                .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
-        )),
-        "openai" => Arc::new(OpenAIProvider::new(
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .or(config.openai_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("OPENAI_MODEL")
-                .ok()
-                .or(config.openai_model.clone())
-                .unwrap_or_else(|| "gpt-4o".to_string()),
-        )),
-        "kimi-code" => Arc::new(KimiCodeProvider::new(
-            std::env::var("KIMI_CODE_API_KEY")
-                .ok()
-                .or(config.kimi_code_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("KIMI_CODE_USER_AGENT")
-                .ok()
-                .or(config.kimi_code_user_agent.clone())
-                .unwrap_or_else(|| KimiCodeProvider::OPENCODE_USER_AGENT.to_string()),
-        )),
-        "kimi" => Arc::new(KimiProvider::new(
-            std::env::var("KIMI_API_KEY")
-                .ok()
-                .or(config.kimi_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("KIMI_MODEL")
-                .ok()
-                .or(config.kimi_model.clone())
-                .unwrap_or_else(|| "moonshot-v1-8k".to_string()),
-        )),
-        "deepseek" => Arc::new(DeepSeekProvider::new(
-            std::env::var("DEEPSEEK_API_KEY")
-                .ok()
-                .or(config.deepseek_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("DEEPSEEK_MODEL")
-                .ok()
-                .or(config.deepseek_model.clone())
-                .unwrap_or_else(|| "deepseek-chat".to_string()),
-        )),
-        "qwen" => Arc::new(QwenProvider::new(
-            std::env::var("DASHSCOPE_API_KEY")
-                .ok()
-                .or(config.qwen_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("QWEN_MODEL")
-                .ok()
-                .or(config.qwen_model.clone())
-                .unwrap_or_else(|| "qwen-plus".to_string()),
-        )),
-        "glm" => Arc::new(GLMProvider::new(
-            std::env::var("GLM_API_KEY")
-                .ok()
-                .or(config.glm_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("GLM_MODEL")
-                .ok()
-                .or(config.glm_model.clone())
-                .unwrap_or_else(|| "glm-4-plus".to_string()),
-        )),
-        "volcengine" => Arc::new(VolcengineProvider::new(
-            std::env::var("VOLCENGINE_API_KEY")
-                .ok()
-                .or(config.volcengine_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("VOLCENGINE_MODEL")
-                .ok()
-                .or(config.volcengine_model.clone())
-                .unwrap_or_else(|| "deepseek-v3-250324".to_string()),
-        )),
-        "custom" => Arc::new(OpenAIProvider::with_base_url(
-            std::env::var("CUSTOM_API_KEY")
-                .ok()
-                .or(config.custom_api_key.clone())
-                .unwrap_or_default(),
-            std::env::var("CUSTOM_MODEL")
-                .ok()
-                .or(config.custom_model.clone())
-                .unwrap_or_else(|| "custom-model".to_string()),
-            &std::env::var("CUSTOM_BASE_URL")
-                .ok()
-                .or(config.custom_base_url.clone())
-                .unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string()),
-        )),
-        _ => Arc::new(MockProvider),
+                .or_else(|| config_model(&config, &provider_type))
+                .unwrap_or_else(|| spec.default_model.to_string());
+            let user_agent = (provider_type == "kimi-code").then(|| {
+                std::env::var("KIMI_CODE_USER_AGENT")
+                    .ok()
+                    .or(config.kimi_code_user_agent.clone())
+                    .unwrap_or_else(|| KIMI_CODE_USER_AGENT.to_string())
+            });
+            make_provider(&provider_type, api_key, model, None, user_agent)
+        } else {
+            match provider_type.as_str() {
+                "llama" => make_provider(
+                    "llama",
+                    String::new(),
+                    std::env::var("LLAMA_MODEL")
+                        .ok()
+                        .or(config.llama_model.clone())
+                        .unwrap_or_else(|| "local-model".to_string()),
+                    std::env::var("LLAMA_BASE_URL")
+                        .ok()
+                        .or(config.llama_base_url.clone()),
+                    None,
+                ),
+                "gemini" => make_provider(
+                    "gemini",
+                    std::env::var("GEMINI_API_KEY")
+                        .ok()
+                        .or(config.gemini_api_key.clone())
+                        .unwrap_or_default(),
+                    std::env::var("GEMINI_MODEL")
+                        .ok()
+                        .or(config.gemini_model.clone())
+                        .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
+                    None,
+                    None,
+                ),
+                "openai" => make_provider(
+                    "openai",
+                    std::env::var("OPENAI_API_KEY")
+                        .ok()
+                        .or(config.openai_api_key.clone())
+                        .unwrap_or_default(),
+                    std::env::var("OPENAI_MODEL")
+                        .ok()
+                        .or(config.openai_model.clone())
+                        .unwrap_or_else(|| "gpt-4o".to_string()),
+                    None,
+                    None,
+                ),
+                "custom" => make_provider(
+                    "custom",
+                    std::env::var("CUSTOM_API_KEY")
+                        .ok()
+                        .or(config.custom_api_key.clone())
+                        .unwrap_or_default(),
+                    std::env::var("CUSTOM_MODEL")
+                        .ok()
+                        .or(config.custom_model.clone())
+                        .unwrap_or_else(|| "custom-model".to_string()),
+                    Some(
+                        std::env::var("CUSTOM_BASE_URL")
+                            .ok()
+                            .or(config.custom_base_url.clone())
+                            .unwrap_or_else(|| {
+                                "http://localhost:8080/v1/chat/completions".to_string()
+                            }),
+                    ),
+                    None,
+                ),
+                _ => Arc::new(MockProvider),
+            }
+        }
     };
 
     let provider_holder = Arc::new(RwLock::new(initial_provider));
@@ -918,18 +1059,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sub-agents cannot recurse and inherit the live provider.
     let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone()));
     tools.push(task_tool);
-    let agent = Arc::new(Agent::new(agent_provider, tools, AgentMode::Build));
-    if let Some(objective) = config.harness_goal.clone() {
-        agent.restore_goal(Goal {
-            objective,
-            status: if config.harness_goal_completed {
-                GoalStatus::Completed
-            } else {
-                GoalStatus::Active
-            },
-            checklist: config.harness_goal_checklist.clone(),
-        });
-    }
+    let agent = Arc::new(Agent::new(
+        agent_provider,
+        tools,
+        AgentMode::Build,
+        goal_service.clone(),
+    ));
 
     // Sync skills from agent into the shared registry so use_skill can find them
     {
@@ -965,6 +1100,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored_messages = session.transcript().await;
     let history = Arc::new(tokio::sync::Mutex::new(active_messages));
 
+    // Tie the agent and its goal persistence to this session/thread.
+    let thread_id = session.id().await;
+    agent.set_thread_id(&thread_id);
+    if goal_service.get_goal(&thread_id).await?.is_none() {
+        if let Some(goal) = load_legacy_goal_from_config() {
+            let _ = goal_service
+                .set_goal(&thread_id, &goal.objective, goal.status, goal.token_budget)
+                .await;
+        }
+    }
+    refresh_agent_goal(&agent, &goal_service, &thread_id).await;
+
     // Load history
     let input_history = Config::load_history();
 
@@ -976,45 +1123,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initial values for TUI
     let initial_p_name = config.default_provider.clone();
-    let initial_m_name = match initial_p_name.as_str() {
-        "openai" => config
-            .openai_model
-            .clone()
-            .unwrap_or_else(|| "gpt-4o".to_string()),
-        "gemini" => config
-            .gemini_model
-            .clone()
-            .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
-        "llama" => config
-            .llama_model
-            .clone()
-            .unwrap_or_else(|| "local-model".to_string()),
-        "kimi-code" => KimiCodeProvider::MODEL.to_string(),
-        "kimi" => config
-            .kimi_model
-            .clone()
-            .unwrap_or_else(|| "moonshot-v1-8k".to_string()),
-        "deepseek" => config
-            .deepseek_model
-            .clone()
-            .unwrap_or_else(|| "deepseek-chat".to_string()),
-        "qwen" => config
-            .qwen_model
-            .clone()
-            .unwrap_or_else(|| "qwen-plus".to_string()),
-        "glm" => config
-            .glm_model
-            .clone()
-            .unwrap_or_else(|| "glm-4-plus".to_string()),
-        "volcengine" => config
-            .volcengine_model
-            .clone()
-            .unwrap_or_else(|| "deepseek-v3-250324".to_string()),
-        "custom" => config
-            .custom_model
-            .clone()
-            .unwrap_or_else(|| "custom-model".to_string()),
-        _ => "mock-model".to_string(),
+    let initial_m_name = {
+        let pt = initial_p_name.as_str();
+        if let Some(spec) = openai_compat_provider(pt) {
+            spec.resolve_model(config_model(&config, pt))
+        } else {
+            match pt {
+                "openai" => config
+                    .openai_model
+                    .clone()
+                    .unwrap_or_else(|| "gpt-4o".to_string()),
+                "gemini" => config
+                    .gemini_model
+                    .clone()
+                    .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
+                "llama" => config
+                    .llama_model
+                    .clone()
+                    .unwrap_or_else(|| "local-model".to_string()),
+                "custom" => config
+                    .custom_model
+                    .clone()
+                    .unwrap_or_else(|| "custom-model".to_string()),
+                _ => "mock-model".to_string(),
+            }
+        }
     };
 
     // Spawn Agent Background Task
@@ -1082,87 +1215,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {}
                         }
                     }
-                    let new_p: Arc<dyn Provider> = match provider_type.as_str() {
-                        "openai" => Arc::new(OpenAIProvider::new(
-                            std::env::var("OPENAI_API_KEY")
-                                .ok()
-                                .or(config.openai_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "gemini" => Arc::new(GeminiProvider::new(
-                            std::env::var("GEMINI_API_KEY")
-                                .ok()
-                                .or(config.gemini_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "kimi-code" => Arc::new(KimiCodeProvider::new(
-                            std::env::var("KIMI_CODE_API_KEY")
-                                .ok()
-                                .or(config.kimi_code_api_key.clone())
-                                .unwrap_or_default(),
+                    let new_p: Arc<dyn Provider> = {
+                        let pt = provider_type.as_str();
+                        // An explicit env var wins, then the persisted config key.
+                        let api_key = openai_compat_provider(pt)
+                            .map(|spec| spec.env_api_key)
+                            .or(match pt {
+                                "openai" => Some("OPENAI_API_KEY"),
+                                "gemini" => Some("GEMINI_API_KEY"),
+                                "custom" => Some("CUSTOM_API_KEY"),
+                                _ => None,
+                            })
+                            .and_then(|env| std::env::var(env).ok())
+                            .or_else(|| config_api_key(&config, pt))
+                            .unwrap_or_default();
+                        let user_agent = (pt == "kimi-code").then(|| {
                             std::env::var("KIMI_CODE_USER_AGENT")
                                 .ok()
                                 .or(config.kimi_code_user_agent.clone())
-                                .unwrap_or_else(|| {
-                                    KimiCodeProvider::OPENCODE_USER_AGENT.to_string()
-                                }),
-                        )),
-                        "llama" => Arc::new(LlamaServerProvider::new(
-                            std::env::var("LLAMA_BASE_URL")
+                                .unwrap_or_else(|| KIMI_CODE_USER_AGENT.to_string())
+                        });
+                        let base_url = match pt {
+                            "llama" => std::env::var("LLAMA_BASE_URL")
                                 .ok()
-                                .or(config.llama_base_url.clone())
-                                .unwrap_or_else(|| "http://localhost:8080".to_string()),
-                            model.clone(),
-                        )),
-                        "kimi" => Arc::new(KimiProvider::new(
-                            std::env::var("KIMI_API_KEY")
-                                .ok()
-                                .or(config.kimi_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "deepseek" => Arc::new(DeepSeekProvider::new(
-                            std::env::var("DEEPSEEK_API_KEY")
-                                .ok()
-                                .or(config.deepseek_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "qwen" => Arc::new(QwenProvider::new(
-                            std::env::var("DASHSCOPE_API_KEY")
-                                .ok()
-                                .or(config.qwen_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "glm" => Arc::new(GLMProvider::new(
-                            std::env::var("GLM_API_KEY")
-                                .ok()
-                                .or(config.glm_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "volcengine" => Arc::new(VolcengineProvider::new(
-                            std::env::var("VOLCENGINE_API_KEY")
-                                .ok()
-                                .or(config.volcengine_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                        )),
-                        "custom" => Arc::new(OpenAIProvider::with_base_url(
-                            std::env::var("CUSTOM_API_KEY")
-                                .ok()
-                                .or(config.custom_api_key.clone())
-                                .unwrap_or_default(),
-                            model.clone(),
-                            &std::env::var("CUSTOM_BASE_URL")
-                                .ok()
-                                .or(config.custom_base_url.clone())
-                                .unwrap_or_default(),
-                        )),
-                        _ => Arc::new(MockProvider),
+                                .or(config.llama_base_url.clone()),
+                            "custom" => Some(
+                                std::env::var("CUSTOM_BASE_URL")
+                                    .ok()
+                                    .or(config.custom_base_url.clone())
+                                    .unwrap_or_default(),
+                            ),
+                            _ => None,
+                        };
+                        make_provider(pt, api_key, model.clone(), base_url, user_agent)
                     };
                     *provider_for_task
                         .write()
@@ -1483,53 +1568,188 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         "/goal" => {
+                            let thread_id = session.id().await;
                             let argument = cmd.strip_prefix("/goal").unwrap_or("").trim();
-                            match argument {
-                                "" | "status" => {
-                                    let message = match agent.get_goal() {
-                                        Some(goal) => format_goal_status(&goal),
-                                        None => "No active goal. Set one with /goal <objective>."
-                                            .to_string(),
-                                    };
-                                    let _ = resp_tx.send(AgentResponse::Text(message));
-                                }
-                                "clear" => {
-                                    agent.clear_goal();
-                                    config.harness_goal = None;
-                                    config.harness_goal_completed = false;
-                                    config.harness_goal_checklist.clear();
-                                    let _ = config.save();
-                                    let _ = resp_tx
-                                        .send(AgentResponse::Text("Goal cleared.".to_string()));
-                                }
-                                "done" => {
-                                    if agent.complete_goal().is_some() {
-                                        config.harness_goal_completed = true;
-                                        let _ = config.save();
-                                        let _ = resp_tx.send(AgentResponse::Text(
-                                            "Goal marked completed.".to_string(),
-                                        ));
-                                    } else {
-                                        let _ = resp_tx.send(AgentResponse::Error(
-                                            "No goal to complete.".to_string(),
-                                        ));
+                            let rest = argument;
+
+                            async fn report_goal_result(
+                                tx: &mpsc::UnboundedSender<AgentResponse>,
+                                agent: &Agent,
+                                result: Result<Option<Goal>, String>,
+                                success: impl FnOnce(&Goal) -> String,
+                                empty: impl Into<String>,
+                            ) {
+                                match result {
+                                    Ok(Some(goal)) => {
+                                        agent.set_goal(goal.clone());
+                                        emit_goal_updated(tx, &goal);
+                                        let _ = tx.send(AgentResponse::Text(success(&goal)));
+                                    }
+                                    Ok(None) => {
+                                        let _ = tx.send(AgentResponse::Error(empty.into()));
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.send(AgentResponse::Error(error));
                                     }
                                 }
-                                objective => {
-                                    let goal = agent.set_goal(objective);
-                                    config.harness_goal = Some(goal.objective.clone());
-                                    config.harness_goal_completed = false;
-                                    config.harness_goal_checklist.clear();
-                                    let _ = config.save();
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Goal set: {}",
-                                        goal.objective
-                                    )));
+                            }
+
+                            if rest.is_empty() || rest == "status" {
+                                refresh_agent_goal(&agent, &goal_service, &thread_id).await;
+                                let message = match agent.get_goal() {
+                                    Some(goal) => format_goal_status(&goal),
+                                    None => "No active goal. Set one with /goal <objective>."
+                                        .to_string(),
+                                };
+                                let _ = resp_tx.send(AgentResponse::Text(message));
+                            } else if rest == "clear" {
+                                match goal_service.clear_goal(&thread_id).await {
+                                    Ok(true) => {
+                                        agent.clear_goal();
+                                        let _ = resp_tx
+                                            .send(AgentResponse::Text("Goal cleared.".to_string()));
+                                    }
+                                    Ok(false) => {
+                                        let _ = resp_tx.send(AgentResponse::Text(
+                                            "No goal to clear.".to_string(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                    }
+                                }
+                            } else if rest == "done" {
+                                report_goal_result(
+                                    &resp_tx,
+                                    &agent,
+                                    goal_service.mark_complete(&thread_id).await,
+                                    |_| "Goal marked completed.".to_string(),
+                                    "No goal to complete.",
+                                )
+                                .await;
+                            } else if rest == "pause" {
+                                report_goal_result(
+                                    &resp_tx,
+                                    &agent,
+                                    goal_service.pause(&thread_id).await,
+                                    |_| "Goal paused.".to_string(),
+                                    "No active goal to pause.",
+                                )
+                                .await;
+                            } else if rest == "resume" {
+                                report_goal_result(
+                                    &resp_tx,
+                                    &agent,
+                                    goal_service.resume(&thread_id).await,
+                                    |_| "Goal resumed.".to_string(),
+                                    "No goal to resume.",
+                                )
+                                .await;
+                            } else if rest.starts_with("edit ") {
+                                let new_objective = rest.strip_prefix("edit ").unwrap_or("").trim();
+                                if new_objective.is_empty() {
+                                    let _ = resp_tx.send(AgentResponse::Error(
+                                        "Usage: /goal edit <new objective>".to_string(),
+                                    ));
+                                } else {
+                                    match goal_service
+                                        .update_goal(&thread_id, Some(new_objective), None, None)
+                                        .await
+                                    {
+                                        Ok(Some(goal)) => {
+                                            agent.set_goal(goal.clone());
+                                            {
+                                                let mut messages = history.lock().await;
+                                                agent.inject_objective_updated(&mut *messages);
+                                                let updated = messages.clone();
+                                                drop(messages);
+                                                let _ = session.replace_messages(updated).await;
+                                            }
+                                            emit_goal_updated(&resp_tx, &goal);
+                                            let _ = resp_tx.send(AgentResponse::Text(format!(
+                                                "Goal updated: {}",
+                                                goal.objective
+                                            )));
+                                        }
+                                        Ok(None) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(
+                                                "No goal to edit. Set one first with /goal <objective>."
+                                                    .to_string(),
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                            } else if rest.starts_with("budget ") {
+                                let budget_arg = rest.strip_prefix("budget ").unwrap_or("").trim();
+                                if budget_arg == "clear" {
+                                    report_goal_result(
+                                        &resp_tx,
+                                        &agent,
+                                        goal_service
+                                            .update_goal(&thread_id, None, None, Some(None))
+                                            .await,
+                                        |_| "Goal token budget cleared.".to_string(),
+                                        "No goal to update.",
+                                    )
+                                    .await;
+                                } else {
+                                    match budget_arg.parse::<i64>() {
+                                        Ok(budget) if budget > 0 => {
+                                            report_goal_result(
+                                                &resp_tx,
+                                                &agent,
+                                                goal_service
+                                                    .update_goal(
+                                                        &thread_id,
+                                                        None,
+                                                        None,
+                                                        Some(Some(budget)),
+                                                    )
+                                                    .await,
+                                                |_| {
+                                                    format!(
+                                                        "Goal token budget set to {} tokens.",
+                                                        budget
+                                                    )
+                                                },
+                                                "No goal to update.",
+                                            )
+                                            .await;
+                                        }
+                                        _ => {
+                                            let _ = resp_tx.send(AgentResponse::Error(
+                                                "Usage: /goal budget <tokens> | /goal budget clear"
+                                                    .to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Set a new goal.
+                                match goal_service
+                                    .set_goal(&thread_id, rest, GoalStatus::Active, None)
+                                    .await
+                                {
+                                    Ok(goal) => {
+                                        agent.set_goal(goal.clone());
+                                        emit_goal_updated(&resp_tx, &goal);
+                                        let _ = resp_tx.send(AgentResponse::Text(format!(
+                                            "Goal set: {}",
+                                            goal.objective
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                    }
                                 }
                             }
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
                         "/loop" => {
+                            let thread_id = session.id().await;
                             let argument = parts.get(1).copied().unwrap_or("8");
                             if argument == "stop" {
                                 let mut current = ctt_clone.write().await;
@@ -1603,10 +1823,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
 
-                                let goal = agent.set_goal(checkpoint.goal.clone());
-                                config.harness_goal = Some(goal.objective.clone());
-                                config.harness_goal_completed = false;
-                                let _ = config.save();
+                                match goal_service
+                                    .set_goal(
+                                        &thread_id,
+                                        &checkpoint.goal,
+                                        GoalStatus::Active,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    Ok(goal) => {
+                                        agent.set_goal(goal.clone());
+                                        emit_goal_updated(&resp_tx, &goal);
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(format!(
+                                            "Failed to restore loop goal: {error}"
+                                        )));
+                                        continue;
+                                    }
+                                }
                                 let _ = resp_tx.send(AgentResponse::Text(format!(
                                     "Resuming goal loop at iteration {}/{}{}.",
                                     start_iteration,
@@ -1625,6 +1861,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         token_slot: ctt_clone.clone(),
                                         generation_counter: generation_clone.clone(),
                                         session: session.clone(),
+                                        goal_service: goal_service.clone(),
                                         compaction_max_chars: config.compaction_max_chars,
                                         compaction_preserve_turns: config.compaction_preserve_turns,
                                         retry_max_attempts: config.provider_retry_max_attempts,
@@ -1648,12 +1885,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
                             };
-                            let goal = match agent.get_goal() {
-                                Some(goal) if goal.status == GoalStatus::Active => goal,
-                                _ => {
+                            let goal = match goal_service.active_goal(&thread_id).await {
+                                Ok(Some(goal)) => goal,
+                                Ok(None) => {
                                     let _ = resp_tx.send(AgentResponse::Error(
                                         "Set an active goal with /goal <objective> before starting /loop.".to_string()
                                     ));
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(error));
                                     continue;
                                 }
                             };
@@ -1665,6 +1906,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     token_slot: ctt_clone.clone(),
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
+                                    goal_service: goal_service.clone(),
                                     compaction_max_chars: config.compaction_max_chars,
                                     compaction_preserve_turns: config.compaction_preserve_turns,
                                     retry_max_attempts: config.provider_retry_max_attempts,
@@ -1770,6 +2012,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     token_slot: ctt_clone.clone(),
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
+                                    goal_service: goal_service.clone(),
                                     compaction_max_chars: config.compaction_max_chars,
                                     compaction_preserve_turns: config.compaction_preserve_turns,
                                     retry_max_attempts: config.provider_retry_max_attempts,
@@ -1780,13 +2023,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     prompt: expand_command(command, arguments),
                                     hidden: false,
                                     display_prompt: Some(cmd),
+                                    images: Vec::new(),
                                 },
                             )
                             .await;
                         }
                     }
                 }
-                AgentRequest::Chat(text) => {
+                AgentRequest::Chat { text, images } => {
                     start_interactive_turn(
                         InteractiveTurnContext {
                             agent: agent.clone(),
@@ -1795,6 +2039,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             token_slot: ctt_clone.clone(),
                             generation_counter: generation_clone.clone(),
                             session: session.clone(),
+                            goal_service: goal_service.clone(),
                             compaction_max_chars: config.compaction_max_chars,
                             compaction_preserve_turns: config.compaction_preserve_turns,
                             retry_max_attempts: config.provider_retry_max_attempts,
@@ -1805,6 +2050,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             prompt: text,
                             hidden: false,
                             display_prompt: None,
+                            images,
                         },
                     )
                     .await;
@@ -1975,6 +2221,9 @@ mod tests {
                 content: "verify".to_string(),
                 status: neenee_core::GoalChecklistStatus::InProgress,
             }],
+            tokens_used: 0,
+            token_budget: None,
+            time_used_seconds: 0,
         };
 
         let status = format_goal_status(&goal);
@@ -1988,10 +2237,13 @@ mod tests {
             std::env::temp_dir().join(format!("neenee-retry-test-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
         let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let goal_service =
+            GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"));
         let agent = Arc::new(Agent::new(
             Arc::new(RetryOnceProvider(AtomicUsize::new(0))),
             Vec::new(),
             AgentMode::Build,
+            goal_service.clone(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -2002,6 +2254,7 @@ mod tests {
                 tx,
                 token: CancellationToken::new(),
                 session,
+                goal_service,
                 compaction_max_chars: 100_000,
                 compaction_preserve_turns: 6,
                 retry_max_attempts: 3,
@@ -2012,6 +2265,7 @@ mod tests {
                 prompt: "work".to_string(),
                 hidden: false,
                 display_prompt: None,
+                images: Vec::new(),
             },
         )
         .await
@@ -2059,10 +2313,13 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-retry-tool-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
+        let goal_service =
+            GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"));
         let agent = Arc::new(Agent::new(
             Arc::new(ToolThenRetryProvider(AtomicUsize::new(0))),
             vec![Arc::new(RetryReadTool)],
             AgentMode::Build,
+            goal_service.clone(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -2073,6 +2330,7 @@ mod tests {
                 tx,
                 token: CancellationToken::new(),
                 session,
+                goal_service,
                 compaction_max_chars: 100_000,
                 compaction_preserve_turns: 6,
                 retry_max_attempts: 4,
@@ -2083,6 +2341,7 @@ mod tests {
                 prompt: "work".to_string(),
                 hidden: false,
                 display_prompt: None,
+                images: Vec::new(),
             },
         )
         .await

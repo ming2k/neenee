@@ -98,20 +98,41 @@ broker, and result-message format apply to native and fallback calls.
 
 ## Goal state
 
-`/goal <objective>` creates an active goal and persists it in config. The goal
-is injected on every turn. `/goal done` marks it completed and `/goal clear`
-removes it.
+`/goal <objective>` creates an active goal. Goals are persisted per session in a
+SQLite store (`goals.db`) keyed by thread id, so they survive restarts and are
+restored on `/resume`; a one-time migration imports any legacy goal from the
+old config. The goal is injected on every turn. `/goal done` marks it completed,
+`/goal clear` removes it, and `/goal pause`, `/goal resume`, `/goal edit`, and
+`/goal budget` manage its lifecycle.
 
-The completion marker `[NEENEE_GOAL_COMPLETE]` is a model-to-harness control
-signal. It is removed from visible output and only used to end an autonomous
-loop early. A structured goal checklist is maintained through the built-in
-`goal_checklist` tool. The completion marker is deferred while any item remains
-pending or in progress.
+A goal carries a status, not just a done flag. Transitions are validated by the
+goal service:
+
+| Status | Meaning |
+|--------|---------|
+| `active` | Being worked on; injected into the system prompt each turn |
+| `paused` | Suspended by the user; resumable |
+| `blocked` | Model gave up after a blocking condition recurred; resumable |
+| `usage_limited` / `budget_limited` | Stopped by a usage cap or token budget; resumable |
+| `complete` | Objective achieved |
+
+Each completed turn's token and elapsed-time cost is accounted against the
+active goal. When a token budget is set and cumulative `tokens_used` reaches it,
+the goal moves to `budget_limited` and a hidden prompt informs the model; the
+user raises the budget with `/goal budget <tokens>` or continues with
+`/goal resume`.
+
+The model also drives goals through tools: `get_goal` (read), `create_goal`
+(start a new goal on explicit request), `update_goal` (mark `complete` or
+`blocked`), and `goal_checklist` (expose progress). The legacy completion marker
+`[NEENEE_GOAL_COMPLETE]` remains a model-to-harness control signal: it is removed
+from visible output and used to end an autonomous loop early, and is deferred
+while any checklist item remains pending or in progress.
 
 Checklist updates are harness metadata: they do not require a write permission
-prompt, but they are validated, persisted in config, injected into subsequent
-system prompts, and projected into the TUI as `done/total` progress. A
-populated active checklist cannot be replaced with an empty list; each item
+prompt, but they are validated, held in live goal state, injected into
+subsequent system prompts, and projected into the TUI as `done/total` progress.
+A populated active checklist cannot be replaced with an empty list; each item
 must receive a terminal completed or cancelled status.
 
 ## Autonomous loop
@@ -157,10 +178,12 @@ replayed.
 These are execution bounds, not a security sandbox. Tool permission policy is
 a separate future layer.
 
-Plan mode uses `ToolAccess`, not tool names. Built-in read tools are explicitly
-marked read-only; all other tools default to write-capable. MCP servers are
-therefore blocked in Plan mode unless their config explicitly sets
-`read_only = true`.
+Plan mode is enforced per-invocation through `Tool::allowed_in_plan_mode`, which
+defaults to read-only access and exempts writes under `.neenee/plans/`. MCP
+servers are therefore blocked in Plan mode unless their config explicitly sets
+`read_only = true`. The model can also switch modes itself via the injected
+`plan_enter`/`plan_exit` tools; see [Plan mode](plan-mode.md) for the full
+workflow and the write exemption.
 
 ## Permission broker
 
