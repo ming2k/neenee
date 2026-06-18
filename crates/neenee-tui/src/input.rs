@@ -172,9 +172,9 @@ pub fn process_event(
         Event::Mouse(mouse) => {
             let x = mouse.column;
             let y = mouse.row;
-            let in_sidebar = context.sidebar_rect.is_some_and(|r| {
-                r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-            });
+            let in_sidebar = context
+                .sidebar_rect
+                .is_some_and(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if in_sidebar {

@@ -1,65 +1,73 @@
 //! Rendering engine: draws the chat UI using ratatui while recording
 //! semantic-to-screen layout information.
 
-mod blocks;
-mod cards;
-mod input_box;
-mod modals;
+mod chrome;
+mod composer;
+mod design;
+mod markdown_table;
+mod message_body;
+mod overlays;
+mod primitives;
 mod sidebar;
-mod status;
-mod table;
-mod text;
+mod text_layout;
 mod theme;
-mod util;
+mod turn_artifacts;
 
-use blocks::render_message_blocks;
-use cards::{
-    draw_sticky_header_if_needed, draw_subagent_bar, render_subagent_inline_card,
-    render_thinking_card, render_tool_step_card, StickyCard,
+pub use chrome::{draw_hint, draw_status_bar, draw_suggestions};
+pub use composer::{draw_composer, INPUT_MSG_IDX};
+use design::{
+    CARD_MIN_WIDTH, CHAT_BODY_PREFIX_COLS, CHAT_BODY_RIGHT_INSET, CHAT_H_INSET,
+    COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
+    COMPOSER_VERTICAL_CHROME_ROWS, CONTEXT_USAGE_BAR_CELLS, FOOTER_H_INSET,
+    HEADER_CONTEXT_MIN_WIDTH, HEADER_GOAL_GAP, HEADER_GOAL_MAX_CHARS, HEADER_PANEL_INNER_PADDING,
+    HEADER_PATH_MAX_CHARS, HEADER_RIGHT_GAP_MIN, HEADER_ROWS, HEADER_WITH_CHECKLIST_ROWS,
+    HINT_LINE_ROWS,
+    MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, STATUS_BAR_ROWS, SUBAGENT_BAR_ROWS,
+    TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS, TOOL_CARD_CHILDREN_GAP_ROWS,
+    TOOL_CARD_SECTION_GAP_ROWS,
 };
-pub use input_box::{draw_input, INPUT_MSG_IDX};
-pub(crate) use modals::draw_models_modal;
-pub use modals::{
+#[cfg(test)]
+use markdown_table::{build_table_render, shrink_column_widths};
+use message_body::draw_message_body;
+pub(crate) use overlays::draw_models_modal;
+pub use overlays::{
     draw_api_key_modal, draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
     draw_permission_sheet, draw_sessions_modal, draw_solution_input_modal, relative_time,
 };
-pub use status::{draw_hint, draw_status_bar, draw_suggestions};
+use primitives::viewport_rect;
 pub use sidebar::{draw_sidebar, SidebarRender, SidebarView, SIDEBAR_AUTO_WIDTH, SIDEBAR_WIDTH};
+use text_layout::wrap_text;
 #[cfg(test)]
-use table::{build_table_render, shrink_column_widths};
-use text::wrap_text;
+use text_layout::WrappedLine;
 #[cfg(test)]
-use text::WrappedLine;
-#[cfg(test)]
-use text::{block_selection_range, line_selection, prohibited_line_end, prohibited_line_start};
+use text_layout::{
+    block_selection_range, line_selection, prohibited_line_end, prohibited_line_start,
+};
 pub use theme::Theme;
-use util::viewport_rect;
+use turn_artifacts::{
+    draw_reasoning_trace, draw_sticky_header_if_needed, draw_subagent_bar,
+    draw_subagent_inline_card, draw_tool_step_card, StickyCard,
+};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block as RtBlock, Borders, Paragraph},
+    widgets::{Block as RtBlock, Paragraph},
     Frame,
 };
 
-use crate::document::ChatMessage;
+use crate::document::{estimate_context_tokens, ChatMessage};
 use crate::layout::LayoutMap;
+use crate::model_context_window;
 use crate::selection::SelectionState;
 #[cfg(test)]
 use neenee_core::PermissionRequest;
 use neenee_core::{AgentMode, Goal, GoalStatus};
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use unicode_width::UnicodeWidthStr;
-
-/// Uniform horizontal inset applied to every chat-area component so no band,
-/// bar, or text touches the terminal frame. Both gutters show `app_bg` via the
-/// global frame fill. Cards consume this via [`chat_band_rect`]; user panels
-/// and code blocks render their own equivalent gutters; markdown text wraps
-/// with `CHAT_H_INSET` cells of slack on the right.
-pub(super) const CHAT_H_INSET: u16 = 2;
 
 /// Inner rect of a chat-area region after reserving the uniform
 /// [`CHAT_H_INSET`] left+right `app_bg` gutters. Use this as the render target
@@ -81,9 +89,12 @@ pub struct ChatView<'a> {
     pub selection: &'a SelectionState,
     pub current_provider: &'a str,
     pub current_model: &'a str,
+    /// Working-directory display string (home swapped for `~`), shown on the
+    /// left side of the header.
+    pub cwd: &'a str,
     pub current_mode: AgentMode,
     pub current_goal: Option<&'a Goal>,
-    /// Transient running status shown in a thin bar above the input box.
+    /// Transient running status shown in a thin bar below the input box.
     /// Empty / "idle" / "responding" means the status bar is hidden.
     pub activity: &'a str,
     /// Spinner animation phase (cycles through braille frames while active).
@@ -91,6 +102,11 @@ pub struct ChatView<'a> {
     /// The current input-box text (masked while the API-key modal is open). The
     /// chat layout reads this so the input box can grow to fit its wrapped text.
     pub input: &'a str,
+    /// Byte offset of the caret inside `input` (see [`App::byte_cursor`]). The
+    /// box grows one extra row when the caret rests past the last wrapped line
+    /// (e.g. just after an inserted newline), so its height matches what
+    /// [`composer::draw_composer`] actually renders.
+    pub byte_cursor: usize,
     /// When true, the header and input box are hidden (overlay modal open).
     pub chrome_hidden: bool,
     /// When set, the view is zoomed into a sub-agent task: a navigation bar is
@@ -106,6 +122,9 @@ pub struct ChatView<'a> {
     /// when `sidebar_visible` is `true`.
     pub sidebar_scroll: usize,
     pub theme: &'a Theme,
+    /// MCP server statuses loaded at startup, shown as a compact count in the
+    /// header right corner (e.g. "MCP 2/3 · 7 tools").
+    pub mcp_statuses: &'a [(String, neenee_core::mcp::McpConnectionStatus)],
 }
 
 /// Info for the sub-agent navigation bar (shown when zoomed into a task).
@@ -122,6 +141,9 @@ pub struct SubagentBarInfo {
 pub struct ChatRender {
     /// The input box area (unchanged from before).
     pub input_rect: Rect,
+    /// The hint line area, stacked below the input box and the transient
+    /// status bar (when visible).
+    pub hint_rect: Rect,
     /// Total height (in lines) of the rendered message stream, ignoring the
     /// viewport clip. Used by the app loop to pin the view to the bottom.
     pub content_lines: usize,
@@ -158,17 +180,20 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         selection,
         current_provider,
         current_model,
+        cwd,
         current_mode,
         current_goal,
         activity,
         spinner_phase,
         input,
+        byte_cursor,
         chrome_hidden,
         subagent_bar,
         sidebar_visible,
         loop_status,
         sidebar_scroll,
         theme,
+        mcp_statuses,
     } = view;
     let full = frame.size();
     // Components render inside the vertical viewport margins (1 cell top and
@@ -198,35 +223,38 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     let sidebar_visible_effective = sidebar_visible && viewport.width > SIDEBAR_WIDTH;
 
     let checklist = current_goal.and_then(goal_checklist_summary);
-    // +1 for the thin separator rule drawn beneath the header content.
-    // Hidden entirely when an overlay modal is open (chrome_hidden).
+    // Header height is content rows only (no separator rule); the band is
+    // separated from the chat by `header_bg`. Hidden entirely when an overlay
+    // modal is open (chrome_hidden).
     let header_height: u16 = if chrome_hidden {
         0
     } else if checklist.is_some() {
-        3
+        HEADER_WITH_CHECKLIST_ROWS
     } else {
-        2
+        HEADER_ROWS
     };
     // The status bar (animated spinner + activity text) sits on its own line
-    // directly above the input box. It is shown only for non-streaming,
+    // directly below the input box. It is shown only for non-streaming,
     // non-idle activity so the chat reclaims that row when nothing is running.
     let status_active =
         !chrome_hidden && !activity.is_empty() && activity != "idle" && activity != "responding";
-    let status_height: u16 = if status_active { 1 } else { 0 };
+    let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new
     // lines and the box expands to fit, up to roughly half the terminal so the
     // chat history always stays visible. The inner text width reserves the
-    // thick left bar and a leading padding space.
-    let input_text_width = (size.width as usize).saturating_sub(6).max(1);
-    let input_wrapped_lines = wrap_text(input, input_text_width).len().max(1);
-    let desired_input_height = input_wrapped_lines as u16 + 2; // top/bottom padding rows
-    let max_input_height = (size.height / 2).max(3);
+    // footer insets and the `> ` prompt prefix.
+    let input_text_width = (size.width as usize)
+        .saturating_sub((2 * FOOTER_H_INSET) as usize + COMPOSER_PROMPT_PREFIX_COLS)
+        .max(1);
+    let input_wrapped_lines = composer::input_row_count(input, input_text_width, byte_cursor);
+    let desired_input_height = input_wrapped_lines as u16 + COMPOSER_VERTICAL_CHROME_ROWS;
+    let max_input_height = (size.height / COMPOSER_MAX_HEIGHT_DIVISOR).max(COMPOSER_MIN_HEIGHT);
     let input_box_height = desired_input_height.min(max_input_height);
     let footer_height: u16 = if chrome_hidden {
         0
     } else {
-        status_height + input_box_height + 1 // + hint line (bottom spacing comes from the viewport margin)
+        status_height + input_box_height + HINT_LINE_ROWS
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -237,12 +265,19 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         ])
         .split(size);
 
-    // 1. Header — just the model name, plus optional goal.
+    // 1. Header — a floating panel: 2-col `app_bg` side gutters, solid
+    //    `panel_bg` top/bottom rows, content indented inside. The left side
+    //    shows the working directory (home collapsed to `~`), the right side
+    //    shows the model name plus the goal / MCP / context-usage cluster.
     //    Skipped entirely when an overlay modal is open.
     if !chrome_hidden {
         let goal = current_goal.map(|goal| {
-            let objective = goal.objective.chars().take(32).collect::<String>();
-            let suffix = if goal.objective.chars().count() > 32 {
+            let objective = goal
+                .objective
+                .chars()
+                .take(HEADER_GOAL_MAX_CHARS)
+                .collect::<String>();
+            let suffix = if goal.objective.chars().count() > HEADER_GOAL_MAX_CHARS {
                 "..."
             } else {
                 ""
@@ -258,37 +293,144 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 .unwrap_or_default();
             format!("{} {}{}{}", mark, objective, suffix, progress)
         });
-        let mut header_spans = vec![
-            Span::raw(" "),
+
+        let panel_bg = theme.panel_bg;
+        let app_bg = theme.app_bg;
+        let inset = CHAT_H_INSET as usize;
+        let full_w = chunks[0].width as usize;
+        let panel_w = full_w.saturating_sub(2 * inset).max(1);
+        let gutter = Span::styled(" ".repeat(inset), Style::default().bg(app_bg));
+        let inner = HEADER_PANEL_INNER_PADDING;
+
+        // --- Content row: cwd on the left, model name + goal + MCP / context
+        //    bar on the right. The path is the workspace indicator; the model
+        //    name + goal + context cluster moves to the right so the left side
+        //    reads purely as "where am I".
+        let path_display = truncate_path(cwd, HEADER_PATH_MAX_CHARS);
+        let path_width = path_display.width();
+        let mut content = vec![
+            gutter.clone(),
+            Span::styled(" ".repeat(inner), Style::default().bg(panel_bg)),
             Span::styled(
-                current_model.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
+                path_display,
+                Style::default().fg(theme.text_muted).bg(panel_bg),
             ),
         ];
+        let mut panel_used = inner + path_width;
+
+        // Right-aligned cluster: model name, then goal, then optional MCP
+        // summary plus the context-usage bar. The bar fills with the *used*
+        // fraction of the model's context window, so a nearly full bar means
+        // the window is almost exhausted. Skipped for providers without a
+        // known window (custom / local / mock) and on terminals too narrow
+        // to fit it cleanly.
+        let mut right_spans: Vec<Span> = Vec::new();
+        let mut right_width = 0usize;
+        right_spans.push(Span::styled(
+            current_model.to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+                .bg(panel_bg),
+        ));
+        right_width += current_model.width();
         if let Some(goal) = goal {
-            header_spans.push(Span::raw("   "));
-            header_spans.push(Span::styled(goal, Style::default().fg(theme.text_muted)));
+            let goal_width = goal.width();
+            right_spans.push(Span::styled(
+                " ".repeat(HEADER_GOAL_GAP),
+                Style::default().bg(panel_bg),
+            ));
+            right_spans.push(Span::styled(
+                goal,
+                Style::default().fg(theme.text_muted).bg(panel_bg),
+            ));
+            right_width += HEADER_GOAL_GAP + goal_width;
         }
-        let mut header_lines = vec![Line::from(header_spans)];
-        if let Some((done, total, current)) = checklist {
-            header_lines.push(Line::from(vec![
-                Span::raw(" "),
+        let mcp_summary = format_mcp_summary(mcp_statuses);
+        if !mcp_summary.is_empty() {
+            let mcp_width = mcp_summary.width();
+            right_spans.push(Span::styled(
+                " ".repeat(HEADER_RIGHT_GAP_MIN),
+                Style::default().bg(panel_bg),
+            ));
+            right_width += HEADER_RIGHT_GAP_MIN;
+            right_spans.push(Span::styled(
+                mcp_summary,
+                Style::default().fg(theme.text_muted).bg(panel_bg),
+            ));
+            right_width += mcp_width;
+        }
+        let context_max = model_context_window(current_provider);
+        if context_max > 0 && panel_w >= HEADER_CONTEXT_MIN_WIDTH {
+            right_spans.push(Span::styled(
+                " ".repeat(HEADER_RIGHT_GAP_MIN),
+                Style::default().bg(panel_bg),
+            ));
+            right_width += HEADER_RIGHT_GAP_MIN;
+            let used = estimate_context_tokens(messages);
+            let usage_bar = context_usage_spans(used, context_max, theme, panel_bg);
+            right_width += usage_bar.iter().map(|s| s.content.width()).sum::<usize>();
+            right_spans.extend(usage_bar);
+        }
+        let gap = panel_w
+            .saturating_sub(panel_used + right_width)
+            .max(HEADER_RIGHT_GAP_MIN);
+        content.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(panel_bg),
+        ));
+        content.extend(right_spans);
+        panel_used += gap + right_width;
+        // Trail the rest of the panel with `panel_bg` so the row reads as a
+        // solid band up to the right gutter.
+        content.push(Span::styled(
+            " ".repeat(panel_w.saturating_sub(panel_used)),
+            Style::default().bg(panel_bg),
+        ));
+        content.push(gutter.clone());
+
+        // --- Optional checklist dock row, indented like the content row.
+        let checklist_line = checklist.map(|(done, total, current)| {
+            let tasks = format!("Tasks {}/{}  ", done, total);
+            let tasks_w = tasks.width();
+            let current_w = current.width();
+            let fill = panel_w
+                .saturating_sub(inner + tasks_w + current_w)
+                .max(HEADER_RIGHT_GAP_MIN);
+            Line::from(vec![
+                gutter.clone(),
+                Span::styled(" ".repeat(inner), Style::default().bg(panel_bg)),
                 Span::styled(
-                    format!("Tasks {}/{}  ", done, total),
+                    tasks,
                     Style::default()
                         .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
+                        .add_modifier(Modifier::BOLD)
+                        .bg(panel_bg),
                 ),
-                Span::styled(current, Style::default().fg(theme.text_muted)),
-            ]));
+                Span::styled(current, Style::default().fg(theme.text_muted).bg(panel_bg)),
+                Span::styled(" ".repeat(fill), Style::default().bg(panel_bg)),
+                gutter.clone(),
+            ])
+        });
+
+        // --- Top / bottom rows: solid `panel_bg` fills the full cell height
+        // (no half-block fade) so the header reads as a solid block with the
+        // content row, framed by the `app_bg` side gutters.
+        let solid_line = Line::from(vec![
+            gutter.clone(),
+            Span::styled(
+                " ".repeat(panel_w),
+                Style::default().bg(panel_bg),
+            ),
+            gutter.clone(),
+        ]);
+
+        let mut lines = vec![solid_line.clone(), Line::from(content)];
+        if let Some(line) = checklist_line {
+            lines.push(line);
         }
-        // Header content with a thin separator rule along the bottom edge.
-        let header_block = RtBlock::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(theme.border_subtle));
-        frame.render_widget(Paragraph::new(header_lines).block(header_block), chunks[0]);
+        lines.push(solid_line);
+        frame.render_widget(Paragraph::new(lines), chunks[0]);
     } // end !chrome_hidden
 
     // 2. Chat History
@@ -297,7 +439,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     let (chat_area, subagent_bar_rect) = if subagent_bar.is_some() {
         let sub = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .constraints([Constraint::Min(0), Constraint::Length(SUBAGENT_BAR_ROWS)])
             .split(chunks[1]);
         (sub[0], Some(sub[1]))
     } else {
@@ -311,11 +453,41 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
     let mut content_lines: usize = 0;
     // Expanded cards collected during the pass, for the sticky pinned header.
     let mut sticky_cards: Vec<StickyCard> = Vec::new();
+    // The last model attribution badge drawn into the stream. A badge is shown
+    // once at the start of an assistant turn and again only when the producing
+    // model changes, so a session that mixes providers stays traceable without
+    // repeating the label on every message of a single-model run.
+    let mut last_shown_attribution: Option<(String, String)> = None;
 
     for (mi, msg) in messages.iter().enumerate() {
+        // Model attribution badge: shown above the first assistant-side
+        // message of a turn (reasoning, text, or tool step) and whenever the
+        // producing provider/model changes. Tool results and tool cards share
+        // the turn's model, so a single badge per model-run keeps the
+        // transcript clean while remaining fully traceable.
+        let is_assistant_side = msg.role == neenee_core::Role::Assistant
+            || msg.is_thinking()
+            || msg.is_tool_step();
+        if is_assistant_side {
+            if let Some(attribution) = msg.attribution_label() {
+                if last_shown_attribution.as_ref() != Some(&attribution) {
+                    draw_attribution_badge(
+                        frame,
+                        chat_area,
+                        &attribution,
+                        &mut skip_rows,
+                        &mut current_y,
+                        &mut content_lines,
+                        theme,
+                    );
+                    last_shown_attribution = Some(attribution);
+                }
+            }
+        }
+
         // Render blocks
         if msg.is_subagent_task() {
-            render_subagent_inline_card(
+            draw_subagent_inline_card(
                 frame,
                 chat_area,
                 msg,
@@ -327,7 +499,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 &mut content_lines,
             );
         } else if msg.is_tool_step() {
-            render_tool_step_card(
+            draw_tool_step_card(
                 frame,
                 chat_area,
                 msg,
@@ -342,7 +514,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 spinner_phase,
             );
         } else if msg.is_thinking() {
-            render_thinking_card(
+            draw_reasoning_trace(
                 frame,
                 chat_area,
                 msg,
@@ -357,7 +529,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 spinner_phase,
             );
         } else {
-            render_message_blocks(
+            draw_message_body(
                 frame,
                 chat_area,
                 msg,
@@ -385,11 +557,11 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
             next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
         });
         if msg.role != neenee_core::Role::User || next_is_card {
-            content_lines += 1;
+            content_lines += MESSAGE_GAP_ROWS;
             if skip_rows > 0 {
                 skip_rows = skip_rows.saturating_sub(1);
             } else if current_y < chat_area.y + chat_area.height {
-                current_y += 1;
+                current_y += MESSAGE_GAP_ROWS as u16;
             }
         }
     }
@@ -400,32 +572,30 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         draw_subagent_bar(frame, rect, bar, theme);
     }
 
-    // The transient running status lives directly above the input box (a thin
-    // animated bar). Hidden while text is actively streaming ("responding"),
-    // since the streamed response is itself the feedback in that phase, and
-    // hidden when idle.
-    let input_rect = if status_active {
-        let status_rect = Rect::new(
-            chunks[2].x + 2,
-            chunks[2].y,
-            chunks[2].width.saturating_sub(4),
-            1,
+    // The footer stacks, from top to bottom: input box, transient status bar
+    // (when active), and the hint line. The input box therefore always anchors
+    // the top of the footer; the status bar and hint line follow it.
+    let footer_x = chunks[2].x + FOOTER_H_INSET;
+    let footer_w = chunks[2].width.saturating_sub(2 * FOOTER_H_INSET);
+    let input_rect = Rect::new(footer_x, chunks[2].y, footer_w, input_box_height);
+
+    // The transient running status lives directly below the input box. Hidden
+    // while text is actively streaming ("responding"), since the streamed
+    // response is itself the feedback in that phase, and hidden when idle.
+    let status_y = input_rect.y + input_rect.height;
+    if status_active {
+        draw_status_bar(
+            frame,
+            Rect::new(footer_x, status_y, footer_w, STATUS_BAR_ROWS),
+            activity,
+            spinner_phase,
+            theme,
         );
-        draw_status_bar(frame, status_rect, activity, spinner_phase, theme);
-        Rect::new(
-            chunks[2].x + 2,
-            chunks[2].y + 1,
-            chunks[2].width.saturating_sub(4),
-            input_box_height,
-        )
-    } else {
-        Rect::new(
-            chunks[2].x + 2,
-            chunks[2].y,
-            chunks[2].width.saturating_sub(4),
-            input_box_height,
-        )
-    };
+    }
+
+    // The hint line sits below the status bar, or directly below the input
+    // box when the status bar is hidden.
+    let hint_rect = Rect::new(footer_x, status_y + status_height, footer_w, HINT_LINE_ROWS);
 
     // Sticky pinned header: if an expanded card's body covers the top of the
     // viewport (its header is scrolled out of view), pin its header to the line
@@ -455,6 +625,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
 
     ChatRender {
         input_rect,
+        hint_rect,
         content_lines,
         view_height: chat_area.height,
         sticky: sticky_info,
@@ -492,9 +663,189 @@ fn goal_checklist_summary(goal: &Goal) -> Option<(usize, usize, String)> {
     Some((done, goal.checklist.len(), current))
 }
 
+/// Shorten a working-directory display string to `max_chars` columns. Paths at
+/// or below the budget come back untouched. Longer paths collapse from the
+/// left: a leading `~/` home anchor is preserved when it fits (so the user's
+/// request to show home as `~` survives on deep directories), followed by `…`
+/// and the trailing path text. Anything else falls back to a plain `…` prefix.
+fn truncate_path(path: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_chars {
+        return path.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    // Preserve a leading "~/" anchor (home shortcut) when truncating from the
+    // left so the home indicator survives even on deep directories.
+    if let Some(rest) = path.strip_prefix("~/") {
+        let anchor = "~/";
+        let anchor_chars = 2;
+        // Need room for anchor + `…` + at least one char of the rest.
+        let budget = max_chars.saturating_sub(anchor_chars + 1);
+        let rest_chars: Vec<char> = rest.chars().collect();
+        if budget > 0 && rest_chars.len() > budget {
+            let kept: String = rest_chars[rest_chars.len() - budget..].iter().collect();
+            return format!("{}…{}", anchor, kept);
+        } else if budget > 0 {
+            return format!("{}{}", anchor, rest);
+        }
+    }
+    let take = max_chars - 1;
+    let truncated: String = chars[chars.len() - take..].iter().collect();
+    format!("…{}", truncated)
+}
+
+fn format_mcp_summary(statuses: &[(String, neenee_core::mcp::McpConnectionStatus)]) -> String {
+    if statuses.is_empty() {
+        return String::new();
+    }
+    let total = statuses.len();
+    let connected = statuses
+        .iter()
+        .filter(|(_, status)| {
+            matches!(
+                status,
+                neenee_core::mcp::McpConnectionStatus::Connected { .. }
+            )
+        })
+        .count();
+    let tools: usize = statuses
+        .iter()
+        .filter_map(|(_, status)| match status {
+            neenee_core::mcp::McpConnectionStatus::Connected { tools } => Some(*tools),
+            _ => None,
+        })
+        .sum();
+    format!("MCP {}/{} · {} tools", connected, total, tools)
+}
+
+/// Context-usage ratio at which the usage bar turns from green to yellow.
+const CONTEXT_USAGE_WARN_THRESHOLD: f64 = 0.7;
+/// Context-usage ratio at which the usage bar turns from yellow to red.
+const CONTEXT_USAGE_CRIT_THRESHOLD: f64 = 0.9;
+
+/// Format a token count with a single-letter SI suffix: `999`, `1.0k`, `20.2k`,
+/// `1.5M`, `3.2B`.
+fn format_token_count(n: usize) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Context-window usage indicator: `[████░░░░░░] 58% (20.2k/256k)`. The bar
+/// fills with the used fraction of the model's context window, so a nearly full
+/// bar means the window is almost exhausted. Color steps green → yellow → red
+/// as usage climbs past the warn / critical thresholds. `bg` is applied to
+/// every span so the indicator reads on a solid panel background.
+fn context_usage_spans(used: usize, max: usize, theme: &Theme, bg: Color) -> Vec<Span<'static>> {
+    let cells = CONTEXT_USAGE_BAR_CELLS;
+    let ratio = if max == 0 {
+        0.0
+    } else {
+        ((used as f64) / (max as f64)).clamp(0.0, 1.0)
+    };
+    let filled = (ratio * cells as f64).round() as usize;
+    let color = if ratio < CONTEXT_USAGE_WARN_THRESHOLD {
+        theme.success
+    } else if ratio < CONTEXT_USAGE_CRIT_THRESHOLD {
+        theme.warning
+    } else {
+        theme.error_fg
+    };
+    let pct = (ratio * 100.0).round() as u32;
+
+    let mut spans = Vec::with_capacity(cells + 6);
+    spans.push(Span::styled(
+        " [",
+        Style::default().fg(theme.text_muted).bg(bg),
+    ));
+    for i in 0..cells {
+        if i < filled {
+            spans.push(Span::styled("█", Style::default().fg(color).bg(bg)));
+        } else {
+            spans.push(Span::styled(
+                "░",
+                Style::default().fg(theme.text_muted).bg(bg),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        "] ",
+        Style::default().fg(theme.text_muted).bg(bg),
+    ));
+    spans.push(Span::styled(
+        format!("{}%", pct),
+        Style::default().fg(color).bg(bg),
+    ));
+    spans.push(Span::styled(
+        format!(
+            " ({}/{})",
+            format_token_count(used),
+            format_token_count(max)
+        ),
+        Style::default().fg(theme.text_muted).bg(bg),
+    ));
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_summary_counts_connected_servers_and_tools() {
+        use neenee_core::mcp::McpConnectionStatus;
+        let statuses = vec![
+            (
+                "fs".to_string(),
+                McpConnectionStatus::Connected { tools: 3 },
+            ),
+            (
+                "git".to_string(),
+                McpConnectionStatus::Failed("not found".to_string()),
+            ),
+        ];
+        assert_eq!(
+            format_mcp_summary(&statuses),
+            "MCP 1/2 · 3 tools".to_string()
+        );
+    }
+
+    #[test]
+    fn mcp_summary_is_empty_when_no_servers() {
+        assert!(format_mcp_summary(&[]).is_empty());
+    }
+
+    #[test]
+    fn format_token_count_uses_si_suffixes() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1000), "1.0k");
+        assert_eq!(format_token_count(20_200), "20.2k");
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(3_200_000_000), "3.2B");
+    }
+
+    #[test]
+    fn context_usage_spans_show_bar_percentage_and_counts() {
+        let theme = Theme::default();
+        let spans = context_usage_spans(20_200, 256_000, &theme, theme.panel_bg);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[█░░░░░░░░░]"), "bar rendered: {text}");
+        assert!(text.contains(" 8%"), "percentage rendered: {text}");
+        assert!(text.contains("(20.2k/256.0k)"), "counts rendered: {text}");
+        assert!(!text.contains('╸'), "nub character removed: {text}");
+    }
 
     /// Smoke-render every redesigned component into a buffer to catch panics
     /// (border math, rect underflows, empty content) without a live terminal.
@@ -533,25 +884,27 @@ mod tests {
                         selection: &SelectionState::None,
                         current_provider: "mock",
                         current_model: "mock-model",
+                        cwd: "~/project",
                         current_mode: AgentMode::Build,
                         current_goal: None,
                         activity: "waiting for model",
                         spinner_phase: 0,
                         input: "hello",
+                        byte_cursor: 5,
                         chrome_hidden: false,
                         subagent_bar: None,
                         sidebar_visible: false,
                         loop_status: "idle",
                         sidebar_scroll: 0,
                         theme: &theme,
+                        mcp_statuses: &[],
                     },
                 );
-                draw_input(
+                draw_composer(
                     f,
                     Rect::new(0, 21, 80, 3),
                     "hello",
                     5,
-                    theme.accent,
                     &theme,
                     &mut LayoutMap::new(),
                     true,
@@ -672,17 +1025,20 @@ mod tests {
                         selection: &SelectionState::None,
                         current_provider: "mock",
                         current_model: "mock-model",
+                        cwd: "~/project",
                         current_mode: AgentMode::Build,
                         current_goal: None,
                         activity: "running subagent",
                         spinner_phase: 0,
                         input: "",
+                        byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
                         sidebar_visible: false,
                         loop_status: "idle",
                         sidebar_scroll: 0,
                         theme: &theme,
+                        mcp_statuses: &[],
                     },
                 );
             })
@@ -703,11 +1059,13 @@ mod tests {
                         selection: &SelectionState::None,
                         current_provider: "mock",
                         current_model: "mock-model",
+                        cwd: "~/project",
                         current_mode: AgentMode::Build,
                         current_goal: None,
                         activity: "",
                         spinner_phase: 0,
                         input: "",
+                        byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: Some(SubagentBarInfo {
                             label: "explore the codebase".to_string(),
@@ -718,6 +1076,7 @@ mod tests {
                         loop_status: "idle",
                         sidebar_scroll: 0,
                         theme: &theme,
+                        mcp_statuses: &[],
                     },
                 );
             })
@@ -768,17 +1127,20 @@ mod tests {
                         selection: &SelectionState::None,
                         current_provider: "mock",
                         current_model: "mock-model",
+                        cwd: "~/project",
                         current_mode: AgentMode::Build,
                         current_goal: Some(&goal),
                         activity: "thinking",
                         spinner_phase: 0,
                         input: "hello",
+                        byte_cursor: 5,
                         chrome_hidden: false,
                         subagent_bar: None,
                         sidebar_visible: true,
                         loop_status: "loop 1/4",
                         sidebar_scroll: 0,
                         theme: &theme,
+                        mcp_statuses: &[],
                     },
                 );
                 captured_sidebar_rect = r.sidebar.rect;
@@ -852,6 +1214,35 @@ mod tests {
         assert_eq!(lines[0].text, "hello");
         assert_eq!(lines[1].text, " worl");
         assert_eq!(lines[2].text, "d");
+    }
+
+    #[test]
+    fn truncate_path_preserves_short_paths() {
+        assert_eq!(truncate_path("~/projects/neenee", 40), "~/projects/neenee");
+        assert_eq!(truncate_path("/", 40), "/");
+        assert_eq!(truncate_path("~", 40), "~");
+    }
+
+    #[test]
+    fn truncate_path_keeps_home_anchor_when_collapsing() {
+        // A deep directory under home keeps `~/` and the leaf tail.
+        let deep = "~/a/very/deeply/nested/project/directory/here";
+        let out = truncate_path(deep, 20);
+        assert!(
+            out.starts_with("~/…"),
+            "expected home anchor preserved, got: {}",
+            out
+        );
+        assert!(out.ends_with("directory/here"));
+        assert!(out.chars().count() <= 20);
+    }
+
+    #[test]
+    fn truncate_path_falls_back_to_ellipsis_for_non_home() {
+        let abs = "/var/log/some/very/deep/path/leaf";
+        let out = truncate_path(abs, 12);
+        assert!(out.starts_with('…'));
+        assert!(out.chars().count() <= 12);
     }
 
     #[test]
@@ -930,17 +1321,20 @@ mod tests {
                             selection: &SelectionState::None,
                             current_provider: "mock",
                             current_model: "m",
+                            cwd: "~/project",
                             current_mode: AgentMode::Build,
                             current_goal: None,
                             activity: "",
                             spinner_phase: 0,
                             input,
+                            byte_cursor: input.len(),
                             chrome_hidden: false,
                             subagent_bar: None,
                             sidebar_visible: false,
                             loop_status: "idle",
                             sidebar_scroll: 0,
                             theme,
+                            mcp_statuses: &[],
                         },
                     );
                     rect = r.input_rect;
@@ -966,10 +1360,10 @@ mod tests {
         assert!(tall.height <= 12);
     }
 
-    /// `draw_input` must not panic for tricky inputs and should place the caret
+    /// `draw_composer` must not panic for tricky inputs and should place the caret
     /// on the second wrapped line when the cursor sits past the first wrap.
     #[test]
-    fn draw_input_wraps_and_positions_caret() {
+    fn draw_composer_wraps_and_positions_caret() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -981,12 +1375,11 @@ mod tests {
         let input = "aaaa bbbb cccc dddd eeee";
         terminal
             .draw(|f| {
-                draw_input(
+                draw_composer(
                     f,
                     Rect::new(0, 0, 20, 8),
                     input,
-                    input.width() as u16,
-                    theme.accent,
+                    input.len(),
                     &theme,
                     &mut LayoutMap::new(),
                     true,

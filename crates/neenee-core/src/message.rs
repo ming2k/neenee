@@ -27,6 +27,16 @@ pub struct Message {
     /// `inline_data` part. Only user messages normally carry images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImagePart>>,
+    /// Identifier of the provider/solution that produced this assistant
+    /// message (e.g. `"kimi-code"`, `"gemini"`). Stamped by the harness so a
+    /// session that mixes multiple models stays traceable after resume. Other
+    /// roles leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model identifier that produced this assistant message (e.g.
+    /// `"kimi-for-coding"`). Companion to [`Message::provider`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub hidden: bool,
 }
@@ -50,6 +60,8 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         }
     }
@@ -70,6 +82,18 @@ impl Message {
         self
     }
 
+    /// Stamp the provider/solution id and model that produced this message,
+    /// so the transcript stays traceable when a session spans multiple models.
+    pub fn with_attribution(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.provider = Some(provider.into());
+        self.model = Some(model.into());
+        self
+    }
+
     pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -79,6 +103,8 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         }
     }

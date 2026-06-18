@@ -14,12 +14,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot, ImagePart, Message,
-    PermissionDecision, PermissionRequest, Role, SessionOverview,
+    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot,
+    ImagePart, Message, PermissionDecision, PermissionRequest, Role, SessionOverview,
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::Rect,
     Terminal,
 };
 use std::{
@@ -66,6 +65,20 @@ pub(crate) struct ModelSolution {
     pub model: &'static str,
     pub description: &'static str,
     pub custom_endpoint: bool,
+    /// Model context window in tokens, used by the header context-usage
+    /// indicator. `0` means "unknown" (custom / local / mock), which hides the
+    /// indicator rather than showing a meaningless fill level.
+    pub context_window: usize,
+}
+
+/// Look up the context window (in tokens) for a provider preset id. Returns `0`
+/// when the provider is unknown or has no fixed window.
+pub(crate) fn model_context_window(provider: &str) -> usize {
+    SOLUTIONS
+        .iter()
+        .find(|s| s.id == provider)
+        .map(|s| s.context_window)
+        .unwrap_or(0)
 }
 
 const SOLUTIONS: &[ModelSolution] = &[
@@ -75,6 +88,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "kimi-for-coding",
         description: "Kimi coding subscription (auto-updated model)",
         custom_endpoint: false,
+        context_window: 128_000,
     },
     ModelSolution {
         id: "openai",
@@ -82,6 +96,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "gpt-4o",
         description: "OpenAI API",
         custom_endpoint: false,
+        context_window: 128_000,
     },
     ModelSolution {
         id: "gemini",
@@ -89,6 +104,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "gemini-1.5-flash",
         description: "Google Gemini",
         custom_endpoint: false,
+        context_window: 1_000_000,
     },
     ModelSolution {
         id: "kimi",
@@ -96,6 +112,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "moonshot-v1-8k",
         description: "Moonshot pay-as-you-go API",
         custom_endpoint: false,
+        context_window: 8_000,
     },
     ModelSolution {
         id: "deepseek",
@@ -103,6 +120,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "deepseek-chat",
         description: "DeepSeek AI",
         custom_endpoint: false,
+        context_window: 64_000,
     },
     ModelSolution {
         id: "qwen",
@@ -110,6 +128,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "qwen-plus",
         description: "Alibaba DashScope",
         custom_endpoint: false,
+        context_window: 131_072,
     },
     ModelSolution {
         id: "glm",
@@ -117,6 +136,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "glm-4-plus",
         description: "Zhipu AI",
         custom_endpoint: false,
+        context_window: 128_000,
     },
     ModelSolution {
         id: "volcengine",
@@ -124,6 +144,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "deepseek-v3-250324",
         description: "ByteDance Ark",
         custom_endpoint: false,
+        context_window: 64_000,
     },
     ModelSolution {
         id: "llama",
@@ -131,6 +152,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "local-model",
         description: "Local Llama server",
         custom_endpoint: false,
+        context_window: 0,
     },
     ModelSolution {
         id: "custom",
@@ -138,6 +160,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "custom-model",
         description: "OpenAI-compatible endpoint",
         custom_endpoint: true,
+        context_window: 0,
     },
     ModelSolution {
         id: "mock",
@@ -145,6 +168,7 @@ const SOLUTIONS: &[ModelSolution] = &[
         model: "mock-model",
         description: "Test provider",
         custom_endpoint: false,
+        context_window: 0,
     },
 ];
 
@@ -202,6 +226,9 @@ pub struct App {
     pub modal_index: usize,
     pub current_provider: String,
     pub current_model: String,
+    /// Display form of the current working directory, with `$HOME` swapped for
+    /// `~`. Captured once at startup because the TUI process never `chdir`s.
+    pub cwd_display: String,
     pub current_mode: AgentMode,
     pub current_goal: Option<Goal>,
     pub loop_status: String,
@@ -257,6 +284,9 @@ pub struct App {
     pub sidebar_rect: Option<ratatui::layout::Rect>,
     /// Theme.
     pub theme: Theme,
+    /// MCP server statuses loaded at startup. Mirrored into the header as a
+    /// compact right-aligned summary.
+    pub mcp_statuses: Vec<(String, McpConnectionStatus)>,
 }
 
 struct UiRuntime {
@@ -400,8 +430,8 @@ impl App {
             .collect()
     }
 
-    /// Toggle the expansion of the tool-step / thinking card at `mi`, keeping
-    /// its header pinned to the screen position the user interacted with.
+    /// Toggle the expansion of the tool-step card / reasoning trace at `mi`,
+    /// keeping its header pinned to the screen position the user interacted with.
     ///
     /// A toggle inserts or removes the body lines that sit *below* the header,
     /// so the header's own content-line never moves. That gives a simple rule
@@ -605,6 +635,7 @@ pub async fn run_tui(
     input_history: Vec<String>,
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
+    mcp_statuses: Vec<(String, McpConnectionStatus)>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
@@ -631,6 +662,8 @@ pub async fn run_tui(
     let messages_clone = messages.clone();
     let should_quit = Arc::new(AtomicBool::new(false));
     let should_quit_clone = should_quit.clone();
+
+    let cwd_display = format_cwd_display();
 
     let current_provider = Arc::new(Mutex::new(initial_provider.clone()));
     let current_model = Arc::new(Mutex::new(initial_model.clone()));
@@ -711,9 +744,9 @@ pub async fn run_tui(
                     } else {
                         // StreamStart inserts an empty assistant placeholder before
                         // the first reasoning delta. Reasoning renders as its own
-                        // thinking card, so that placeholder is never used and only
+                        // reasoning trace, so that placeholder is never used and only
                         // leaves an extra blank line between the user message and the
-                        // thinking header. Drop it before creating the thinking card
+                        // reasoning header. Drop it before creating the reasoning trace
                         // so restored history and live reasoning have identical
                         // spacing.
                         if msgs
@@ -731,7 +764,20 @@ pub async fn run_tui(
                         .take()
                         .map(|started| started.elapsed().as_millis() as u64);
                     let mut msgs = messages_clone.lock().await;
-                    if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking()) {
+                    // The round closes with `AssistantEnd` *before* `ReasoningEnd`
+                    // (see golden_reasoning_precedes_text_in_the_same_round), so by
+                    // the time this arrives the assistant's text message is usually
+                    // the literal last message. Scan backward for the most recent
+                    // Thinking message that is still streaming (`duration_ms: None`)
+                    // instead of relying on it being last — otherwise the trace's
+                    // duration never gets stamped and the spinner runs forever.
+                    let target = msgs.iter_mut().rfind(|message| {
+                        matches!(
+                            &message.kind,
+                            MessageKind::Thinking { duration_ms: None, .. }
+                        )
+                    });
+                    if let Some(last) = target {
                         last.raw = content.clone();
                         last.reparse();
                         if let MessageKind::Thinking {
@@ -898,6 +944,7 @@ pub async fn run_tui(
         modal_index: 0,
         current_provider: initial_provider,
         current_model: initial_model,
+        cwd_display,
         current_mode: AgentMode::Build,
         current_goal: None,
         loop_status: "idle".to_string(),
@@ -929,6 +976,7 @@ pub async fn run_tui(
         sidebar_max_scroll: 0,
         sidebar_rect: None,
         theme: Theme::default(),
+        mcp_statuses,
     };
 
     // Run app
@@ -965,6 +1013,25 @@ pub async fn run_tui(
     }
 
     Ok(app.input_history)
+}
+
+/// Build a display form of the process working directory with the user's home
+/// directory replaced by `~`. Falls back to the raw path (or `"."` if the cwd
+/// cannot be read) when home detection fails.
+fn format_cwd_display() -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return ".".to_string(),
+    };
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rel) = cwd.strip_prefix(&home) {
+            if rel.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rel.display());
+        }
+    }
+    cwd.display().to_string()
 }
 
 async fn run_app_loop<B: Backend>(
@@ -1097,10 +1164,6 @@ async fn run_app_loop<B: Backend>(
             } else {
                 app.input.clone()
             };
-            let accent = match app.current_mode {
-                AgentMode::Plan => ratatui::style::Color::Rgb(137, 180, 250),
-                AgentMode::Build => app.theme.accent,
-            };
 
             // Overlay modals (Models, Sessions, Help, Permission) replace the
             // entire chrome. Modals that type into the input line keep it.
@@ -1141,17 +1204,20 @@ async fn run_app_loop<B: Backend>(
                     selection: &app.selection,
                     current_provider: &app.current_provider,
                     current_model: &app.current_model,
+                    cwd: &app.cwd_display,
                     current_mode: app.current_mode,
                     current_goal: app.current_goal.as_ref(),
                     activity: &status,
                     spinner_phase: app.spinner_tick,
                     input: &masked_input,
+                    byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
                     sidebar_visible: app.sidebar_visible(f.size().width),
                     loop_status: &app.loop_status,
                     sidebar_scroll: app.sidebar_scroll,
                     theme: &app.theme,
+                    mcp_statuses: &app.mcp_statuses,
                 },
             );
             let input_rect = chat_render.input_rect;
@@ -1174,12 +1240,11 @@ async fn run_app_loop<B: Backend>(
 
             // The input box is only shown when no overlay modal is open.
             if !chrome_hidden {
-                render::draw_input(
+                render::draw_composer(
                     f,
                     input_rect,
                     &masked_input,
-                    app.cursor_display_x(),
-                    accent,
+                    app.byte_cursor(),
                     &app.theme,
                     &mut layout_map,
                     app.active_modal != Modal::ApiKey,
@@ -1187,22 +1252,8 @@ async fn run_app_loop<B: Backend>(
                 );
 
                 // Right-aligned hint line below the input box.
-                let hint_rect = Rect::new(
-                    input_rect.x,
-                    input_rect.y + input_rect.height,
-                    input_rect.width,
-                    1,
-                );
-                render::draw_hint(
-                    f,
-                    hint_rect,
-                    &[
-                        ("ctrl+p", "commands"),
-                        ("ctrl+h", "help"),
-                        ("enter", "send"),
-                    ],
-                    &app.theme,
-                );
+                let hint_rect = chat_render.hint_rect;
+                render::draw_hint(f, hint_rect, &[("ctrl+h", "help")], &app.theme);
             }
 
             // Slash suggestions
@@ -1333,9 +1384,7 @@ async fn run_app_loop<B: Backend>(
         // height. The sidebar cannot follow the bottom (its content is static
         // per frame), so a simple saturating clamp is enough.
         let sidebar_view_height = app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0);
-        let sidebar_max = app
-            .sidebar_max_scroll
-            .saturating_sub(sidebar_view_height);
+        let sidebar_max = app.sidebar_max_scroll.saturating_sub(sidebar_view_height);
         app.sidebar_scroll = app.sidebar_scroll.min(sidebar_max);
 
         // Drain all currently-ready input events before redrawing. The first
@@ -1737,9 +1786,9 @@ async fn run_app_loop<B: Backend>(
                     app.sidebar_scroll = app.sidebar_scroll.saturating_sub(2);
                 }
                 input::InputAction::SidebarScrollDown => {
-                    let max = app.sidebar_max_scroll.saturating_sub(
-                        app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0),
-                    );
+                    let max = app
+                        .sidebar_max_scroll
+                        .saturating_sub(app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0));
                     app.sidebar_scroll = (app.sidebar_scroll + 2).min(max);
                 }
                 input::InputAction::SidebarScrollPageUp => {
@@ -1754,9 +1803,9 @@ async fn run_app_loop<B: Backend>(
                         .sidebar_rect
                         .map(|r| (r.height as usize).saturating_sub(1).max(1))
                         .unwrap_or(1);
-                    let max = app.sidebar_max_scroll.saturating_sub(
-                        app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0),
-                    );
+                    let max = app
+                        .sidebar_max_scroll
+                        .saturating_sub(app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0));
                     app.sidebar_scroll = (app.sidebar_scroll + page).min(max);
                 }
                 input::InputAction::InsertChar(c) => {
@@ -1979,7 +2028,7 @@ async fn run_app_loop<B: Backend>(
                             app.selection = SelectionState::None;
                             app.drag.cancel();
                         } else if cursor.block_idx == usize::MAX - 1 {
-                            // Clicked a thinking card header: toggle that card.
+                            // Clicked a reasoning trace header: toggle that trace.
                             let mi = cursor.message_idx;
                             let mut messages = runtime.messages.lock().await;
                             app.toggle_card_pinned(&mut messages, mi);
@@ -2329,6 +2378,7 @@ pub async fn start_tui(
     input_history: Vec<String>,
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
+    mcp_statuses: Vec<(String, McpConnectionStatus)>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     run_tui(
         tx,
@@ -2338,6 +2388,7 @@ pub async fn start_tui(
         input_history,
         initial_messages,
         custom_commands,
+        mcp_statuses,
     )
     .await
 }

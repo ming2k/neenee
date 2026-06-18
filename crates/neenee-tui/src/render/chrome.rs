@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::layout::LayoutMap;
 
-use super::util::{contrast_fg, viewport_rect};
+use super::primitives::{contrast_fg, viewport_rect};
 use super::Theme;
 
 /// Braille spinner frames used by the transient status bar above the input
@@ -25,7 +25,7 @@ pub fn spinner_frame(spinner_phase: usize) -> &'static str {
     SPINNER_FRAMES[spinner_phase % SPINNER_FRAMES.len()]
 }
 
-/// Draw the transient activity bar that sits directly above the input box.
+/// Draw the transient activity bar that sits directly below the input box.
 /// Replaces the old inline `┃ neenee ⟳ <status>` indicator: the brand prefix
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by an animated braille spinner so the harness never looks frozen.

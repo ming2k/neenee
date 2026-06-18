@@ -40,6 +40,22 @@ impl Provider for ProxyProvider {
         p.prepare_tools(tools);
     }
 
+    /// Delegate to the currently active inner provider so attribution tracks
+    /// the live provider even after a mid-session `/models` switch.
+    fn provider_id(&self) -> String {
+        self.holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .provider_id()
+    }
+
+    fn model(&self) -> String {
+        self.holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .model()
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let p = self
             .holder
@@ -1172,6 +1188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Spawn Agent Background Task
+    let mcp_statuses_for_tui = mcp_statuses.clone();
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
@@ -2089,6 +2106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_history,
         restored_messages,
         custom_command_suggestions,
+        mcp_statuses_for_tui,
     )
     .await
     {

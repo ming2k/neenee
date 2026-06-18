@@ -98,6 +98,40 @@ impl Block {
     }
 }
 
+/// Total character count of the context a message stream occupies, used by the
+/// header's context-window indicator. `raw` is display state for tool steps
+/// (a short summary when collapsed), so tool-step bulk is measured directly
+/// from `arguments` + `output` + nested children; thinking text uses `content`;
+/// chat text uses `raw`.
+fn context_chars_of(messages: &[ChatMessage]) -> usize {
+    let mut chars = 0usize;
+    for m in messages {
+        match &m.kind {
+            MessageKind::Chat => chars += m.raw.len(),
+            MessageKind::Thinking { content, .. } => chars += content.len(),
+            MessageKind::ToolStep {
+                arguments,
+                output,
+                children,
+                ..
+            } => {
+                chars += arguments.len();
+                if let Some(o) = output {
+                    chars += o.len();
+                }
+                chars += context_chars_of(children);
+            }
+        }
+    }
+    chars
+}
+
+/// Rough token estimate for the active context, using the same ~4 chars/token
+/// heuristic as `neenee_core`'s `estimate_string_tokens_len`.
+pub fn estimate_context_tokens(messages: &[ChatMessage]) -> usize {
+    (context_chars_of(messages) / 4).max(1)
+}
+
 /// A structured chat message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
@@ -413,7 +447,7 @@ impl ChatMessage {
         }
     }
 
-    /// Human-readable header for the thinking card (always one line).
+    /// Human-readable header for the reasoning trace (always one line).
     pub fn thinking_header(&self) -> Option<String> {
         let MessageKind::Thinking {
             content,
@@ -476,7 +510,7 @@ impl ChatMessage {
         };
         if *expanded {
             // Expanded tool-step bodies are rendered directly from the
-            // structured data (see render_tool_step_card), not from parsed
+            // structured data (see draw_tool_step_card), not from parsed
             // markdown. We still populate `blocks` so semantic selection and
             // copy work: block 0 = display arguments, block 1 = output.
             let kv = parse_arguments_kv(arguments);

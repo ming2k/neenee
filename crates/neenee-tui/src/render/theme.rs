@@ -14,7 +14,6 @@ pub struct Theme {
     pub quote_fg: Color,
     pub dim_fg: Color,
     pub selected_bg: Color,
-    pub header_bg: Color,
     pub accent: Color,
     // opencode-style semantic design tokens.
     /// Base background painted across the entire terminal frame so the TUI
@@ -24,10 +23,13 @@ pub struct Theme {
     pub text: Color,
     /// Muted/secondary text.
     pub text_muted: Color,
-    /// Solid background for panels (modals, sheets, input).
+    /// Solid background for panels (modals, sheets).
     pub panel_bg: Color,
-    /// Slightly dimmer than `panel_bg`; used for sent user messages so they
-    /// read as read-only compared to the live input box.
+    /// Background for the live input box; brighter than `user_panel_bg` so the
+    /// active prompt stands out from already-sent messages.
+    pub input_bg: Color,
+    /// Used for sent user messages so they read as read-only compared to the
+    /// live input box.
     pub user_panel_bg: Color,
     /// Slightly raised background for footer/option bars.
     pub element_bg: Color,
@@ -42,39 +44,39 @@ pub struct Theme {
     pub warning: Color,
     pub success: Color,
     pub info: Color,
-    pub border_subtle: Color,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            user_fg: Color::Rgb(137, 180, 250),
-            assistant_fg: Color::Rgb(205, 214, 244),
-            error_fg: Color::Rgb(243, 139, 168),
-            system_fg: Color::Rgb(127, 132, 156),
-            code_fg: Color::Rgb(148, 226, 213),
-            code_bg: Color::Rgb(22, 24, 35),
-            heading_fg: Color::Rgb(94, 234, 212),
-            quote_fg: Color::Rgb(249, 226, 175),
-            dim_fg: Color::Rgb(127, 132, 156),
-            selected_bg: Color::Rgb(30, 50, 70),
-            header_bg: Color::Rgb(22, 24, 35),
-            accent: Color::Rgb(94, 234, 212),
-            // Cool palette: cyan / teal / sky — no purple-pink.
-            app_bg: Color::Rgb(15, 16, 25),
-            text: Color::Rgb(205, 214, 244),
-            text_muted: Color::Rgb(122, 132, 153),
-            panel_bg: Color::Rgb(22, 24, 35),
-            user_panel_bg: Color::Rgb(18, 20, 30),
-            element_bg: Color::Rgb(33, 37, 54),
-            menu_bg: Color::Rgb(27, 30, 44),
-            user_bg: Color::Rgb(29, 35, 54),
-            backdrop: Color::Rgb(8, 9, 14),
-            primary: Color::Rgb(34, 211, 238),
-            warning: Color::Rgb(250, 204, 21),
-            success: Color::Rgb(74, 222, 128),
-            info: Color::Rgb(125, 211, 252),
-            border_subtle: Color::Rgb(45, 50, 70),
+            user_fg: Color::Rgb(165, 177, 164),
+            assistant_fg: Color::Rgb(213, 213, 205),
+            error_fg: Color::Rgb(190, 111, 104),
+            system_fg: Color::Rgb(111, 116, 110),
+            code_fg: Color::Rgb(166, 178, 163),
+            code_bg: Color::Rgb(13, 14, 14),
+            heading_fg: Color::Rgb(190, 194, 181),
+            quote_fg: Color::Rgb(156, 145, 118),
+            dim_fg: Color::Rgb(94, 99, 94),
+            selected_bg: Color::Rgb(38, 48, 44),
+            accent: Color::Rgb(142, 161, 145),
+            // Zen palette: ink-black base, charcoal surfaces, quiet sage
+            // accents. Contrast comes from luminance, not saturated hue, so
+            // the interface stays calm while preserving semantic cues.
+            app_bg: Color::Rgb(7, 8, 8),
+            text: Color::Rgb(213, 213, 205),
+            text_muted: Color::Rgb(119, 125, 117),
+            panel_bg: Color::Rgb(14, 15, 15),
+            input_bg: Color::Rgb(18, 19, 19),
+            user_panel_bg: Color::Rgb(11, 12, 12),
+            element_bg: Color::Rgb(21, 23, 22),
+            menu_bg: Color::Rgb(17, 19, 18),
+            user_bg: Color::Rgb(18, 24, 21),
+            backdrop: Color::Rgb(3, 4, 4),
+            primary: Color::Rgb(142, 161, 145),
+            warning: Color::Rgb(181, 149, 93),
+            success: Color::Rgb(117, 148, 117),
+            info: Color::Rgb(128, 153, 156),
         }
     }
 }

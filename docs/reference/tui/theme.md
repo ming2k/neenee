@@ -1,46 +1,54 @@
 # Color palette
 
-All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render.rs`).
+All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render/theme.rs`).
 
 ## Backgrounds
 
 | Token | RGB | Purpose |
 |-------|-----|---------|
-| `app_bg` | (15, 16, 25) | Darkest base; fills the entire frame |
-| `user_panel_bg` | (18, 20, 30) | Sent user-message band (dimmer than input) |
-| `panel_bg` | (22, 24, 35) | Input box (brighter = "editable") |
-| `code_bg` | (22, 24, 35) | Code blocks and tool-step results |
-| `menu_bg` | (27, 30, 44) | Tool-step / thinking card body |
-| `element_bg` | (33, 37, 54) | Card headers, sticky headers |
-| `backdrop` | (8, 9, 14) | Dim overlay behind modals |
-| `selected_bg` | (30, 50, 70) | Semantic-selection highlight |
+| `app_bg` | (7, 8, 8) | Darkest base; fills the entire frame |
+| `backdrop` | (3, 4, 4) | Dim overlay behind modals (darker than `app_bg`) |
+| `code_bg` | (13, 14, 14) | Code blocks and tool-step results |
+| `user_panel_bg` | (11, 12, 12) | Sent user-message band (dimmer than input) |
+| `panel_bg` | (14, 15, 15) | Input box + sidebar (brighter = "editable" / chrome) |
+| `menu_bg` | (17, 19, 18) | Tool-step / thinking card body |
+| `user_bg` | (18, 24, 21) | Tinted band behind the user's own messages |
+| `element_bg` | (21, 23, 22) | Card headers, sticky headers, footer / option bars |
+| `selected_bg` | (38, 48, 44) | Semantic-selection highlight |
 
 ## Foregrounds
 
 | Token | RGB | Purpose |
 |-------|-----|---------|
-| `text` | (205, 214, 244) | Primary text (input box, selected) |
-| `text_muted` | (122, 132, 153) | Sent messages, labels, secondary text |
-| `assistant_fg` | (205, 214, 244) | Assistant text |
-| `code_fg` | (148, 226, 213) | Code content |
-| `dim_fg` | (127, 132, 156) | Line-number gutter, tool name |
-| `accent` | (94, 234, 212) | `┃` bars, model name, spinners |
-| `success` | (74, 222, 128) | Completed tool status |
-| `error_fg` | (243, 139, 168) | Failed tool status |
-| `info` | (125, 211, 252) | Running tool status, thinking card marker |
-| `border_subtle` | (45, 50, 70) | Header separator rule |
-| `primary` | (34, 211, 238) | Hint-line keys |
-| `warning` | (250, 204, 21) | Warnings |
-| `heading_fg` | (94, 234, 212) | Markdown headings |
-| `quote_fg` | (249, 226, 175) | Blockquotes |
+| `text` | (213, 213, 205) | Primary text (input box, selected) |
+| `text_muted` | (119, 125, 117) | Sent messages, labels, secondary text |
+| `assistant_fg` | (213, 213, 205) | Assistant text |
+| `user_fg` | (165, 177, 164) | User message text |
+| `system_fg` | (111, 116, 110) | System / harness messages |
+| `code_fg` | (166, 178, 163) | Code content |
+| `heading_fg` | (190, 194, 181) | Markdown headings |
+| `quote_fg` | (156, 145, 118) | Blockquotes |
+| `dim_fg` | (94, 99, 94) | Line-number gutter, tool name |
+| `accent` | (142, 161, 145) | `┃` bars, model name, spinners |
+| `primary` | (142, 161, 145) | Brand / selection; hint-line keys |
+| `success` | (117, 148, 117) | Completed tool status; context-usage bar < 70% |
+| `info` | (128, 153, 156) | Running tool status, thinking card marker |
+| `warning` | (181, 149, 93) | Warnings; context-usage bar 70–90% |
+| `error_fg` | (190, 111, 104) | Failed tool status; context-usage bar > 90% |
 
 ## Background hierarchy
 
+```text
+backdrop (3,4,4)        ← dimmest; modal overlay
+app_bg (7,8,8)          ← base; entire frame
+  code_bg (13,14,14)        ← code blocks
+  user_panel_bg (11,12,12)  ← sent messages (dimmer = read-only)
+  panel_bg (14,15,15)       ← input box + sidebar (chrome)
+  menu_bg (17,19,18)        ← card bodies
+  user_bg (18,24,21)        ← user-message tint
+  element_bg (21,23,22)     ← card headers (brightest panel)
+selected_bg (38,48,44)  ← selection highlight
 ```
-app_bg (15,16,25)       ← darkest, entire frame
-  user_panel_bg (18,20,30)  ← sent messages (dimmer = read-only)
-  panel_bg (22,24,35)       ← input box (brighter = editable)
-  code_bg (22,24,35)        ← code blocks
-menu_bg (27,30,44)      ← card bodies
-element_bg (33,37,54)   ← card headers (brightest panel)
-```
+
+The header is a floating half-block panel on `panel_bg` (same as the input
+box), inset from the edges by `app_bg` gutters; no separator rules are drawn.

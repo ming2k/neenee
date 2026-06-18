@@ -72,8 +72,18 @@ impl Provider for MockProvider {
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         })
+    }
+
+    fn provider_id(&self) -> String {
+        "mock".to_string()
+    }
+
+    fn model(&self) -> String {
+        "mock".to_string()
     }
 
     async fn stream_chat(
@@ -99,6 +109,11 @@ pub struct OpenAIProvider {
     pub model: String,
     pub base_url: String,
     pub user_agent: String,
+    /// Stable provider/solution id surfaced via [`Provider::provider_id`] so
+    /// assistant messages can be attributed. Defaults to `"openai"`; the
+    /// OpenAI-compatible registry overrides it to the preset id (e.g.
+    /// `"kimi-code"`) in [`OpenAiCompatProvider::build`].
+    pub id: String,
     tools: Mutex<Option<Vec<Value>>>,
 }
 
@@ -122,6 +137,7 @@ impl OpenAIProvider {
             model,
             base_url: base_url.to_string(),
             user_agent: user_agent.to_string(),
+            id: "openai".to_string(),
             tools: Mutex::new(None),
         }
     }
@@ -271,6 +287,14 @@ impl Provider for OpenAIProvider {
         });
     }
 
+    fn provider_id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let client = reqwest::Client::new();
 
@@ -326,6 +350,8 @@ impl Provider for OpenAIProvider {
             tool_calls,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         })
     }
@@ -420,11 +446,16 @@ impl Provider for OpenAIProvider {
 pub struct GeminiProvider {
     pub api_key: String,
     pub model: String,
+    pub id: String,
 }
 
 impl GeminiProvider {
     pub fn new(api_key: String, model: String) -> Self {
-        Self { api_key, model }
+        Self {
+            api_key,
+            model,
+            id: "gemini".to_string(),
+        }
     }
 }
 
@@ -496,6 +527,14 @@ fn gemini_request_body(messages: Vec<Message>) -> Value {
 
 #[async_trait]
 impl Provider for GeminiProvider {
+    fn provider_id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let client = reqwest::Client::new();
         let url = format!(
@@ -549,6 +588,8 @@ impl Provider for GeminiProvider {
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         })
     }
@@ -611,16 +652,29 @@ impl Provider for GeminiProvider {
 pub struct LlamaServerProvider {
     pub base_url: String,
     pub model: String,
+    pub id: String,
 }
 
 impl LlamaServerProvider {
     pub fn new(base_url: String, model: String) -> Self {
-        Self { base_url, model }
+        Self {
+            base_url,
+            model,
+            id: "llama".to_string(),
+        }
     }
 }
 
 #[async_trait]
 impl Provider for LlamaServerProvider {
+    fn provider_id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn model(&self) -> String {
+        self.model.clone()
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let client = reqwest::Client::new();
         let url = format!(
@@ -670,6 +724,8 @@ impl Provider for LlamaServerProvider {
             tool_calls: None,
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         })
     }
@@ -865,7 +921,14 @@ impl OpenAiCompatProvider {
         let agent = user_agent
             .or_else(|| self.default_user_agent.map(str::to_string))
             .unwrap_or_else(|| NEENEE_USER_AGENT.to_string());
-        OpenAIProvider::with_base_url_and_user_agent(api_key, model, self.base_url, &agent)
+        let mut provider = OpenAIProvider::with_base_url_and_user_agent(
+            api_key,
+            model,
+            self.base_url,
+            &agent,
+        );
+        provider.id = self.id.to_string();
+        provider
     }
 }
 
@@ -951,6 +1014,8 @@ mod tests {
             tool_calls: Some(vec![matched.clone()]),
             tool_call_id: None,
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         };
         let good_result = Message {
@@ -961,6 +1026,8 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some("call_matched".to_string()),
             images: None,
+            provider: None,
+            model: None,
             hidden: false,
         };
         let orphan_result = Message {
@@ -1000,6 +1067,11 @@ mod tests {
         assert_eq!(provider.base_url, spec.base_url);
         assert_eq!(provider.model, "kimi-for-coding");
         assert_eq!(provider.user_agent, KIMI_CODE_USER_AGENT);
+        // The registry stamps the preset id onto the concrete provider so
+        // assistant responses can be attributed to "kimi-code".
+        assert_eq!(provider.id, "kimi-code");
+        assert_eq!(provider.provider_id(), "kimi-code");
+        assert_eq!(provider.model(), "kimi-for-coding");
     }
 
     #[test]

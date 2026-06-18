@@ -16,12 +16,15 @@ use crate::document::{Block, ChatMessage};
 use crate::layout::{BlockRegion, LayoutMap, TableCellHit};
 use crate::selection::SelectionState;
 
-use super::table::{build_table_render, push_table_segment};
-use super::text::{
+use super::design::{
+    USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_TEXT_GAP_COLS, USER_MESSAGE_TRANSITION_ROWS,
+};
+use super::markdown_table::{build_table_render, push_table_segment};
+use super::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
     WrappedLine,
 };
-use super::Theme;
+use super::{Theme, CHAT_BODY_PREFIX_COLS, CHAT_BODY_RIGHT_INSET};
 
 fn display_width_u16(s: &str) -> u16 {
     s.width() as u16
@@ -32,7 +35,7 @@ fn display_width_u16(s: &str) -> u16 {
 /// This is extracted so that normal messages and tool-step cards can share
 /// the same block-rendering logic while using different containing rects.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_message_blocks(
+pub(super) fn draw_message_body(
     frame: &mut Frame,
     area: Rect,
     msg: &ChatMessage,
@@ -57,42 +60,46 @@ pub(super) fn render_message_blocks(
                     _ => Style::default().fg(theme.assistant_fg),
                 };
                 let full_width = area.width as usize;
-                let lines = if is_user {
-                    wrap_text(content, area.width.saturating_sub(6) as usize)
-                } else {
-                    // 4-col left indent + 2-col right gutter (`CHAT_H_INSET`).
-                    wrap_text(content, area.width.saturating_sub(6) as usize)
-                };
+                let body_wrap_width = area
+                    .width
+                    .saturating_sub(CHAT_BODY_PREFIX_COLS + CHAT_BODY_RIGHT_INSET)
+                    as usize;
+                let lines = wrap_text(content, body_wrap_width);
                 *content_lines += lines.len();
 
                 // User messages get top/bottom padding rows (matching the input
                 // box's breathing room).  The padding is a blank `user_panel_bg`
                 // row with the `┃` bar so the message reads as a solid panel.
                 let user_bg = theme.user_panel_bg;
-                let user_content_w = full_width.saturating_sub(4);
+                let user_gutter = " ".repeat(USER_MESSAGE_OUTER_GUTTER_COLS);
+                let user_content_w = full_width.saturating_sub(2 * USER_MESSAGE_OUTER_GUTTER_COLS);
 
                 if is_user {
-                    *content_lines += 1;
-                    if *skip_rows > 0 {
-                        *skip_rows = skip_rows.saturating_sub(1);
-                    } else if *current_y < area.y + area.height {
-                        // Top transition: ▄ (lower half block) for both the
-                        // bar (accent fg) and the panel (user_bg fg) so the
-                        // half-height boundary is pixel-accurate. Box-drawing
-                        // characters like ╻ are font-dependent and rarely sit
-                        // at the exact 50% mark.
-                        let pad = Line::from(vec![
-                            Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled("▄", Style::default().bg(theme.app_bg).fg(theme.accent)),
-                            Span::styled(
-                                "▄".repeat(user_content_w.saturating_sub(1)),
-                                Style::default().fg(user_bg).bg(theme.app_bg),
-                            ),
-                            Span::styled("  ", Style::default().bg(theme.app_bg)),
-                        ]);
-                        let rect = Rect::new(area.x, *current_y, area.width, 1);
-                        frame.render_widget(Paragraph::new(pad), rect);
-                        *current_y += 1;
+                    for _ in 0..USER_MESSAGE_TRANSITION_ROWS {
+                        *content_lines += 1;
+                        if *skip_rows > 0 {
+                            *skip_rows = skip_rows.saturating_sub(1);
+                        } else if *current_y < area.y + area.height {
+                            // Top edge: lower-half blocks so only the bottom half
+                            // carries user_panel_bg, meeting the text rows below.
+                            let pad = Line::from(vec![
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.app_bg),
+                                ),
+                                Span::styled(
+                                    "▄".repeat(user_content_w),
+                                    Style::default().fg(user_bg).bg(theme.app_bg),
+                                ),
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.app_bg),
+                                ),
+                            ]);
+                            let rect = Rect::new(area.x, *current_y, area.width, 1);
+                            frame.render_widget(Paragraph::new(pad), rect);
+                            *current_y += 1;
+                        }
                     }
                 }
 
@@ -106,18 +113,16 @@ pub(super) fn render_message_blocks(
                     }
 
                     let line = if is_user {
-                        // Sent user messages share the input box's `┃` accent
-                        // bar on a dimmer `user_panel_bg` band.  Selection is
-                        // character-level, not line-level, so the user can
-                        // highlight arbitrary substrings.
+                        // Sent user messages render on a dimmer `user_panel_bg`
+                        // band. Selection is character-level, not line-level,
+                        // so the user can highlight arbitrary substrings.
                         let bg = user_bg;
                         let text_style = Style::default().bg(bg).fg(theme.text_muted);
                         let sel_style = Style::default().bg(theme.selected_bg).fg(theme.text);
                         let sel = line_selection(sel_range, wl);
 
                         let mut spans = vec![
-                            Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled("█", Style::default().bg(bg).fg(theme.accent)),
+                            Span::styled(user_gutter.clone(), Style::default().bg(theme.app_bg)),
                             Span::styled(" ", Style::default().bg(bg)),
                         ];
 
@@ -136,16 +141,20 @@ pub(super) fn render_message_blocks(
                             }
                         }
 
-                        let used = 2usize + wl.text.width();
+                        let used = USER_MESSAGE_TEXT_GAP_COLS + wl.text.width();
                         spans.push(Span::styled(
                             padded_tail(user_content_w, used),
                             Style::default().bg(bg),
                         ));
-                        spans.push(Span::styled("  ", Style::default().bg(theme.app_bg)));
+                        spans.push(Span::styled(
+                            user_gutter.clone(),
+                            Style::default().bg(theme.app_bg),
+                        ));
                         Line::from(spans)
                     } else {
+                        let prefix = " ".repeat(CHAT_BODY_PREFIX_COLS as usize);
                         line_spans(
-                            "    ",
+                            &prefix,
                             Style::default(),
                             &wl.text,
                             line_selection(sel_range, wl),
@@ -157,13 +166,20 @@ pub(super) fn render_message_blocks(
                     frame.render_widget(Paragraph::new(line), line_rect);
 
                     if record_layout {
+                        // User panels prefix text with the outer gutter plus a
+                        // one-column gap; other roles use the body prefix.
+                        let prefix_cols = if is_user {
+                            (USER_MESSAGE_OUTER_GUTTER_COLS + USER_MESSAGE_TEXT_GAP_COLS) as u16
+                        } else {
+                            CHAT_BODY_PREFIX_COLS
+                        };
                         layout_map.push(BlockRegion {
                             message_idx: mi,
                             block_idx: bi,
                             start_byte: wl.start_byte,
                             end_byte: wl.end_byte,
                             text: wl.text.clone(),
-                            prefix_cols: 4,
+                            prefix_cols,
                             rect: line_rect,
                         });
                     }
@@ -172,25 +188,31 @@ pub(super) fn render_message_blocks(
                 }
 
                 if is_user {
-                    *content_lines += 1;
-                    if *skip_rows > 0 {
-                        *skip_rows = skip_rows.saturating_sub(1);
-                    } else if *current_y < area.y + area.height {
-                        // Bottom transition: ▀ (upper half block) for both the
-                        // bar (accent fg) and the panel (user_bg fg) — matching
-                        // the top transition's pixel-accurate half boundary.
-                        let pad = Line::from(vec![
-                            Span::styled("  ", Style::default().bg(theme.app_bg)),
-                            Span::styled("▀", Style::default().bg(theme.app_bg).fg(theme.accent)),
-                            Span::styled(
-                                "▀".repeat(user_content_w.saturating_sub(1)),
-                                Style::default().fg(user_bg).bg(theme.app_bg),
-                            ),
-                            Span::styled("  ", Style::default().bg(theme.app_bg)),
-                        ]);
-                        let rect = Rect::new(area.x, *current_y, area.width, 1);
-                        frame.render_widget(Paragraph::new(pad), rect);
-                        *current_y += 1;
+                    for _ in 0..USER_MESSAGE_TRANSITION_ROWS {
+                        *content_lines += 1;
+                        if *skip_rows > 0 {
+                            *skip_rows = skip_rows.saturating_sub(1);
+                        } else if *current_y < area.y + area.height {
+                            // Bottom edge: upper-half blocks so only the top half
+                            // carries user_panel_bg, meeting the text rows above.
+                            let pad = Line::from(vec![
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.app_bg),
+                                ),
+                                Span::styled(
+                                    "▀".repeat(user_content_w),
+                                    Style::default().fg(user_bg).bg(theme.app_bg),
+                                ),
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.app_bg),
+                                ),
+                            ]);
+                            let rect = Rect::new(area.x, *current_y, area.width, 1);
+                            frame.render_widget(Paragraph::new(pad), rect);
+                            *current_y += 1;
+                        }
                     }
                 }
             }

@@ -13,14 +13,14 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block as RtBlock, Borders, Paragraph},
+    widgets::{Block as RtBlock, Paragraph},
     Frame,
 };
 
 use neenee_core::{AgentMode, Goal, GoalChecklistStatus, GoalStatus};
 
+use super::primitives::viewport_rect;
 use super::theme::Theme;
-use super::util::viewport_rect;
 #[cfg(test)]
 use neenee_core::GoalChecklistItem;
 
@@ -100,27 +100,21 @@ pub fn draw_sidebar(frame: &mut Frame, view: SidebarView<'_>) -> SidebarRender {
         height: outer.height,
     };
 
-    // Paint the pane background so the sidebar reads as a solid column.
+    // Paint the pane background so the sidebar reads as a solid column. No
+    // left separator rule is drawn: the `panel_bg` vs `app_bg` contrast marks
+    // the boundary on its own.
     frame.render_widget(
         RtBlock::default().style(Style::default().bg(theme.panel_bg)),
         sidebar_outer,
     );
 
-    // Thin separator on the left edge of the sidebar.
-    let separator_block = RtBlock::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border_subtle))
-        .style(Style::default().bg(theme.panel_bg));
-    frame.render_widget(separator_block, sidebar_outer);
-
-    // Inner content rect after insets. Reserve one column on each side plus
-    // the separator's left border.
+    // Inner content rect after insets.
     let inner = Rect {
-        x: sidebar_outer.x + 1 + SIDEBAR_H_INSET,
+        x: sidebar_outer.x + SIDEBAR_H_INSET,
         y: sidebar_outer.y + SIDEBAR_V_INSET,
         width: sidebar_outer
             .width
-            .saturating_sub(1 + 2 * SIDEBAR_H_INSET)
+            .saturating_sub(2 * SIDEBAR_H_INSET)
             .max(1),
         height: sidebar_outer
             .height
@@ -174,12 +168,14 @@ fn build_sidebar_lines<'a>(
     let width = content_width.max(1);
     let mut lines: Vec<Line<'a>> = Vec::new();
 
-    let section = |title: &'a str| Line::from(vec![Span::styled(
-        title.to_string(),
-        Style::default()
-            .fg(theme.text_muted)
-            .add_modifier(Modifier::BOLD),
-    )]);
+    let section = |title: &'a str| {
+        Line::from(vec![Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme.text_muted)
+                .add_modifier(Modifier::BOLD),
+        )])
+    };
     let blank = || Line::from("");
 
     // Title row: brand + mode badge.
@@ -190,9 +186,7 @@ fn build_sidebar_lines<'a>(
     lines.push(Line::from(vec![
         Span::styled(
             "neenee",
-            Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -385,10 +379,7 @@ fn push_objective<'a>(
             chars.next();
             break;
         }
-        first_line.push(Span::styled(
-            c.to_string(),
-            Style::default().fg(theme.text),
-        ));
+        first_line.push(Span::styled(c.to_string(), Style::default().fg(theme.text)));
         taken += 1;
         chars.next();
     }
@@ -417,8 +408,7 @@ fn push_checklist_item<'a>(
     let prefix = format!("{glyph} ");
     let prefix_chars = prefix.chars().count();
     let room = width.saturating_sub(prefix_chars).max(1);
-    let mut first_line: Vec<Span<'a>> =
-        vec![Span::styled(prefix, Style::default().fg(color))];
+    let mut first_line: Vec<Span<'a>> = vec![Span::styled(prefix, Style::default().fg(color))];
     let mut chars = content.chars().peekable();
     let mut taken = 0usize;
     while let Some(c) = chars.peek().copied() {

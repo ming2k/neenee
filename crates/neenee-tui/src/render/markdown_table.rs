@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::document::TableAlignment;
 
-use super::text::wrap_text;
+use super::text_layout::wrap_text;
 
 /// Push one segment of a table grid line, splitting it around the selection
 /// overlay (if any). `seg_lo`/`seg_hi` are byte offsets within `text`;

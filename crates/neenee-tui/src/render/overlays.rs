@@ -17,7 +17,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::layout::LayoutMap;
 use neenee_core::PermissionRequest;
 
-use super::util::{centered_rect, contrast_fg, draw_dim_backdrop, panel_block, viewport_rect};
+use super::primitives::{
+    centered_rect, contrast_fg, draw_dim_backdrop, panel_block, viewport_rect,
+};
 use super::{Theme, CHAT_H_INSET};
 
 const PERMISSION_SHEET_MAX_WIDTH: u16 = 118;

@@ -63,6 +63,22 @@ pub trait Provider: Send + Sync {
     /// Called by the agent before each turn so the provider can prepare tool schemas.
     /// Default is a no-op for providers that don't support native function calling.
     fn prepare_tools(&self, _tools: &[Arc<dyn Tool>]) {}
+
+    /// Stable provider/solution identifier (e.g. `"kimi-code"`, `"gemini"`).
+    /// The harness stamps it onto assistant messages so a session that mixes
+    /// multiple models stays traceable. Defaults to an empty string for
+    /// providers (mostly test doubles) that don't carry an identity.
+    ///
+    /// Returns an owned [`String`] because the active provider may live behind
+    /// a runtime-swappable proxy that cannot lend out a borrow across its lock.
+    fn provider_id(&self) -> String {
+        String::new()
+    }
+    /// The model identifier this provider targets (e.g. `"kimi-for-coding"`).
+    /// Companion to [`Provider::provider_id`]; defaults to an empty string.
+    fn model(&self) -> String {
+        String::new()
+    }
 }
 
 #[async_trait]
@@ -811,6 +827,11 @@ impl Agent {
                 tool_calls: (!calls.is_empty()).then_some(calls),
                 tool_call_id: None,
                 images: None,
+                // Stamp which provider/model produced this turn so a session
+                // that mixes models stays traceable after resume. The proxy
+                // provider delegates to whichever concrete provider is active.
+                provider: Some(self.provider.provider_id()),
+                model: Some(self.provider.model()),
                 hidden: false,
             };
             if !valid_assistant_response(&response) {
@@ -1236,6 +1257,8 @@ mod tests {
                     }]),
                     tool_call_id: None,
                     images: None,
+                    provider: None,
+                    model: None,
                     hidden: false,
                 })
             } else {

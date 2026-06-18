@@ -17,13 +17,19 @@ use crate::document::{Block, ChatMessage};
 use crate::layout::{BlockRegion, LayoutMap};
 use crate::selection::SelectionState;
 
-use super::blocks::render_message_blocks;
-use super::status::spinner_frame;
-use super::text::{
+use super::chrome::spinner_frame;
+use super::message_body::draw_message_body;
+use super::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, strip_ansi,
     wrap_text, WrappedLine,
 };
-use super::{chat_band_rect, StickyInfo, SubagentBarInfo, Theme};
+use super::{
+    chat_band_rect, StickyInfo, SubagentBarInfo, Theme, CARD_MIN_WIDTH, CHAT_BODY_PREFIX_COLS,
+    CHAT_BODY_RIGHT_INSET, CHAT_H_INSET, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_BOTTOM_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
+    TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS, TOOL_CARD_CHILDREN_GAP_ROWS,
+    TOOL_CARD_SECTION_GAP_ROWS,
+};
 
 /// Tracked info for an expanded card, used to render a sticky header pinned
 /// under the HUD bar while the card's body is scrolled into view.
@@ -31,7 +37,8 @@ pub(super) struct StickyCard {
     message_idx: usize,
     header: String,
     color: Color,
-    /// usize::MAX for tool steps, usize::MAX - 1 for thinking cards.
+    background: Option<Color>,
+    /// usize::MAX for tool steps, usize::MAX - 1 for reasoning traces.
     block_idx: usize,
     header_line: usize,
     body_end_line: usize,
@@ -74,14 +81,13 @@ fn card_header_line(
 
 /// Render the shared header band of an expandable card and record its rect in
 /// the layout map so clicks / `Enter` on it can toggle the card. Returns the
-/// content-line index of the header (used for sticky-pin tracking). Both
-/// tool-step and thinking cards delegate here.
+/// content-line index of the header (used for sticky-pin tracking).
 ///
 /// `block_idx` is the sentinel recorded in [`BlockRegion`] so the click handler
-/// can tell the two card kinds apart: `usize::MAX` for tool-step cards and
-/// `usize::MAX - 1` for thinking cards.
+/// can tell card/trace kinds apart: `usize::MAX` for tool-step cards and
+/// `usize::MAX - 1` for reasoning traces.
 #[allow(clippy::too_many_arguments)]
-fn render_expandable_card_header(
+fn draw_expandable_card_header(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -132,28 +138,30 @@ fn render_expandable_card_header(
     header_line_idx
 }
 
-/// Draw a single blank line padded to `full_width` with `style`'s
-/// background. Used to separate sections inside an expanded card body so
-/// each part gets visual breathing room.
-fn draw_blank_line(
+/// Draw blank rows padded to `full_width` with `style`'s background. The row
+/// count is supplied by component spacing tokens in `design.rs`.
+fn draw_blank_rows(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
     style: Style,
+    rows: usize,
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
 ) {
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(padded_tail(full_width, 0), style))),
-            rect,
-        );
-        *current_y += 1;
+    for _ in 0..rows {
+        *content_lines += 1;
+        if *skip_rows > 0 {
+            *skip_rows = skip_rows.saturating_sub(1);
+        } else if *current_y < chat_area.y + chat_area.height {
+            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(padded_tail(full_width, 0), style))),
+                rect,
+            );
+            *current_y += 1;
+        }
     }
 }
 
@@ -230,7 +238,7 @@ fn draw_tool_meta_row(
 /// commands wrap under the prompt so the expanded view stays compact without
 /// losing the actual command that ran.
 #[allow(clippy::too_many_arguments)]
-fn render_meta_value_row_wrapped(
+fn draw_meta_value_row_wrapped(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -299,9 +307,9 @@ fn render_meta_value_row_wrapped(
 /// an expanded tool-step card body. Handles scroll-skip, wrapping, semantic
 /// selection layout recording, and an optional blank separator above the
 /// label. Result rendering for known tools is handled by
-/// [`render_tool_result_section`] instead.
+/// [`draw_tool_result_section`] instead.
 #[allow(clippy::too_many_arguments)]
-fn render_tool_body_section(
+fn draw_tool_body_section(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -324,11 +332,12 @@ fn render_tool_body_section(
     content_lines: &mut usize,
 ) {
     if separator {
-        draw_blank_line(
+        draw_blank_rows(
             frame,
             chat_area,
             full_width,
             pad_style,
+            TOOL_CARD_SECTION_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -351,7 +360,7 @@ fn render_tool_body_section(
     let sel_range = block_selection_range(selection, mi, block_idx);
     let _ = sel_range;
     if code_mode {
-        render_code_content(
+        draw_code_content(
             frame,
             chat_area,
             full_width,
@@ -413,7 +422,7 @@ fn render_tool_body_section(
 /// fallback for unrecognized tools. The gutter starts at column `indent`
 /// so the code aligns with the rest of the card body.
 #[allow(clippy::too_many_arguments)]
-fn render_code_content(
+fn draw_code_content(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -509,7 +518,7 @@ fn render_code_content(
 /// directories (entries ending in `/`) in `info`, files in `code_fg`. No
 /// line-number gutter since listing rows have no meaningful line index.
 #[allow(clippy::too_many_arguments)]
-fn render_listing_content(
+fn draw_listing_content(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -722,7 +731,7 @@ fn emit_simple_rows(
 /// Selection byte ranges are anchored in the original tool output so
 /// copy/cut works across the visible match content.
 #[allow(clippy::too_many_arguments)]
-fn render_grep_content(
+fn draw_grep_content(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -893,7 +902,7 @@ fn render_grep_content(
 /// `(success, stderr):`, `[Output truncated`, `[Output was large`) are
 /// highlighted in `warning` so they stand out from the output itself.
 #[allow(clippy::too_many_arguments)]
-fn render_bash_content(
+fn draw_bash_content(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -996,9 +1005,9 @@ fn render_bash_content(
 /// (so the label aligns with `Tool` / `Arguments`), then dispatches the
 /// content rendering based on the tool name. Known tools with structured
 /// output get a specialized renderer; everything else falls back to a
-/// line-numbered code block via [`render_code_content`].
+/// line-numbered code block via [`draw_code_content`].
 #[allow(clippy::too_many_arguments)]
-fn render_tool_result_section(
+fn draw_tool_result_section(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -1018,11 +1027,12 @@ fn render_tool_result_section(
     body_label: Style,
 ) {
     if separator {
-        draw_blank_line(
+        draw_blank_rows(
             frame,
             chat_area,
             full_width,
             body_pad,
+            TOOL_CARD_SECTION_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -1042,7 +1052,7 @@ fn render_tool_result_section(
 
     let block_idx = 1usize;
     match name {
-        "list_dir" | "glob" => render_listing_content(
+        "list_dir" | "glob" => draw_listing_content(
             frame,
             chat_area,
             full_width,
@@ -1058,7 +1068,7 @@ fn render_tool_result_section(
             indent,
             inner_w,
         ),
-        "grep" => render_grep_content(
+        "grep" => draw_grep_content(
             frame,
             chat_area,
             full_width,
@@ -1074,7 +1084,7 @@ fn render_tool_result_section(
             indent,
             inner_w,
         ),
-        "bash" => render_bash_content(
+        "bash" => draw_bash_content(
             frame,
             chat_area,
             full_width,
@@ -1090,7 +1100,7 @@ fn render_tool_result_section(
             indent + 2,
             inner_w.saturating_sub(2),
         ),
-        _ => render_code_content(
+        _ => draw_code_content(
             frame,
             chat_area,
             full_width,
@@ -1115,7 +1125,7 @@ fn render_tool_result_section(
 /// (the task description + duration) and a live status line summarizing the
 /// sub-agent's progress.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_subagent_inline_card(
+pub(super) fn draw_subagent_inline_card(
     frame: &mut Frame,
     chat_area: Rect,
     msg: &ChatMessage,
@@ -1143,7 +1153,7 @@ pub(super) fn render_subagent_inline_card(
 
     let chat_area = chat_band_rect(chat_area);
     let full_width = chat_area.width as usize;
-    if full_width < 8 {
+    if full_width < CARD_MIN_WIDTH {
         return;
     }
 
@@ -1234,7 +1244,7 @@ pub(super) fn draw_subagent_bar(
 ) {
     let band = chat_band_rect(rect);
     let full_width = band.width as usize;
-    if full_width < 8 {
+    if full_width < CARD_MIN_WIDTH {
         return;
     }
     let bg = theme.menu_bg;
@@ -1277,7 +1287,7 @@ pub(super) fn draw_subagent_bar(
 /// expandable body, and per-line scroll handling so tall cards scroll like
 /// normal messages.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_tool_step_card(
+pub(super) fn draw_tool_step_card(
     frame: &mut Frame,
     chat_area: Rect,
     msg: &ChatMessage,
@@ -1318,9 +1328,9 @@ pub(super) fn render_tool_step_card(
     // `chat_area.width` directly, so shrinking here propagates everywhere.
     let chat_area = chat_band_rect(chat_area);
     let full_width = chat_area.width as usize;
-    if full_width < 8 {
+    if full_width < CARD_MIN_WIDTH {
         // Too narrow to draw a card; fall back to plain block rendering.
-        render_message_blocks(
+        draw_message_body(
             frame,
             chat_area,
             msg,
@@ -1337,11 +1347,11 @@ pub(super) fn render_tool_step_card(
     }
 
     // Header band: solid background region with a `+`/`-` expand marker (no
-    // border lines). Delegated to the shared expandable-card header helper so
-    // tool-step and thinking cards stay in sync. `inner_width` is the full
-    // band width; each body section subtracts its own indent before wrapping.
+    // border lines). Tool-step cards keep the shared card header treatment;
+    // reasoning traces use their own prose-aligned header. `inner_width` is the
+    // full band width; each body section subtracts its own indent before wrapping.
     let inner_width = chat_area.width as usize;
-    let header_line_idx = render_expandable_card_header(
+    let header_line_idx = draw_expandable_card_header(
         frame,
         chat_area,
         full_width,
@@ -1373,7 +1383,7 @@ pub(super) fn render_tool_step_card(
         } = &msg.kind
         {
             if name == "bash" && !output.trim().is_empty() {
-                render_bash_preview(
+                draw_bash_preview(
                     frame,
                     chat_area,
                     full_width,
@@ -1413,11 +1423,12 @@ pub(super) fn render_tool_step_card(
         let meta_value_style = Style::default().bg(body_bg).fg(theme.dim_fg);
         let command_style = Style::default().bg(body_bg).fg(theme.text);
 
-        draw_blank_line(
+        draw_blank_rows(
             frame,
             chat_area,
             full_width,
             pad,
+            TOOL_CARD_BODY_TOP_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -1451,7 +1462,7 @@ pub(super) fn render_tool_step_card(
                     current_y,
                     content_lines,
                 );
-                render_meta_value_row_wrapped(
+                draw_meta_value_row_wrapped(
                     frame,
                     chat_area,
                     full_width,
@@ -1468,7 +1479,7 @@ pub(super) fn render_tool_step_card(
                 );
                 if let Some(output_str) = output {
                     if !output_str.is_empty() {
-                        render_tool_result_section(
+                        draw_tool_result_section(
                             frame,
                             chat_area,
                             full_width,
@@ -1511,7 +1522,7 @@ pub(super) fn render_tool_step_card(
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !display_args.is_empty() {
-                    render_tool_body_section(
+                    draw_tool_body_section(
                         frame,
                         chat_area,
                         full_width,
@@ -1542,7 +1553,7 @@ pub(super) fn render_tool_step_card(
                 // background while only the result content uses `code_bg`.
                 if let Some(output_str) = output {
                     if !output_str.is_empty() {
-                        render_tool_result_section(
+                        draw_tool_result_section(
                             frame,
                             chat_area,
                             full_width,
@@ -1569,11 +1580,12 @@ pub(super) fn render_tool_step_card(
         // ── Nested sub-agent children ── (blank-separated from Result).
         if let crate::document::MessageKind::ToolStep { children, .. } = &msg.kind {
             if !children.is_empty() {
-                draw_blank_line(
+                draw_blank_rows(
                     frame,
                     chat_area,
                     full_width,
                     pad,
+                    TOOL_CARD_CHILDREN_GAP_ROWS,
                     skip_rows,
                     current_y,
                     content_lines,
@@ -1581,7 +1593,7 @@ pub(super) fn render_tool_step_card(
             }
             for child in children {
                 if child.is_tool_step() {
-                    render_child_tool_step(
+                    draw_child_tool_step(
                         frame,
                         chat_area,
                         child,
@@ -1602,7 +1614,7 @@ pub(super) fn render_tool_step_card(
                         chat_area.width.saturating_sub(12),
                         remaining_height,
                     );
-                    render_message_blocks(
+                    draw_message_body(
                         frame,
                         child_area,
                         child,
@@ -1619,11 +1631,12 @@ pub(super) fn render_tool_step_card(
             }
         }
 
-        draw_blank_line(
+        draw_blank_rows(
             frame,
             chat_area,
             full_width,
             pad,
+            TOOL_CARD_BODY_BOTTOM_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -1645,6 +1658,7 @@ pub(super) fn render_tool_step_card(
                 } => theme.success,
                 _ => theme.info,
             },
+            background: Some(theme.element_bg),
             block_idx: usize::MAX,
             header_line: header_line_idx,
             body_end_line: *content_lines,
@@ -1654,7 +1668,7 @@ pub(super) fn render_tool_step_card(
 
 /// Render a nested child tool step as a compact header line plus its output.
 #[allow(clippy::too_many_arguments)]
-fn render_child_tool_step(
+fn draw_child_tool_step(
     frame: &mut Frame,
     chat_area: Rect,
     child: &ChatMessage,
@@ -1731,10 +1745,105 @@ fn render_child_tool_step(
     }
 }
 
-/// Render a thinking/reasoning message as an expandable card. Shares its
-/// header band with tool-step cards via `render_expandable_card_header`.
+fn advance_plain_blank_rows(
+    chat_area: Rect,
+    rows: usize,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    for _ in 0..rows {
+        *content_lines += 1;
+        if *skip_rows > 0 {
+            *skip_rows = skip_rows.saturating_sub(1);
+        } else if *current_y < chat_area.y + chat_area.height {
+            *current_y += 1;
+        }
+    }
+}
+
+fn reasoning_trace_header_line(
+    marker: &str,
+    header: &str,
+    marker_color: Color,
+    header_color: Color,
+    full_width: usize,
+) -> Line<'static> {
+    let marker_prefix_cols = CHAT_H_INSET as usize;
+    let marker_text = format!("{} ", marker);
+    let header_text = header.to_string();
+    let used = marker_prefix_cols + marker_text.width() + header_text.width();
+    Line::from(vec![
+        Span::styled(" ".repeat(marker_prefix_cols), Style::default()),
+        Span::styled(
+            marker_text,
+            Style::default()
+                .fg(marker_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            header_text,
+            Style::default()
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(padded_tail(full_width, used), Style::default()),
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_thinking_card(
+fn draw_reasoning_trace_header(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    mi: usize,
+    expanded: bool,
+    marker_override: Option<&str>,
+    header: &str,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) -> usize {
+    let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
+    let header_line_idx = *content_lines;
+
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(reasoning_trace_header_line(
+                marker,
+                header,
+                theme.info,
+                theme.text_muted,
+                full_width,
+            )),
+            line_rect,
+        );
+        layout_map.push(BlockRegion {
+            message_idx: mi,
+            block_idx: usize::MAX - 1,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: CHAT_H_INSET,
+            rect: line_rect,
+        });
+        *current_y += 1;
+    }
+
+    header_line_idx
+}
+
+/// Render a reasoning trace as expandable prose. It keeps the thinking
+/// message model for stream semantics, but presents it as body-aligned text
+/// instead of a colored card.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_reasoning_trace(
     frame: &mut Frame,
     chat_area: Rect,
     msg: &ChatMessage,
@@ -1759,14 +1868,10 @@ pub(super) fn render_thinking_card(
             ..
         }
     );
-    // Render into the inset band so the `element_bg`/`menu_bg` bands sit inside
-    // the uniform 2-cell `app_bg` gutters, matching user panels and code blocks.
-    let chat_area = chat_band_rect(chat_area);
     let full_width = chat_area.width as usize;
 
-    // Too narrow to render a padded region — fall back to plain blocks.
-    if full_width < 8 {
-        render_message_blocks(
+    if full_width < (CHAT_BODY_PREFIX_COLS + 1) as usize {
+        draw_message_body(
             frame,
             chat_area,
             msg,
@@ -1782,43 +1887,31 @@ pub(super) fn render_thinking_card(
         return;
     }
 
-    // Header band: shared expandable-card header (`+ {header}` / `- {header}`).
-    let header_line_idx = render_expandable_card_header(
+    let header_line_idx = draw_reasoning_trace_header(
         frame,
         chat_area,
         full_width,
         mi,
-        usize::MAX - 1,
         expanded,
         running.then(|| spinner_frame(spinner_phase)),
         &header,
-        theme.info,
-        theme.text_muted,
-        theme.element_bg,
+        theme,
         layout_map,
         skip_rows,
         current_y,
         content_lines,
     );
 
-    // Body region: a subtly different background band, shown only when expanded.
-    // Body content is indented 2 cols so it left-aligns with the header text in
-    // `+ {header}` (the `+` sits at col 0, the header text at col 2). A blank
-    // `menu_bg` row after the header and between consecutive text blocks gives
-    // the reasoning room to breathe (paragraph breaks inside a single block are
-    // already preserved as empty rows by `wrap_text`).
     if expanded {
-        let body_bg = theme.menu_bg;
-        let pad = Style::default().bg(body_bg);
-        let indent = 2usize;
-        let inner_width = full_width.saturating_sub(indent);
-        // Blank line after the header band — mirrors the tool-step card so
-        // both expandable cards open with the same breathing room.
-        draw_blank_line(
-            frame,
+        let body_prefix = " ".repeat(CHAT_BODY_PREFIX_COLS as usize);
+        let body_wrap_width = chat_area
+            .width
+            .saturating_sub(CHAT_BODY_PREFIX_COLS + CHAT_BODY_RIGHT_INSET)
+            as usize;
+
+        advance_plain_blank_rows(
             chat_area,
-            full_width,
-            pad,
+            REASONING_TRACE_BODY_TOP_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -1827,18 +1920,16 @@ pub(super) fn render_thinking_card(
         for (bi, block) in msg.blocks.iter().enumerate() {
             if let Block::Text { content } = block {
                 if emitted_any_block {
-                    draw_blank_line(
-                        frame,
+                    advance_plain_blank_rows(
                         chat_area,
-                        full_width,
-                        pad,
+                        REASONING_TRACE_BLOCK_GAP_ROWS,
                         skip_rows,
                         current_y,
                         content_lines,
                     );
                 }
                 emitted_any_block = true;
-                let lines = wrap_text(content, inner_width);
+                let lines = wrap_text(content, body_wrap_width);
                 *content_lines += lines.len();
                 for wl in &lines {
                     if *skip_rows > 0 {
@@ -1849,22 +1940,14 @@ pub(super) fn render_thinking_card(
                         break;
                     }
                     let sel_range = block_selection_range(selection, mi, bi);
-                    let selected = matches!(line_selection(sel_range, wl), Some((s, e)) if s != e);
-                    let used = indent + wl.text.width();
-                    let line = Line::from(vec![
-                        Span::styled(" ".repeat(indent), pad),
-                        Span::styled(
-                            wl.text.clone(),
-                            Style::default()
-                                .bg(if selected { theme.selected_bg } else { body_bg })
-                                .fg(if selected {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                }),
-                        ),
-                        Span::styled(padded_tail(full_width, used), pad),
-                    ]);
+                    let line = line_spans(
+                        &body_prefix,
+                        Style::default(),
+                        &wl.text,
+                        line_selection(sel_range, wl),
+                        Style::default().fg(theme.text_muted),
+                        theme.selected_bg,
+                    );
                     let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
                     layout_map.push(BlockRegion {
@@ -1873,18 +1956,16 @@ pub(super) fn render_thinking_card(
                         start_byte: wl.start_byte,
                         end_byte: wl.end_byte,
                         text: wl.text.clone(),
-                        prefix_cols: indent as u16,
+                        prefix_cols: CHAT_BODY_PREFIX_COLS,
                         rect: line_rect,
                     });
                     *current_y += 1;
                 }
             }
         }
-        draw_blank_line(
-            frame,
+        advance_plain_blank_rows(
             chat_area,
-            full_width,
-            pad,
+            REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
             skip_rows,
             current_y,
             content_lines,
@@ -1896,6 +1977,7 @@ pub(super) fn render_thinking_card(
             message_idx: mi,
             header,
             color: theme.text_muted,
+            background: None,
             block_idx: usize::MAX - 1,
             header_line: header_line_idx,
             body_end_line: *content_lines,
@@ -1914,7 +1996,7 @@ const BASH_PREVIEW_LINES: usize = 8;
 /// usize::MAX` so clicking anywhere on the preview toggles the card open,
 /// matching the expandable-card interaction model.
 #[allow(clippy::too_many_arguments)]
-fn render_bash_preview(
+fn draw_bash_preview(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
@@ -2009,21 +2091,37 @@ pub(super) fn draw_sticky_header_if_needed(
     let card = sticky_cards
         .iter()
         .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)?;
-    // Pin inside the same inset band the cards render into so the sticky
-    // header aligns exactly with the (possibly scrolled-away) real header.
-    let band = chat_band_rect(chat_area);
-    let line_rect = Rect::new(band.x, chat_area.y, band.width, 1);
-    frame.render_widget(
-        Paragraph::new(card_header_line(
-            "-",
-            &card.header,
-            card.color,
-            theme.text_muted,
-            theme.element_bg,
-            band.width as usize,
-        )),
-        line_rect,
-    );
+    let line_rect = if let Some(bg) = card.background {
+        // Pin inside the same inset band the cards render into so the sticky
+        // header aligns exactly with the (possibly scrolled-away) real header.
+        let band = chat_band_rect(chat_area);
+        let line_rect = Rect::new(band.x, chat_area.y, band.width, 1);
+        frame.render_widget(
+            Paragraph::new(card_header_line(
+                "-",
+                &card.header,
+                card.color,
+                theme.text_muted,
+                bg,
+                band.width as usize,
+            )),
+            line_rect,
+        );
+        line_rect
+    } else {
+        let line_rect = Rect::new(chat_area.x, chat_area.y, chat_area.width, 1);
+        frame.render_widget(
+            Paragraph::new(reasoning_trace_header_line(
+                "-",
+                &card.header,
+                card.color,
+                theme.text_muted,
+                chat_area.width as usize,
+            )),
+            line_rect,
+        );
+        line_rect
+    };
     Some(StickyInfo {
         message_idx: card.message_idx,
         header: card.header.clone(),

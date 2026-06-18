@@ -1305,6 +1305,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "crossterm",
+ "dirs",
  "futures",
  "neenee-core",
  "pulldown-cmark",
