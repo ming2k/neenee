@@ -2141,15 +2141,13 @@ fn spawn_clipboard_copy(
 fn spawn_clipboard_paste(tx: &mpsc::UnboundedSender<clipboard::ClipboardRead>) {
     let tx = tx.clone();
     tokio::spawn(async move {
-        let read = match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            crate::clipboard::read(),
-        )
-        .await
-        {
-            Ok(inner) => inner,
-            Err(_) => clipboard::ClipboardRead::Empty,
-        };
+        let read =
+            match tokio::time::timeout(std::time::Duration::from_secs(3), crate::clipboard::read())
+                .await
+            {
+                Ok(inner) => inner,
+                Err(_) => clipboard::ClipboardRead::Empty,
+            };
         let _ = tx.send(read);
     });
 }
@@ -2163,7 +2161,10 @@ fn apply_clipboard_paste(app: &mut App, read: clipboard::ClipboardRead) {
     match read {
         clipboard::ClipboardRead::Image { data, mime } => {
             let encoded = crate::clipboard::base64_image(&data);
-            app.pending_images.push(ImagePart { mime, data: encoded });
+            app.pending_images.push(ImagePart {
+                mime,
+                data: encoded,
+            });
             let n = app.pending_images.len();
             app.copy_toast_message = format!(
                 "{n} image{} attached — enter to send",
@@ -2183,7 +2184,10 @@ fn apply_clipboard_paste(app: &mut App, read: clipboard::ClipboardRead) {
                 .unwrap_or(app.input.len());
             app.input.insert_str(byte_pos, &text);
             app.cursor_position += chars_to_insert;
-            app.copy_toast_message = format!("pasted {chars_to_insert} char{}", if chars_to_insert == 1 { "" } else { "s" });
+            app.copy_toast_message = format!(
+                "pasted {chars_to_insert} char{}",
+                if chars_to_insert == 1 { "" } else { "s" }
+            );
             app.copy_toast_failed = false;
             app.copy_toast_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(1200));

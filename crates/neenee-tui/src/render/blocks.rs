@@ -1,0 +1,679 @@
+//! Markdown block-level rendering for a single message: text, code, tables,
+//! headings, quotes, lists, rules, breaks. Emits one rendered line per row
+//! and records semantic [`BlockRegion`]s / table cell hit boxes for selection
+//! and click hit-testing.
+
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
+use unicode_width::UnicodeWidthStr;
+
+use crate::document::{Block, ChatMessage};
+use crate::layout::{BlockRegion, LayoutMap, TableCellHit};
+use crate::selection::SelectionState;
+
+use super::table::{build_table_render, push_table_segment};
+use super::text::{
+    block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
+    WrappedLine,
+};
+use super::Theme;
+
+fn display_width_u16(s: &str) -> u16 {
+    s.width() as u16
+}
+
+/// Render the blocks of a single message inside the given area.
+///
+/// This is extracted so that normal messages and tool-step cards can share
+/// the same block-rendering logic while using different containing rects.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_message_blocks(
+    frame: &mut Frame,
+    area: Rect,
+    msg: &ChatMessage,
+    mi: usize,
+    selection: &SelectionState,
+    theme: &Theme,
+    layout_map: &mut LayoutMap,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    record_layout: bool,
+) {
+    for (bi, block) in msg.blocks.iter().enumerate() {
+        let sel_range = block_selection_range(selection, mi, bi);
+
+        match block {
+            Block::Text { content } => {
+                let is_user = msg.role == neenee_core::Role::User;
+                let base = match msg.role {
+                    neenee_core::Role::User => Style::default().fg(theme.user_fg),
+                    neenee_core::Role::System => Style::default().fg(theme.system_fg),
+                    _ => Style::default().fg(theme.assistant_fg),
+                };
+                let full_width = area.width as usize;
+                let lines = if is_user {
+                    wrap_text(content, area.width.saturating_sub(6) as usize)
+                } else {
+                    // 4-col left indent + 2-col right gutter (`CHAT_H_INSET`).
+                    wrap_text(content, area.width.saturating_sub(6) as usize)
+                };
+                *content_lines += lines.len();
+
+                // User messages get top/bottom padding rows (matching the input
+                // box's breathing room).  The padding is a blank `user_panel_bg`
+                // row with the `┃` bar so the message reads as a solid panel.
+                let user_bg = theme.user_panel_bg;
+                let user_content_w = full_width.saturating_sub(4);
+
+                if is_user {
+                    *content_lines += 1;
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                    } else if *current_y < area.y + area.height {
+                        // Top transition: ▄ (lower half block) for both the
+                        // bar (accent fg) and the panel (user_bg fg) so the
+                        // half-height boundary is pixel-accurate. Box-drawing
+                        // characters like ╻ are font-dependent and rarely sit
+                        // at the exact 50% mark.
+                        let pad = Line::from(vec![
+                            Span::styled("  ", Style::default().bg(theme.app_bg)),
+                            Span::styled("▄", Style::default().bg(theme.app_bg).fg(theme.accent)),
+                            Span::styled(
+                                "▄".repeat(user_content_w.saturating_sub(1)),
+                                Style::default().fg(user_bg).bg(theme.app_bg),
+                            ),
+                            Span::styled("  ", Style::default().bg(theme.app_bg)),
+                        ]);
+                        let rect = Rect::new(area.x, *current_y, area.width, 1);
+                        frame.render_widget(Paragraph::new(pad), rect);
+                        *current_y += 1;
+                    }
+                }
+
+                for wl in &lines {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+
+                    let line = if is_user {
+                        // Sent user messages share the input box's `┃` accent
+                        // bar on a dimmer `user_panel_bg` band.  Selection is
+                        // character-level, not line-level, so the user can
+                        // highlight arbitrary substrings.
+                        let bg = user_bg;
+                        let text_style = Style::default().bg(bg).fg(theme.text_muted);
+                        let sel_style = Style::default().bg(theme.selected_bg).fg(theme.text);
+                        let sel = line_selection(sel_range, wl);
+
+                        let mut spans = vec![
+                            Span::styled("  ", Style::default().bg(theme.app_bg)),
+                            Span::styled("█", Style::default().bg(bg).fg(theme.accent)),
+                            Span::styled(" ", Style::default().bg(bg)),
+                        ];
+
+                        match sel {
+                            None => {
+                                spans.push(Span::styled(wl.text.clone(), text_style));
+                            }
+                            Some((lo, hi)) => {
+                                if lo > 0 {
+                                    spans.push(Span::styled(wl.text[..lo].to_string(), text_style));
+                                }
+                                spans.push(Span::styled(wl.text[lo..hi].to_string(), sel_style));
+                                if hi < wl.text.len() {
+                                    spans.push(Span::styled(wl.text[hi..].to_string(), text_style));
+                                }
+                            }
+                        }
+
+                        let used = 2usize + wl.text.width();
+                        spans.push(Span::styled(
+                            padded_tail(user_content_w, used),
+                            Style::default().bg(bg),
+                        ));
+                        spans.push(Span::styled("  ", Style::default().bg(theme.app_bg)));
+                        Line::from(spans)
+                    } else {
+                        line_spans(
+                            "    ",
+                            Style::default(),
+                            &wl.text,
+                            line_selection(sel_range, wl),
+                            base,
+                            theme.selected_bg,
+                        )
+                    };
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+
+                    if record_layout {
+                        layout_map.push(BlockRegion {
+                            message_idx: mi,
+                            block_idx: bi,
+                            start_byte: wl.start_byte,
+                            end_byte: wl.end_byte,
+                            text: wl.text.clone(),
+                            prefix_cols: 4,
+                            rect: line_rect,
+                        });
+                    }
+
+                    *current_y += 1;
+                }
+
+                if is_user {
+                    *content_lines += 1;
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                    } else if *current_y < area.y + area.height {
+                        // Bottom transition: ▀ (upper half block) for both the
+                        // bar (accent fg) and the panel (user_bg fg) — matching
+                        // the top transition's pixel-accurate half boundary.
+                        let pad = Line::from(vec![
+                            Span::styled("  ", Style::default().bg(theme.app_bg)),
+                            Span::styled("▀", Style::default().bg(theme.app_bg).fg(theme.accent)),
+                            Span::styled(
+                                "▀".repeat(user_content_w.saturating_sub(1)),
+                                Style::default().fg(user_bg).bg(theme.app_bg),
+                            ),
+                            Span::styled("  ", Style::default().bg(theme.app_bg)),
+                        ]);
+                        let rect = Rect::new(area.x, *current_y, area.width, 1);
+                        frame.render_widget(Paragraph::new(pad), rect);
+                        *current_y += 1;
+                    }
+                }
+            }
+            Block::Table {
+                headers,
+                rows,
+                aligns,
+                ..
+            } => {
+                // Adaptive table rendering: compute column widths that fit the
+                // available terminal width, wrap cell contents within their
+                // columns, and draw the grid line-by-line. This keeps borders
+                // intact even for wide/CJK tables instead of letting the
+                // generic line wrapper mangle `│` separators.
+                let indent = 3usize;
+                let full_width = area.width as usize;
+                // `indent` left + 2-col right gutter (`CHAT_H_INSET`).
+                let available = full_width.saturating_sub(indent + 2);
+                let table = build_table_render(headers, rows, aligns, available);
+                let ncols = headers.len().max(1);
+
+                let base = Style::default().fg(theme.text);
+                let border_style = Style::default().fg(theme.text_muted);
+                let sel_bg = theme.selected_bg;
+
+                // A whole-table selection (middle-click) still copies the grid
+                // with borders stripped, so keep recording the displayed grid.
+                if record_layout {
+                    layout_map.record_table_grid(mi, bi, table.lines.join("\n"));
+                }
+
+                // If a single cell is selected in this block, resolve its
+                // (row, col) so we can highlight just that cell's column across
+                // every grid line it spans (including wrapped continuation
+                // lines), without bleeding into adjacent cells.
+                let selected_cell = match selection {
+                    SelectionState::TableCell {
+                        message_idx,
+                        block_idx,
+                        cell_idx,
+                    } if *message_idx == mi && *block_idx == bi => {
+                        Some((cell_idx / ncols, cell_idx % ncols))
+                    }
+                    _ => None,
+                };
+
+                *content_lines += table.lines.len();
+                let mut line_start_byte = 0usize;
+                for (line_idx, line_text) in table.lines.iter().enumerate() {
+                    let row_info = table.line_info.get(line_idx).and_then(|o| o.as_ref());
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        line_start_byte += line_text.len() + 1; // +1 for '\n'
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+                    let is_border = row_info.is_none();
+
+                    let start_byte = line_start_byte;
+                    let end_byte = line_start_byte + line_text.len();
+                    let wl = WrappedLine {
+                        text: line_text.clone(),
+                        start_byte,
+                        end_byte,
+                    };
+
+                    // The byte range to highlight on this line: either the
+                    // selected cell's column (cell selection), a whole-line /
+                    // partial range (block/range selection), or nothing.
+                    let selected_span = if let Some((sr, sc)) = selected_cell {
+                        row_info
+                            .filter(|info| info.row == sr)
+                            .and_then(|info| info.col_spans.get(sc).copied())
+                    } else {
+                        line_selection(sel_range, &wl)
+                    };
+                    let fully_selected =
+                        matches!(selected_span, Some((s, e)) if s == 0 && e == line_text.len());
+                    let pad_style = if fully_selected {
+                        Style::default().bg(sel_bg)
+                    } else {
+                        Style::default()
+                    };
+
+                    let used = indent + line_text.width();
+                    let mut spans = vec![Span::styled(" ".repeat(indent), pad_style)];
+                    // On data lines the `│` rules and inter-cell padding are
+                    // border decoration; only the padded cell text (col_spans)
+                    // is "content". Paint borders with the same muted style as
+                    // the horizontal separators so the grid reads as one
+                    // uniform weight — otherwise the vertical rules (drawn on
+                    // every data row with the brighter text colour) look
+                    // heavier than the sparse horizontal rules.
+                    if let Some(info) = row_info {
+                        let mut pos = 0usize;
+                        for &(lo, hi) in &info.col_spans {
+                            if lo > pos {
+                                push_table_segment(
+                                    &mut spans,
+                                    line_text,
+                                    pos,
+                                    lo,
+                                    border_style,
+                                    selected_span,
+                                    sel_bg,
+                                );
+                            }
+                            push_table_segment(
+                                &mut spans,
+                                line_text,
+                                lo,
+                                hi,
+                                base,
+                                selected_span,
+                                sel_bg,
+                            );
+                            pos = hi;
+                        }
+                        if pos < line_text.len() {
+                            push_table_segment(
+                                &mut spans,
+                                line_text,
+                                pos,
+                                line_text.len(),
+                                border_style,
+                                selected_span,
+                                sel_bg,
+                            );
+                        }
+                    } else {
+                        push_table_segment(
+                            &mut spans,
+                            line_text,
+                            0,
+                            line_text.len(),
+                            border_style,
+                            selected_span,
+                            sel_bg,
+                        );
+                    }
+                    spans.push(Span::styled(padded_tail(full_width, used), pad_style));
+                    let line = Line::from(spans);
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+
+                    if record_layout {
+                        // Register a hit box per cell so clicks resolve to a
+                        // single cell (and thus its full, possibly wrapped
+                        // text) instead of the whole grid line.
+                        if let Some(info) = row_info {
+                            for (ci, &(lo, hi)) in info.col_spans.iter().enumerate() {
+                                if hi <= lo {
+                                    continue;
+                                }
+                                let col_start = line_text[..lo].width();
+                                let col_w = line_text[lo..hi].width();
+                                let rect = Rect::new(
+                                    area.x + indent as u16 + col_start as u16,
+                                    *current_y,
+                                    col_w as u16,
+                                    1,
+                                );
+                                layout_map.push_table_cell_hit(TableCellHit {
+                                    message_idx: mi,
+                                    block_idx: bi,
+                                    cell_idx: info.row * ncols + ci,
+                                    rect,
+                                });
+                            }
+                        }
+                        // Data lines also carry a region so non-table hit
+                        // tests (e.g. card headers) keep working; border rules
+                        // remain dead zones.
+                        if !is_border {
+                            layout_map.push(BlockRegion {
+                                message_idx: mi,
+                                block_idx: bi,
+                                start_byte,
+                                end_byte,
+                                text: line_text.clone(),
+                                prefix_cols: indent as u16,
+                                rect: line_rect,
+                            });
+                        }
+                    }
+
+                    line_start_byte = end_byte + 1; // +1 for '\n'
+                    *current_y += 1;
+                }
+            }
+            Block::Code { language, content } => {
+                // Borderless code block: a uniform `code_bg` band with a
+                // line-number gutter, matching opencode's clean look. No
+                // `╭─ ╰─` frame, no per-line `│` rule.
+                let code_bg = theme.code_bg;
+                // The solid-background band is inset from the chat edges so it
+                // reads as a distinct panel rather than bleeding into the
+                // terminal frame. Content (gutter + code) lives inside the
+                // band; the surrounding cells keep `app_bg`.
+                let h_inset: u16 = 2;
+                let band_x = area.x + h_inset;
+                let band_w = area.width.saturating_sub(2 * h_inset).max(1);
+                let full_width = band_w as usize;
+
+                // Split into logical lines, tracking each one's byte offset
+                // within `content` so semantic selection maps back to the raw
+                // source even after per-line wrapping.
+                let mut logical_lines: Vec<(usize, &str)> = Vec::new();
+                let mut offset = 0usize;
+                for line in content.split('\n') {
+                    logical_lines.push((offset, line));
+                    offset += line.len() + 1; // +1 for the '\n'
+                }
+
+                let gutter_width = logical_lines.len().to_string().len().max(2);
+                // The code band is a uniform background with a line-number
+                // gutter — no left accent bar.
+                let left_indent = 2usize;
+                let gutter_gap = 1usize;
+                let indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
+                let wrap_width = full_width.saturating_sub(indent + 1);
+
+                // Subtle language tag on its own dim line above the gutter.
+                if let Some(lang) = language.as_deref().filter(|l| !l.is_empty()) {
+                    *content_lines += 1;
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                    } else if *current_y < area.y + area.height {
+                        let used = left_indent + 1 + lang.len();
+                        let line = Line::from(vec![
+                            Span::styled(" ".repeat(left_indent), Style::default().bg(code_bg)),
+                            Span::styled(" ", Style::default().bg(code_bg)),
+                            Span::styled(
+                                lang.to_string(),
+                                Style::default().bg(code_bg).fg(theme.dim_fg),
+                            ),
+                            Span::styled(
+                                padded_tail(full_width, used),
+                                Style::default().bg(code_bg),
+                            ),
+                        ]);
+                        let line_rect = Rect::new(band_x, *current_y, band_w, 1);
+                        frame.render_widget(Paragraph::new(line), line_rect);
+                        *current_y += 1;
+                    }
+                }
+
+                for (line_idx, (line_start_byte, logical_line)) in logical_lines.iter().enumerate()
+                {
+                    let wrapped = wrap_text(logical_line, wrap_width);
+                    let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
+                        vec![WrappedLine {
+                            text: String::new(),
+                            start_byte: 0,
+                            end_byte: 0,
+                        }]
+                    } else {
+                        wrapped
+                    };
+                    *content_lines += wrapped.len();
+                    for (wrap_idx, wl) in wrapped.iter().enumerate() {
+                        if *skip_rows > 0 {
+                            *skip_rows = skip_rows.saturating_sub(1);
+                            continue;
+                        }
+                        if *current_y >= area.y + area.height {
+                            break;
+                        }
+
+                        let gutter = if wrap_idx == 0 {
+                            format!("{:>width$}", line_idx + 1, width = gutter_width)
+                        } else {
+                            " ".repeat(gutter_width)
+                        };
+
+                        // Shift the wrapped line's byte offsets back into
+                        // block-content coordinates for selection intersection.
+                        let block_wl = WrappedLine {
+                            text: wl.text.clone(),
+                            start_byte: line_start_byte + wl.start_byte,
+                            end_byte: line_start_byte + wl.end_byte,
+                        };
+
+                        let line = code_gutter_line(
+                            None,
+                            left_indent,
+                            &gutter,
+                            gutter_gap,
+                            code_bg,
+                            theme.dim_fg,
+                            &wl.text,
+                            line_selection(sel_range, &block_wl),
+                            theme.code_fg,
+                            theme.selected_bg,
+                            full_width,
+                        );
+                        let line_rect = Rect::new(band_x, *current_y, band_w, 1);
+                        frame.render_widget(Paragraph::new(line), line_rect);
+
+                        if record_layout {
+                            layout_map.push(BlockRegion {
+                                message_idx: mi,
+                                block_idx: bi,
+                                start_byte: line_start_byte + wl.start_byte,
+                                end_byte: line_start_byte + wl.end_byte,
+                                text: wl.text.clone(),
+                                prefix_cols: indent as u16,
+                                rect: line_rect,
+                            });
+                        }
+
+                        *current_y += 1;
+                    }
+                }
+            }
+            Block::Heading { level, content } => {
+                let prefix = "   ".to_string();
+                let prefix_cols = display_width_u16(&prefix);
+                let modifier = if *level == 1 {
+                    Modifier::BOLD | Modifier::UNDERLINED
+                } else {
+                    Modifier::BOLD
+                };
+                let style = Style::default().fg(theme.heading_fg).add_modifier(modifier);
+                let continuation = " ".repeat(prefix_cols as usize);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
+                *content_lines += lines.len();
+                for (line_index, wl) in lines.iter().enumerate() {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+                    let line = line_spans(
+                        if line_index == 0 {
+                            &prefix
+                        } else {
+                            &continuation
+                        },
+                        style,
+                        &wl.text,
+                        line_selection(sel_range, wl),
+                        style,
+                        theme.selected_bg,
+                    );
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+
+                    if record_layout {
+                        layout_map.push(BlockRegion {
+                            message_idx: mi,
+                            block_idx: bi,
+                            start_byte: wl.start_byte,
+                            end_byte: wl.end_byte,
+                            text: wl.text.clone(),
+                            prefix_cols,
+                            rect: line_rect,
+                        });
+                    }
+
+                    *current_y += 1;
+                }
+            }
+            Block::Quote { content } => {
+                // 5-col `▎` prefix + 2-col right gutter (`CHAT_H_INSET`).
+                let lines = wrap_text(content, area.width.saturating_sub(7) as usize);
+                *content_lines += lines.len();
+                for wl in &lines {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+
+                    let base = Style::default().fg(theme.quote_fg);
+                    let line = line_spans(
+                        "   ▎ ",
+                        Style::default().fg(theme.quote_fg),
+                        &wl.text,
+                        line_selection(sel_range, wl),
+                        base,
+                        theme.selected_bg,
+                    );
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+
+                    if record_layout {
+                        layout_map.push(BlockRegion {
+                            message_idx: mi,
+                            block_idx: bi,
+                            start_byte: wl.start_byte,
+                            end_byte: wl.end_byte,
+                            text: wl.text.clone(),
+                            prefix_cols: 5,
+                            rect: line_rect,
+                        });
+                    }
+
+                    *current_y += 1;
+                }
+            }
+            Block::Rule => {
+                *content_lines += 1;
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < area.y + area.height {
+                    let width = area.width.saturating_sub(6) as usize;
+                    let text = format!("   {}", "─".repeat(width));
+                    let line =
+                        Line::from(vec![Span::styled(text, Style::default().fg(theme.dim_fg))]);
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+                    *current_y += 1;
+                }
+            }
+            Block::Break => {
+                // Visual break, just skip a line
+                *content_lines += 1;
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < area.y + area.height {
+                    *current_y += 1;
+                }
+            }
+            Block::ListItem {
+                content,
+                ordered,
+                depth,
+                checked,
+            } => {
+                let marker = match (checked, ordered) {
+                    (Some(true), _) => "[x]".to_string(),
+                    (Some(false), _) => "[ ]".to_string(),
+                    (None, Some(index)) => format!("{}.", index),
+                    (None, None) => "•".to_string(),
+                };
+                let indent = "  ".repeat(*depth);
+                let prefix = format!("   {}{} ", indent, marker);
+                let prefix_cols = display_width_u16(&prefix);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
+                *content_lines += lines.len();
+                for wl in &lines {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+
+                    let base = Style::default().fg(theme.assistant_fg);
+                    let line = line_spans(
+                        &prefix,
+                        Style::default().fg(theme.accent),
+                        &wl.text,
+                        line_selection(sel_range, wl),
+                        base,
+                        theme.selected_bg,
+                    );
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+
+                    if record_layout {
+                        layout_map.push(BlockRegion {
+                            message_idx: mi,
+                            block_idx: bi,
+                            start_byte: wl.start_byte,
+                            end_byte: wl.end_byte,
+                            text: wl.text.clone(),
+                            prefix_cols,
+                            rect: line_rect,
+                        });
+                    }
+
+                    *current_y += 1;
+                }
+            }
+        }
+    }
+}
