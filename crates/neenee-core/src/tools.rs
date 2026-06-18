@@ -1,118 +1,9 @@
-use crate::{Goal, GoalChecklistItem, GoalChecklistStatus, GoalStatus, Tool, ToolAccess};
+use crate::{Tool, ToolAccess};
 use async_trait::async_trait;
 use serde_json::json;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
-
-pub struct GoalChecklistTool {
-    goal: Arc<Mutex<Option<Goal>>>,
-}
-
-impl GoalChecklistTool {
-    pub(crate) fn new(goal: Arc<Mutex<Option<Goal>>>) -> Self {
-        Self { goal }
-    }
-}
-
-#[async_trait]
-impl Tool for GoalChecklistTool {
-    fn name(&self) -> &str {
-        "goal_checklist"
-    }
-
-    fn description(&self) -> &str {
-        "Replace the active goal's structured checklist. Use this to expose concrete progress. \
-         Keep exactly one item in_progress while working; mark verified work completed."
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "maxItems": 50,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": { "type": "string" },
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"]
-                            }
-                        },
-                        "required": ["content", "status"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["items"],
-            "additionalProperties": false
-        })
-    }
-
-    fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
-    }
-
-    async fn call(&self, arguments: &str) -> Result<String, String> {
-        #[derive(serde::Deserialize)]
-        struct Arguments {
-            items: Vec<GoalChecklistItem>,
-        }
-
-        let arguments: Arguments =
-            serde_json::from_str(arguments).map_err(|error| format!("Invalid JSON: {}", error))?;
-        if arguments.items.len() > 50 {
-            return Err("Goal checklist is limited to 50 items.".to_string());
-        }
-        if arguments
-            .items
-            .iter()
-            .any(|item| item.content.trim().is_empty())
-        {
-            return Err("Goal checklist item content cannot be empty.".to_string());
-        }
-        let in_progress = arguments
-            .items
-            .iter()
-            .filter(|item| item.status == GoalChecklistStatus::InProgress)
-            .count();
-        if in_progress > 1 {
-            return Err("At most one goal checklist item may be in_progress.".to_string());
-        }
-
-        let mut goal = self.goal.lock().unwrap_or_else(|error| error.into_inner());
-        let goal = goal
-            .as_mut()
-            .ok_or_else(|| "No active goal. Set one with /goal <objective>.".to_string())?;
-        if goal.status != GoalStatus::Active {
-            return Err("The goal is already completed.".to_string());
-        }
-        if arguments.items.is_empty() && !goal.checklist.is_empty() {
-            return Err(
-                "An active checklist cannot be cleared. Mark each item completed or cancelled."
-                    .to_string(),
-            );
-        }
-        goal.checklist = arguments.items;
-        let resolved = goal
-            .checklist
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item.status,
-                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-                )
-            })
-            .count();
-        Ok(format!(
-            "Goal checklist updated: {}/{} resolved.",
-            resolved,
-            goal.checklist.len()
-        ))
-    }
-}
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 /// Read a file from disk.
 pub struct ReadFileTool;
@@ -201,6 +92,9 @@ impl Tool for WriteFileTool {
     fn permission_scope(&self, arguments: &str) -> String {
         json_string(arguments, "path")
     }
+    fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
+        crate::plan::is_plan_path(&json_string(arguments, "path"))
+    }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -248,6 +142,9 @@ impl Tool for EditFileTool {
     }
     fn permission_scope(&self, arguments: &str) -> String {
         json_string(arguments, "path")
+    }
+    fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
+        crate::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -313,14 +210,19 @@ impl Tool for BashTool {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let command = args["command"].as_str().ok_or("Missing 'command'")?;
-        let _timeout_secs = args["timeout"].as_u64().unwrap_or(30);
+        let timeout_secs = args["timeout"].as_u64().unwrap_or(30);
+        let timeout_duration = Duration::from_secs(timeout_secs);
 
-        let output = if cfg!(target_os = "windows") {
+        let future = if cfg!(target_os = "windows") {
             Command::new("cmd").args(["/C", command]).output()
         } else {
             Command::new("sh").arg("-c").arg(command).output()
-        }
-        .map_err(|e| format!("Failed to execute: {}", e))?;
+        };
+
+        let output = timeout(timeout_duration, future)
+            .await
+            .map_err(|_| format!("Command timed out after {} seconds", timeout_secs))?
+            .map_err(|e| format!("Failed to execute: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -392,7 +294,7 @@ impl Tool for GrepTool {
         let path = args["path"].as_str().unwrap_or(".");
         let ext = args["ext"].as_str();
 
-        let mut cmd = Command::new("rg");
+        let mut cmd = std::process::Command::new("rg");
         cmd.args(["-n", "--color=never", "--max-count", "50", "-C", "2"]);
         if let Some(e) = ext {
             cmd.arg("-g").arg(format!("*.{}", e));
@@ -892,6 +794,42 @@ fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
     results
 }
 
+/// Parse DuckDuckGo Lite results.
+/// Lite uses `<a class="result-link" href="...">title</a>` and
+/// `<td class="result-snippet">snippet</td>`.
+fn parse_ddg_lite_results(html: &str) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    // Split on the result link marker so each piece contains one result.
+    for piece in html.split("result-link") {
+        if results.len() >= 10 {
+            break;
+        }
+        let Some(href_start) = piece.find("href=\"") else {
+            continue;
+        };
+        let rest = &piece[href_start + 6..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let raw_url = &rest[..end];
+        let url = decode_ddg_redirect(raw_url);
+        if url.is_empty() || !url.starts_with("http") {
+            continue;
+        }
+        let title = extract_until(title_start_after(&rest[end..]), '<');
+        if title.trim().is_empty() {
+            continue;
+        }
+        let snippet = extract_lite_snippet(piece);
+        results.push(SearchResult {
+            title: decode_entities(&title),
+            url,
+            snippet: decode_entities(&snippet),
+        });
+    }
+    results
+}
+
 fn title_start_after(rest: &str) -> &str {
     if let Some(idx) = rest.find('>') {
         &rest[idx + 1..]
@@ -908,6 +846,16 @@ fn extract_until(text: &str, terminator: char) -> String {
 
 fn extract_snippet(piece: &str) -> String {
     if let Some(idx) = piece.find("result__snippet") {
+        let rest = &piece[idx..];
+        if let Some(gt) = rest.find('>') {
+            return extract_until(&rest[gt + 1..], '<');
+        }
+    }
+    String::new()
+}
+
+fn extract_lite_snippet(piece: &str) -> String {
+    if let Some(idx) = piece.find("result-snippet") {
         let rest = &piece[idx..];
         if let Some(gt) = rest.find('>') {
             return extract_until(&rest[gt + 1..], '<');
@@ -981,24 +929,23 @@ impl Tool for WebSearchTool {
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let query = args["query"].as_str().ok_or("Missing 'query'")?;
         let client = http_client()?;
-        let endpoint = "https://html.duckduckgo.com/html/";
-        let response = client
-            .post(endpoint)
-            .form(&[("q", query)])
-            .send()
-            .await
-            .map_err(|e| format!("Search request failed: {}", e))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("Search failed with HTTP {}", status));
-        }
-        let html = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read search response: {}", e))?;
-        let results = parse_ddg_results(&html);
+
+        // Try DuckDuckGo Lite first (simpler, more stable markup), then fall back to the
+        // regular HTML endpoint. If both fail, surface the last error so the user/model can
+        // tell what happened instead of getting a misleading "No results found".
+        let (results, source) = match search_ddg_lite(&client, query).await {
+            Ok(results) if !results.is_empty() => (results, "DuckDuckGo Lite"),
+            _ => match search_ddg_html(&client, query).await {
+                Ok(results) => (results, "DuckDuckGo HTML"),
+                Err(error) => return Err(error),
+            },
+        };
+
         if results.is_empty() {
-            return Ok(format!("No results found for '{}'.", query));
+            return Ok(format!(
+                "No results found for '{}' (tried DuckDuckGo Lite and HTML endpoints).",
+                query
+            ));
         }
         let formatted = results
             .iter()
@@ -1014,8 +961,63 @@ impl Tool for WebSearchTool {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-        Ok(formatted)
+        Ok(format!(
+            "Search results for '{}' (via {}):\n\n{}",
+            query, source, formatted
+        ))
     }
+}
+
+async fn search_ddg_lite(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<SearchResult>, String> {
+    let endpoint = "https://lite.duckduckgo.com/lite/";
+    let response = client
+        .post(endpoint)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .form(&[("q", query), ("kl", "us-en")])
+        .send()
+        .await
+        .map_err(|e| format!("DuckDuckGo Lite request failed: {}", e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("DuckDuckGo Lite returned HTTP {}", status));
+    }
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read DuckDuckGo Lite response: {}", e))?;
+    Ok(parse_ddg_lite_results(&html))
+}
+
+async fn search_ddg_html(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<SearchResult>, String> {
+    let endpoint = "https://html.duckduckgo.com/html/";
+    let response = client
+        .post(endpoint)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .form(&[("q", query), ("kl", "us-en")])
+        .send()
+        .await
+        .map_err(|e| format!("DuckDuckGo HTML request failed: {}", e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("DuckDuckGo HTML returned HTTP {}", status));
+    }
+    let html = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read DuckDuckGo HTML response: {}", e))?;
+    Ok(parse_ddg_results(&html))
 }
 
 /// A lightweight, standalone task list (decoupled from the persistent goal).
@@ -1248,8 +1250,13 @@ impl TaskTool {
             .cloned()
             .collect();
 
+        let goal_service = crate::GoalService::new(
+            crate::GoalStore::open_in_memory()
+                .await
+                .map_err(|err| format!("failed to create sub-agent goal store: {err}"))?,
+        );
         let sub_agent =
-            crate::Agent::new(self.provider.clone(), sub_tools, crate::AgentMode::Build);
+            crate::Agent::new(self.provider.clone(), sub_tools, crate::AgentMode::Build, goal_service);
 
         let system = format!(
             "You are a focused research sub-agent. Your single job is to answer the assigned task \
@@ -1266,8 +1273,9 @@ impl TaskTool {
             .run_streaming_with_events(&mut messages, |event| {
                 Self::forward_event(event, &mut on_event)
             })
-            .await?;
-        let content = result.content.trim().to_string();
+            .await
+            .map_err(|error| error.to_string())?;
+        let content = result.message.content.trim().to_string();
         if content.is_empty() {
             Ok("(sub-agent returned no answer)".to_string())
         } else {
@@ -1275,10 +1283,7 @@ impl TaskTool {
         }
     }
 
-    fn forward_event(
-        event: crate::AgentEvent,
-        on_event: &mut dyn FnMut(crate::SubTaskEvent),
-    ) {
+    fn forward_event(event: crate::AgentEvent, on_event: &mut dyn FnMut(crate::SubTaskEvent)) {
         match event {
             crate::AgentEvent::ModelRequestStarted { tool_round } => {
                 let status = if tool_round == 0 {
@@ -1440,5 +1445,70 @@ mod tests {
         let inside_curly_quote = text.find('’').unwrap() + 1;
 
         assert_eq!(truncate_utf8(text, inside_curly_quote), "prefix ");
+    }
+
+    #[test]
+    fn parse_ddg_results_extracts_title_url_and_snippet() {
+        let html = r#"
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fnews">AI News</a>
+            <a class="result__snippet">Latest artificial intelligence headlines.</a>
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org">Research</a>
+            <a class="result__snippet">Research papers on AI.</a>
+        "#;
+        let results = parse_ddg_results(html);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "AI News");
+        assert_eq!(results[0].url, "https://example.com/news");
+        assert_eq!(
+            results[0].snippet,
+            "Latest artificial intelligence headlines."
+        );
+    }
+
+    #[test]
+    fn parse_ddg_lite_results_extracts_title_url_and_snippet() {
+        let html = r#"
+            <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.example.com%2Fone">Lite Result One</a>
+            <td class="result-snippet">A snippet from the lite endpoint.</td>
+            <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.example.com%2Ftwo">Lite Result Two</a>
+            <td class="result-snippet">Another lite snippet.</td>
+        "#;
+        let results = parse_ddg_lite_results(html);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Lite Result One");
+        assert_eq!(results[0].url, "https://lite.example.com/one");
+        assert_eq!(results[0].snippet, "A snippet from the lite endpoint.");
+    }
+
+    #[test]
+    fn parse_ddg_results_skips_invalid_redirects() {
+        let html = r#"
+            <a class="result__a" href="/not-a-redirect">Bad Link</a>
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fvalid.example.com">Good Link</a>
+        "#;
+        let results = parse_ddg_results(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Good Link");
+    }
+
+    #[test]
+    fn write_and_edit_tools_allow_plan_paths_in_plan_mode() {
+        // The plans directory must exist so is_plan_path can resolve it.
+        let cwd = std::env::current_dir().unwrap();
+        std::fs::create_dir_all(cwd.join(crate::plan::PLANS_DIR)).unwrap();
+
+        let write = WriteFileTool;
+        let edit = EditFileTool;
+
+        let plan_args = r#"{"path":".neenee/plans/feature.md","content":"x"}"#;
+        let plan_edit_args =
+            r#"{"path":".neenee/plans/feature.md","old_string":"a","new_string":"b"}"#;
+        let src_args = r#"{"path":"src/main.rs","content":"x"}"#;
+
+        assert!(write.allowed_in_plan_mode(plan_args));
+        assert!(edit.allowed_in_plan_mode(plan_edit_args));
+        // Non-plan paths are not exempted, even though the tools are write-capable.
+        assert!(!write.allowed_in_plan_mode(src_args));
+        assert!(!edit.allowed_in_plan_mode(src_args));
     }
 }

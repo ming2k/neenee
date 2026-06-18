@@ -1,57 +1,67 @@
 # Built-in tools
 
 The neenee agent exposes a fixed set of built-in tools to the model on every
-turn. MCP server tools and the synthetic `goal_checklist` tool are appended at
-runtime. This page lists every tool name, its access class, parameter schema,
-permission scope, and source location.
+turn. MCP server tools and the synthetic goal tools (`get_goal`, `create_goal`,
+`update_goal`, `goal_checklist`) are appended at runtime. This page lists every
+tool name, its access class, parameter schema, permission scope, and source
+location.
 
 All production tools live in the `neenee-core` crate. The `Tool` trait is
 defined at `crates/neenee-core/src/lib.rs:156`.
 
 ## Tool access
 
-`ToolAccess` (`crates/neenee-core/src/lib.rs:195`) gates two surfaces:
+`ToolAccess` (`crates/neenee-core/src/lib.rs`) gates two surfaces:
 
 | Variant | Plan mode | Permission broker |
 |---------|-----------|-------------------|
 | `ReadOnly` | Allowed | Bypassed |
-| `Write` (default) | Blocked with an error | Prompted unless a cached `Always` rule matches |
+| `Write` (default) | Blocked unless `allowed_in_plan_mode` exempts the call | Prompted unless a cached `Always` rule matches |
 
-A tool that does not override `access()` is treated as `Write`. The Plan-mode
-gate at `crates/neenee-core/src/lib.rs:976` and the permission broker at
-`crates/neenee-core/src/lib.rs:983` both consult the same enum, so a tool
-marked `ReadOnly` is trusted in both surfaces.
+A tool that does not override `access()` is treated as `Write`. Plan mode is
+enforced per-invocation through `Tool::allowed_in_plan_mode(arguments)`, which
+defaults to `access() == ReadOnly`; `write_file` and `edit_file` override it to
+also permit writes under `.neenee/plans/`. The Plan-mode gate in
+`Agent::execute_tool` and the permission broker both consult `ToolAccess`, so a
+tool marked `ReadOnly` is trusted in both surfaces. See
+[Plan mode](../explanation/plan-mode.md) for the exemption rationale.
 
 ## Built-in tool registry
 
-Registration order is the literal in `crates/neenee/src/main.rs:899-915`.
-`Agent::new` strips any external `goal_checklist` and appends its own
-(`crates/neenee-core/src/lib.rs:442-443`). `TaskTool` is pushed last so it can
-capture a snapshot of the assembled toolset.
+Registration order is the literal in `crates/neenee/src/main.rs`. `Agent::new`
+strips any externally supplied `goal_checklist`, `get_goal`, `create_goal`,
+`update_goal`, `plan_enter`, and `plan_exit`, then appends its own goal tools
+from `crates/neenee-core/src/goals/tools.rs` and plan tools from
+`crates/neenee-core/src/plan.rs` so they share the agent's live state.
+`TaskTool` is pushed last so it can capture a snapshot of the assembled toolset.
 
 | Tool name | Access | Permission scope | Source |
 |-----------|--------|------------------|--------|
-| `bash` | `Write` | `command` argument | `crates/neenee-core/src/tools.rs:292` |
-| `read_file` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:121` |
-| `write_file` | `Write` | `path` argument | `crates/neenee-core/src/tools.rs:184` |
-| `edit_file` | `Write` | `path` argument | `crates/neenee-core/src/tools.rs:229` |
-| `grep` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:367` |
-| `glob` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:606` |
-| `list_dir` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:428` |
-| `webfetch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:763` |
-| `websearch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:940` |
-| `todo` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:1043` |
-| `create_project` | `Write` | `{path}/{name}` or `*` | `crates/neenee-core/src/project.rs:22` |
-| `init_config` | `Write` | `path` argument or `.` | `crates/neenee-core/src/project.rs:116` |
-| `use_skill` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:536` |
-| `task` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs:1167` |
-| `goal_checklist` | `ReadOnly` | `*` (no permission prompt) | `crates/neenee-core/src/tools.rs:18` |
-| `mcp__<server>__<tool>` | `ReadOnly` if server `read_only = true`, else `Write` | `*` | `crates/neenee-core/src/mcp.rs:230` |
+| `bash` | `Write` | `command` argument | `crates/neenee-core/src/tools.rs` |
+| `read_file` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
+| `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
+| `grep` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `glob` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `list_dir` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `webfetch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `websearch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `todo` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `create_project` | `Write` | `{path}/{name}` or `*` | `crates/neenee-core/src/project.rs` |
+| `init_config` | `Write` | `path` argument or `.` | `crates/neenee-core/src/project.rs` |
+| `use_skill` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `task` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `get_goal` | `ReadOnly` | `*` | `crates/neenee-core/src/goals/tools.rs` |
+| `create_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
+| `update_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
+| `goal_checklist` | `ReadOnly` | `*` (no permission prompt) | `crates/neenee-core/src/goals/tools.rs` |
+| `plan_enter` | `ReadOnly` | `*` | `crates/neenee-core/src/plan.rs` |
+| `plan_exit` | `ReadOnly` | `*` | `crates/neenee-core/src/plan.rs` |
+| `mcp__<server>__<tool>` | `ReadOnly` if server `read_only = true`, else `Write` | `*` | `crates/neenee-core/src/mcp.rs` |
 
-`permission_scope` defaults to `"*"` (`crates/neenee-core/src/lib.rs:163`).
-Only `write_file`, `edit_file`, `bash`, `create_project`, and `init_config`
-override it; their scope string is what a cached `Always` rule matches
-against.
+`permission_scope` defaults to `"*"`. Only `write_file`, `edit_file`, `bash`,
+`create_project`, and `init_config` override it; their scope string is what a
+cached `Always` rule matches against.
 
 ## Parameters
 
@@ -147,6 +157,33 @@ Each item: `{ "content": string, "status": "pending" | "in_progress" | "complete
 
 Spawns a read-only sub-agent. See [Special tools](#special-tools).
 
+### `get_goal`
+
+No parameters. Returns the current goal as JSON, including status, token budget,
+`tokens_used`, elapsed time, and remaining budget, or `{"goal": null}` when none
+is set.
+
+### `create_goal`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `objective` | string | yes | The objective to start pursuing |
+| `token_budget` | integer | no | Positive budget; omit unless explicitly requested |
+
+Starts a new active goal. The model is instructed to call this only when the
+user or developer instructions explicitly ask for a goal, never inferred from an
+ordinary task.
+
+### `update_goal`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `status` | enum | yes | `complete` or `blocked` |
+
+Marks the active goal `complete` (objective achieved, no work remaining) or
+`blocked` (same blocking condition recurred across consecutive goal turns).
+Pause, resume, and budget/usage limits are user-controlled, not reachable here.
+
 ### `goal_checklist`
 
 | Parameter | Type | Required | Notes |
@@ -155,12 +192,28 @@ Spawns a read-only sub-agent. See [Special tools](#special-tools).
 
 Each item: `{ "content": string, "status": "pending" | "in_progress" | "completed" | "cancelled" }`.
 
-Hard rules enforced at `crates/neenee-core/src/tools.rs:66-97`:
+Hard rules enforced in `crates/neenee-core/src/goals/tools.rs`:
 
 - Empty `content` rejected.
 - At most one `in_progress` item.
 - A non-empty checklist cannot be replaced with an empty list; each item must
   receive a terminal `completed` or `cancelled` status.
+
+### `plan_enter`
+
+No parameters. Switches the agent to `Plan` mode. The model calls it when a
+request would benefit from designing before implementing; it should not be
+called for simple tasks or when the user wants immediate implementation. See
+[Plan mode](../explanation/plan-mode.md).
+
+### `plan_exit`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `plan_path` | string | no | Path to the plan file under `.neenee/plans/` that was written |
+
+Switches the agent back to `Build` mode to implement the plan. The model calls
+it only after the plan is written and finalized.
 
 ### `use_skill`
 
@@ -198,25 +251,39 @@ public name is `mcp__{sanitized_server}__{sanitized_original}`
 
 ## Special tools
 
-### `goal_checklist`
+### Goal tools
 
-`GoalChecklistTool` (`crates/neenee-core/src/tools.rs:18`) is force-injected
-by `Agent::new` and shares the agent's `Arc<Mutex<Option<Goal>>>`. Updates
-write directly into live goal state and surface as
-`AgentResponse::HarnessState` to the TUI. It is `ReadOnly` and bypasses the
-permission broker entirely.
+`GetGoalTool`, `CreateGoalTool`, `UpdateGoalTool`, and `GoalChecklistTool`
+(`crates/neenee-core/src/goals/tools.rs`) are force-injected by `Agent::new`.
+They share a `GoalToolContext` carrying the session/thread id and the
+`GoalService`, which persists goal state in SQLite; `goal_checklist` also shares
+the agent's live `Arc<Mutex<Option<Goal>>>`. `get_goal` and `update_goal`/
+`create_goal` read and mutate the persisted goal; `goal_checklist` writes
+directly into live goal state and surfaces as `AgentResponse::GoalUpdated` to the
+TUI. `get_goal` and `goal_checklist` are `ReadOnly` and bypass the permission
+broker; `create_goal` and `update_goal` are `Write`.
 
 ### `task`
 
-`TaskTool` (`crates/neenee-core/src/tools.rs:1167`) is the only tool that
-overrides `call_with_events` (`tools.rs:1194`) to stream sub-agent activity
+`TaskTool` (`crates/neenee-core/src/tools.rs`) is the only tool that
+overrides `call_with_events` to stream sub-agent activity
 back through `SubTaskEvent`. The sub-agent:
 
-- Inherits the parent's provider (`tools.rs:1232-1233`).
-- Runs in `AgentMode::Build` (`tools.rs:1233`).
-- Receives only tools where `access() == ReadOnly && name != "task"`
-  (`tools.rs:1228`), preventing recursion and any write capability.
-- Uses a forced read-only system prompt (`tools.rs:1235-1241`).
+- Inherits the parent's provider.
+- Runs in `AgentMode::Build`.
+- Receives only tools where `access() == ReadOnly && name != "task"`,
+  preventing recursion and any write capability.
+- Uses a forced read-only system prompt.
+
+### Plan tools
+
+`PlanEnterTool` and `PlanExitTool` (`crates/neenee-core/src/plan.rs`) are
+force-injected by `Agent::new`. They share a `PlanToolContext` carrying the
+same `Arc<Mutex<AgentMode>>` the `Agent` owns, so each tool flips the mode in
+place. Both are `ReadOnly` and bypass the permission broker. After either
+returns, the agent emits a `ModeChanged` event so the TUI refreshes its mode
+indicator. The Plan-mode gate exempts `.neenee/plans/` writes through
+`Tool::allowed_in_plan_mode`; see [Plan mode](../explanation/plan-mode.md).
 
 ### MCP tools
 

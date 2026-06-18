@@ -12,10 +12,7 @@ use std::borrow::Cow;
 /// (`row * ncols + col`, header is row 0). Falls back to an empty string for
 /// out-of-range indices (e.g. a body row with fewer columns than the header).
 fn table_cell_text(block: &Block, cell_idx: usize) -> String {
-    if let Block::Table {
-        headers, rows, ..
-    } = block
-    {
+    if let Block::Table { headers, rows, .. } = block {
         let ncols = headers.len().max(1);
         let row = cell_idx / ncols;
         let col = cell_idx % ncols;
@@ -64,16 +61,7 @@ fn strip_table_borders(s: &str) -> String {
                 .filter(|c| {
                     !matches!(
                         c,
-                        '│' | '─'
-                            | '┌'
-                            | '┐'
-                            | '└'
-                            | '┘'
-                            | '├'
-                            | '┤'
-                            | '┬'
-                            | '┴'
-                            | '┼'
+                        '│' | '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
                     )
                 })
                 .collect();
@@ -268,13 +256,7 @@ pub fn get_selected_text<'a>(
             if start.message_idx == end.message_idx {
                 // Selection within a single message.
                 let msg = messages.get(start.message_idx)?;
-                extract_within_message(
-                    start.message_idx,
-                    msg,
-                    &start,
-                    &end,
-                    table_grid,
-                )
+                extract_within_message(start.message_idx, msg, &start, &end, table_grid)
             } else {
                 // Selection spans multiple messages.
                 let mut result = String::new();
@@ -455,9 +437,9 @@ mod tests {
         let arg_index = message
             .blocks
             .iter()
-            .position(|block| {
-                matches!(block, Block::Text { content } if content.contains("README.md"))
-            })
+            .position(
+                |block| matches!(block, Block::Text { content } if content.contains("README.md")),
+            )
             .unwrap();
 
         let copied = get_selected_text(

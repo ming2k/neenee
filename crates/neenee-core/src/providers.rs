@@ -71,6 +71,7 @@ impl Provider for MockProvider {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: None,
             hidden: false,
         })
     }
@@ -181,6 +182,27 @@ fn valid_provider_message(message: &Message) -> bool {
             .is_some_and(|calls| !calls.is_empty())
 }
 
+fn openai_content(m: &Message) -> Value {
+    match &m.images {
+        Some(images) if !images.is_empty() => {
+            let mut parts = Vec::new();
+            if !m.content.is_empty() {
+                parts.push(json!({ "type": "text", "text": m.content }));
+            }
+            for image in images {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", image.mime, image.data)
+                    }
+                }));
+            }
+            Value::Array(parts)
+        }
+        _ => Value::String(m.content.clone()),
+    }
+}
+
 fn openai_message(m: Message) -> Value {
     let mut map = json!({
         "role": match m.role {
@@ -189,7 +211,7 @@ fn openai_message(m: Message) -> Value {
             Role::System => "system",
             Role::Tool => "tool",
         },
-        "content": m.content,
+        "content": openai_content(&m),
     });
     if let Some(tool_calls) = m.tool_calls {
         map["tool_calls"] = json!(tool_calls
@@ -303,6 +325,7 @@ impl Provider for OpenAIProvider {
             reasoning_content,
             tool_calls,
             tool_call_id: None,
+            images: None,
             hidden: false,
         })
     }
@@ -425,18 +448,40 @@ fn gemini_request_body(messages: Vec<Message>) -> Value {
         } else {
             message.content
         };
+        let images = message.images.unwrap_or_default();
+
+        // Build the parts for this message. When there are no images we keep
+        // the original behaviour of always emitting a single text part (even
+        // when empty, e.g. for tool-call-only assistant turns). With images we
+        // emit the text part only when non-empty, followed by inline_data parts.
+        let mut new_parts: Vec<Value> = Vec::new();
+        if images.is_empty() {
+            new_parts.push(json!({ "text": text }));
+        } else {
+            if !text.is_empty() {
+                new_parts.push(json!({ "text": text }));
+            }
+            for image in &images {
+                new_parts.push(json!({
+                    "inline_data": {
+                        "mime_type": image.mime,
+                        "data": image.data,
+                    }
+                }));
+            }
+        }
 
         if let Some(previous) = contents.last_mut() {
             if previous.get("role").and_then(Value::as_str) == Some(role) {
                 if let Some(parts) = previous.get_mut("parts").and_then(Value::as_array_mut) {
-                    parts.push(json!({ "text": text }));
+                    parts.extend(new_parts);
                     continue;
                 }
             }
         }
         contents.push(json!({
             "role": role,
-            "parts": [{ "text": text }]
+            "parts": new_parts
         }));
     }
 
@@ -503,6 +548,7 @@ impl Provider for GeminiProvider {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: None,
             hidden: false,
         })
     }
@@ -592,7 +638,7 @@ impl Provider for LlamaServerProvider {
                         Role::System => "system",
                         Role::Tool => "tool",
                     },
-                    "content": m.content,
+                    "content": openai_content(&m),
                 })
             }).collect::<Vec<_>>()
         });
@@ -623,6 +669,7 @@ impl Provider for LlamaServerProvider {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: None,
             hidden: false,
         })
     }
@@ -648,7 +695,7 @@ impl Provider for LlamaServerProvider {
                         Role::System => "system",
                         Role::Tool => "tool",
                     },
-                    "content": m.content,
+                    "content": openai_content(&m),
                 })
             }).collect::<Vec<_>>()
         });
@@ -695,247 +742,130 @@ impl Provider for LlamaServerProvider {
 // OpenAI-compatible provider wrappers for popular Chinese & global services
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Kimi Code — OpenAI-compatible coding-agent endpoint.
-/// Endpoint: https://api.kimi.com/coding/v1/chat/completions
-/// Env: `KIMI_CODE_API_KEY`
-/// The fixed model ID is mapped to the latest coding model by Kimi Code.
-pub struct KimiCodeProvider(OpenAIProvider);
+/// The Kimi coding endpoint authenticates clients by a fixed user agent that
+/// impersonates the OpenCode client; it is the default unless overridden.
+pub const KIMI_CODE_USER_AGENT: &str = "opencode/1.17.4";
 
-impl KimiCodeProvider {
-    pub const MODEL: &'static str = "kimi-for-coding";
-    pub const ENDPOINT: &'static str = "https://api.kimi.com/coding/v1/chat/completions";
-    pub const OPENCODE_USER_AGENT: &'static str = "opencode/1.17.4";
-
-    pub fn new(api_key: String, user_agent: String) -> Self {
-        Self(OpenAIProvider::with_base_url_and_user_agent(
-            api_key,
-            Self::MODEL.to_string(),
-            Self::ENDPOINT,
-            &user_agent,
-        ))
-    }
+/// Specification for an OpenAI-compatible provider.
+///
+/// Every provider in [`OPENAI_COMPAT_PROVIDERS`] speaks the OpenAI
+/// chat-completions wire format and differs only in endpoint, default model,
+/// the environment variables consulted, and (rarely) a pinned model or a
+/// required user agent. Modelling them as *data* rather than one delegating
+/// newtype per vendor means adding a provider is a single table entry instead
+/// of ~30 lines of boilerplate trait delegation.
+pub struct OpenAiCompatProvider {
+    /// Stable identifier used in config (`default_provider`) and the TUI.
+    pub id: &'static str,
+    /// Full chat-completions endpoint URL.
+    pub base_url: &'static str,
+    /// Model used when neither config nor environment specifies one.
+    pub default_model: &'static str,
+    /// Environment variable consulted for the API key.
+    pub env_api_key: &'static str,
+    /// Environment variable consulted for a model override.
+    pub env_model: &'static str,
+    /// When set, the endpoint pins this model and ignores any override
+    /// (e.g. the Kimi coding endpoint).
+    pub fixed_model: Option<&'static str>,
+    /// When set, the endpoint requires this user agent unless overridden.
+    pub default_user_agent: Option<&'static str>,
 }
 
-#[async_trait]
-impl Provider for KimiCodeProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
-    }
+/// The single registry of OpenAI-compatible providers — the source of truth for
+/// their endpoints, default models, and environment variables.
+pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
+    // Kimi Code — OpenAI-compatible coding-agent endpoint. The fixed model ID
+    // is mapped to the latest coding model by Kimi Code.
+    OpenAiCompatProvider {
+        id: "kimi-code",
+        base_url: "https://api.kimi.com/coding/v1/chat/completions",
+        default_model: "kimi-for-coding",
+        env_api_key: "KIMI_CODE_API_KEY",
+        env_model: "KIMI_CODE_MODEL",
+        fixed_model: Some("kimi-for-coding"),
+        default_user_agent: Some(KIMI_CODE_USER_AGENT),
+    },
+    // Kimi Open Platform (Moonshot AI). Models: moonshot-v1-{8k,32k,128k}.
+    OpenAiCompatProvider {
+        id: "kimi",
+        base_url: "https://api.moonshot.cn/v1/chat/completions",
+        default_model: "moonshot-v1-8k",
+        env_api_key: "KIMI_API_KEY",
+        env_model: "KIMI_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+    // DeepSeek. Models: deepseek-chat, deepseek-reasoner (returns reasoning_content).
+    OpenAiCompatProvider {
+        id: "deepseek",
+        base_url: "https://api.deepseek.com/v1/chat/completions",
+        default_model: "deepseek-chat",
+        env_api_key: "DEEPSEEK_API_KEY",
+        env_model: "DEEPSEEK_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+    // Qwen (Tongyi / Alibaba DashScope). Models: qwen-plus, qwen-max, qwen-coder-plus.
+    OpenAiCompatProvider {
+        id: "qwen",
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        default_model: "qwen-plus",
+        env_api_key: "DASHSCOPE_API_KEY",
+        env_model: "QWEN_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+    // GLM (Zhipu AI / 智谱). Models: glm-4-plus, glm-4, glm-4-air, glm-4-flash.
+    OpenAiCompatProvider {
+        id: "glm",
+        base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        default_model: "glm-4-plus",
+        env_api_key: "GLM_API_KEY",
+        env_model: "GLM_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+    // Volcengine (火山引擎 / ByteDance Ark). Models: deepseek-v3-250324, doubao-pro-256k.
+    OpenAiCompatProvider {
+        id: "volcengine",
+        base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        default_model: "deepseek-v3-250324",
+        env_api_key: "VOLCENGINE_API_KEY",
+        env_model: "VOLCENGINE_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+];
+
+/// Look up an OpenAI-compatible provider spec by its identifier.
+pub fn openai_compat_provider(id: &str) -> Option<&'static OpenAiCompatProvider> {
+    OPENAI_COMPAT_PROVIDERS.iter().find(|spec| spec.id == id)
 }
 
-/// Kimi Open Platform (Moonshot AI) — OpenAI-compatible endpoint.
-/// Base URL: https://api.moonshot.cn/v1/chat/completions
-/// Env: `KIMI_API_KEY`
-/// Popular models: moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k,
-///                  moonshot-v1-8k-vision-preview
-pub struct KimiProvider(OpenAIProvider);
+impl OpenAiCompatProvider {
+    /// Resolve the model to use: a pinned `fixed_model` always wins, otherwise
+    /// the caller's override, otherwise the provider default.
+    pub fn resolve_model(&self, override_model: Option<String>) -> String {
+        if let Some(fixed) = self.fixed_model {
+            return fixed.to_string();
+        }
+        override_model.unwrap_or_else(|| self.default_model.to_string())
+    }
 
-impl KimiProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://api.moonshot.cn/v1/chat/completions",
-        ))
-    }
-}
-
-#[async_trait]
-impl Provider for KimiProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
+    /// Build a concrete [`OpenAIProvider`] for this spec. `user_agent` overrides
+    /// the spec default (used by the Kimi coding endpoint).
+    pub fn build(
         &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
-    }
-}
-
-/// DeepSeek — OpenAI-compatible endpoint.
-/// Base URL: https://api.deepseek.com/v1/chat/completions
-/// Env: `DEEPSEEK_API_KEY`
-/// Popular models: deepseek-chat, deepseek-reasoner
-/// Note: deepseek-reasoner returns `reasoning_content` field.
-pub struct DeepSeekProvider(OpenAIProvider);
-
-impl DeepSeekProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://api.deepseek.com/v1/chat/completions",
-        ))
-    }
-}
-
-#[async_trait]
-impl Provider for DeepSeekProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
-    }
-}
-
-/// Qwen (Tongyi / Alibaba DashScope) — OpenAI-compatible endpoint.
-/// Base URL: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-/// Env: `DASHSCOPE_API_KEY`
-/// Popular models: qwen-plus, qwen-max, qwen-turbo, qwen-coder-plus
-/// International users: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-pub struct QwenProvider(OpenAIProvider);
-
-impl QwenProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        ))
-    }
-
-    pub fn new_intl(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
-        ))
-    }
-}
-
-#[async_trait]
-impl Provider for QwenProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
-    }
-}
-
-/// GLM (Zhipu AI / 智谱) — OpenAI-compatible endpoint.
-/// Base URL: https://open.bigmodel.cn/api/paas/v4/chat/completions
-/// Env: `GLM_API_KEY`
-/// Popular models: glm-4-plus, glm-4, glm-4-air, glm-4-flash, glm-4v
-pub struct GLMProvider(OpenAIProvider);
-
-impl GLMProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        ))
-    }
-}
-
-#[async_trait]
-impl Provider for GLMProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
-    }
-}
-
-/// Volcengine (火山引擎 / ByteDance Ark) — OpenAI-compatible endpoint.
-/// Base URL: https://ark.cn-beijing.volces.com/api/v3/chat/completions
-/// Env: `VOLCENGINE_API_KEY`
-/// Popular models: deepseek-v3-250324, deepseek-r1-250324, doubao-pro-256k
-pub struct VolcengineProvider(OpenAIProvider);
-
-impl VolcengineProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self(OpenAIProvider::with_base_url(
-            api_key,
-            model,
-            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-        ))
-    }
-}
-
-#[async_trait]
-impl Provider for VolcengineProvider {
-    fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
-        self.0.prepare_tools(tools);
-    }
-    async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
-        self.0.chat(messages).await
-    }
-    async fn stream_chat(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        self.0.stream_chat(messages).await
-    }
-    async fn stream_chat_events(
-        &self,
-        messages: Vec<Message>,
-    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        self.0.stream_chat_events(messages).await
+        api_key: String,
+        override_model: Option<String>,
+        user_agent: Option<String>,
+    ) -> OpenAIProvider {
+        let model = self.resolve_model(override_model);
+        let agent = user_agent
+            .or_else(|| self.default_user_agent.map(str::to_string))
+            .unwrap_or_else(|| NEENEE_USER_AGENT.to_string());
+        OpenAIProvider::with_base_url_and_user_agent(api_key, model, self.base_url, &agent)
     }
 }
 
@@ -1020,6 +950,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: Some(vec![matched.clone()]),
             tool_call_id: None,
+            images: None,
             hidden: false,
         };
         let good_result = Message {
@@ -1029,6 +960,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_matched".to_string()),
+            images: None,
             hidden: false,
         };
         let orphan_result = Message {
@@ -1060,14 +992,27 @@ mod tests {
 
     #[test]
     fn kimi_code_uses_fixed_coding_endpoint_and_model() {
-        let provider = KimiCodeProvider::new(
-            "test-key".to_string(),
-            KimiCodeProvider::OPENCODE_USER_AGENT.to_string(),
-        );
+        let spec = openai_compat_provider("kimi-code").expect("kimi-code spec");
+        // A pinned model ignores any caller override.
+        assert_eq!(spec.resolve_model(Some("ignored".to_string())), "kimi-for-coding");
 
-        assert_eq!(provider.0.base_url, KimiCodeProvider::ENDPOINT);
-        assert_eq!(provider.0.model, KimiCodeProvider::MODEL);
-        assert_eq!(provider.0.user_agent, KimiCodeProvider::OPENCODE_USER_AGENT);
+        let provider = spec.build("test-key".to_string(), None, None);
+        assert_eq!(provider.base_url, spec.base_url);
+        assert_eq!(provider.model, "kimi-for-coding");
+        assert_eq!(provider.user_agent, KIMI_CODE_USER_AGENT);
+    }
+
+    #[test]
+    fn openai_compat_spec_resolves_model_override_and_default() {
+        let spec = openai_compat_provider("deepseek").expect("deepseek spec");
+        assert_eq!(spec.resolve_model(None), "deepseek-chat");
+        assert_eq!(
+            spec.resolve_model(Some("deepseek-reasoner".to_string())),
+            "deepseek-reasoner"
+        );
+        // Non-coding providers fall back to the shared neenee user agent.
+        let provider = spec.build("k".to_string(), None, None);
+        assert_eq!(provider.user_agent, NEENEE_USER_AGENT);
     }
 
     #[test]

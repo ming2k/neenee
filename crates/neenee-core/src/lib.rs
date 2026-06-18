@@ -5,6 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+pub mod goals;
+pub use goals::{
+    Goal, GoalAccountingResult, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus,
+    GoalStore, TokenUsage, TurnOutcome, TurnTimer,
+};
+
 const MAX_TOOL_ROUNDS: usize = 32;
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
 pub const GOAL_COMPLETE_MARKER: &str = "[NEENEE_GOAL_COMPLETE]";
@@ -38,6 +44,83 @@ pub fn public_error_message(error: &str) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+/// Heuristic: does this provider error indicate the request exceeded the
+/// model's context window? Used to trigger a compaction-and-retry instead of a
+/// plain failure.
+pub fn is_context_overflow(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "context length",
+        "context_length",
+        "context window",
+        "context_window",
+        "maximum context",
+        "too many tokens",
+        "token limit",
+    ]
+    .iter()
+    .any(|pattern| error.contains(pattern))
+}
+
+/// A typed harness error.
+///
+/// Replaces the previous practice of smuggling control signals through error
+/// *string contents* — a retryable JSON prefix, substring scans for context
+/// overflow, and an `"Interrupted"` sentinel — so the turn loop and its callers
+/// match outcomes exhaustively by variant instead of by fragile string compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessError {
+    /// A transient failure (rate limit, overload, timeout) that may be retried.
+    Retryable {
+        message: String,
+        retry_after_ms: Option<u64>,
+    },
+    /// The request exceeded the model's context window.
+    ContextOverflow(String),
+    /// The turn was cancelled by the user.
+    Interrupted,
+    /// Any other terminal failure; the message is user-facing.
+    Other(String),
+}
+
+impl HarnessError {
+    /// Classify a raw provider/transport error string into a typed error. This
+    /// is the single place the legacy string encoding is decoded.
+    pub fn classify(error: String) -> Self {
+        if let Some(retry) = parse_retryable_error(&error) {
+            return Self::Retryable {
+                message: retry.message,
+                retry_after_ms: retry.retry_after_ms,
+            };
+        }
+        if is_context_overflow(&error) {
+            return Self::ContextOverflow(error);
+        }
+        Self::Other(error)
+    }
+}
+
+impl std::fmt::Display for HarnessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable { message, .. }
+            | Self::ContextOverflow(message)
+            | Self::Other(message) => write!(f, "{message}"),
+            Self::Interrupted => write!(f, "Interrupted"),
+        }
+    }
+}
+
+impl std::error::Error for HarnessError {}
+
+/// Raw provider/transport error strings classify into a typed error when
+/// propagated with `?` inside the turn loop.
+impl From<String> for HarnessError {
+    fn from(error: String) -> Self {
+        Self::classify(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
@@ -57,8 +140,23 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Inline image attachments (typically pasted into the prompt). Each part
+    /// carries a MIME type and already-base64-encoded bytes so it can be
+    /// emitted directly as an OpenAI `image_url` data URL or a Gemini
+    /// `inline_data` part. Only user messages normally carry images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImagePart>>,
     #[serde(default)]
     pub hidden: bool,
+}
+
+/// An inline image attached to a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImagePart {
+    /// MIME type, e.g. `"image/png"`.
+    pub mime: String,
+    /// Base64-encoded image bytes.
+    pub data: String,
 }
 
 impl Message {
@@ -70,6 +168,7 @@ impl Message {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            images: None,
             hidden: false,
         }
     }
@@ -85,6 +184,11 @@ impl Message {
         self
     }
 
+    pub fn with_images(mut self, images: Vec<ImagePart>) -> Self {
+        self.images = if images.is_empty() { None } else { Some(images) };
+        self
+    }
+
     pub fn tool_result(call: &ToolCall, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -93,6 +197,7 @@ impl Message {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
+            images: None,
             hidden: false,
         }
     }
@@ -160,6 +265,12 @@ pub trait Tool: Send + Sync {
     fn access(&self) -> ToolAccess {
         ToolAccess::Write
     }
+    /// Whether this specific invocation may run while the agent is in Plan
+    /// mode. Defaults to read-only tools; write-capable tools can override to
+    /// permit safe scopes (e.g. writing files under the plan directory).
+    fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
+        matches!(self.access(), ToolAccess::ReadOnly)
+    }
     fn permission_scope(&self, _arguments: &str) -> String {
         "*".to_string()
     }
@@ -200,6 +311,7 @@ pub enum ToolAccess {
 
 pub mod commands;
 pub mod mcp;
+pub mod plan;
 pub mod project;
 pub mod providers;
 pub mod skills;
@@ -207,7 +319,10 @@ pub mod tools;
 
 #[derive(Debug)]
 pub enum AgentRequest {
-    Chat(String),
+    Chat {
+        text: String,
+        images: Vec<ImagePart>,
+    },
     SlashCommand(String),
     Interrupt,
     PermissionReply {
@@ -221,7 +336,9 @@ pub enum AgentRequest {
         base_url: Option<String>,
     },
     /// Delete a session (active or archived) by id or short id prefix.
-    DeleteSession { id: String },
+    DeleteSession {
+        id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -253,6 +370,8 @@ pub enum AgentResponse {
     },
     HarnessState(HarnessSnapshot),
     GoalUpdated(Goal),
+    /// The agent mode changed via `plan_enter` / `plan_exit`.
+    ModeChanged(AgentMode),
     RetryScheduled {
         attempt: usize,
         max_attempts: usize,
@@ -283,35 +402,6 @@ pub enum AgentResponse {
 pub enum AgentMode {
     Build,
     Plan,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GoalStatus {
-    Active,
-    Completed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Goal {
-    pub objective: String,
-    pub status: GoalStatus,
-    #[serde(default)]
-    pub checklist: Vec<GoalChecklistItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalChecklistStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoalChecklistItem {
-    pub content: String,
-    pub status: GoalChecklistStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +481,9 @@ pub enum AgentEvent {
         duration_ms: u64,
     },
     GoalUpdated(Goal),
+    /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
+    /// uses this to refresh its mode indicator live, mid-turn.
+    ModeChanged(AgentMode),
     PermissionRequest(PermissionRequest),
     /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.
     SubTask {
@@ -430,26 +523,77 @@ struct PermissionState {
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<Arc<dyn Tool>>,
-    mode: std::sync::Mutex<AgentMode>,
+    mode: Arc<std::sync::Mutex<AgentMode>>,
+    /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
     pub skills: Vec<skills::Skill>,
+    goal_service: GoalService,
+    thread_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// Mutable bookkeeping threaded through a single turn's tool-dispatch rounds.
+#[derive(Default)]
+struct TurnState {
+    token_usage: TokenUsage,
+    /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
+    previous_call: Option<(String, String)>,
+    repeated_calls: usize,
 }
 
 impl Agent {
-    pub fn new(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>, mode: AgentMode) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        tools: Vec<Arc<dyn Tool>>,
+        mode: AgentMode,
+        goal_service: GoalService,
+    ) -> Self {
         let skills = skills::discover_skills();
         let goal = Arc::new(std::sync::Mutex::new(None));
+        let thread_id = Arc::new(std::sync::Mutex::new(None));
+        let mode = Arc::new(std::sync::Mutex::new(mode));
+        let context = goals::tools::GoalToolContext {
+            thread_id: Arc::clone(&thread_id),
+            goal_service: goal_service.clone(),
+        };
+
         let mut tools = tools;
-        tools.retain(|tool| tool.name() != "goal_checklist");
-        tools.push(Arc::new(tools::GoalChecklistTool::new(goal.clone())));
+        tools.retain(|tool| !matches!(tool.name(), "goal_checklist" | "get_goal" | "create_goal" | "update_goal" | "plan_enter" | "plan_exit"));
+        tools.push(Arc::new(goals::tools::GoalChecklistTool::new(
+            context.clone(),
+            Arc::clone(&goal),
+        )));
+        tools.push(Arc::new(goals::tools::GetGoalTool::new(context.clone())));
+        tools.push(Arc::new(goals::tools::CreateGoalTool::new(context.clone())));
+        tools.push(Arc::new(goals::tools::UpdateGoalTool::new(context.clone())));
+
+        // Plan-mode workflow tools share the mode handle so they can flip it
+        // in place; the agent emits a ModeChanged event after they run.
+        let plan_context = plan::PlanToolContext::new(Arc::clone(&mode));
+        tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
+        tools.push(Arc::new(plan::PlanExitTool::new(plan_context)));
+
         Self {
             provider,
             tools,
-            mode: std::sync::Mutex::new(mode),
+            mode,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
             skills,
+            goal_service,
+            thread_id,
+        }
+    }
+
+    pub fn set_thread_id(&self, thread_id: impl Into<String>) {
+        if let Ok(mut guard) = self.thread_id.lock() {
+            *guard = Some(thread_id.into());
+        }
+    }
+
+    pub fn clear_thread_id(&self) {
+        if let Ok(mut guard) = self.thread_id.lock() {
+            *guard = None;
         }
     }
 
@@ -467,26 +611,12 @@ impl Agent {
         self.goal.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    pub fn set_goal(&self, objective: impl Into<String>) -> Goal {
-        let goal = Goal {
-            objective: objective.into(),
-            status: GoalStatus::Active,
-            checklist: Vec::new(),
-        };
-        *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = Some(goal.clone());
-        goal
+    pub fn set_goal(&self, goal: Goal) {
+        *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = Some(goal);
     }
 
     pub fn restore_goal(&self, goal: Goal) {
         *self.goal.lock().unwrap_or_else(|error| error.into_inner()) = Some(goal);
-    }
-
-    pub fn complete_goal(&self) -> Option<Goal> {
-        let mut guard = self.goal.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(goal) = guard.as_mut() {
-            goal.status = GoalStatus::Completed;
-        }
-        guard.clone()
     }
 
     pub fn clear_goal(&self) {
@@ -494,15 +624,49 @@ impl Agent {
     }
 
     pub fn goal_can_complete(&self) -> bool {
-        self.get_goal().is_some_and(|goal| {
-            goal.checklist.is_empty()
-                || goal.checklist.iter().all(|item| {
-                    matches!(
-                        item.status,
-                        GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-                    )
-                })
-        })
+        self.get_goal().is_some_and(|goal| goal.can_complete())
+    }
+
+    pub fn goal_service(&self) -> &GoalService {
+        &self.goal_service
+    }
+
+    pub fn thread_id(&self) -> Option<String> {
+        self.thread_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Append a hidden user message that asks the model to continue the active goal.
+    pub fn inject_goal_continuation(&self, messages: &mut Vec<Message>) {
+        if let Some(goal) = self.get_goal() {
+            if goal.status == GoalStatus::Active {
+                messages.push(Message::hidden(
+                    Role::User,
+                    goals::prompts::continuation_prompt(&goal),
+                ));
+            }
+        }
+    }
+
+    /// Append a hidden user message that informs the model the goal objective changed.
+    pub fn inject_objective_updated(&self, messages: &mut Vec<Message>) {
+        if let Some(goal) = self.get_goal() {
+            messages.push(Message::hidden(
+                Role::User,
+                goals::prompts::objective_updated_prompt(&goal),
+            ));
+        }
+    }
+
+    /// Append a hidden user message that informs the model the goal hit its budget.
+    pub fn inject_budget_limit(&self, messages: &mut Vec<Message>) {
+        if let Some(goal) = self.get_goal() {
+            if goal.status == GoalStatus::BudgetLimited {
+                messages.push(Message::hidden(
+                    Role::User,
+                    goals::prompts::budget_limit_prompt(&goal),
+                ));
+            }
+        }
     }
 
     pub fn reply_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
@@ -557,10 +721,22 @@ impl Agent {
             format!("Current mode: {:?}.", mode),
         ];
 
+        parts.push(
+            "Plan workflow: in Build mode, if a request is complex, spans multiple files, or would \
+             benefit from designing first, call the plan_enter tool to switch to Plan mode. In Plan \
+             mode, research with read-only tools, write the plan to .neenee/plans/<name>.md (the \
+             only location you may write while planning), then call plan_exit to switch back to \
+             Build mode and implement the plan. Do not enter Plan mode for simple tasks or when the \
+             user wants immediate implementation."
+                .to_string(),
+        );
+
         if mode == AgentMode::Plan {
             parts.push(
-                "In Plan mode, you may only use tools marked ReadOnly. Write-capable and \
-                 unclassified tools are blocked and will return an error."
+                "You are currently in Plan mode. You may only use read-only tools, except that you \
+                 may write files under .neenee/plans/. When the plan is written and finalized, call \
+                 plan_exit to return to Build mode and implement it; do not implement edits while \
+                 in Plan mode."
                     .to_string(),
             );
         }
@@ -581,13 +757,14 @@ impl Agent {
                             .join("\n")
                     ));
                 }
-                parts.push(format!(
-                    "Work toward this goal across turns. Only when the objective is fully \
-                     achieved, verified, and every checklist item is completed or cancelled, \
-                     include {} on its own line in the final response. Use goal_checklist to \
-                     create and update concrete progress items.",
-                    GOAL_COMPLETE_MARKER
-                ));
+                parts.push(
+                    "Work toward this goal across turns. Use get_goal to read the current goal, \
+                     create_goal when the user asks for a new goal, update_goal to mark the goal \
+                     complete or blocked, and goal_checklist to expose concrete progress items. \
+                     Only when the objective is fully achieved, verified, and every checklist item \
+                     is completed or cancelled, call update_goal with status \"complete\"."
+                        .to_string(),
+                );
             }
         }
 
@@ -666,7 +843,7 @@ impl Agent {
         }
     }
 
-    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<Message, String> {
+    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
         self.run_with_events(messages, |event| {
             if let AgentEvent::PermissionRequest(request) = event {
                 self.reply_permission(&request.id, PermissionDecision::Reject);
@@ -679,21 +856,21 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         mut on_event: F,
-    ) -> Result<Message, String>
+    ) -> Result<TurnOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
         self.provider.prepare_tools(&self.tools);
+        let turn_start = std::time::Instant::now();
+        let mut state = TurnState::default();
         let mut tool_rounds = 0;
-        let mut previous_call: Option<(String, String)> = None;
-        let mut repeated_calls = 0;
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(format!(
+                return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
-                ));
+                )));
             }
 
             remove_empty_assistant_messages(messages);
@@ -701,80 +878,28 @@ impl Agent {
 
             let response = self.provider.chat(messages.clone()).await?;
             if !valid_assistant_response(&response) {
-                return Err("Provider returned an empty assistant response.".to_string());
+                return Err(HarnessError::Other(
+                    "Provider returned an empty assistant response.".to_string(),
+                ));
             }
+            state.token_usage.total_tokens += estimate_message_tokens(&response);
             messages.push(response.clone());
 
-            // Check for native tool calls (OpenAI function calling)
-            if let Some(tool_calls) = &response.tool_calls {
-                if !tool_calls.is_empty() {
-                    for call in tool_calls {
-                        self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
-                    }
-                    // Emit all ToolCall events up front.
-                    let call_ids: Vec<String> = tool_calls
-                        .iter()
-                        .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
-                        .collect();
-                    for (call, id) in tool_calls.iter().zip(&call_ids) {
-                        on_event(AgentEvent::ToolCall {
-                            id: id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                        });
-                    }
-                    // Execute all tool calls concurrently.
-                    let results =
-                        self.execute_tools_concurrent(tool_calls, &mut on_event).await;
-                    for ((call, id), (result, duration_ms)) in
-                        tool_calls.iter().zip(&call_ids).zip(results)
-                    {
-                        self.emit_goal_update(call, &mut on_event);
-                        on_event(AgentEvent::ToolResult {
-                            id: id.clone(),
-                            name: call.name.clone(),
-                            output: result.clone(),
-                            duration_ms,
-                        });
-                        messages.push(Message::tool_result(
-                            call,
-                            format!("[{} result]:\n{}", call.name, result),
-                        ));
-                    }
-                    tool_rounds += 1;
-                    continue;
-                }
-            }
-
-            // Check for text-based tool calls (universal fallback for all providers)
-            if let Some(call) = self.parse_tool_call(&response.content) {
-                self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
-                Self::attach_fallback_tool_call(messages, &call);
-                let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                on_event(AgentEvent::ToolCall {
-                    id: call_id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                });
-                let started = std::time::Instant::now();
-                let result = self.execute_tool_evented(&call, &mut on_event).await;
-                let duration_ms = started.elapsed().as_millis() as u64;
-                self.emit_goal_update(&call, &mut on_event);
-                on_event(AgentEvent::ToolResult {
-                    id: call_id,
-                    name: call.name.clone(),
-                    output: result.clone(),
-                    duration_ms,
-                });
-                messages.push(Message::tool_result(
-                    &call,
-                    format!("[{} result]:\n{}", call.name, result),
-                ));
+            // The model produced no text stream, so nothing was shown to the UI
+            // that a fallback tool call would need to retract.
+            if self
+                .dispatch_tool_calls(&response, messages, &mut state, false, &mut on_event)
+                .await?
+            {
                 tool_rounds += 1;
                 continue;
             }
 
-            return Ok(response);
+            return Ok(TurnOutcome {
+                message: response,
+                token_usage: state.token_usage,
+                duration_ms: turn_start.elapsed().as_millis() as u64,
+            });
         }
     }
 
@@ -782,21 +907,21 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         mut on_event: F,
-    ) -> Result<Message, String>
+    ) -> Result<TurnOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
         self.provider.prepare_tools(&self.tools);
+        let turn_start = std::time::Instant::now();
+        let mut state = TurnState::default();
         let mut tool_rounds = 0;
-        let mut previous_call: Option<(String, String)> = None;
-        let mut repeated_calls = 0;
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(format!(
+                return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
-                ));
+                )));
             }
 
             remove_empty_assistant_messages(messages);
@@ -873,83 +998,140 @@ impl Agent {
                 reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 tool_calls: (!calls.is_empty()).then_some(calls),
                 tool_call_id: None,
+                images: None,
                 hidden: false,
             };
             if !valid_assistant_response(&response) {
-                return Err("Provider returned an empty assistant response.".to_string());
+                return Err(HarnessError::Other(
+                    "Provider returned an empty assistant response.".to_string(),
+                ));
             }
+            state.token_usage.total_tokens += estimate_message_tokens(&response);
             messages.push(response.clone());
 
-            if let Some(tool_calls) = &response.tool_calls {
-                for call in tool_calls {
-                    self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
-                }
-                // Emit all ToolCall events up front.
-                let call_ids: Vec<String> = tool_calls
-                    .iter()
-                    .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
-                    .collect();
-                for (call, id) in tool_calls.iter().zip(&call_ids) {
-                    on_event(AgentEvent::ToolCall {
-                        id: id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    });
-                }
-                // Execute all tool calls concurrently.
-                let results =
-                    self.execute_tools_concurrent(tool_calls, &mut on_event).await;
-                for ((call, id), (result, duration_ms)) in
-                    tool_calls.iter().zip(&call_ids).zip(results)
-                {
-                    self.emit_goal_update(call, &mut on_event);
-                    on_event(AgentEvent::ToolResult {
-                        id: id.clone(),
-                        name: call.name.clone(),
-                        output: result.clone(),
-                        duration_ms,
-                    });
-                    messages.push(Message::tool_result(
-                        call,
-                        format!("[{} result]:\n{}", call.name, result),
-                    ));
-                }
+            // `emitted_text` means assistant text was already streamed to the
+            // UI; a text-fallback tool call must then retract it via a discard.
+            if self
+                .dispatch_tool_calls(&response, messages, &mut state, emitted_text, &mut on_event)
+                .await?
+            {
                 tool_rounds += 1;
                 continue;
             }
 
-            if let Some(call) = self.parse_tool_call(&response.content) {
-                if emitted_text {
-                    on_event(AgentEvent::AssistantDiscard);
-                }
-                self.guard_repeated_call(&call, &mut previous_call, &mut repeated_calls)?;
-                Self::attach_fallback_tool_call(messages, &call);
-                let call_id = format!("call_{}", uuid::Uuid::new_v4());
+            return Ok(TurnOutcome {
+                message: response,
+                token_usage: state.token_usage,
+                duration_ms: turn_start.elapsed().as_millis() as u64,
+            });
+        }
+    }
+
+    /// Execute any tool calls carried by `response`, emitting events and
+    /// appending tool results to `messages`. Shared by the streaming and
+    /// non-streaming loops so the dispatch contract — repeated-call guard,
+    /// up-front `ToolCall` events, concurrent execution with FIFO-ordered
+    /// results, and goal/mode updates — lives in exactly one place.
+    ///
+    /// `streamed_text` is true when the response text was already streamed to
+    /// the UI, so a recognised text-fallback tool call retracts it with an
+    /// `AssistantDiscard`. Returns `true` when a tool round ran (the caller
+    /// should loop again), `false` when the turn is complete.
+    async fn dispatch_tool_calls<F>(
+        &self,
+        response: &Message,
+        messages: &mut Vec<Message>,
+        state: &mut TurnState,
+        streamed_text: bool,
+        on_event: &mut F,
+    ) -> Result<bool, HarnessError>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        // Native tool calls (OpenAI-style function calling). An empty list is
+        // treated as "no tool calls" so we fall through to the text fallback.
+        if let Some(tool_calls) = response
+            .tool_calls
+            .as_ref()
+            .filter(|calls| !calls.is_empty())
+        {
+            for call in tool_calls {
+                self.guard_repeated_call(call, &mut state.previous_call, &mut state.repeated_calls)?;
+            }
+            // Emit all ToolCall events up front.
+            let call_ids: Vec<String> = tool_calls
+                .iter()
+                .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
+                .collect();
+            for (call, id) in tool_calls.iter().zip(&call_ids) {
                 on_event(AgentEvent::ToolCall {
-                    id: call_id.clone(),
+                    id: id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
-                let started = std::time::Instant::now();
-                let result = self.execute_tool_evented(&call, &mut on_event).await;
-                let duration_ms = started.elapsed().as_millis() as u64;
-                self.emit_goal_update(&call, &mut on_event);
-                on_event(AgentEvent::ToolResult {
-                    id: call_id,
-                    name: call.name.clone(),
-                    output: result.clone(),
-                    duration_ms,
-                });
-                messages.push(Message::tool_result(
-                    &call,
-                    format!("[{} result]:\n{}", call.name, result),
-                ));
-                tool_rounds += 1;
-                continue;
             }
-
-            return Ok(response);
+            // Execute all tool calls concurrently; results arrive in input order.
+            let results = self.execute_tools_concurrent(tool_calls, on_event).await;
+            for ((call, id), (result, duration_ms)) in
+                tool_calls.iter().zip(&call_ids).zip(results)
+            {
+                self.record_tool_result(call, id, &result, duration_ms, messages, state, on_event);
+            }
+            return Ok(true);
         }
+
+        // Text-based fallback: any provider may emit a JSON tool call as text.
+        if let Some(call) = self.parse_tool_call(&response.content) {
+            if streamed_text {
+                on_event(AgentEvent::AssistantDiscard);
+            }
+            self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls)?;
+            Self::attach_fallback_tool_call(messages, &call);
+            let call_id = format!("call_{}", uuid::Uuid::new_v4());
+            on_event(AgentEvent::ToolCall {
+                id: call_id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            });
+            let started = std::time::Instant::now();
+            let result = self.execute_tool_evented(&call, on_event).await;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            self.record_tool_result(&call, &call_id, &result, duration_ms, messages, state, on_event);
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Account for, surface, and persist a single tool result. The argument
+    /// count reflects the per-result state it must thread; grouping it further
+    /// would only move the noise to the call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn record_tool_result<F>(
+        &self,
+        call: &ToolCall,
+        call_id: &str,
+        result: &str,
+        duration_ms: u64,
+        messages: &mut Vec<Message>,
+        state: &mut TurnState,
+        on_event: &mut F,
+    ) where
+        F: FnMut(AgentEvent) + Send,
+    {
+        state.token_usage.total_tokens += estimate_string_tokens(result);
+        self.emit_goal_update(call, on_event);
+        self.emit_mode_change(call, on_event);
+        on_event(AgentEvent::ToolResult {
+            id: call_id.to_string(),
+            name: call.name.clone(),
+            output: result.to_string(),
+            duration_ms,
+        });
+        messages.push(Message::tool_result(
+            call,
+            format!("[{} result]:\n{}", call.name, result),
+        ));
     }
 
     fn guard_repeated_call(
@@ -957,7 +1139,7 @@ impl Agent {
         call: &ToolCall,
         previous_call: &mut Option<(String, String)>,
         repeated_calls: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), HarnessError> {
         let signature = (call.name.clone(), call.arguments.clone());
         if previous_call.as_ref() == Some(&signature) {
             *repeated_calls += 1;
@@ -967,10 +1149,10 @@ impl Agent {
         }
 
         if *repeated_calls > MAX_REPEATED_TOOL_CALLS {
-            return Err(format!(
+            return Err(HarnessError::Other(format!(
                 "Agent stopped after repeating the same '{}' tool call {} times.",
                 call.name, MAX_REPEATED_TOOL_CALLS
-            ));
+            )));
         }
         Ok(())
     }
@@ -986,6 +1168,18 @@ impl Agent {
         }
     }
 
+    /// Notify the harness that the agent mode changed via `plan_enter` /
+    /// `plan_exit`. The tools mutate the shared mode cell themselves; this
+    /// only emits the live `ModeChanged` event so the TUI can refresh.
+    fn emit_mode_change<F>(&self, call: &ToolCall, on_event: &mut F)
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        if call.name == "plan_enter" || call.name == "plan_exit" {
+            on_event(AgentEvent::ModeChanged(self.get_mode()));
+        }
+    }
+
     async fn execute_tool(
         &self,
         call: &ToolCall,
@@ -996,7 +1190,7 @@ impl Agent {
             None => return format!("Error: Tool '{}' not found", call.name),
         };
 
-        if self.get_mode() == AgentMode::Plan && tool.access() != ToolAccess::ReadOnly {
+        if self.get_mode() == AgentMode::Plan && !tool.allowed_in_plan_mode(&call.arguments) {
             return format!(
                 "[Plan mode] Tool '{}' is blocked. Switch to Build mode to execute it.",
                 call.name
@@ -1153,6 +1347,31 @@ fn remove_empty_assistant_messages(messages: &mut Vec<Message>) {
     messages.retain(|message| message.role != Role::Assistant || valid_assistant_response(message));
 }
 
+fn estimate_message_tokens(message: &Message) -> i64 {
+    let text_len = message.content.len()
+        + message
+            .reasoning_content
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+    let tool_text: usize = message
+        .tool_calls
+        .as_ref()
+        .map(|calls| calls.iter().map(|c| c.name.len() + c.arguments.len()).sum())
+        .unwrap_or(0);
+    estimate_string_tokens_len(text_len + tool_text)
+}
+
+fn estimate_string_tokens(s: &str) -> i64 {
+    estimate_string_tokens_len(s.len())
+}
+
+fn estimate_string_tokens_len(len: usize) -> i64 {
+    // Rough heuristic: ~4 characters per token for English text.
+    // Providers that report real usage should override this estimate.
+    (len / 4).max(1) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,6 +1413,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     }]),
                     tool_call_id: None,
+                    images: None,
                     hidden: false,
                 })
             } else {
@@ -1295,19 +1515,39 @@ mod tests {
         }
     }
 
+    fn test_goal_service() -> GoalService {
+        GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"))
+    }
+
     fn agent() -> Agent {
-        Agent::new(Arc::new(TestProvider), Vec::new(), AgentMode::Build)
+        Agent::new(
+            Arc::new(TestProvider),
+            Vec::new(),
+            AgentMode::Build,
+            test_goal_service(),
+        )
+    }
+
+    fn active_goal(objective: &str) -> Goal {
+        Goal {
+            objective: objective.to_string(),
+            status: GoalStatus::Active,
+            checklist: Vec::new(),
+            tokens_used: 0,
+            token_budget: None,
+            time_used_seconds: 0,
+        }
     }
 
     #[test]
     fn goal_is_injected_into_system_prompt() {
         let agent = agent();
-        agent.set_goal("ship the harness");
+        agent.set_goal(active_goal("ship the harness"));
 
         let prompt = agent.build_system_prompt();
 
         assert!(prompt.contains("ship the harness"));
-        assert!(prompt.contains(GOAL_COMPLETE_MARKER));
+        assert!(prompt.contains("update_goal"));
     }
 
     #[test]
@@ -1320,11 +1560,13 @@ mod tests {
     #[test]
     fn goal_lifecycle_is_explicit() {
         let agent = agent();
-        agent.set_goal("verify behavior");
+        agent.set_goal(active_goal("verify behavior"));
         assert_eq!(agent.get_goal().unwrap().status, GoalStatus::Active);
 
-        agent.complete_goal();
-        assert_eq!(agent.get_goal().unwrap().status, GoalStatus::Completed);
+        let mut completed = active_goal("verify behavior");
+        completed.status = GoalStatus::Complete;
+        agent.set_goal(completed);
+        assert_eq!(agent.get_goal().unwrap().status, GoalStatus::Complete);
 
         agent.clear_goal();
         assert_eq!(agent.get_goal(), None);
@@ -1333,7 +1575,7 @@ mod tests {
     #[tokio::test]
     async fn goal_checklist_controls_completion_readiness() {
         let agent = agent();
-        agent.set_goal("ship verified work");
+        agent.set_goal(active_goal("ship verified work"));
         let tool = agent
             .tools
             .iter()
@@ -1364,7 +1606,7 @@ mod tests {
     #[tokio::test]
     async fn goal_checklist_rejects_multiple_in_progress_items() {
         let agent = agent();
-        agent.set_goal("track work");
+        agent.set_goal(active_goal("track work"));
         let tool = agent
             .tools
             .iter()
@@ -1387,7 +1629,7 @@ mod tests {
     #[tokio::test]
     async fn goal_checklist_cannot_be_silently_cleared() {
         let agent = agent();
-        agent.set_goal("track work");
+        agent.set_goal(active_goal("track work"));
         let tool = agent
             .tools
             .iter()
@@ -1406,7 +1648,7 @@ mod tests {
     #[test]
     fn goal_checklist_updates_emit_harness_state() {
         let agent = agent();
-        agent.set_goal("track");
+        agent.set_goal(active_goal("track"));
         let call = ToolCall {
             id: "call".to_string(),
             name: "goal_checklist".to_string(),
@@ -1429,6 +1671,7 @@ mod tests {
             Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
             vec![Arc::new(StreamingReadTool(calls.clone()))],
             AgentMode::Build,
+            test_goal_service(),
         );
         let mut messages = vec![Message::new(Role::User, "run")];
         let mut events = Vec::new();
@@ -1438,7 +1681,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.content, "done");
+        assert_eq!(response.message.content, "done");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let model_rounds = events
             .iter()
@@ -1486,6 +1729,7 @@ mod tests {
             Arc::new(TestProvider),
             vec![Arc::new(WriteTestTool)],
             AgentMode::Plan,
+            test_goal_service(),
         );
         let call = ToolCall {
             id: "call".to_string(),
@@ -1505,6 +1749,7 @@ mod tests {
             Arc::new(TestProvider),
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
+            test_goal_service(),
         ));
         let call = ToolCall {
             id: "call".to_string(),
@@ -1549,6 +1794,7 @@ mod tests {
             Arc::new(TestProvider),
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
+            test_goal_service(),
         ));
         let call = ToolCall {
             id: "call".to_string(),
@@ -1575,18 +1821,357 @@ mod tests {
 
     #[tokio::test]
     async fn headless_run_rejects_write_tools_without_hanging() {
+        let goal_service = GoalService::new(
+            GoalStore::open_in_memory().await.expect("in-memory goal store"),
+        );
         let agent = Agent::new(
             Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
+            goal_service,
         );
         let mut messages = vec![Message::new(Role::User, "write something")];
 
-        let response = agent.run(&mut messages).await.unwrap();
+        let outcome = agent.run(&mut messages).await.unwrap();
 
-        assert_eq!(response.content, "done");
+        assert_eq!(outcome.message.content, "done");
         assert!(messages
             .iter()
             .any(|message| message.content.contains("Permission denied")));
+    }
+
+    // ---- Golden-transcript harness ----------------------------------------
+    //
+    // `ScriptedProvider` replays a fixed list of streamed events — one script
+    // per model round — so a whole agent turn runs deterministically and its
+    // emitted `AgentEvent` stream can be asserted as a stable golden
+    // transcript. This pins the loop's externally-visible contract (tool-call
+    // ordering, native vs text-fallback dispatch, concurrent result ordering,
+    // the repeated-call guard, and permission gating) independently of any real
+    // provider, so the refactors that follow can lean on it as a safety net.
+
+    /// A model round that streams a single chunk of assistant text.
+    fn text_round(text: &str) -> Vec<ProviderStreamEvent> {
+        vec![ProviderStreamEvent::TextDelta(text.to_string())]
+    }
+
+    /// A model round that streams native tool calls as `(id, name, arguments)`.
+    fn tool_round(calls: &[(&str, &str, &str)]) -> Vec<ProviderStreamEvent> {
+        calls
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, arguments))| ProviderStreamEvent::ToolCallDelta {
+                index,
+                id: Some(id.to_string()),
+                name: Some(name.to_string()),
+                arguments: arguments.to_string(),
+            })
+            .collect()
+    }
+
+    struct ScriptedProvider {
+        rounds: std::sync::Mutex<std::collections::VecDeque<Vec<ProviderStreamEvent>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(rounds: Vec<Vec<ProviderStreamEvent>>) -> Self {
+            Self {
+                rounds: std::sync::Mutex::new(rounds.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedProvider {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+            Err("scripted provider is streaming-only".to_string())
+        }
+
+        async fn stream_chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn stream_chat_events(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
+            // A turn that runs past its script gets a terminal "done" so the
+            // loop exits rather than hanging on a missing round.
+            let round = self
+                .rounds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+                .unwrap_or_else(|| text_round("done"));
+            Ok(Box::pin(stream::iter(round.into_iter().map(Ok))))
+        }
+    }
+
+    /// A tool that records every invocation's arguments and returns canned
+    /// output, with a configurable access level for permission tests.
+    struct RecordingTool {
+        name: &'static str,
+        access: ToolAccess,
+        output: String,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingTool {
+        fn read(name: &'static str, output: &str) -> Self {
+            Self {
+                name,
+                access: ToolAccess::ReadOnly,
+                output: output.to_string(),
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn write(name: &'static str, output: &str) -> Self {
+            Self {
+                access: ToolAccess::Write,
+                ..Self::read(name, output)
+            }
+        }
+
+        fn calls_handle(&self) -> Arc<std::sync::Mutex<Vec<String>>> {
+            Arc::clone(&self.calls)
+        }
+    }
+
+    #[async_trait]
+    impl Tool for RecordingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "recording test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn access(&self) -> ToolAccess {
+            self.access
+        }
+        async fn call(&self, arguments: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(arguments.to_string());
+            Ok(self.output.clone())
+        }
+    }
+
+    /// Normalise an event stream into a stable, assertable transcript by
+    /// dropping non-deterministic fields (generated call ids and durations).
+    fn transcript(events: &[AgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| match event {
+                AgentEvent::ModelRequestStarted { tool_round } => {
+                    format!("model-request round={tool_round}")
+                }
+                AgentEvent::AssistantDelta { delta, start } => {
+                    format!("assistant-delta start={start} {delta:?}")
+                }
+                AgentEvent::AssistantEnd(content) => format!("assistant-end {content:?}"),
+                AgentEvent::AssistantDiscard => "assistant-discard".to_string(),
+                AgentEvent::ReasoningDelta { delta, start } => {
+                    format!("reasoning-delta start={start} {delta:?}")
+                }
+                AgentEvent::ReasoningEnd(content) => format!("reasoning-end {content:?}"),
+                AgentEvent::ToolCall { name, arguments, .. } => {
+                    format!("tool-call {name} {arguments}")
+                }
+                AgentEvent::ToolResult { name, output, .. } => {
+                    format!("tool-result {name} {output:?}")
+                }
+                AgentEvent::GoalUpdated(_) => "goal-updated".to_string(),
+                AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
+                AgentEvent::PermissionRequest(request) => {
+                    format!("permission-request {} {}", request.tool, request.scope)
+                }
+                AgentEvent::SubTask { .. } => "subtask".to_string(),
+            })
+            .collect()
+    }
+
+    /// Drive one full turn, auto-answering any permission prompt with `decision`
+    /// so write-capable tools don't deadlock the loop.
+    async fn run_golden_turn(
+        agent: &Agent,
+        prompt: &str,
+        decision: PermissionDecision,
+    ) -> (Vec<AgentEvent>, Result<TurnOutcome, HarnessError>) {
+        let mut messages = vec![Message::new(Role::User, prompt)];
+        let mut events = Vec::new();
+        let outcome = agent
+            .run_streaming_with_events(&mut messages, |event| {
+                if let AgentEvent::PermissionRequest(request) = &event {
+                    agent.reply_permission(&request.id, decision);
+                }
+                events.push(event);
+            })
+            .await;
+        (events, outcome)
+    }
+
+    #[tokio::test]
+    async fn golden_native_tool_round_then_final_text() {
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new(vec![
+                tool_round(&[("c1", "alpha", "{\"k\":1}"), ("c2", "beta", "{\"k\":2}")]),
+                text_round("all done"),
+            ])),
+            vec![
+                Arc::new(RecordingTool::read("alpha", "A-out")),
+                Arc::new(RecordingTool::read("beta", "B-out")),
+            ],
+            AgentMode::Build,
+            test_goal_service(),
+        );
+
+        let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
+
+        assert_eq!(outcome.unwrap().message.content, "all done");
+        // Calls are announced up front, then results land in input (FIFO) order
+        // regardless of concurrent execution.
+        assert_eq!(
+            transcript(&events),
+            vec![
+                "model-request round=0",
+                "tool-call alpha {\"k\":1}",
+                "tool-call beta {\"k\":2}",
+                "tool-result alpha \"A-out\"",
+                "tool-result beta \"B-out\"",
+                "model-request round=1",
+                "assistant-delta start=true \"all done\"",
+                "assistant-end \"all done\"",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new(vec![
+                text_round("{\"tool\":\"alpha\",\"arguments\":{\"k\":1}}"),
+                text_round("finished"),
+            ])),
+            vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
+            AgentMode::Build,
+            test_goal_service(),
+        );
+
+        let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
+
+        assert_eq!(outcome.unwrap().message.content, "finished");
+        // The streamed JSON is shown, then discarded once recognised as a tool
+        // call, so the UI never leaves raw tool JSON on screen.
+        assert_eq!(
+            transcript(&events),
+            vec![
+                "model-request round=0",
+                "assistant-delta start=true \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
+                "assistant-end \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
+                "assistant-discard",
+                "tool-call alpha {\"k\":1}",
+                "tool-result alpha \"A-out\"",
+                "model-request round=1",
+                "assistant-delta start=true \"finished\"",
+                "assistant-end \"finished\"",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn golden_repeated_identical_tool_calls_abort_the_turn() {
+        let tool = RecordingTool::read("alpha", "A-out");
+        let calls = tool.calls_handle();
+        // Four identical rounds: the guard trips on the fourth.
+        let identical = || tool_round(&[("c", "alpha", "{}")]);
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new(vec![
+                identical(),
+                identical(),
+                identical(),
+                identical(),
+            ])),
+            vec![Arc::new(tool)],
+            AgentMode::Build,
+            test_goal_service(),
+        );
+
+        let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
+
+        assert!(matches!(
+            outcome.unwrap_err(),
+            HarnessError::Other(message) if message.contains("repeating the same")
+        ));
+        // The first MAX_REPEATED_TOOL_CALLS calls run; the fourth is blocked.
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            MAX_REPEATED_TOOL_CALLS,
+            "guard must stop before executing the repeat"
+        );
+    }
+
+    #[tokio::test]
+    async fn golden_rejected_write_tool_is_gated_and_loop_continues() {
+        let tool = RecordingTool::write("writer", "WROTE");
+        let calls = tool.calls_handle();
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new(vec![
+                tool_round(&[("c1", "writer", "{\"path\":\"x\"}")]),
+                text_round("stopped"),
+            ])),
+            vec![Arc::new(tool)],
+            AgentMode::Build,
+            test_goal_service(),
+        );
+
+        let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
+
+        assert_eq!(outcome.unwrap().message.content, "stopped");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "rejected write tool must not execute"
+        );
+        let lines = transcript(&events);
+        assert!(lines.iter().any(|line| line == "permission-request writer *"));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("tool-result writer") && line.contains("Permission denied")));
+    }
+
+    #[tokio::test]
+    async fn golden_reasoning_precedes_text_in_the_same_round() {
+        let agent = Agent::new(
+            Arc::new(ScriptedProvider::new(vec![vec![
+                ProviderStreamEvent::ReasoningDelta("think".to_string()),
+                ProviderStreamEvent::TextDelta("answer".to_string()),
+            ]])),
+            Vec::new(),
+            AgentMode::Build,
+            test_goal_service(),
+        );
+
+        let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
+
+        assert_eq!(outcome.unwrap().message.content, "answer");
+        // Deltas surface in stream-arrival order (reasoning first here), but the
+        // round closes with AssistantEnd before ReasoningEnd.
+        assert_eq!(
+            transcript(&events),
+            vec![
+                "model-request round=0",
+                "reasoning-delta start=true \"think\"",
+                "assistant-delta start=true \"answer\"",
+                "assistant-end \"answer\"",
+                "reasoning-end \"think\"",
+            ]
+        );
     }
 }

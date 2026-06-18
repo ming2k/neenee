@@ -1436,6 +1436,7 @@ fn render_expandable_card_header(
     mi: usize,
     block_idx: usize,
     expanded: bool,
+    marker_override: Option<&str>,
     header: &str,
     arrow_color: Color,
     header_color: Color,
@@ -1445,7 +1446,7 @@ fn render_expandable_card_header(
     current_y: &mut u16,
     content_lines: &mut usize,
 ) -> usize {
-    let arrow = if expanded { "-" } else { "+" };
+    let arrow = marker_override.unwrap_or(if expanded { "-" } else { "+" });
     let header_line_idx = *content_lines;
 
     *content_lines += 1;
@@ -1524,10 +1525,47 @@ fn draw_section_label(
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
     } else if *current_y < chat_area.y + chat_area.height {
-        let used = 1 + label.len();
+        let indent = 2usize;
+        let used = indent + label.len();
         let line = Line::from(vec![
-            Span::styled(" ", pad_style),
+            Span::styled(" ".repeat(indent), pad_style),
             Span::styled(label, label_style),
+            Span::styled(padded_tail(full_width, used), pad_style),
+        ]);
+        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        frame.render_widget(Paragraph::new(line), rect);
+        *current_y += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_tool_meta_row(
+    frame: &mut Frame,
+    chat_area: Rect,
+    full_width: usize,
+    label: &str,
+    value: &str,
+    pad_style: Style,
+    label_style: Style,
+    value_style: Style,
+    label_width: usize,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+) {
+    *content_lines += 1;
+    if *skip_rows > 0 {
+        *skip_rows = skip_rows.saturating_sub(1);
+    } else if *current_y < chat_area.y + chat_area.height {
+        let indent = 2usize;
+        let gap = 2usize;
+        let label_text = format!("{:<width$}", label, width = label_width);
+        let used = indent + label_width + gap + value.width();
+        let line = Line::from(vec![
+            Span::styled(" ".repeat(indent), pad_style),
+            Span::styled(label_text, label_style),
+            Span::styled(" ".repeat(gap), pad_style),
+            Span::styled(value.to_string(), value_style),
             Span::styled(padded_tail(full_width, used), pad_style),
         ]);
         let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
@@ -1540,27 +1578,31 @@ fn draw_section_label(
 /// commands wrap under the prompt so the expanded view stays compact without
 /// losing the actual command that ran.
 #[allow(clippy::too_many_arguments)]
-fn render_shell_command_line(
+fn render_meta_value_row_wrapped(
     frame: &mut Frame,
     chat_area: Rect,
     full_width: usize,
-    command: &str,
+    label: &str,
+    value: &str,
     pad_style: Style,
-    prompt_style: Style,
-    command_style: Style,
-    indent: usize,
+    label_style: Style,
+    value_style: Style,
+    label_width: usize,
     inner_w: usize,
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
 ) {
-    let command = command.trim_end();
-    if command.is_empty() {
+    let value = value.trim_end();
+    if value.is_empty() {
         return;
     }
 
-    let wrap_w = inner_w.saturating_sub(2).max(1);
-    let wrapped = wrap_text(command, wrap_w);
+    let indent = 2usize;
+    let gap = 2usize;
+    let value_indent = indent + label_width + gap;
+    let wrap_w = inner_w.max(1);
+    let wrapped = wrap_text(value, wrap_w);
     let wrapped: Vec<WrappedLine> = if wrapped.is_empty() {
         vec![WrappedLine {
             text: String::new(),
@@ -1581,14 +1623,20 @@ fn render_shell_command_line(
             break;
         }
 
-        let prompt = if idx == 0 { "$ " } else { "  " };
-        let used = indent + prompt.width() + wl.text.width();
-        let line = Line::from(vec![
-            Span::styled(" ".repeat(indent), pad_style),
-            Span::styled(prompt, prompt_style),
-            Span::styled(wl.text.clone(), command_style),
-            Span::styled(padded_tail(full_width, used), pad_style),
-        ]);
+        let mut spans = vec![Span::styled(" ".repeat(indent), pad_style)];
+        if idx == 0 {
+            spans.push(Span::styled(
+                format!("{:<width$}", label, width = label_width),
+                label_style,
+            ));
+            spans.push(Span::styled(" ".repeat(gap), pad_style));
+        } else {
+            spans.push(Span::styled(" ".repeat(label_width + gap), pad_style));
+        }
+        spans.push(Span::styled(wl.text.clone(), value_style));
+        let used = value_indent + wl.text.width();
+        spans.push(Span::styled(padded_tail(full_width, used), pad_style));
+        let line = Line::from(spans);
         let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
         frame.render_widget(Paragraph::new(line), rect);
         *current_y += 1;
@@ -2209,13 +2257,17 @@ fn render_bash_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = theme.code_bg;
-    let pad = Style::default().bg(code_bg);
-    let base = Style::default().bg(code_bg).fg(theme.code_fg);
+    let result_bg = theme.menu_bg;
+    let pad = Style::default().bg(result_bg);
+    let base = Style::default().bg(result_bg).fg(theme.code_fg);
     let marker_style = Style::default()
-        .bg(code_bg)
+        .bg(result_bg)
         .fg(theme.warning)
         .add_modifier(Modifier::BOLD);
+    let content = content.trim_end_matches(&['\r', '\n'][..]);
+    if content.is_empty() {
+        return;
+    }
     let sel_range = block_selection_range(selection, mi, block_idx);
     let wrap_w = inner_w.saturating_sub(indent).max(1);
 
@@ -2383,8 +2435,8 @@ fn render_tool_result_section(
             skip_rows,
             current_y,
             content_lines,
-            indent,
-            inner_w,
+            indent + 2,
+            inner_w.saturating_sub(2),
         ),
         _ => render_code_content(
             frame,
@@ -2580,6 +2632,7 @@ fn render_tool_step_card(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_cards: &mut Vec<StickyCard>,
+    spinner_phase: usize,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
@@ -2595,6 +2648,10 @@ fn render_tool_step_card(
         } => theme.success,
         _ => theme.info,
     };
+    let running = matches!(
+        &msg.kind,
+        crate::document::MessageKind::ToolStep { output: None, .. }
+    );
 
     let expanded = msg.tool_step_expanded() == Some(true);
     // Render into the inset band so the `element_bg`/`menu_bg`/`code_bg` bands
@@ -2634,6 +2691,7 @@ fn render_tool_step_card(
         mi,
         usize::MAX,
         expanded,
+        running.then(|| spinner_frame(spinner_phase)),
         &header,
         status_color,
         theme.text_muted,
@@ -2690,6 +2748,23 @@ fn render_tool_step_card(
         let arg_style = Style::default().bg(body_bg).fg(theme.text_muted);
         let indent = 2usize;
         let inner_w = inner_width.saturating_sub(indent);
+        let meta_label_width = 9usize;
+        let meta_label_style = Style::default()
+            .bg(body_bg)
+            .fg(theme.text_muted)
+            .add_modifier(Modifier::BOLD);
+        let meta_value_style = Style::default().bg(body_bg).fg(theme.dim_fg);
+        let command_style = Style::default().bg(body_bg).fg(theme.text);
+
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
 
         if let crate::document::MessageKind::ToolStep {
             name,
@@ -2705,56 +2780,31 @@ fn render_tool_step_card(
                     .find(|(k, _)| k == "command")
                     .map(|(_, v)| v.as_str())
                     .unwrap_or_default();
-                draw_section_label(
+                draw_tool_meta_row(
                     frame,
                     chat_area,
                     full_width,
                     "Tool",
+                    name,
                     pad,
-                    label_style,
+                    meta_label_style,
+                    meta_value_style,
+                    meta_label_width,
                     skip_rows,
                     current_y,
                     content_lines,
                 );
-                *content_lines += 1;
-                if *skip_rows > 0 {
-                    *skip_rows = skip_rows.saturating_sub(1);
-                } else if *current_y < chat_area.y + chat_area.height {
-                    let used = indent + name.len();
-                    let line = Line::from(vec![
-                        Span::styled(" ".repeat(indent), pad),
-                        Span::styled(
-                            name.as_str(),
-                            Style::default().bg(body_bg).fg(theme.dim_fg),
-                        ),
-                        Span::styled(padded_tail(full_width, used), pad),
-                    ]);
-                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                    frame.render_widget(Paragraph::new(line), rect);
-                    *current_y += 1;
-                }
-
-                draw_section_label(
+                render_meta_value_row_wrapped(
                     frame,
                     chat_area,
                     full_width,
                     "Arguments",
-                    pad,
-                    label_style,
-                    skip_rows,
-                    current_y,
-                    content_lines,
-                );
-                render_shell_command_line(
-                    frame,
-                    chat_area,
-                    full_width,
                     command,
                     pad,
-                    Style::default().bg(body_bg).fg(theme.info),
-                    Style::default().bg(body_bg).fg(theme.text),
-                    indent,
-                    inner_w,
+                    meta_label_style,
+                    command_style,
+                    meta_label_width,
+                    full_width.saturating_sub(indent + meta_label_width + 2),
                     skip_rows,
                     current_y,
                     content_lines,
@@ -2783,32 +2833,20 @@ fn render_tool_step_card(
                     }
                 }
             } else {
-                // ── Tool ── (technical name, only visible when expanded).
-                draw_section_label(
+                draw_tool_meta_row(
                     frame,
                     chat_area,
                     full_width,
                     "Tool",
+                    name,
                     pad,
-                    label_style,
+                    meta_label_style,
+                    meta_value_style,
+                    meta_label_width,
                     skip_rows,
                     current_y,
                     content_lines,
                 );
-                *content_lines += 1;
-                if *skip_rows > 0 {
-                    *skip_rows = skip_rows.saturating_sub(1);
-                } else if *current_y < chat_area.y + chat_area.height {
-                    let used = indent + name.len();
-                    let line = Line::from(vec![
-                        Span::styled(" ".repeat(indent), pad),
-                        Span::styled(name.as_str(), Style::default().bg(body_bg).fg(theme.dim_fg)),
-                        Span::styled(padded_tail(full_width, used), pad),
-                    ]);
-                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-                    frame.render_widget(Paragraph::new(line), rect);
-                    *current_y += 1;
-                }
 
                 let display_args: String = kv
                     .iter()
@@ -2923,6 +2961,16 @@ fn render_tool_step_card(
                 }
             }
         }
+
+        draw_blank_line(
+            frame,
+            chat_area,
+            full_width,
+            pad,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
     }
 
     // Bottom border.
@@ -3041,11 +3089,19 @@ fn render_thinking_card(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_cards: &mut Vec<StickyCard>,
+    spinner_phase: usize,
 ) {
     let Some(header) = msg.thinking_header() else {
         return;
     };
     let expanded = msg.thinking_expanded() == Some(true);
+    let running = matches!(
+        &msg.kind,
+        crate::document::MessageKind::Thinking {
+            duration_ms: None,
+            ..
+        }
+    );
     // Render into the inset band so the `element_bg`/`menu_bg` bands sit inside
     // the uniform 2-cell `app_bg` gutters, matching user panels and code blocks.
     let chat_area = chat_band_rect(chat_area);
@@ -3077,6 +3133,7 @@ fn render_thinking_card(
         mi,
         usize::MAX - 1,
         expanded,
+        running.then(|| spinner_frame(spinner_phase)),
         &header,
         theme.info,
         theme.text_muted,
@@ -3396,7 +3453,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
             } else {
                 ""
             };
-            let mark = if goal.status == GoalStatus::Completed {
+            let mark = if goal.status == GoalStatus::Complete {
                 "✓"
             } else {
                 "◎"
@@ -3488,6 +3545,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 &mut current_y,
                 &mut content_lines,
                 &mut sticky_cards,
+                spinner_phase,
             );
         } else if msg.is_thinking() {
             render_thinking_card(
@@ -3502,6 +3560,7 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
                 &mut current_y,
                 &mut content_lines,
                 &mut sticky_cards,
+                spinner_phase,
             );
         } else {
             render_message_blocks(
@@ -3523,7 +3582,15 @@ pub fn draw_chat(frame: &mut Frame, layout_map: &mut LayoutMap, view: ChatView<'
         // bottom transition row (▀) that separates it from the next message, so
         // the extra blank line is omitted there to keep the gap to a single row
         // (otherwise the sent message sits two rows above the following body).
-        if msg.role != neenee_core::Role::User {
+        // The exception is when the next message is a card (thinking or tool
+        // step): cards have their own solid background band, and a blank row
+        // between the user panel's transition and the card header keeps the two
+        // visually distinct. This matches the spacing produced by live reasoning
+        // streams and restored history.
+        let next_is_card = messages
+            .get(mi + 1)
+            .is_some_and(|next| next.is_thinking() || next.is_tool_step() || next.is_subagent_task());
+        if msg.role != neenee_core::Role::User || next_is_card {
             content_lines += 1;
             if skip_rows > 0 {
                 skip_rows = skip_rows.saturating_sub(1);
@@ -3792,6 +3859,10 @@ pub fn draw_input(
 /// (10 frames ≈ one revolution per second at the 100ms tick rate).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+fn spinner_frame(spinner_phase: usize) -> &'static str {
+    SPINNER_FRAMES[spinner_phase % SPINNER_FRAMES.len()]
+}
+
 /// Draw the transient activity bar that sits directly above the input box.
 /// Replaces the old inline `┃ neenee ⟳ <status>` indicator: the brand prefix
 /// is dropped (the header already shows it) and the static `⟳` glyph is
@@ -3806,7 +3877,7 @@ pub fn draw_status_bar(
     if status.is_empty() || status == "idle" || status == "responding" {
         return;
     }
-    let spinner = SPINNER_FRAMES[spinner_phase % SPINNER_FRAMES.len()];
+    let spinner = spinner_frame(spinner_phase);
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -4947,6 +5018,9 @@ mod tests {
         let goal = Goal {
             objective: "ship".to_string(),
             status: GoalStatus::Active,
+            tokens_used: 0,
+            token_budget: None,
+            time_used_seconds: 0,
             checklist: vec![
                 neenee_core::GoalChecklistItem {
                     content: "implemented".to_string(),

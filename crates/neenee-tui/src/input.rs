@@ -67,6 +67,9 @@ pub enum InputAction {
     CtrlC,
     /// Toggle expanded details for semantic tool steps.
     ToggleToolSteps,
+    /// Paste from the system clipboard (image or text). Resolved by the app
+    /// loop, which reads the clipboard asynchronously.
+    Paste,
     /// Input character.
     InsertChar(char),
     /// Delete character before cursor.
@@ -122,14 +125,13 @@ pub enum InputAction {
 /// Insert a literal newline at the cursor position, but only in modals that
 /// accept free-text input. Used by the Alt+Enter and Ctrl+J multi-line
 /// entry bindings (plain Enter sends the message).
-fn insert_newline(
-    input: &mut String,
-    cursor_position: &mut usize,
-    active_modal: super::Modal,
-) {
+fn insert_newline(input: &mut String, cursor_position: &mut usize, active_modal: super::Modal) {
     if matches!(
         active_modal,
-        super::Modal::None | super::Modal::ApiKey | super::Modal::Endpoint | super::Modal::ModelName
+        super::Modal::None
+            | super::Modal::ApiKey
+            | super::Modal::Endpoint
+            | super::Modal::ModelName
     ) {
         let byte_pos = input
             .char_indices()
@@ -330,6 +332,17 @@ pub fn process_event(
                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     insert_newline(input, cursor_position, context.active_modal);
                     InputAction::None
+                }
+                // Ctrl+V: paste from the system clipboard. Only active on the
+                // main prompt (not inside modals); the app loop reads the
+                // clipboard asynchronously and either attaches an image or
+                // inserts the text at the cursor.
+                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if context.active_modal == super::Modal::None {
+                        InputAction::Paste
+                    } else {
+                        InputAction::None
+                    }
                 }
                 KeyCode::Char(c) => {
                     // Sibling sub-agent navigation: only when not typing (empty

@@ -180,9 +180,10 @@ impl ChatMessage {
                 children.push(ChatMessage::new(Role::Assistant, ""));
             }
             SubTaskEvent::StreamDelta(delta) => {
-                if let Some(last) = children.last_mut().filter(|m| {
-                    m.role == Role::Assistant && matches!(m.kind, MessageKind::Chat)
-                }) {
+                if let Some(last) = children
+                    .last_mut()
+                    .filter(|m| m.role == Role::Assistant && matches!(m.kind, MessageKind::Chat))
+                {
                     last.push_stream(delta);
                 } else {
                     let mut msg = ChatMessage::new(Role::Assistant, "");
@@ -328,10 +329,7 @@ impl ChatMessage {
         else {
             return None;
         };
-        let tool_calls = children
-            .iter()
-            .filter(|child| child.is_tool_step())
-            .count();
+        let tool_calls = children.iter().filter(|child| child.is_tool_step()).count();
         let line = match output {
             Some(o) if o.starts_with("Error") => {
                 format!("↳ Failed · {} tool calls", tool_calls)
@@ -362,9 +360,7 @@ impl ChatMessage {
                             .unwrap_or_else(|| "tool".to_string());
                         format!("↳ Running {} · {}", stats, header)
                     }
-                    Some(child)
-                        if child.role == Role::Assistant && !child.raw.is_empty() =>
-                    {
+                    Some(child) if child.role == Role::Assistant && !child.raw.is_empty() => {
                         format!("↳ Running {} · thinking", stats)
                     }
                     _ => format!("↳ Running {}", stats),
@@ -430,7 +426,11 @@ impl ChatMessage {
         let chars = content.chars().count();
         Some(match duration_ms {
             None => format!("Thinking · {} chars", chars),
-            Some(_) => format!("Thinking · {} · {} chars", duration_text(*duration_ms), chars),
+            Some(_) => format!(
+                "Thinking · {} · {} chars",
+                duration_text(*duration_ms),
+                chars
+            ),
         })
     }
 
@@ -808,7 +808,8 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                             );
                         }
                     }
-                }                _ => {}
+                }
+                _ => {}
             },
             Event::Text(t) => {
                 if in_code {
@@ -1213,12 +1214,10 @@ mod tests {
                 ..
             } if content == "next"
         )));
-        let table = blocks
-            .iter()
-            .find_map(|block| match block {
-                Block::Table { headers, rows, .. } => Some((headers, rows)),
-                _ => None,
-            });
+        let table = blocks.iter().find_map(|block| match block {
+            Block::Table { headers, rows, .. } => Some((headers, rows)),
+            _ => None,
+        });
         let (headers, rows) = table.expect("table block present");
         assert_eq!(headers, &["Name".to_string(), "State".to_string()]);
         assert_eq!(rows, &[vec!["neenee".to_string(), "ready".to_string()]]);
@@ -1232,10 +1231,7 @@ mod tests {
                 _ => None,
             })
             .expect("rendered table text");
-        assert!(
-            rendered.contains("┌"),
-            "missing top border: {rendered}"
-        );
+        assert!(rendered.contains("┌"), "missing top border: {rendered}");
         assert!(
             rendered.contains("├"),
             "missing header/body separator: {rendered}"
@@ -1254,13 +1250,14 @@ mod tests {
 
     #[test]
     fn table_alignment_and_uneven_cells_line_up() {
-        let blocks = parse_blocks(
-            "| Tool | Count |\n| :--- | ---: |\n| read | 1 |\n| webfetch | 250 |",
-        );
+        let blocks =
+            parse_blocks("| Tool | Count |\n| :--- | ---: |\n| read | 1 |\n| webfetch | 250 |");
         let rendered = blocks
             .iter()
             .find_map(|block| match block {
-                Block::Table { rendered, aligns, .. } => Some((rendered.as_str(), aligns.clone())),
+                Block::Table {
+                    rendered, aligns, ..
+                } => Some((rendered.as_str(), aligns.clone())),
                 _ => None,
             })
             .expect("table block");
@@ -1323,11 +1320,8 @@ mod tests {
 
     #[test]
     fn subagent_status_reflects_children_and_completion() {
-        let mut task = ChatMessage::tool_step(
-            "call_9",
-            "task",
-            r#"{"description":"d","prompt":"p"}"#,
-        );
+        let mut task =
+            ChatMessage::tool_step("call_9", "task", r#"{"description":"d","prompt":"p"}"#);
 
         // No children yet, still running.
         let running = task.subagent_status_line().expect("running status");
