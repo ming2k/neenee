@@ -1,6 +1,6 @@
 # Header
 
-The header is a floating half-block panel at the top of the chat column, shaped
+The header is a floating half-block panel at the top of the transcript column, shaped
 like the [input box](input-box.md): 2-col `app_bg` side gutters, `▄`/`▀`
 half-block transitions top and bottom, and content indented inside on
 `panel_bg`.
@@ -54,7 +54,7 @@ dock adds one content row.
 
 ## Source
 
-`draw_chat` in `render/mod.rs` builds the panel inline (gutters, `▄`/`▀`
+`draw_transcript` in `render/mod.rs` builds the panel inline (gutters, `▄`/`▀`
 transitions, `panel_bg` content rows). Context bar from
 `context_usage_spans`; window from `model_context_window` (`lib.rs`); usage
 from `estimate_context_tokens` (`document.rs`). Spacing constants live in

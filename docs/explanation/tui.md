@@ -47,7 +47,7 @@ Each call removes one limitation of the line-oriented terminal:
 
 - `enable_raw_mode` disables canonical line editing so the program reads
   key events as they arrive instead of waiting for Enter.
-- `EnterAlternateScreen` switches to a private buffer so the chat never
+- `EnterAlternateScreen` switches to a private buffer so the transcript never
   pollutes the shell's scrollback and the shell is restored on exit.
 - `EnableMouseCapture` delivers selection, click, and wheel events.
 - `DISAMBIGUATE_ESCAPE_CODES` requests the Kitty enhanced-keyboard
@@ -124,7 +124,7 @@ the wrapped result. neenee keeps a **structured document** instead.
 
 ```rust
 pub enum MessageKind {
-    Chat,
+    Text,
     ToolStep { id, name, arguments, output, expanded, duration_ms, started_at, children },
     Thinking { content, duration_ms, expanded },
 }

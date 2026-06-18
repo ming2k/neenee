@@ -46,7 +46,7 @@ without a tool template versus the vendor's hosted endpoint) can behave
 differently on the same `tools` payload.
 
 neenee trusts the runtime to deliver well-formed OpenAI-shaped tool calls.
-The `OpenAIProvider` declares schemas via `prepare_tools`
+The `OpenAiCompatProvider` declares schemas via `prepare_tools`
 (`crates/neenee-core/src/providers.rs`) and injects them into every
 request body through `request_body`. It does not implement its own guided
 decoding or prompt templating — that is the runtime's job. For the
@@ -97,11 +97,11 @@ layers:
 
 - **OpenAI-compatible registry presets** (`kimi-code`, `kimi`, `deepseek`,
   `qwen`, `glm`, `volcengine`, plus the bespoke `openai` and `custom`
-  entries, all backed by `OpenAIProvider`) assume a runtime that fully
+  entries, all backed by `OpenAiCompatProvider`) assume a runtime that fully
   implements the OpenAI Chat Completions contract including `tools`,
   `tool_choice`, `reasoning_content`, and SSE tool-call deltas. The
-  registry presets are pure data in `OPENAI_COMPAT_PROVIDERS`;
-  `OpenAiCompatProvider::build` constructs an `OpenAIProvider` for each, so
+  registry presets are pure data in `OPENAI_PROVIDER_SPECS`;
+  `OpenAiProviderSpec::build` constructs an `OpenAiCompatProvider` for each, so
   they inherit every capability from one shared implementation.
 - **Gemini** (`GeminiProvider`) speaks a different request shape
   (`systemInstruction`, `model`/`user` roles, no `tools` field). neenee does

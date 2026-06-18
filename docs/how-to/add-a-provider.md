@@ -16,22 +16,22 @@ provider name into a concrete provider) lives in
 
 | Provider speaks... | Path | Effort |
 |--------------------|------|--------|
-| OpenAI Chat Completions (`/v1/chat/completions`, `tools`, `tool_choice`, `reasoning_content`, SSE) | Add a `OPENAI_COMPAT_PROVIDERS` registry entry | Tiny |
+| OpenAI Chat Completions (`/v1/chat/completions`, `tools`, `tool_choice`, `reasoning_content`, SSE) | Add a `OPENAI_PROVIDER_SPECS` registry entry | Tiny |
 | A custom contract (different roles, no `tools` field, different streaming) | Standalone adapter | Medium |
 
 Pick the registry path whenever possible. A registry entry inherits native
 tools, reasoning, and structured streaming for free by delegating to
-`OpenAIProvider`.
+`OpenAiCompatProvider`.
 
 ## Add a registry entry
 
-The `OPENAI_COMPAT_PROVIDERS` const table in `providers.rs` is the source of
-truth for every OpenAI-compatible vendor. Each row is an `OpenAiCompatProvider`
+The `OPENAI_PROVIDER_SPECS` const table in `providers.rs` is the source of
+truth for every OpenAI-compatible vendor. Each row is an `OpenAiProviderSpec`
 spec; adding a provider is a single new entry instead of a delegating struct
 plus trait boilerplate.
 
 ```rust
-OpenAiCompatProvider {
+OpenAiProviderSpec {
     id: "acme",
     base_url: "https://api.acme.example/v1/chat/completions",
     default_model: "acme-1",
@@ -52,11 +52,11 @@ OpenAiCompatProvider {
 | `fixed_model` | When set, the endpoint pins this model and ignores any override (e.g. the Kimi coding endpoint) |
 | `default_user_agent` | When set, the endpoint requires this user agent unless overridden |
 
-`OpenAiCompatProvider::build` turns the spec into a concrete `OpenAIProvider`,
-calling `OpenAIProvider::with_base_url_and_user_agent` and setting the
+`OpenAiProviderSpec::build` turns the spec into a concrete `OpenAiCompatProvider`,
+calling `OpenAiCompatProvider::with_base_url_and_user_agent` and setting the
 provider's `id` field so assistant messages are attributed correctly. The
 built provider inherits `prepare_tools`, `stream_chat_events`, and the full
-`chat`/`stream_chat` implementations from `OpenAIProvider`.
+`chat`/`stream_chat` implementations from `OpenAiCompatProvider`.
 
 That single table entry is the entire core change. The remaining steps wire
 the new `id` into the per-provider config fields and TUI status reporting in
@@ -81,7 +81,7 @@ struct in `crates/neenee/src/config.rs`, with serde rename rules matching
 the existing providers.
 
 The startup dispatch and runtime switch already route through
-`make_provider`, which consults `openai_compat_provider` first. Because the
+`make_provider`, which consults `openai_provider_spec` first. Because the
 new `id` is in the registry, no new `match` arm is needed in
 `make_provider` itself.
 

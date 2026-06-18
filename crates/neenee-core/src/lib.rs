@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 pub mod goals;
 pub use goals::{
@@ -93,7 +94,7 @@ pub trait Tool: Send + Sync {
     /// mode. Defaults to read-only tools; write-capable tools can override to
     /// permit safe scopes (e.g. writing files under the plan directory).
     fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
-        matches!(self.access(), ToolAccess::ReadOnly)
+        matches!(self.access(), ToolAccess::Read)
     }
     fn permission_scope(&self, _arguments: &str) -> String {
         "*".to_string()
@@ -129,7 +130,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolAccess {
-    ReadOnly,
+    Read,
     Write,
 }
 
@@ -178,6 +179,10 @@ pub enum AgentResponse {
         name: String,
         output: String,
         duration_ms: u64,
+    },
+    ToolCancelled {
+        id: String,
+        name: String,
     },
     PermissionRequest(PermissionRequest),
     PermissionsCleared,
@@ -304,6 +309,14 @@ pub enum AgentEvent {
         output: String,
         duration_ms: u64,
     },
+    /// A tool call was aborted mid-flight (e.g. the user interrupted the turn).
+    /// Emitted in addition to the original [`AgentEvent::ToolCall`] so every
+    /// dispatched call converges on exactly one terminal event; downstream
+    /// renderers must move the matching card out of its "running" state.
+    ToolCancelled {
+        id: String,
+        name: String,
+    },
     GoalUpdated(Goal),
     /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
     /// uses this to refresh its mode indicator live, mid-turn.
@@ -351,7 +364,7 @@ pub struct Agent {
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
-    pub skills: Vec<skills::Skill>,
+    skills_registry: skills::SkillRegistry,
     goal_service: GoalService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
 }
@@ -371,8 +384,8 @@ impl Agent {
         tools: Vec<Arc<dyn Tool>>,
         mode: AgentMode,
         goal_service: GoalService,
+        skills_registry: skills::SkillRegistry,
     ) -> Self {
-        let skills = skills::discover_skills();
         let goal = Arc::new(std::sync::Mutex::new(None));
         let thread_id = Arc::new(std::sync::Mutex::new(None));
         let mode = Arc::new(std::sync::Mutex::new(mode));
@@ -382,7 +395,17 @@ impl Agent {
         };
 
         let mut tools = tools;
-        tools.retain(|tool| !matches!(tool.name(), "goal_checklist" | "get_goal" | "create_goal" | "update_goal" | "plan_enter" | "plan_exit"));
+        tools.retain(|tool| {
+            !matches!(
+                tool.name(),
+                "goal_checklist"
+                    | "get_goal"
+                    | "create_goal"
+                    | "update_goal"
+                    | "plan_enter"
+                    | "plan_exit"
+            )
+        });
         tools.push(Arc::new(goals::tools::GoalChecklistTool::new(
             context.clone(),
             Arc::clone(&goal),
@@ -403,7 +426,7 @@ impl Agent {
             mode,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
-            skills,
+            skills_registry,
             goal_service,
             thread_id,
         }
@@ -456,7 +479,10 @@ impl Agent {
     }
 
     pub fn thread_id(&self) -> Option<String> {
-        self.thread_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.thread_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Append a hidden user message that asks the model to continue the active goal.
@@ -613,8 +639,12 @@ impl Agent {
         }
 
         // Skills index
-        if !self.skills.is_empty() {
-            parts.push(format!("\n{}", skills::build_skills_index(&self.skills)));
+        let registry = self.skills_registry.lock();
+        if !registry.list().is_empty() {
+            parts.push(format!(
+                "\n{}",
+                skills::build_skills_index(&registry.enabled_skills())
+            ));
         }
 
         parts.join("\n")
@@ -630,6 +660,46 @@ impl Agent {
             }
         }
         messages.insert(0, Message::new(Role::System, prompt));
+    }
+
+    /// Auto-load skills whose names are mentioned in the latest user turn.
+    /// Mentioned skills are injected as hidden user messages so the model
+    /// behaves as if the skill content was explicitly loaded.
+    fn inject_implicit_skills(&self, messages: &mut Vec<Message>) {
+        let text = messages
+            .iter()
+            .filter(|m| m.role == Role::User && !m.hidden)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.is_empty() {
+            return;
+        }
+
+        let registry = self.skills_registry.lock();
+        let already_loaded: std::collections::HashSet<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::User && m.hidden)
+            .filter_map(|m| {
+                let prefix = "[Skill '";
+                let start = m.content.find(prefix)? + prefix.len();
+                let end = m.content[start..].find("' loaded]")?;
+                Some(m.content[start..start + end].to_string())
+            })
+            .collect();
+
+        for skill in registry.resolve_mentions(&text) {
+            if already_loaded.contains(&skill.name) {
+                continue;
+            }
+            messages.push(Message::hidden(
+                Role::User,
+                format!(
+                    "[Skill '{}' loaded]\n{}\n[/Skill]",
+                    skill.name, skill.content
+                ),
+            ));
+        }
     }
 
     /// Parse a tool call from assistant response text.
@@ -668,7 +738,8 @@ impl Agent {
     }
 
     pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
-        self.run_with_events(messages, |event| {
+        // Non-interactive convenience path: not cancellable from the outside.
+        self.run_with_events(messages, &CancellationToken::new(), |event| {
             if let AgentEvent::PermissionRequest(request) = event {
                 self.reply_permission(&request.id, PermissionDecision::Reject);
             }
@@ -680,6 +751,7 @@ impl Agent {
     pub async fn run_with_events<F>(
         &self,
         messages: &mut Vec<Message>,
+        cancel: &CancellationToken,
         mut on_event: F,
     ) -> Result<TurnOutcome, HarnessError>
     where
@@ -697,9 +769,13 @@ impl Agent {
                     MAX_TOOL_ROUNDS
                 )));
             }
+            if cancel.is_cancelled() {
+                return Err(HarnessError::Interrupted);
+            }
 
             remove_empty_assistant_messages(messages);
             self.ensure_system_prompt(messages);
+            self.inject_implicit_skills(messages);
 
             let response = self.provider.chat(messages.clone()).await?;
             if !valid_assistant_response(&response) {
@@ -713,7 +789,14 @@ impl Agent {
             // The model produced no text stream, so nothing was shown to the UI
             // that a fallback tool call would need to retract.
             if self
-                .dispatch_tool_calls(&response, messages, &mut state, false, &mut on_event)
+                .dispatch_tool_calls(
+                    &response,
+                    messages,
+                    &mut state,
+                    false,
+                    cancel,
+                    &mut on_event,
+                )
                 .await?
             {
                 tool_rounds += 1;
@@ -732,6 +815,7 @@ impl Agent {
     pub async fn run_streaming_with_events<F>(
         &self,
         messages: &mut Vec<Message>,
+        cancel: &CancellationToken,
         mut on_event: F,
     ) -> Result<TurnOutcome, HarnessError>
     where
@@ -744,65 +828,86 @@ impl Agent {
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                tracing::warn!(max_rounds = MAX_TOOL_ROUNDS, "turn aborted: tool-round limit");
+                tracing::warn!(
+                    max_rounds = MAX_TOOL_ROUNDS,
+                    "turn aborted: tool-round limit"
+                );
                 return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
                 )));
             }
+            if cancel.is_cancelled() {
+                return Err(HarnessError::Interrupted);
+            }
 
             remove_empty_assistant_messages(messages);
             self.ensure_system_prompt(messages);
+            self.inject_implicit_skills(messages);
             tracing::debug!(tool_round = tool_rounds, "requesting model completion");
             on_event(AgentEvent::ModelRequestStarted {
                 tool_round: tool_rounds,
             });
-            let mut stream = self.provider.stream_chat_events(messages.clone()).await?;
+            // Race the model request against cancellation so an interrupt
+            // while we're waiting on the network resolves promptly instead of
+            // blocking until the first stream chunk arrives.
+            let mut stream = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
+                result = self.provider.stream_chat_events(messages.clone()) => result?,
+            };
             let mut content = String::new();
             let mut reasoning_content = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut emitted_text = false;
             let mut emitted_reasoning = false;
 
-            while let Some(event) = stream.next().await {
-                match event? {
-                    ProviderStreamEvent::TextDelta(delta) => {
-                        content.push_str(&delta);
-                        on_event(AgentEvent::AssistantDelta {
-                            delta,
-                            start: !emitted_text,
-                        });
-                        emitted_text = true;
-                    }
-                    ProviderStreamEvent::ReasoningDelta(delta) => {
-                        reasoning_content.push_str(&delta);
-                        on_event(AgentEvent::ReasoningDelta {
-                            delta,
-                            start: !emitted_reasoning,
-                        });
-                        emitted_reasoning = true;
-                    }
-                    ProviderStreamEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments,
-                    } => {
-                        while calls.len() <= index {
-                            calls.push(ToolCall {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: String::new(),
-                            });
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
+                    event = stream.next() => {
+                        let Some(event) = event else { break };
+                        match event? {
+                            ProviderStreamEvent::TextDelta(delta) => {
+                                content.push_str(&delta);
+                                on_event(AgentEvent::AssistantDelta {
+                                    delta,
+                                    start: !emitted_text,
+                                });
+                                emitted_text = true;
+                            }
+                            ProviderStreamEvent::ReasoningDelta(delta) => {
+                                reasoning_content.push_str(&delta);
+                                on_event(AgentEvent::ReasoningDelta {
+                                    delta,
+                                    start: !emitted_reasoning,
+                                });
+                                emitted_reasoning = true;
+                            }
+                            ProviderStreamEvent::ToolCallDelta {
+                                index,
+                                id,
+                                name,
+                                arguments,
+                            } => {
+                                while calls.len() <= index {
+                                    calls.push(ToolCall {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments: String::new(),
+                                    });
+                                }
+                                let call = &mut calls[index];
+                                if let Some(id) = id {
+                                    call.id.push_str(&id);
+                                }
+                                if let Some(name) = name {
+                                    call.name.push_str(&name);
+                                }
+                                call.arguments.push_str(&arguments);
+                            }
                         }
-                        let call = &mut calls[index];
-                        if let Some(id) = id {
-                            call.id.push_str(&id);
-                        }
-                        if let Some(name) = name {
-                            call.name.push_str(&name);
-                        }
-                        call.arguments.push_str(&arguments);
                     }
                 }
             }
@@ -845,7 +950,14 @@ impl Agent {
             // `emitted_text` means assistant text was already streamed to the
             // UI; a text-fallback tool call must then retract it via a discard.
             if self
-                .dispatch_tool_calls(&response, messages, &mut state, emitted_text, &mut on_event)
+                .dispatch_tool_calls(
+                    &response,
+                    messages,
+                    &mut state,
+                    emitted_text,
+                    cancel,
+                    &mut on_event,
+                )
                 .await?
             {
                 tool_rounds += 1;
@@ -870,12 +982,18 @@ impl Agent {
     /// the UI, so a recognised text-fallback tool call retracts it with an
     /// `AssistantDiscard`. Returns `true` when a tool round ran (the caller
     /// should loop again), `false` when the turn is complete.
+    ///
+    /// `cancel` makes tool execution cooperative: if the turn is interrupted
+    /// mid-flight, every already-announced [`AgentEvent::ToolCall`] is paired
+    /// with a terminal [`AgentEvent::ToolCancelled`] before this returns
+    /// `Err(HarnessError::Interrupted)`, so no card is left "running".
     async fn dispatch_tool_calls<F>(
         &self,
         response: &Message,
         messages: &mut Vec<Message>,
         state: &mut TurnState,
         streamed_text: bool,
+        cancel: &CancellationToken,
         on_event: &mut F,
     ) -> Result<bool, HarnessError>
     where
@@ -889,7 +1007,11 @@ impl Agent {
             .filter(|calls| !calls.is_empty())
         {
             for call in tool_calls {
-                self.guard_repeated_call(call, &mut state.previous_call, &mut state.repeated_calls)?;
+                self.guard_repeated_call(
+                    call,
+                    &mut state.previous_call,
+                    &mut state.repeated_calls,
+                )?;
             }
             // Emit all ToolCall events up front.
             let call_ids: Vec<String> = tool_calls
@@ -906,9 +1028,13 @@ impl Agent {
                 });
             }
             // Execute all tool calls concurrently; results arrive in input order.
-            let results = self.execute_tools_concurrent(tool_calls, on_event).await;
-            for ((call, id), (result, duration_ms)) in
-                tool_calls.iter().zip(&call_ids).zip(results)
+            // An interrupt converts the whole batch into per-id `ToolCancelled`
+            // events — the turn is being aborted, so partial side effects are
+            // neither recorded nor replayed (the caller drops the turn history).
+            let results = self
+                .execute_tools_concurrent(tool_calls, &call_ids, cancel, on_event)
+                .await?;
+            for ((call, id), (result, duration_ms)) in tool_calls.iter().zip(&call_ids).zip(results)
             {
                 self.record_tool_result(call, id, &result, duration_ms, messages, state, on_event);
             }
@@ -929,10 +1055,19 @@ impl Agent {
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             });
-            let started = std::time::Instant::now();
-            let result = self.execute_tool_evented(&call, on_event).await;
-            let duration_ms = started.elapsed().as_millis() as u64;
-            self.record_tool_result(&call, &call_id, &result, duration_ms, messages, state, on_event);
+            let result = self
+                .execute_tool_evented(&call, &call_id, cancel, on_event)
+                .await?;
+            let duration_ms = std::time::Instant::now().elapsed().as_millis() as u64;
+            self.record_tool_result(
+                &call,
+                &call_id,
+                &result,
+                duration_ms,
+                messages,
+                state,
+                on_event,
+            );
             return Ok(true);
         }
 
@@ -1108,7 +1243,18 @@ impl Agent {
 
     /// Single-call wrapper that forwards channel events to a mutable callback.
     /// Used by text-fallback paths (one tool call at a time).
-    async fn execute_tool_evented<F>(&self, call: &ToolCall, on_event: &mut F) -> String
+    ///
+    /// Cancellation-aware: if `cancel` fires while the tool is in flight, the
+    /// already-announced call (identified by `call_id`) is paired with a
+    /// terminal [`AgentEvent::ToolCancelled`] and this returns
+    /// `Err(HarnessError::Interrupted)`.
+    async fn execute_tool_evented<F>(
+        &self,
+        call: &ToolCall,
+        call_id: &str,
+        cancel: &CancellationToken,
+        on_event: &mut F,
+    ) -> Result<String, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1117,6 +1263,17 @@ impl Agent {
         tokio::pin!(fut);
         loop {
             tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    while let Ok(event) = rx.try_recv() {
+                        on_event(event);
+                    }
+                    on_event(AgentEvent::ToolCancelled {
+                        id: call_id.to_string(),
+                        name: call.name.clone(),
+                    });
+                    return Err(HarnessError::Interrupted);
+                }
                 event = rx.recv() => {
                     if let Some(event) = event {
                         on_event(event);
@@ -1126,7 +1283,7 @@ impl Agent {
                     while let Ok(event) = rx.try_recv() {
                         on_event(event);
                     }
-                    return result;
+                    return Ok(result);
                 }
             }
         }
@@ -1135,11 +1292,18 @@ impl Agent {
     /// Execute multiple tool calls concurrently, forwarding interleaved events
     /// to the callback in real time. Returns `(result, duration_ms)` pairs in
     /// the same order as the input calls.
+    ///
+    /// Cancellation-aware: an interrupt emits a [`AgentEvent::ToolCancelled`]
+    /// for every dispatched call id (the whole batch is abandoned — partial
+    /// side effects are neither recorded nor replayed by the caller) and
+    /// returns `Err(HarnessError::Interrupted)`.
     async fn execute_tools_concurrent<F>(
         &self,
         calls: &[ToolCall],
+        call_ids: &[String],
+        cancel: &CancellationToken,
         on_event: &mut F,
-    ) -> Vec<(String, u64)>
+    ) -> Result<Vec<(String, u64)>, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1162,6 +1326,19 @@ impl Agent {
 
         loop {
             tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    while let Ok(event) = rx.try_recv() {
+                        on_event(event);
+                    }
+                    for (id, call) in call_ids.iter().zip(calls) {
+                        on_event(AgentEvent::ToolCancelled {
+                            id: id.clone(),
+                            name: call.name.clone(),
+                        });
+                    }
+                    return Err(HarnessError::Interrupted);
+                }
                 event = rx.recv() => {
                     if let Some(event) = event {
                         on_event(event);
@@ -1171,7 +1348,7 @@ impl Agent {
                     while let Ok(event) = rx.try_recv() {
                         on_event(event);
                     }
-                    return results;
+                    return Ok(results);
                 }
             }
         }
@@ -1350,7 +1527,7 @@ mod tests {
         }
 
         fn access(&self) -> ToolAccess {
-            ToolAccess::ReadOnly
+            ToolAccess::Read
         }
 
         async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -1370,6 +1547,7 @@ mod tests {
             Vec::new(),
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         )
     }
 
@@ -1517,12 +1695,17 @@ mod tests {
             vec![Arc::new(StreamingReadTool(calls.clone()))],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
         let mut messages = vec![Message::new(Role::User, "run")];
         let mut events = Vec::new();
 
         let response = agent
-            .run_streaming_with_events(&mut messages, |event| events.push(event))
+            .run_streaming_with_events(
+                &mut messages,
+                &CancellationToken::new(),
+                |event| events.push(event),
+            )
             .await
             .unwrap();
 
@@ -1545,6 +1728,88 @@ mod tests {
             events.last(),
             Some(AgentEvent::AssistantEnd(content)) if content == "done"
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_tool_execution_emits_tool_cancelled() {
+        use std::future::pending;
+        use std::sync::Mutex;
+        use tokio::sync::Notify;
+
+        struct BlockingTool {
+            started: Arc<Notify>,
+        }
+
+        #[async_trait]
+        impl Tool for BlockingTool {
+            fn name(&self) -> &str {
+                "stream_read"
+            }
+            fn description(&self) -> &str {
+                "blocks until the turn is cancelled"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn access(&self) -> ToolAccess {
+                ToolAccess::Read
+            }
+            async fn call(&self, _arguments: &str) -> Result<String, String> {
+                self.started.notify_one();
+                let _: () = pending().await;
+                unreachable!("the turn is cancelled before this returns")
+            }
+        }
+
+        let started = Arc::new(Notify::new());
+        let events: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
+            vec![Arc::new(BlockingTool {
+                started: started.clone(),
+            })],
+            AgentMode::Build,
+            test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
+        );
+        let token = CancellationToken::new();
+        let mut messages = vec![Message::new(Role::User, "run")];
+        let events_for_run = events.clone();
+
+        let run_token = token.clone();
+        let handle = tokio::spawn(async move {
+            agent
+                .run_streaming_with_events(&mut messages, &run_token, |event| {
+                    if let Ok(mut guard) = events_for_run.lock() {
+                        guard.push(event);
+                    }
+                })
+                .await
+        });
+
+        // Wait until the tool is actually in flight, then interrupt.
+        started.notified().await;
+        token.cancel();
+
+        let outcome = handle.await.expect("turn task panicked");
+        assert!(
+            matches!(outcome, Err(HarnessError::Interrupted)),
+            "expected the turn to be interrupted, got {outcome:?}"
+        );
+
+        let recorded = events.lock().expect("events lock poisoned").clone();
+        // Every announced ToolCall converges on a terminal event: here a
+        // ToolCancelled, never a ToolResult (the turn was aborted).
+        assert!(recorded.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolCancelled { name, .. } if name == "stream_read"
+        )));
+        assert!(!recorded
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolResult { .. })));
+        assert!(recorded
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCall { name, .. } if name == "stream_read")));
     }
 
     #[test]
@@ -1575,6 +1840,7 @@ mod tests {
             vec![Arc::new(WriteTestTool)],
             AgentMode::Plan,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
         let call = ToolCall {
             id: "call".to_string(),
@@ -1583,8 +1849,9 @@ mod tests {
         };
 
         assert!(agent
-            .execute_tool_evented(&call, &mut |_| {})
+            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |_| {})
             .await
+            .unwrap()
             .contains("[Plan mode]"));
     }
 
@@ -1595,6 +1862,7 @@ mod tests {
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         ));
         let call = ToolCall {
             id: "call".to_string(),
@@ -1606,7 +1874,7 @@ mod tests {
         let task_call = call.clone();
         let task = tokio::spawn(async move {
             task_agent
-                .execute_tool_evented(&task_call, &mut |event| {
+                .execute_tool_evented(&task_call, "call", &CancellationToken::new(), &mut |event| {
                     let _ = event_tx.send(event);
                 })
                 .await
@@ -1618,17 +1886,18 @@ mod tests {
         };
         assert!(!task.is_finished());
         assert!(agent.reply_permission(&request.id, PermissionDecision::Always));
-        assert_eq!(task.await.unwrap(), "should not run");
+        assert_eq!(task.await.unwrap().unwrap(), "should not run");
         assert_eq!(agent.allowed_tools(), vec!["write_test *".to_string()]);
 
         let mut prompted_again = false;
         let output = agent
-            .execute_tool_evented(&call, &mut |event| {
+            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
                 if matches!(event, AgentEvent::PermissionRequest(_)) {
                     prompted_again = true;
                 }
             })
-            .await;
+            .await
+            .unwrap();
         assert_eq!(output, "should not run");
         assert!(!prompted_again);
     }
@@ -1640,6 +1909,7 @@ mod tests {
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         ));
         let call = ToolCall {
             id: "call".to_string(),
@@ -1650,7 +1920,7 @@ mod tests {
         let task_agent = agent.clone();
         let task = tokio::spawn(async move {
             task_agent
-                .execute_tool_evented(&call, &mut |event| {
+                .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
                     let _ = event_tx.send(event);
                 })
                 .await
@@ -1661,19 +1931,22 @@ mod tests {
             event => panic!("unexpected event: {:?}", event),
         };
         assert!(agent.reply_permission(&request.id, PermissionDecision::Reject));
-        assert!(task.await.unwrap().contains("Permission denied"));
+        assert!(task.await.unwrap().unwrap().contains("Permission denied"));
     }
 
     #[tokio::test]
     async fn headless_run_rejects_write_tools_without_hanging() {
         let goal_service = GoalService::new(
-            GoalStore::open_in_memory().await.expect("in-memory goal store"),
+            GoalStore::open_in_memory()
+                .await
+                .expect("in-memory goal store"),
         );
         let agent = Agent::new(
             Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
             vec![Arc::new(WriteTestTool)],
             AgentMode::Build,
             goal_service,
+            crate::skills::SkillRegistry::empty(),
         );
         let mut messages = vec![Message::new(Role::User, "write something")];
 
@@ -1705,12 +1978,14 @@ mod tests {
         calls
             .iter()
             .enumerate()
-            .map(|(index, (id, name, arguments))| ProviderStreamEvent::ToolCallDelta {
-                index,
-                id: Some(id.to_string()),
-                name: Some(name.to_string()),
-                arguments: arguments.to_string(),
-            })
+            .map(
+                |(index, (id, name, arguments))| ProviderStreamEvent::ToolCallDelta {
+                    index,
+                    id: Some(id.to_string()),
+                    name: Some(name.to_string()),
+                    arguments: arguments.to_string(),
+                },
+            )
             .collect()
     }
 
@@ -1768,7 +2043,7 @@ mod tests {
         fn read(name: &'static str, output: &str) -> Self {
             Self {
                 name,
-                access: ToolAccess::ReadOnly,
+                access: ToolAccess::Read,
                 output: output.to_string(),
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
@@ -1827,11 +2102,16 @@ mod tests {
                     format!("reasoning-delta start={start} {delta:?}")
                 }
                 AgentEvent::ReasoningEnd(content) => format!("reasoning-end {content:?}"),
-                AgentEvent::ToolCall { name, arguments, .. } => {
+                AgentEvent::ToolCall {
+                    name, arguments, ..
+                } => {
                     format!("tool-call {name} {arguments}")
                 }
                 AgentEvent::ToolResult { name, output, .. } => {
                     format!("tool-result {name} {output:?}")
+                }
+                AgentEvent::ToolCancelled { name, .. } => {
+                    format!("tool-cancelled {name}")
                 }
                 AgentEvent::GoalUpdated(_) => "goal-updated".to_string(),
                 AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
@@ -1853,7 +2133,7 @@ mod tests {
         let mut messages = vec![Message::new(Role::User, prompt)];
         let mut events = Vec::new();
         let outcome = agent
-            .run_streaming_with_events(&mut messages, |event| {
+            .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
                 if let AgentEvent::PermissionRequest(request) = &event {
                     agent.reply_permission(&request.id, decision);
                 }
@@ -1876,6 +2156,7 @@ mod tests {
             ],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
 
         let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1908,6 +2189,7 @@ mod tests {
             vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
 
         let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1947,6 +2229,7 @@ mod tests {
             vec![Arc::new(tool)],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
 
         let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1975,6 +2258,7 @@ mod tests {
             vec![Arc::new(tool)],
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
 
         let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1985,10 +2269,12 @@ mod tests {
             "rejected write tool must not execute"
         );
         let lines = transcript(&events);
-        assert!(lines.iter().any(|line| line == "permission-request writer *"));
         assert!(lines
             .iter()
-            .any(|line| line.starts_with("tool-result writer") && line.contains("Permission denied")));
+            .any(|line| line == "permission-request writer *"));
+        assert!(lines.iter().any(
+            |line| line.starts_with("tool-result writer") && line.contains("Permission denied")
+        ));
     }
 
     #[tokio::test]
@@ -2001,6 +2287,7 @@ mod tests {
             Vec::new(),
             AgentMode::Build,
             test_goal_service(),
+            crate::skills::SkillRegistry::empty(),
         );
 
         let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;

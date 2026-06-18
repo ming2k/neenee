@@ -15,15 +15,15 @@ defined in `crates/neenee-core/src/lib.rs`.
 
 | Variant | Plan mode | Permission broker |
 |---------|-----------|-------------------|
-| `ReadOnly` | Allowed | Bypassed |
+| `Read` | Allowed | Bypassed |
 | `Write` (default) | Blocked unless `allowed_in_plan_mode` exempts the call | Prompted unless a cached `Always` rule matches |
 
 A tool that does not override `access()` is treated as `Write`. Plan mode is
 enforced per-invocation through `Tool::allowed_in_plan_mode(arguments)`, which
-defaults to `access() == ReadOnly`; `write_file` and `edit_file` override it to
+defaults to `access() == Read`; `write_file` and `edit_file` override it to
 also permit writes under `.neenee/plans/`. The Plan-mode gate in
 `Agent::execute_tool` and the permission broker both consult `ToolAccess`, so a
-tool marked `ReadOnly` is trusted in both surfaces. See
+tool marked `Read` is trusted in both surfaces. See
 [Plan mode](../explanation/plan-mode.md) for the exemption rationale.
 
 ## Built-in tool registry
@@ -38,26 +38,26 @@ from `crates/neenee-core/src/goals/tools.rs` and plan tools from
 | Tool name | Access | Permission scope | Source |
 |-----------|--------|------------------|--------|
 | `bash` | `Write` | `command` argument | `crates/neenee-core/src/tools.rs` |
-| `read_file` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `read_file` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
 | `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
 | `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
-| `grep` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `glob` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `list_dir` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `webfetch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `websearch` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `todo` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
+| `grep` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `glob` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `list_dir` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `webfetch` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `websearch` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `todo` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
 | `create_project` | `Write` | `{path}/{name}` or `*` | `crates/neenee-core/src/project.rs` |
 | `init_config` | `Write` | `path` argument or `.` | `crates/neenee-core/src/project.rs` |
-| `use_skill` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `task` | `ReadOnly` | `*` | `crates/neenee-core/src/tools.rs` |
-| `get_goal` | `ReadOnly` | `*` | `crates/neenee-core/src/goals/tools.rs` |
+| `use_skill` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `task` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `get_goal` | `Read` | `*` | `crates/neenee-core/src/goals/tools.rs` |
 | `create_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
 | `update_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
-| `goal_checklist` | `ReadOnly` | `*` (no permission prompt) | `crates/neenee-core/src/goals/tools.rs` |
-| `plan_enter` | `ReadOnly` | `*` | `crates/neenee-core/src/plan.rs` |
-| `plan_exit` | `ReadOnly` | `*` | `crates/neenee-core/src/plan.rs` |
-| `mcp__<server>__<tool>` | `ReadOnly` if server `read_only = true`, else `Write` | `*` | `crates/neenee-core/src/mcp.rs` |
+| `goal_checklist` | `Read` | `*` (no permission prompt) | `crates/neenee-core/src/goals/tools.rs` |
+| `plan_enter` | `Read` | `*` | `crates/neenee-core/src/plan.rs` |
+| `plan_exit` | `Read` | `*` | `crates/neenee-core/src/plan.rs` |
+| `mcp__<server>__<tool>` | `Read` if server `read_only = true`, else `Write` | `*` | `crates/neenee-core/src/mcp.rs` |
 
 `permission_scope` defaults to `"*"`. Only `write_file`, `edit_file`, `bash`,
 `create_project`, and `init_config` override it; their scope string is what a
@@ -259,7 +259,7 @@ They share a `GoalToolContext` carrying the session/thread id and the
 the agent's live `Arc<Mutex<Option<Goal>>>`. `get_goal` and `update_goal`/
 `create_goal` read and mutate the persisted goal; `goal_checklist` writes
 directly into live goal state and surfaces as `AgentResponse::GoalUpdated` to the
-TUI. `get_goal` and `goal_checklist` are `ReadOnly` and bypass the permission
+TUI. `get_goal` and `goal_checklist` are `Read` and bypass the permission
 broker; `create_goal` and `update_goal` are `Write`.
 
 ### `task`
@@ -270,7 +270,7 @@ back through `SubTaskEvent`. The sub-agent:
 
 - Inherits the parent's provider.
 - Runs in `AgentMode::Build`.
-- Receives only tools where `access() == ReadOnly && name != "task"`,
+- Receives only tools where `access() == Read && name != "task"`,
   preventing recursion and any write capability.
 - Uses a forced read-only system prompt.
 
@@ -279,7 +279,7 @@ back through `SubTaskEvent`. The sub-agent:
 `PlanEnterTool` and `PlanExitTool` (`crates/neenee-core/src/plan.rs`) are
 force-injected by `Agent::new`. They share a `PlanToolContext` carrying the
 same `Arc<Mutex<AgentMode>>` the `Agent` owns, so each tool flips the mode in
-place. Both are `ReadOnly` and bypass the permission broker. After either
+place. Both are `Read` and bypass the permission broker. After either
 returns, the agent emits a `ModeChanged` event so the TUI refreshes its mode
 indicator. The Plan-mode gate exempts `.neenee/plans/` writes through
 `Tool::allowed_in_plan_mode`; see [Plan mode](../explanation/plan-mode.md).
@@ -296,25 +296,47 @@ by `MCP_CONNECT_TIMEOUT = 8s`. Configuration lives in `config.toml` under
 ## Skills
 
 Skills are not tools, but the `use_skill` tool loads them. A skill is a
-Markdown file with optional YAML frontmatter:
+Markdown file with YAML frontmatter, conventionally named `SKILL.md` inside a
+skill directory:
+
+```text
+.neenee/skills/<name>/SKILL.md
+~/.neenee/skills/<name>/SKILL.md
+```
 
 ```text
 ---
 name: my-skill
 description: When to invoke this skill
+short-description: Short help
+version: "1.0.0"
+tags: [rust]
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: mcp
+      value: rust-analyzer
 ---
-Skill body injected into the system prompt on demand.
+Skill body injected into the context on demand.
 ```
 
-Discovery (`crates/neenee-core/src/skills.rs`, `discover_skills`) searches,
-in order:
+The skill registry (`crates/neenee-core/src/skills/`) discovers skills from,
+in priority order (later sources override earlier ones):
 
-1. `.neenee/skills/` in the project root.
-2. `~/.neenee/skills/` in the user home.
+1. Bundled system skills (`~/.neenee/skills/.system/`).
+2. Remote skill repositories configured in `config.toml`, cached under
+   `~/.cache/neenee/skills/`.
+3. User-global skills: `~/.neenee/skills/`, `~/.agents/skills/`,
+   `~/.claude/skills/`, `~/.kimi-code/skills/`.
+4. Extra local paths configured in `config.toml`.
+5. Project-repo skills: `.neenee/skills/`, `.agents/skills/`, `.claude/skills/`,
+   `.kimi-code/skills/`.
 
-First-seen wins; project-local overrides user-global. The skill index is
-built by `build_skills_index` and injected into the system prompt by
-`Agent::ensure_system_prompt` (`crates/neenee-core/src/lib.rs`).
+The catalog is built by `build_skills_index` and injected into the system
+prompt by `Agent::build_system_prompt`. Skills whose names are mentioned in a
+user message are auto-loaded by `Agent::inject_implicit_skills` when their
+policy allows implicit invocation.
 
 ## See also
 

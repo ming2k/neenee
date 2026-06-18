@@ -12,19 +12,20 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::document::{Block, ChatMessage};
+use crate::document::{Block, TranscriptMessage};
 use crate::layout::{BlockRegion, LayoutMap, TableCellHit};
 use crate::selection::SelectionState;
 
 use super::design::{
-    USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_TEXT_GAP_COLS, USER_MESSAGE_TRANSITION_ROWS,
+    USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_RIGHT_PAD_COLS, USER_MESSAGE_TEXT_GAP_COLS,
+    USER_MESSAGE_TRANSITION_ROWS,
 };
 use super::markdown_table::{build_table_render, push_table_segment};
 use super::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
     WrappedLine,
 };
-use super::{Theme, CHAT_BODY_PREFIX_COLS, CHAT_BODY_RIGHT_INSET};
+use super::{Theme, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET};
 
 fn display_width_u16(s: &str) -> u16 {
     s.width() as u16
@@ -38,7 +39,7 @@ fn display_width_u16(s: &str) -> u16 {
 pub(super) fn draw_message_body(
     frame: &mut Frame,
     area: Rect,
-    msg: &ChatMessage,
+    msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
     theme: &Theme,
@@ -62,9 +63,24 @@ pub(super) fn draw_message_body(
                 let full_width = area.width as usize;
                 let body_wrap_width = area
                     .width
-                    .saturating_sub(CHAT_BODY_PREFIX_COLS + CHAT_BODY_RIGHT_INSET)
+                    .saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + TRANSCRIPT_BODY_RIGHT_INSET)
                     as usize;
-                let lines = wrap_text(content, body_wrap_width);
+                // User messages render inside their own panel, so they wrap at
+                // the panel's inner width minus symmetric left/right padding
+                // rather than the shared prose width — this keeps the text from
+                // running into either edge of the `user_panel_bg` band.
+                let user_panel_w = full_width.saturating_sub(2 * USER_MESSAGE_OUTER_GUTTER_COLS);
+                let user_text_width = user_panel_w
+                    .saturating_sub(USER_MESSAGE_TEXT_GAP_COLS + USER_MESSAGE_RIGHT_PAD_COLS)
+                    .max(1);
+                let lines = wrap_text(
+                    content,
+                    if is_user {
+                        user_text_width
+                    } else {
+                        body_wrap_width
+                    },
+                );
                 *content_lines += lines.len();
 
                 // User messages get top/bottom padding rows (matching the input
@@ -123,7 +139,10 @@ pub(super) fn draw_message_body(
 
                         let mut spans = vec![
                             Span::styled(user_gutter.clone(), Style::default().bg(theme.app_bg)),
-                            Span::styled(" ", Style::default().bg(bg)),
+                            Span::styled(
+                                " ".repeat(USER_MESSAGE_TEXT_GAP_COLS),
+                                Style::default().bg(bg),
+                            ),
                         ];
 
                         match sel {
@@ -152,7 +171,7 @@ pub(super) fn draw_message_body(
                         ));
                         Line::from(spans)
                     } else {
-                        let prefix = " ".repeat(CHAT_BODY_PREFIX_COLS as usize);
+                        let prefix = " ".repeat(TRANSCRIPT_BODY_PREFIX_COLS as usize);
                         line_spans(
                             &prefix,
                             Style::default(),
@@ -171,7 +190,7 @@ pub(super) fn draw_message_body(
                         let prefix_cols = if is_user {
                             (USER_MESSAGE_OUTER_GUTTER_COLS + USER_MESSAGE_TEXT_GAP_COLS) as u16
                         } else {
-                            CHAT_BODY_PREFIX_COLS
+                            TRANSCRIPT_BODY_PREFIX_COLS
                         };
                         layout_map.push(BlockRegion {
                             message_idx: mi,
@@ -229,7 +248,7 @@ pub(super) fn draw_message_body(
                 // generic line wrapper mangle `│` separators.
                 let indent = 3usize;
                 let full_width = area.width as usize;
-                // `indent` left + 2-col right gutter (`CHAT_H_INSET`).
+                // `indent` left + 2-col right gutter (`TRANSCRIPT_H_INSET`).
                 let available = full_width.saturating_sub(indent + 2);
                 let table = build_table_render(headers, rows, aligns, available);
                 let ncols = headers.len().max(1);
@@ -410,7 +429,7 @@ pub(super) fn draw_message_body(
                 // line-number gutter, matching opencode's clean look. No
                 // `╭─ ╰─` frame, no per-line `│` rule.
                 let code_bg = theme.code_bg;
-                // The solid-background band is inset from the chat edges so it
+                // The solid-background band is inset from the transcript edges so it
                 // reads as a distinct panel rather than bleeding into the
                 // terminal frame. Content (gutter + code) lives inside the
                 // band; the surrounding cells keep `app_bg`.
@@ -581,7 +600,7 @@ pub(super) fn draw_message_body(
                 }
             }
             Block::Quote { content } => {
-                // 5-col `▎` prefix + 2-col right gutter (`CHAT_H_INSET`).
+                // 5-col `▎` prefix + 2-col right gutter (`TRANSCRIPT_H_INSET`).
                 let lines = wrap_text(content, area.width.saturating_sub(7) as usize);
                 *content_lines += lines.len();
                 for wl in &lines {

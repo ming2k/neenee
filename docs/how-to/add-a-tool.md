@@ -66,11 +66,11 @@ choice for any tool with side effects.
 
 ```rust
 fn access(&self) -> ToolAccess {
-    ToolAccess::ReadOnly
+    ToolAccess::Read
 }
 ```
 
-`ReadOnly` tools bypass the permission broker and run in Plan mode. `Write`
+`Read` tools bypass the permission broker and run in Plan mode. `Write`
 tools prompt the user once per `(tool, scope)` pair unless an `Always` rule
 is cached. See [Built-in tools](../reference/tools.md#tool-access) for the
 full gating matrix.
@@ -126,7 +126,7 @@ let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
 ```
 
 Tools added before `tools.extend(mcp.tools)` are visible to the `task`
-sub-agent, which inherits the parent toolset filtered to `ReadOnly`. Tools
+sub-agent, which inherits the parent toolset filtered to `Read`. Tools
 added after that line are not. Place read-only tools before the MCP
 extension to make them sub-agent-callable; place write tools or tools that
 should never recurse anywhere in the list. `TaskTool` is pushed last, after

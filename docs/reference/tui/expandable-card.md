@@ -10,14 +10,14 @@ cards are the two concrete instances.
   + Read crates/main.rs · 0ms
 ```
 
-(The two leading spaces are the `app_bg` gutter shared by all chat content.)
+(The two leading spaces are the `app_bg` gutter shared by all transcript content.)
 
 | Attribute | Value |
 |-----------|-------|
 | Background | `element_bg` (33, 37, 54) band, no border lines |
-| Band inset | 2 cols of `app_bg` on each side (`CHAT_H_INSET`) |
-| Marker | `+` (collapsed) / `-` (expanded), BOLD, at band column 0 (chat column 2) |
-| Header text | Starts at band column 2 (chat column 4), BOLD, color set by the concrete card |
+| Band inset | 2 cols of `app_bg` on each side (`TRANSCRIPT_H_INSET`) |
+| Marker | `+` (collapsed) / `-` (expanded), BOLD, at band column 0 (transcript column 2) |
+| Header text | Starts at band column 2 (transcript column 4), BOLD, color set by the concrete card |
 | Padding | Spaces fill the rest of the band with `element_bg` |
 
 The marker sits at the start of the inset band; a single space separates it
@@ -36,7 +36,7 @@ frame.
 | Attribute | Value |
 |-----------|-------|
 | Background | Set by the concrete card (`menu_bg` or `code_bg`) |
-| Body indent | 2 cols inside the band (chat column 4) — left-aligned with the header text |
+| Body indent | 2 cols inside the band (transcript column 4) — left-aligned with the header text |
 | Visibility | Rendered only when expanded |
 
 The 2-col body indent (inside the band) is what makes the body line up with
@@ -47,11 +47,16 @@ separating space band column 1, and the header text band column 2 onward.
 
 | Trigger | Effect |
 |---------|--------|
-| Click header | Toggle that card |
-| `Enter` on selected card | Toggle that card |
+| `Tab` | Move keyboard focus to the next visible card |
+| `Shift+Tab` | Move keyboard focus to the previous visible card |
+| `Enter` / `Space` on focused card | Toggle that card |
+| Click header or preview | Focus and toggle that card |
 | `Ctrl+T` | Expand or collapse all tool-step cards |
 | Sticky pin | When an expanded card's body scrolls past the top of the viewport, its header pins under the HUD bar (rendered with `-`) |
 | Narrow terminal (`< 8` cols) | Falls back to plain block rendering via `render_message_blocks` |
+
+Keyboard focus is the primary interaction path. Mouse clicks use the same
+semantic target model and also move focus to the clicked card.
 
 ### Header pinning on toggle
 
@@ -88,6 +93,11 @@ Each header records a `BlockRegion` in the layout map with a sentinel
 
 Regular text blocks use 0-based indices and never collide with these
 sentinels.
+
+`LayoutMap::interactive_targets()` returns the visible tool-step and thinking
+targets in screen order for `Tab` / `Shift+Tab` navigation. Multiple hit rows
+for the same card, such as collapsed previews, are deduplicated into one
+focus target.
 
 ## Source
 

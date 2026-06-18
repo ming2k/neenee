@@ -1,0 +1,12 @@
+---
+source: crates/neenee-tui/src/render/snapshot_tests.rs
+expression: "render_grid(&m, 80, 40)"
+---
+  - ⠋ ⌕ Grep "foo" in src
+
+    Result
+    src/a.rs
+    10  let foo = 1;
+    22  foo();
+    src/b.rs
+     5  foo,

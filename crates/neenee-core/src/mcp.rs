@@ -206,7 +206,7 @@ impl McpClient {
                     description,
                     parameters,
                     access: if read_only {
-                        ToolAccess::ReadOnly
+                        ToolAccess::Read
                     } else {
                         ToolAccess::Write
                     },

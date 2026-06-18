@@ -5,20 +5,56 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind
 use crate::layout::{LayoutMap, SemanticCursor};
 use crate::selection::SelectionDrag;
 
+/// Which surface currently owns keyboard focus.
+///
+/// The TUI splits keyboard input into two zones so the same key (Tab, arrows,
+/// Enter) has a single, unambiguous meaning per zone:
+///
+/// - [`FocusZone::Compose`] — the input box owns the keys. Typing inserts into
+///   the prompt, `↑`/`↓` walk input history or slash suggestions, `Tab`
+///   accepts a slash suggestion. This is the default.
+/// - [`FocusZone::Browse`] — the conversation stream owns the keys. `Tab` /
+///   `↑` / `↓` cycle the keyboard-focused card, `Enter` / `Space` activate it,
+///   and any printable character drops back into [`FocusZone::Compose`] and
+///   inserts itself.
+///
+/// Transitions are explicit so the meaning of every key is derivable from the
+/// current zone, and a visible indicator (input border + hint-bar label) tells
+/// the user which zone they are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusZone {
+    #[default]
+    Compose,
+    Browse,
+}
+
+impl FocusZone {
+    pub fn is_compose(self) -> bool {
+        matches!(self, FocusZone::Compose)
+    }
+
+    pub fn is_browse(self) -> bool {
+        matches!(self, FocusZone::Browse)
+    }
+}
+
 pub struct InputContext {
     pub active_modal: super::Modal,
     pub is_responding: bool,
-    pub input_starts_with_slash: bool,
+    /// Which completion menu (slash command vs `@path` mention) is active, or
+    /// `None` when no menu is shown. Drives Tab/↑/↓ cycling and the
+    /// slash-specific Enter auto-accept. Mirrors [`super::CompletionKind`].
+    pub completion_kind: super::CompletionKind,
     pub suggestion_count: usize,
     pub has_exact_suggestion: bool,
     pub suggestion_index: Option<usize>,
     pub permission_confirm_always: bool,
     /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
     pub in_subagent_view: bool,
-    /// Current screen rect of the right-side sidebar, when visible. Mouse
-    /// wheel events whose coordinates fall inside route to the sidebar's own
-    /// scroll state instead of the main chat viewport.
-    pub sidebar_rect: Option<ratatui::layout::Rect>,
+    /// Whether a keyboard-focusable card or action target is active.
+    pub has_focused_target: bool,
+    /// Which surface (input box vs conversation stream) owns keyboard focus.
+    pub focus_zone: FocusZone,
 }
 
 /// Result of processing an input event.
@@ -71,6 +107,18 @@ pub enum InputAction {
     CtrlC,
     /// Toggle expanded details for semantic tool steps.
     ToggleToolSteps,
+    /// Move keyboard focus to the next activatable target.
+    FocusNextTarget,
+    /// Move keyboard focus to the previous activatable target.
+    FocusPrevTarget,
+    /// Activate the current keyboard-focused target.
+    ActivateFocusedTarget,
+    /// Switch the keyboard focus zone to the conversation stream (Browse).
+    /// `backward` is `true` for Shift+Tab (lands on the last card) and
+    /// `false` for Tab (lands on the first card).
+    EnterBrowseZone { backward: bool },
+    /// Switch the keyboard focus zone back to the input box (Compose).
+    ReturnToComposeZone,
     /// Paste from the system clipboard (image or text). Resolved by the app
     /// loop, which reads the clipboard asynchronously.
     Paste,
@@ -110,6 +158,10 @@ pub enum InputAction {
     SelectionEnd,
     /// Select entire block at coordinates (e.g. triple-click).
     SelectBlock { x: u16, y: u16 },
+    /// Mouse pointer moved to screen coordinates (hover tracking). Used to
+    /// drive hover affordances on clickable elements like reasoning-trace
+    /// headers. Suppressed while an overlay modal is open.
+    Hover { x: u16, y: u16 },
     /// Submit the API key typed in the key-input modal.
     SubmitApiKey,
     /// Submit a custom OpenAI-compatible endpoint.
@@ -124,17 +176,6 @@ pub enum InputAction {
     PrevSibling,
     /// Move to the next sibling sub-agent task.
     NextSibling,
-    /// Toggle the right-side persistent sidebar on/off. Overrides the
-    /// width-based auto-show rule until pressed again.
-    ToggleSidebar,
-    /// Scroll the sidebar up by one wheel tick (mouse wheel over the pane).
-    SidebarScrollUp,
-    /// Scroll the sidebar down by one wheel tick (mouse wheel over the pane).
-    SidebarScrollDown,
-    /// Scroll the sidebar up by one viewport page.
-    SidebarScrollPageUp,
-    /// Scroll the sidebar down by one viewport page.
-    SidebarScrollPageDown,
 }
 
 /// Insert a literal newline at the cursor position, but only in modals that
@@ -158,6 +199,51 @@ fn insert_newline(input: &mut String, cursor_position: &mut usize, active_modal:
     }
 }
 
+/// Move the caret to the start of the current logical line.
+///
+/// Used by the `Home` key and `Ctrl+A` (readline convention). For a
+/// single-line buffer this is the very start; for a multi-line buffer it
+/// stops just past the nearest preceding newline. `cursor_position` is a
+/// char index, so the newline search is translated back to chars.
+fn cursor_line_start(input: &str, cursor_position: &mut usize) {
+    let char_count = input.chars().count();
+    let char_pos = (*cursor_position).min(char_count);
+    let byte_offset = input
+        .char_indices()
+        .nth(char_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(input.len());
+    let before = &input[..byte_offset];
+    if let Some(rel) = before.rfind('\n') {
+        let after_newline = rel + '\n'.len_utf8();
+        *cursor_position = before[..after_newline].chars().count();
+    } else {
+        *cursor_position = 0;
+    }
+}
+
+/// Move the caret to the end of the current logical line.
+///
+/// Used by the `End` key and `Ctrl+E`. For a multi-line buffer the caret
+/// stops just before the next newline rather than at the end of the whole
+/// buffer, matching the readline/standard-editor behaviour users expect.
+fn cursor_line_end(input: &str, cursor_position: &mut usize) {
+    let char_count = input.chars().count();
+    let char_pos = (*cursor_position).min(char_count);
+    let byte_offset = input
+        .char_indices()
+        .nth(char_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(input.len());
+    let after = &input[byte_offset..];
+    if let Some(rel) = after.find('\n') {
+        let end_byte = byte_offset + rel;
+        *cursor_position = input[..end_byte].chars().count();
+    } else {
+        *cursor_position = char_count;
+    }
+}
+
 /// Process a crossterm event into a high-level action.
 ///
 /// `input` and `cursor_position` are mutable because some events modify them directly.
@@ -172,24 +258,9 @@ pub fn process_event(
         Event::Mouse(mouse) => {
             let x = mouse.column;
             let y = mouse.row;
-            let in_sidebar = context
-                .sidebar_rect
-                .is_some_and(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height);
             match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    if in_sidebar {
-                        InputAction::SidebarScrollUp
-                    } else {
-                        InputAction::ScrollUp
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    if in_sidebar {
-                        InputAction::SidebarScrollDown
-                    } else {
-                        InputAction::ScrollDown
-                    }
-                }
+                MouseEventKind::ScrollUp => InputAction::ScrollUp,
+                MouseEventKind::ScrollDown => InputAction::ScrollDown,
                 MouseEventKind::Down(MouseButton::Left) => {
                     if context.active_modal == super::Modal::None {
                         drag.start(SemanticCursor::new(0, 0, 0));
@@ -222,6 +293,16 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Mouse motion (reported because `EnableMouseCapture` requests
+                // mode 1003 "all motion"). Only forwarded on the main view so
+                // hover affordances don't fire behind an overlay modal.
+                MouseEventKind::Moved => {
+                    if context.active_modal == super::Modal::None {
+                        InputAction::Hover { x, y }
+                    } else {
+                        InputAction::None
+                    }
+                }
                 _ => InputAction::None,
             }
         }
@@ -244,15 +325,6 @@ pub fn process_event(
             {
                 return InputAction::ToggleToolSteps;
             }
-            // Ctrl+B: toggle the right-side persistent sidebar. Overrides the
-            // width-based auto-show rule so the user can hide it on wide
-            // terminals or reveal it on narrow ones.
-            if key.code == KeyCode::Char('b')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && context.active_modal == super::Modal::None
-            {
-                return InputAction::ToggleSidebar;
-            }
 
             match key.code {
                 KeyCode::Esc => {
@@ -264,6 +336,11 @@ pub fn process_event(
                         }
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
+                    } else if context.focus_zone.is_browse() {
+                        // First Esc returns the keyboard focus to the input
+                        // box. Subsequent presses walk back through sub-agent
+                        // views and the interrupt arm.
+                        InputAction::ReturnToComposeZone
                     } else if context.in_subagent_view {
                         InputAction::ExitSubAgent
                     } else if context.is_responding {
@@ -306,7 +383,9 @@ pub fn process_event(
                     }
                 }
                 KeyCode::Char('q')
-                    if input.is_empty() && context.active_modal == super::Modal::None =>
+                    if input.is_empty()
+                        && context.active_modal == super::Modal::None
+                        && context.focus_zone.is_compose() =>
                 {
                     InputAction::Quit
                 }
@@ -330,8 +409,14 @@ pub fn process_event(
                     super::Modal::ModelName => InputAction::SubmitModelName,
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::None => {
-                        // If slash suggestions are visible and none selected, auto-pick first.
-                        if context.input_starts_with_slash
+                        if context.focus_zone.is_browse() {
+                            return InputAction::ActivateFocusedTarget;
+                        }
+                        // Slash-only: pressing Enter on a unique prefix
+                        // auto-accepts the first suggestion rather than
+                        // sending `/go` as a (rejected) command. Path
+                        // mentions skip this so Enter still sends the message.
+                        if context.completion_kind == super::CompletionKind::Slash
                             && context.suggestion_count > 0
                             && context.suggestion_index.is_none()
                             && !context.has_exact_suggestion
@@ -355,7 +440,7 @@ pub fn process_event(
                 },
                 KeyCode::Tab => {
                     if context.active_modal == super::Modal::None
-                        && context.input_starts_with_slash
+                        && context.completion_kind != super::CompletionKind::None
                         && context.suggestion_count > 0
                     {
                         let next = match context.suggestion_index {
@@ -363,6 +448,22 @@ pub fn process_event(
                             None => 0,
                         };
                         InputAction::AcceptSuggestion(next.to_string())
+                    } else if context.focus_zone.is_browse() {
+                        InputAction::FocusNextTarget
+                    } else if context.active_modal == super::Modal::None && input.is_empty() {
+                        // Compose → Browse: hand the keyboard over to the
+                        // conversation stream and focus the first card.
+                        InputAction::EnterBrowseZone { backward: false }
+                    } else {
+                        InputAction::None
+                    }
+                }
+                KeyCode::BackTab => {
+                    if context.focus_zone.is_browse() {
+                        InputAction::FocusPrevTarget
+                    } else if context.active_modal == super::Modal::None && input.is_empty() {
+                        // Compose → Browse, focusing the last card.
+                        InputAction::EnterBrowseZone { backward: true }
                     } else {
                         InputAction::None
                     }
@@ -383,9 +484,40 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Ctrl+A: move the caret to the start of the current line
+                // (readline convention). Works wherever free text is being
+                // edited — the main prompt in Compose zone and the free-text
+                // modals. Outside those (Browse zone, read-only modals) it is
+                // a no-op so it never inserts a literal 'a' or scrolls.
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::ApiKey
+                            | super::Modal::Endpoint
+                            | super::Modal::ModelName
+                    ) {
+                        cursor_line_start(input, cursor_position);
+                    }
+                    InputAction::None
+                }
+                // Ctrl+E: move the caret to the end of the current line.
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::ApiKey
+                            | super::Modal::Endpoint
+                            | super::Modal::ModelName
+                    ) {
+                        cursor_line_end(input, cursor_position);
+                    }
+                    InputAction::None
+                }
                 KeyCode::Char(c) => {
-                    // Sibling sub-agent navigation: only when not typing (empty
-                    // input) and zoomed into a sub-agent view.
+                    // Sibling sub-agent navigation works in both zones (it is a
+                    // sub-agent view feature, not a typing-navigation thing)
+                    // but only when no text is being composed.
                     if context.active_modal == super::Modal::None
                         && context.in_subagent_view
                         && input.is_empty()
@@ -395,6 +527,29 @@ pub fn process_event(
                             ']' => return InputAction::NextSibling,
                             _ => {}
                         }
+                    }
+                    if context.active_modal == super::Modal::None
+                        && context.focus_zone.is_browse()
+                        && c == ' '
+                    {
+                        return InputAction::ActivateFocusedTarget;
+                    }
+                    // Any printable character in the Browse zone drops back to
+                    // the Compose zone and inserts itself, mirroring the
+                    // "type to edit" affordance users expect from modal editors.
+                    // The insertion happens here (process_event owns `input`),
+                    // and the zone switch is signalled back so the renderer
+                    // can update on the next frame.
+                    if context.active_modal == super::Modal::None && context.focus_zone.is_browse()
+                    {
+                        let byte_pos = input
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .nth(*cursor_position)
+                            .unwrap_or(input.len());
+                        input.insert(byte_pos, c);
+                        *cursor_position += 1;
+                        return InputAction::ReturnToComposeZone;
                     }
                     if context.active_modal == super::Modal::Models && c == 'k' {
                         InputAction::ConfigureKey
@@ -482,7 +637,11 @@ pub fn process_event(
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
-                        if context.input_starts_with_slash && context.suggestion_count > 0 {
+                        if context.focus_zone.is_browse() {
+                            InputAction::FocusPrevTarget
+                        } else if context.completion_kind != super::CompletionKind::None
+                            && context.suggestion_count > 0
+                        {
                             InputAction::SuggestPrev
                         } else {
                             InputAction::HistoryPrev
@@ -499,7 +658,11 @@ pub fn process_event(
                     | super::Modal::ModelName
                     | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
-                        if context.input_starts_with_slash && context.suggestion_count > 0 {
+                        if context.focus_zone.is_browse() {
+                            InputAction::FocusNextTarget
+                        } else if context.completion_kind != super::CompletionKind::None
+                            && context.suggestion_count > 0
+                        {
                             InputAction::SuggestNext
                         } else {
                             InputAction::HistoryNext
@@ -522,21 +685,49 @@ pub fn process_event(
                 {
                     InputAction::ScrollPageDown
                 }
-                KeyCode::Home
-                    if matches!(
+                KeyCode::Home => {
+                    // Now that focus zones disambiguate editing (Compose)
+                    // from navigating (Browse), Home no longer clashes with
+                    // conversation scrolling:
+                    //   - Permission modal / Browse zone: scroll to the top.
+                    //   - Compose zone / free-text modals: move the input
+                    //     caret to the start of the current line.
+                    if context.active_modal == super::Modal::Permission
+                        || (context.active_modal == super::Modal::None
+                            && context.focus_zone.is_browse())
+                    {
+                        InputAction::ScrollTop
+                    } else if matches!(
                         context.active_modal,
-                        super::Modal::None | super::Modal::Permission
-                    ) =>
-                {
-                    InputAction::ScrollTop
+                        super::Modal::None
+                            | super::Modal::ApiKey
+                            | super::Modal::Endpoint
+                            | super::Modal::ModelName
+                    ) {
+                        cursor_line_start(input, cursor_position);
+                        InputAction::None
+                    } else {
+                        InputAction::None
+                    }
                 }
-                KeyCode::End
-                    if matches!(
+                KeyCode::End => {
+                    if context.active_modal == super::Modal::Permission
+                        || (context.active_modal == super::Modal::None
+                            && context.focus_zone.is_browse())
+                    {
+                        InputAction::ScrollBottom
+                    } else if matches!(
                         context.active_modal,
-                        super::Modal::None | super::Modal::Permission
-                    ) =>
-                {
-                    InputAction::ScrollBottom
+                        super::Modal::None
+                            | super::Modal::ApiKey
+                            | super::Modal::Endpoint
+                            | super::Modal::ModelName
+                    ) {
+                        cursor_line_end(input, cursor_position);
+                        InputAction::None
+                    } else {
+                        InputAction::None
+                    }
                 }
                 _ => InputAction::None,
             }
@@ -577,13 +768,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::None,
                 is_responding: false,
-                input_starts_with_slash: true,
+                completion_kind: crate::CompletionKind::Slash,
                 suggestion_count: 1,
                 has_exact_suggestion: exact,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         )
@@ -624,13 +816,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::Permission,
                 is_responding: true,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: true,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         );
@@ -649,13 +842,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::None,
                 is_responding: false,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         );
@@ -674,13 +868,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::Models,
                 is_responding: false,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         );
@@ -702,13 +897,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::None,
                 is_responding: false,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         );
@@ -723,13 +919,14 @@ mod tests {
         let context = InputContext {
             active_modal: crate::Modal::None,
             is_responding: false,
-            input_starts_with_slash: false,
+            completion_kind: crate::CompletionKind::None,
             suggestion_count: 0,
             has_exact_suggestion: false,
             suggestion_index: None,
             permission_confirm_always: false,
             in_subagent_view: false,
-            sidebar_rect: None,
+            has_focused_target: false,
+            focus_zone: FocusZone::Compose,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -755,13 +952,14 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::Help,
                 is_responding: false,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view: false,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         );
@@ -778,16 +976,166 @@ mod tests {
             InputContext {
                 active_modal: crate::Modal::None,
                 is_responding: false,
-                input_starts_with_slash: false,
+                completion_kind: crate::CompletionKind::None,
                 suggestion_count: 0,
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
                 in_subagent_view,
-                sidebar_rect: None,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
             },
             &mut drag,
         )
+    }
+
+    fn key_with_focus(code: KeyCode) -> InputAction {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::None,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: true,
+                focus_zone: FocusZone::Browse,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn tab_in_compose_enters_browse_in_main_view() {
+        // Compose (default) + empty input + no slash suggestions: Tab hands
+        // focus over to the conversation stream rather than silently doing
+        // nothing.
+        let mut input = String::new();
+        assert_eq!(
+            key_in_view(KeyCode::Tab, false, &mut input),
+            InputAction::EnterBrowseZone { backward: false }
+        );
+        // Shift+Tab enters Browse as well, but lands on the last card.
+        assert_eq!(
+            key_in_view(KeyCode::BackTab, false, &mut input),
+            InputAction::EnterBrowseZone { backward: true }
+        );
+    }
+
+    #[test]
+    fn tab_and_arrows_cycle_cards_in_browse_zone() {
+        // Once in Browse, Tab / BackTab / Up / Down all walk the keyboard focus
+        // across the visible interactive targets.
+        assert_eq!(
+            key_with_focus(KeyCode::Tab),
+            InputAction::FocusNextTarget
+        );
+        assert_eq!(
+            key_with_focus(KeyCode::BackTab),
+            InputAction::FocusPrevTarget
+        );
+        assert_eq!(key_with_focus(KeyCode::Up), InputAction::FocusPrevTarget);
+        assert_eq!(key_with_focus(KeyCode::Down), InputAction::FocusNextTarget);
+    }
+
+    #[test]
+    fn enter_and_space_activate_focused_target() {
+        assert_eq!(
+            key_with_focus(KeyCode::Enter),
+            InputAction::ActivateFocusedTarget
+        );
+        assert_eq!(
+            key_with_focus(KeyCode::Char(' ')),
+            InputAction::ActivateFocusedTarget
+        );
+    }
+
+    #[test]
+    fn escape_returns_to_compose_zone() {
+        // From Browse, the first Esc returns the keyboard focus to the input
+        // box. A subsequent Esc (now in Compose) walks back through sub-agent
+        // views / interrupt arms.
+        assert_eq!(
+            key_with_focus(KeyCode::Esc),
+            InputAction::ReturnToComposeZone
+        );
+    }
+
+    #[test]
+    fn typing_in_browse_returns_to_compose_and_inserts() {
+        let action = key_with_focus(KeyCode::Char('a'));
+        assert_eq!(action, InputAction::ReturnToComposeZone);
+
+        // Re-run with access to the input buffer so we can assert the char
+        // was inserted alongside the zone switch.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::None,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: true,
+                focus_zone: FocusZone::Browse,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::ReturnToComposeZone);
+        assert_eq!(input, "a");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn q_in_browse_inserts_instead_of_quitting() {
+        // 'q' is only a quit shortcut in Compose. In Browse it behaves like
+        // any other printable character so the user does not accidentally
+        // exit the program while navigating cards.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::None,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: true,
+                focus_zone: FocusZone::Browse,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::ReturnToComposeZone);
+        assert_eq!(input, "q");
     }
 
     #[test]
@@ -826,5 +1174,282 @@ mod tests {
         let mut other = String::new();
         key_in_view(KeyCode::Char(']'), false, &mut other);
         assert_eq!(other, "]");
+    }
+
+    /// Run `code` (+ `modifiers`) against a fully-specified context and return
+    /// the resulting action plus the final cursor position. The input buffer is
+    /// mutated in place so callers can assert on its contents too.
+    fn run_key(
+        input: &mut String,
+        cursor: &mut usize,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        modal: crate::Modal,
+        zone: FocusZone,
+    ) -> InputAction {
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            input,
+            cursor,
+            InputContext {
+                active_modal: modal,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: zone,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn home_and_end_move_caret_in_compose_zone() {
+        // Caret starts mid-string; Home jumps to line start, End to line end.
+        // The buffer contents are never modified by these keys.
+        let mut input = "hello".to_string();
+        let mut cursor = 3;
+
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Home,
+            KeyModifiers::NONE,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 0);
+
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::End,
+            KeyModifiers::NONE,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn home_and_end_scroll_in_browse_zone() {
+        // In Browse the conversation owns focus, so Home/End drive scrolling
+        // instead of moving the (unfocused) input caret.
+        let mut input = "hello".to_string();
+        let mut cursor = 3;
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                crate::Modal::None,
+                FocusZone::Browse
+            ),
+            InputAction::ScrollTop
+        );
+        assert_eq!(cursor, 3, "Browse Home must not touch the caret");
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::End,
+                KeyModifiers::NONE,
+                crate::Modal::None,
+                FocusZone::Browse
+            ),
+            InputAction::ScrollBottom
+        );
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn home_and_end_scroll_in_permission_modal() {
+        let mut input = String::new();
+        let mut cursor = 0;
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                crate::Modal::Permission,
+                FocusZone::Compose
+            ),
+            InputAction::ScrollTop
+        );
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::End,
+                KeyModifiers::NONE,
+                crate::Modal::Permission,
+                FocusZone::Compose
+            ),
+            InputAction::ScrollBottom
+        );
+    }
+
+    #[test]
+    fn home_and_end_move_caret_in_free_text_modals() {
+        // The API-key / endpoint / model-name modals are single-line inputs;
+        // Home/End should edit there too, not be swallowed.
+        for modal in [
+            crate::Modal::ApiKey,
+            crate::Modal::Endpoint,
+            crate::Modal::ModelName,
+        ] {
+            let mut input = "abc".to_string();
+            let mut cursor = 2;
+            let action = run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                modal,
+                FocusZone::Compose,
+            );
+            assert_eq!(action, InputAction::None);
+            assert_eq!(cursor, 0, "Home should reach line start");
+
+            let action = run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::End,
+                KeyModifiers::NONE,
+                modal,
+                FocusZone::Compose,
+            );
+            assert_eq!(action, InputAction::None);
+            assert_eq!(cursor, 3, "End should reach line end");
+        }
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_move_caret_in_compose_zone() {
+        let mut input = "hello".to_string();
+        let mut cursor = 2;
+
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cursor, 0);
+        assert_eq!(input, "hello", "Ctrl+A must not insert a literal 'a'");
+
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cursor, 5);
+        assert_eq!(input, "hello");
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_are_noop_in_browse_zone() {
+        // Browse has no input editing; the keys fall through to no-ops rather
+        // than scrolling or inserting characters.
+        let mut input = String::new();
+        let mut cursor = 0;
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                crate::Modal::None,
+                FocusZone::Browse
+            ),
+            InputAction::None
+        );
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                crate::Modal::None,
+                FocusZone::Browse
+            ),
+            InputAction::None
+        );
+    }
+
+    #[test]
+    fn line_aware_movement_respects_newlines() {
+        // Multi-line input: Home/End/Ctrl+A/Ctrl+E operate on the current
+        // logical line, not the whole buffer.
+        let mut input = "line1\nline2\nline3".to_string();
+        // Place the caret in the middle of the second line ("line2").
+        // "line1\n" = 6 chars, then 2 more into "line2" -> char index 8.
+        let mut cursor = 8;
+
+        // Home -> start of "line2" (char index 6, just past the first '\n').
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Home,
+            KeyModifiers::NONE,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 6, "Home should land at start of current line");
+
+        // End -> end of "line2" (char index 11, just before the second '\n').
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::End,
+            KeyModifiers::NONE,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 11, "End should land at end of current line");
+
+        // Ctrl+A from the end of line2 should also snap to line start.
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 6);
+        // Ctrl+E snaps back to the line end without running off the buffer.
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+            crate::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 11);
     }
 }

@@ -10,7 +10,7 @@ All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render/them
 | `backdrop` | (3, 4, 4) | Dim overlay behind modals (darker than `app_bg`) |
 | `code_bg` | (13, 14, 14) | Code blocks and tool-step results |
 | `user_panel_bg` | (11, 12, 12) | Sent user-message band (dimmer than input) |
-| `panel_bg` | (14, 15, 15) | Input box + sidebar (brighter = "editable" / chrome) |
+| `panel_bg` | (14, 15, 15) | Input box + header panel (brighter = "editable" / chrome) |
 | `menu_bg` | (17, 19, 18) | Tool-step / thinking card body |
 | `user_bg` | (18, 24, 21) | Tinted band behind the user's own messages |
 | `element_bg` | (21, 23, 22) | Card headers, sticky headers, footer / option bars |
@@ -43,7 +43,7 @@ backdrop (3,4,4)        ← dimmest; modal overlay
 app_bg (7,8,8)          ← base; entire frame
   code_bg (13,14,14)        ← code blocks
   user_panel_bg (11,12,12)  ← sent messages (dimmer = read-only)
-  panel_bg (14,15,15)       ← input box + sidebar (chrome)
+  panel_bg (14,15,15)       ← input box + header panel (chrome)
   menu_bg (17,19,18)        ← card bodies
   user_bg (18,24,21)        ← user-message tint
   element_bg (21,23,22)     ← card headers (brightest panel)

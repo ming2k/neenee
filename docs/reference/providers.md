@@ -21,17 +21,17 @@ Three capability surfaces matter for tool-using agents:
 
 | Provider | Native tools | Reasoning | Structured streaming | Source |
 |----------|--------------|-----------|----------------------|--------|
-| `OpenAIProvider` | yes | yes | yes | `providers.rs` (`OpenAIProvider`) |
-| OpenAI-compatible registry presets | yes | yes | yes | `OpenAiCompatProvider` (delegates to `OpenAIProvider`) |
+| `OpenAiCompatProvider` | yes | yes | yes | `providers.rs` (`OpenAiCompatProvider`) |
+| OpenAI-compatible registry presets | yes | yes | yes | `OpenAiProviderSpec` (delegates to `OpenAiCompatProvider`) |
 | `GeminiProvider` | no | no | no | `providers.rs` (`GeminiProvider`) |
 | `LlamaServerProvider` | no | no | no | `providers.rs` (`LlamaServerProvider`) |
 | `MockProvider` | no | no | no | `providers.rs` (`MockProvider`) |
 
-The six OpenAI-compatible presets in `OPENAI_COMPAT_PROVIDERS`
+The six OpenAI-compatible presets in `OPENAI_PROVIDER_SPECS`
 (`kimi-code`, `kimi`, `deepseek`, `qwen`, `glm`, `volcengine`) are built by
-`OpenAiCompatProvider::build`, which returns an `OpenAIProvider` with its
+`OpenAiProviderSpec::build`, which returns an `OpenAiCompatProvider` with its
 `id` field set to the preset identifier. They therefore inherit every
-capability of `OpenAIProvider`. `GeminiProvider` and `LlamaServerProvider`
+capability of `OpenAiCompatProvider`. `GeminiProvider` and `LlamaServerProvider`
 are standalone adapters that never override `prepare_tools` and never send a
 `tools` field; tool calls on those providers travel only through the
 universal fallback.
@@ -45,7 +45,7 @@ separate `<NAME>_MODEL` env var.
 
 ### OpenAI-compatible presets
 
-Each row corresponds to one entry in the `OPENAI_COMPAT_PROVIDERS` table in
+Each row corresponds to one entry in the `OPENAI_PROVIDER_SPECS` table in
 `providers.rs`. The endpoint, default model, and env vars are data in that
 table, not hard-coded per struct.
 
@@ -62,10 +62,10 @@ table, not hard-coded per struct.
 
 | `default_provider` | Struct | Endpoint | API key env | Model env | Default / popular models |
 |--------------------|--------|----------|-------------|-----------|--------------------------|
-| `openai` | `OpenAIProvider` | `https://api.openai.com/v1/chat/completions` | `OPENAI_API_KEY` | `OPENAI_MODEL` | `gpt-4o`, `gpt-4o-mini` |
+| `openai` | `OpenAiCompatProvider` | `https://api.openai.com/v1/chat/completions` | `OPENAI_API_KEY` | `OPENAI_MODEL` | `gpt-4o`, `gpt-4o-mini` |
 | `gemini` | `GeminiProvider` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}` | `GEMINI_API_KEY` | `GEMINI_MODEL` | `gemini-1.5-pro`, `gemini-1.5-flash`, `gemini-2.0-flash` |
 | `llama` | `LlamaServerProvider` | `${LLAMA_BASE_URL}/v1/chat/completions` | none | `LLAMA_MODEL` | user-supplied |
-| `custom` | `OpenAIProvider` | `${CUSTOM_BASE_URL}` | `CUSTOM_API_KEY` | `CUSTOM_MODEL` | user-supplied |
+| `custom` | `OpenAiCompatProvider` | `${CUSTOM_BASE_URL}` | `CUSTOM_API_KEY` | `CUSTOM_MODEL` | user-supplied |
 | `mock` | `MockProvider` | n/a | none | none | test fixture |
 
 Notes:
@@ -78,7 +78,7 @@ Notes:
 - `qwen` reads its API key from `DASHSCOPE_API_KEY` but its model from
   `QWEN_MODEL`.
 - `llama` and `custom` are the only providers that read a base URL; the
-  registry presets hard-code their endpoint inside `OPENAI_COMPAT_PROVIDERS`.
+  registry presets hard-code their endpoint inside `OPENAI_PROVIDER_SPECS`.
 - `llama` and `mock` always report as ready in the API-key status check
   (`provider_key_status` in `main.rs`); the rest require their API key env
   var to be set.
@@ -89,8 +89,8 @@ Provider construction is centralized in `make_provider`
 (`crates/neenee/src/main.rs`). It is the single source of truth shared by
 startup and runtime switching:
 
-1. If `openai_compat_provider(provider_type)` matches a registry entry,
-   `OpenAiCompatProvider::build` constructs the `OpenAIProvider`.
+1. If `openai_provider_spec(provider_type)` matches a registry entry,
+   `OpenAiProviderSpec::build` constructs the `OpenAiCompatProvider`.
 2. Otherwise a `match` handles the bespoke providers (`gemini`, `llama`,
    `custom`, `openai`); the fallthrough arm returns `MockProvider`.
 

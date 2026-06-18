@@ -332,6 +332,18 @@ pub fn init_neenee_config(base: &Path) -> Result<Vec<String>, String> {
         }
     }
 
+    // Drop a starter skill template so users can see the SKILL.md format.
+    let example_skill = base.join(".neenee/skills/example/SKILL.md");
+    if !example_skill.exists() {
+        if let Some(parent) = example_skill.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create '{}': {}", parent.display(), e))?;
+        }
+        std::fs::write(&example_skill, example_skill_template())
+            .map_err(|e| format!("Failed to write '{}': {}", example_skill.display(), e))?;
+        created.push(".neenee/skills/example/SKILL.md".to_string());
+    }
+
     let agents_md = base.join("AGENTS.md");
     if !agents_md.exists() {
         std::fs::write(&agents_md, agents_md_template(base))
@@ -347,6 +359,19 @@ pub fn init_neenee_config(base: &Path) -> Result<Vec<String>, String> {
     }
 
     Ok(created)
+}
+
+fn example_skill_template() -> &'static str {
+    "---\n\
+    name: example\n\
+    description: An example skill showing the frontmatter format.\n\
+    short-description: Example skill\n\
+    ---\n\
+    \n\
+    # Example Skill\n\
+    \n\
+    Edit this file or add more `.neenee/skills/<name>/SKILL.md` files to teach\n\
+    neenee domain-specific conventions, build steps, or review checklists.\n"
 }
 
 fn agents_md_template(base: &Path) -> String {

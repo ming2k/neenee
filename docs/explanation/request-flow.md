@@ -36,7 +36,7 @@ Content-Type: application/json
 }
 ```
 
-The body is assembled by `OpenAIProvider::request_body`
+The body is assembled by `OpenAiCompatProvider::request_body`
 (`crates/neenee-core/src/providers.rs`). Two fields are conditional:
 
 | Field | When present | Source |
@@ -76,25 +76,32 @@ HTTP/2 streaming) and is the mechanism OpenAI-compatible servers use to
 stream tokens.
 
 neenee reads the stream via `reqwest::Response::bytes_stream()` and splits
-on newlines inside `OpenAIProvider::stream_chat_events`
+on newlines inside `OpenAiCompatProvider::stream_chat_events`
 (`crates/neenee-core/src/providers.rs`). Each `data:`-prefixed line is one
 SSE event. The literal `data: [DONE]` terminates the stream.
 
 ### SSE event shapes
 
-Each `data:` payload is parsed by `parse_openai_stream_data` (`providers.rs`).
-The parser reads three optional fields from `choices[0].delta`:
+Each `data:` payload is parsed by `parse_openai_stream_data`
+(`crates/neenee-core/src/providers.rs`). The parser reads three optional
+fields from `choices[0].delta` and emits a typed event for each non-empty
+field:
 
-| Delta field | Event emitted | Reconstructed into |
-|-------------|---------------|--------------------|
-| `content` | `ProviderStreamEvent::TextDelta` | assistant visible text |
-| `reasoning_content` | `ProviderStreamEvent::ReasoningDelta` | reasoning text |
-| `tool_calls[]` | `ProviderStreamEvent::ToolCallDelta` (per `index`) | tool calls |
+| Delta field | Rust event (`ProviderStreamEvent`) | Reconstructed into |
+|-------------|------------------------------------|--------------------|
+| `content` | `TextDelta(String)` | assistant visible text |
+| `reasoning_content` | `ReasoningDelta(String)` | reasoning text |
+| `tool_calls[]` | `ToolCallDelta { index, id, name, arguments }` | tool calls |
 
 A single delta may carry any combination of the three. A delta with an
 empty `content` and no `tool_calls` produces no event. The terminal chunk
 usually carries `finish_reason` (`stop`, `tool_calls`, `length`) and an
 empty `delta`.
+
+The `tool_calls` array in a delta is sparse: one SSE line may contain only
+`index: 0` with an `id` and `name`, the next line only `index: 0` with a
+fragment of `arguments`, and a later line `index: 1` for a second call. The
+agent never assumes that a single delta contains a complete call.
 
 ## Tool call reassembly
 
@@ -103,23 +110,44 @@ single call may be split across many SSE events: the first fragment
 typically carries `id` and `function.name`; subsequent fragments carry
 pieces of `function.arguments` that must be concatenated.
 
-The streaming loop accumulates them inside
-`Agent::run_streaming_with_events` (`crates/neenee-core/src/lib.rs`):
+The streaming loop inside `Agent::run_streaming_with_events`
+(`crates/neenee-core/src/lib.rs`) maintains a `Vec<ToolCall>` that starts
+empty and grows dynamically as higher `index` values appear:
 
-```text
-for each ToolCallDelta:
-    grow calls vector to index+1
-    append id, name, arguments to calls[index]
+```rust
+while calls.len() <= index {
+    calls.push(ToolCall {
+        id: String::new(),
+        name: String::new(),
+        arguments: String::new(),
+    });
+}
+let call = &mut calls[index];
+if let Some(id) = id { call.id.push_str(&id); }
+if let Some(name) = name { call.name.push_str(&name); }
+call.arguments.push_str(&arguments);
 ```
 
-Reassembly completes only when the stream ends. After `[DONE]`:
+`index` is `usize`; the vector is expanded to `index + 1` so that parallel
+calls can be assembled in any interleaving order. Only the `arguments`
+field is guaranteed to be present in every fragment; `id` and `name` are
+`Option<String>` because some providers emit them only in the first
+fragment.
+
+Reassembly completes only when the stream ends. After `data: [DONE]` the
+agent performs three cleanup steps before any side effects occur:
 
 ```text
-calls.retain(|c| !c.name.is_empty())
-assign call_<uuid> to empty ids
-build assistant Message with tool_calls
-push to messages, then execute
+calls.retain(|c| !c.name.is_empty())      // drop empty placeholder slots
+for call in calls { if call.id.is_empty() { call.id = "call_<uuid>" } }
+build assistant Message { role: Assistant, content, tool_calls: Some(calls) }
+messages.push(response); then execute tool calls
 ```
+
+Slots with an empty `name` are discarded because some providers emit
+zero-valued `tool_calls` deltas. Empty `id` fields are backfilled with
+`call_<uuid>` so that the following `tool` message has a valid
+`tool_call_id` to reference.
 
 Side effects never fire mid-stream. This is what makes retry safe: a stream
 that errors before `[DONE]` can be re-issued without leaving partial tool
@@ -153,6 +181,21 @@ flowchart TD
     N --> B
     L -- no --> O["return response — loop exits"]
 ```
+
+### Tool dispatch
+
+The branching after the assistant message is handled by
+`Agent::dispatch_tool_calls` (`crates/neenee-core/src/lib.rs`). For a native
+tool-call round it emits one `ToolCall` event per call up front, executes all
+calls concurrently with `execute_tools_concurrent`, and then records the
+results in input order. For a text-fallback round it parses the assistant
+`content` as JSON, optionally emits `AssistantDiscard` to retract the raw JSON
+from the UI, promotes the parsed call onto the assistant message with
+`attach_fallback_tool_call`, and executes a single call.
+
+In both cases the actual side-effecting work is performed by
+`Agent::execute_tool`, which handles lookup, Plan-mode gating, the permission
+broker, and the final `Tool::call_with_events` invocation.
 
 ### Messages evolution
 

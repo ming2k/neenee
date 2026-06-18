@@ -205,7 +205,78 @@ Add new tools in `crates/neenee-core/src/tools.rs` by implementing the `Tool` tr
 
 ### Skills
 
-Add project-specific skills to `.neenee/skills/*.md` or user-wide skills to `~/.neenee/skills/*.md`. Metadata is indexed at startup and bodies are loaded on demand through `use_skill`.
+Skills are domain-specific instruction files that neenee can load on demand or automatically when mentioned.
+
+#### Layout
+
+Place skills in directories named `SKILL.md`:
+
+```
+.neenee/skills/<name>/SKILL.md
+~/.neenee/skills/<name>/SKILL.md
+```
+
+Skill files use YAML frontmatter followed by Markdown content:
+
+```markdown
+---
+name: rust-expert
+description: "Use when writing or debugging Rust code"
+short-description: "Rust help"
+version: "1.0.0"
+tags: [rust, cargo]
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: mcp
+      value: rust-analyzer
+---
+
+# Rust Expert
+
+... guidelines, examples, checklists ...
+```
+
+#### Discovery sources (highest priority wins)
+
+1. Project repo: `.neenee/skills/**/SKILL.md`, `.agents/skills/**/SKILL.md`, `.claude/skills/**/SKILL.md`, `.kimi-code/skills/**/SKILL.md`
+2. User global: `~/.neenee/skills/**/SKILL.md`, `~/.agents/skills/**/SKILL.md`, `~/.claude/skills/**/SKILL.md`, `~/.kimi-code/skills/**/SKILL.md`
+3. Extra local paths configured in `config.toml`
+4. Remote skill repositories configured in `config.toml`
+
+#### Configuration
+
+Add a `[skills]` table to `~/.config/neenee/config.toml`:
+
+```toml
+[skills]
+paths = ["~/.my-skills"]
+urls = ["https://example.com/skills"]
+disabled = ["old-skill"]
+bundled = true
+```
+
+Remote repositories must expose an `index.json`:
+
+```json
+{
+  "skills": [
+    { "name": "my-skill", "files": ["SKILL.md", "reference.md"] }
+  ]
+}
+```
+
+Remote files are cached under `~/.cache/neenee/skills/`.
+
+#### Using skills
+
+- `use_skill` tool — load a skill by name.
+- `list_skills` tool — list all available skills.
+- `reload_skills` tool — rescan local directories and refetch remote repos.
+- Slash commands: `/skills list`, `/skills reload`, `/skill <name>`.
+
+Skills with `policy.allow_implicit_invocation: true` are automatically injected into the context when you mention them by name, e.g. `rust-expert: review this` or `@rust-expert`.
 
 ### Custom Commands
 

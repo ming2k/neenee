@@ -31,8 +31,10 @@ use std::{
 use tokio::sync::{mpsc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
-use crate::document::{ChatMessage, MessageKind};
-use crate::layout::LayoutMap;
+use crate::document::{MessageKind, TranscriptMessage};
+use crate::layout::{
+    InteractiveTarget, InteractiveTargetKind, LayoutMap, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
+};
 use crate::render::Theme;
 use crate::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionDrag, SelectionState,
@@ -57,6 +59,279 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands and keybindings"),
     ("/exit", "Exit the program"),
 ];
+
+/// Kind of completion menu the input box is currently offering. Drives the
+/// keyboard shortcuts that cycle / accept entries: Tab, ↑/↓, and (for slash
+/// only) plain Enter on a unique prefix. Path mentions only complete via Tab
+/// so a plain Enter still sends the message as typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionKind {
+    /// No completion menu is active.
+    #[default]
+    None,
+    /// `/command` and subcommand completion (replaces the whole input).
+    Slash,
+    /// `@path` file mention completion (splices into the input at the cursor).
+    Path,
+}
+
+/// A single completion candidate rendered in the completion menu. The
+/// `replace_start..replace_end` byte range is the slice of the current input
+/// that gets overwritten by `label` when the candidate is accepted, so slash
+/// commands (which replace the whole input) and inline `@path` mentions
+/// (which replace only the `@prefix` token) share one accept path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// Text to insert at the replace range.
+    pub label: String,
+    /// Hint shown to the right of the label (e.g. "Set goal", "dir", "1.2k").
+    pub description: String,
+    /// Byte offset in `App::input` where the replacement starts.
+    pub replace_start: usize,
+    /// Byte offset in `App::input` where the replacement ends.
+    pub replace_end: usize,
+}
+
+impl Completion {
+    /// Build a slash-command style completion that replaces the whole input
+    /// (`replace_start = 0`, `replace_end = input_len`).
+    fn whole_input(label: &str, description: &str, input_len: usize) -> Completion {
+        Completion {
+            label: label.to_string(),
+            description: description.to_string(),
+            replace_start: 0,
+            replace_end: input_len,
+        }
+    }
+}
+
+/// Upper bound on the number of filesystem entries scanned for a single `@`
+/// mention completion. Bounds the work on huge directories (e.g. generated
+/// `node_modules`) so each keystroke stays imperceptible; the menu renders the
+/// first six and cycles through the rest with ↑/↓.
+const MAX_PATH_COMPLETIONS: usize = 200;
+
+/// Cached recursive project listing for `@path` completion. Entries are
+/// normalized to forward-slash paths relative to the captured cwd:
+/// directories get a trailing `/`, files do not. Built once by
+/// [`scan_project_files`] (ripgrep-first, manual walk fallback) and reused
+/// across keystrokes, mirroring the per-directory picker cache in opencode's
+/// TUI so each keystroke only filters instead of re-scanning.
+#[derive(Debug, Clone)]
+pub struct PathScan {
+    pub entries: Vec<String>,
+}
+
+/// Recursively list files (and synthesized directory entries) under `cwd`,
+/// respecting `.gitignore` and `.ignore`. Hidden files are included by
+/// default so the user can mention e.g. `.env`; `.git/` is always excluded.
+///
+/// Prefers `rg --files` (fast, gitignore-aware, already a project dep) and
+/// falls back to a manual recursive walk when `rg` is unavailable so the
+/// feature still works on stripped systems. Matches the ripgrep-fallback
+/// behaviour opencode uses when its native `fff` picker is missing.
+fn scan_project_files(cwd: &std::path::Path) -> PathScan {
+    let entries = try_ripgrep_scan(cwd).unwrap_or_else(|| manual_walk(cwd));
+    PathScan { entries }
+}
+
+/// Ripgrep-backed project scan. Returns `None` if `rg` cannot be spawned or
+/// exits non-zero so the caller can fall back to [`manual_walk`].
+fn try_ripgrep_scan(cwd: &std::path::Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new("rg")
+        .args([
+            "--files",
+            "--hidden",
+            "--glob=!.git",
+            "--color=never",
+            "--no-messages",
+        ])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.replace('\\', "/"))
+        .collect();
+
+    // Synthesize directory entries by walking each file's ancestor chain —
+    // `rg --files` only emits files, so directories are derived. Matches
+    // opencode's ripgrep-fallback behaviour.
+    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in &files {
+        let mut acc = String::new();
+        let parts: Vec<&str> = path.split('/').collect();
+        // All but the last segment (the filename) are directory ancestors.
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            dirs.insert(format!("{}/", acc));
+        }
+    }
+
+    let mut entries: Vec<String> = files;
+    entries.extend(dirs);
+    // Dirs first (alphabetic), then files (alphabetic). Case-insensitive to
+    // keep `README.md` and `readme.md` adjacent on case-insensitive FSes.
+    entries.sort_by(|a, b| {
+        let a_dir = a.ends_with('/');
+        let b_dir = b.ends_with('/');
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    entries.dedup();
+    Some(entries)
+}
+
+/// Pure-Rust recursive directory walk used when `rg` is unavailable. Skips
+/// `.git/` unconditionally; hidden files and other ignored directories are
+/// included so users can still mention e.g. `.env` or `.github/workflows`.
+fn manual_walk(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(std::path::PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, rel_prefix)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = match entry.file_name().to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // `.git/` is always skipped to avoid dumping the entire repo
+            // internals into the completion list.
+            if name == ".git" {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let rel = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}{}", rel_prefix, name)
+            };
+            if is_dir {
+                let child_rel = format!("{}/", rel);
+                stack.push((entry.path(), child_rel.clone()));
+                out.push(child_rel);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        let a_dir = a.ends_with('/');
+        let b_dir = b.ends_with('/');
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    out
+}
+
+/// Split a raw `@`-mention body (everything after the `@`) into the directory
+/// to scan and the file-name prefix to match inside it. Kept for tests that
+/// exercise the legacy single-directory resolution; the live completion path
+/// uses the cached recursive scan + [`path_query_match`] instead.
+#[cfg(test)]
+fn split_prefix(after_at: &str, cwd: &std::path::Path) -> (std::path::PathBuf, String) {
+    let last_slash = after_at.bytes().rposition(|b| b == b'/');
+    let (dir_part, file_prefix) = match last_slash {
+        Some(idx) => (&after_at[..=idx], after_at[idx + 1..].to_string()),
+        None => ("", after_at.to_string()),
+    };
+
+    let base_dir = if let Some(rest) = dir_part.strip_prefix("~/") {
+        match dirs::home_dir() {
+            Some(home) => home.join(rest),
+            None => cwd.join(dir_part),
+        }
+    } else if dir_part.starts_with('/') {
+        std::path::PathBuf::from(dir_part)
+    } else {
+        cwd.join(dir_part)
+    };
+    (base_dir, file_prefix)
+}
+
+/// Format a byte count with a single-letter SI suffix, matching the
+/// context-usage formatter's style: `512B`, `1.2k`, `3.4M`.
+#[cfg(test)]
+fn format_byte_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}k", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Decide whether a cached path entry should be shown for a given `@query`.
+///
+/// - Empty query: only top-level entries (immediate children of cwd), so the
+///   initial menu is a small, useful overview instead of every nested file.
+/// - Query without `/`: case-insensitive substring match anywhere in the
+///   path, so `@foo` finds `src/foo.rs` and `Cargo.lock` alike.
+/// - Query ending in `/` (e.g. `@src/`): case-insensitive prefix match,
+///   listing that directory's descendants so the user can descend naturally.
+/// - Other queries: case-insensitive substring match — covers `@src/foo` and
+///   similar mid-path fragments.
+fn path_query_match(path: &str, query: &str) -> bool {
+    if query.is_empty() {
+        // Top-level: a path with no `/`, or a single trailing `/` and nothing
+        // else (top-level directory).
+        let trimmed = path.trim_end_matches('/');
+        !trimmed.contains('/')
+    } else if let Some(dir_prefix) = query.strip_suffix('/').filter(|_| query.contains('/')) {
+        // Query is `@<dir>/`: descend, prefix match.
+        path.to_lowercase().starts_with(&dir_prefix.to_lowercase())
+    } else {
+        path.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
+/// Pure core of [`App::active_mention_range`]. Given the input bytes and a
+/// byte offset sitting at the caret, return the inclusive `(start, end)` range
+/// of the `@mention` token the caret is inside, or `None` when no token is
+/// active. See the method docs for the rules.
+fn mention_range_at(input: &str, cursor_byte: usize) -> Option<(usize, usize)> {
+    if cursor_byte > input.len() {
+        return None;
+    }
+    let before = &input[..cursor_byte];
+    // Walk back over chars from the cursor looking for an `@` without
+    // crossing whitespace. `char_indices` gives byte offsets so the range we
+    // return can be sliced straight out of the input.
+    let mut chars_before: Vec<(usize, char)> = before.char_indices().collect();
+    while let Some((idx, c)) = chars_before.pop() {
+        if c.is_whitespace() {
+            return None;
+        }
+        if c == '@' {
+            let preceding_whitespace = chars_before
+                .last()
+                .map(|(_, prev_c)| prev_c.is_whitespace())
+                .unwrap_or(true);
+            return if preceding_whitespace {
+                Some((idx, cursor_byte))
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ModelSolution {
@@ -187,8 +462,8 @@ pub enum Modal {
 
 pub struct App {
     pub input: String,
-    /// Structured chat messages (semantic document model).
-    pub messages: Vec<ChatMessage>,
+    /// Structured transcript messages (semantic document model).
+    pub messages: Vec<TranscriptMessage>,
     pub scroll: u16,
     /// Whether the view follows the newest content (auto-scroll to bottom).
     pub follow_bottom: bool,
@@ -201,6 +476,10 @@ pub struct App {
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
     pub sticky_card: Option<usize>,
     pub sticky_rect: Option<ratatui::layout::Rect>,
+    /// Screen rect of the goal segment in the hint bar for the current frame,
+    /// so clicks inside it route to `/goal status`. `None` when no goal is
+    /// shown or the hint bar is hidden (overlay modal open).
+    pub hint_goal_rect: Option<ratatui::layout::Rect>,
     /// Content-line index of the sticky card's real header. Used to re-anchor
     /// the scroll offset when the user collapses the pinned card so the header
     /// lands at the top of the viewport instead of jumping to unrelated content.
@@ -229,7 +508,15 @@ pub struct App {
     /// Display form of the current working directory, with `$HOME` swapped for
     /// `~`. Captured once at startup because the TUI process never `chdir`s.
     pub cwd_display: String,
-    pub current_mode: AgentMode,
+    /// Raw current working directory captured at startup. Used to resolve
+    /// `@path` mention completions against the real filesystem.
+    pub cwd: std::path::PathBuf,
+    /// Cached recursive project file listing for `@path` completion, populated
+    /// lazily on the first `@` mention and reused afterwards. Mirrors the
+    /// per-directory picker cache in opencode's TUI. Invalidated after each
+    /// accepted path completion so newly-created files become visible without
+    /// a restart. `None` = not scanned yet.
+    pub path_scan_cache: Option<PathScan>,
     pub current_goal: Option<Goal>,
     pub loop_status: String,
     pub activity_status: String,
@@ -249,6 +536,24 @@ pub struct App {
     pub drag: SelectionDrag,
     /// Layout map for the current frame (updated each draw).
     pub layout_map: LayoutMap,
+    /// Message index of the reasoning trace whose header currently rests under
+    /// the mouse pointer (inline or sticky pinned), so the next draw brightens
+    /// it as a dark→bright hover affordance hinting that it is clickable.
+    /// `None` whenever the pointer is elsewhere or an overlay modal is open.
+    pub hovered_reasoning: Option<usize>,
+    /// Keyboard-focused activatable target in the current frame. Mouse support
+    /// is an acceleration path; this is the equivalent keyboard-first path.
+    pub focused_target: Option<InteractiveTarget>,
+    /// Which surface (input box vs conversation stream) currently owns
+    /// keyboard focus. See [`input::FocusZone`] for the full semantics.
+    /// Defaults to [`input::FocusZone::Compose`] so typing flows into the
+    /// prompt box; `Tab` on an empty prompt hands focus to the stream, and
+    /// any printable key (or `Esc`) hands it back.
+    pub focus_zone: input::FocusZone,
+    /// Tracks the last cursor visibility command we sent to the terminal so
+    /// we only emit `Hide` / `Show` escape codes when the desired state
+    /// actually changes, avoiding per-frame flicker.
+    pub cursor_hidden: bool,
     /// Show a brief "copied" toast. Held until this deadline elapses so the
     /// duration is wall-clock consistent regardless of the event-loop cadence.
     pub copy_toast_until: Option<std::time::Instant>,
@@ -269,19 +574,6 @@ pub struct App {
     pub setup_model: Option<String>,
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
-    /// Sidebar visibility override. `None` follows the auto rule (show when
-    /// the terminal is wide enough); `Some(true)`/`Some(false)` forces it on
-    /// or off regardless of width. Toggled with Ctrl+B.
-    pub sidebar_forced: Option<bool>,
-    /// Sidebar scroll offset in content lines. Held across frames and clamped
-    /// each draw against the freshly measured content height.
-    pub sidebar_scroll: usize,
-    /// Sidebar content height measured on the most recent draw. Used by the
-    /// app loop to clamp `sidebar_scroll` between redraws.
-    pub sidebar_max_scroll: usize,
-    /// Sidebar screen rect from the most recent draw. Used by mouse-wheel
-    /// routing so scrolling over the pane scrolls it instead of the chat.
-    pub sidebar_rect: Option<ratatui::layout::Rect>,
     /// Theme.
     pub theme: Theme,
     /// MCP server statuses loaded at startup. Mirrored into the header as a
@@ -296,7 +588,7 @@ struct UiRuntime {
     activity_status: Arc<Mutex<String>>,
     pending_permission: Arc<Mutex<Option<PermissionRequest>>>,
     is_responding: Arc<AtomicBool>,
-    messages: Arc<Mutex<Vec<ChatMessage>>>,
+    messages: Arc<Mutex<Vec<TranscriptMessage>>>,
     key_status: Arc<Mutex<HashMap<String, bool>>>,
     /// Sessions picker rows + a one-shot request to open the picker modal.
     sessions_overview: Arc<Mutex<Vec<SessionOverview>>>,
@@ -312,21 +604,29 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
-    /// Whether the right-side sidebar should render for the given terminal
-    /// width. Honors the user's toggle: `Some(_)` overrides the auto rule,
-    /// `None` shows the pane once the terminal is wide enough.
-    pub fn sidebar_visible(&self, width: u16) -> bool {
-        match self.sidebar_forced {
-            Some(forced) => forced,
-            None => width >= render::SIDEBAR_AUTO_WIDTH,
-        }
-    }
-
     pub fn cursor_display_x(&self) -> u16 {
         self.input[..self.byte_cursor()].width() as u16
     }
 
-    fn suggestion_matches(&self) -> Vec<(&str, &str)> {
+    /// Classify which completion menu, if any, should be shown for the current
+    /// input + cursor state. Slash commands take priority over `@path` mentions
+    /// because a slash input is a command-in-progress and never carries inline
+    /// file references.
+    pub fn completion_kind(&self) -> CompletionKind {
+        if self.input.starts_with('/') {
+            CompletionKind::Slash
+        } else if self.active_mention_range().is_some() {
+            CompletionKind::Path
+        } else {
+            CompletionKind::None
+        }
+    }
+
+    /// Compute the live completion candidates for the current input + cursor.
+    /// Returns an empty `Vec` when no menu should be shown. See [`Completion`]
+    /// for the slash-vs-path replace-range semantics. Takes `&mut self` so the
+    /// `@path` scan can populate [`App::path_scan_cache`] on first use.
+    pub fn completions(&mut self) -> Vec<Completion> {
         let current = self.input.to_lowercase();
 
         // Subcommand completion for /mode
@@ -344,7 +644,7 @@ impl App {
                     .map(|sub| sub.to_lowercase().starts_with(after))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
             .collect();
         }
 
@@ -360,7 +660,7 @@ impl App {
                     .map(|sub| sub.starts_with(after))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
             .collect();
         }
 
@@ -377,7 +677,7 @@ impl App {
                     .map(|sub| sub.starts_with(after))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
             .collect();
         }
 
@@ -392,7 +692,7 @@ impl App {
                     .map(|sub| sub.starts_with(after))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
             .collect();
         }
 
@@ -413,21 +713,100 @@ impl App {
                     .map(|sub| sub.starts_with(after))
                     .unwrap_or(false)
             })
-            .copied()
+            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
             .collect();
         }
 
-        SLASH_COMMANDS
+        if current.starts_with('/') {
+            return SLASH_COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd.starts_with(&current))
+                .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
+                .chain(self.custom_commands.iter().filter_map(|(command, desc)| {
+                    if command.starts_with(&current) {
+                        Some(Completion::whole_input(
+                            command.as_str(),
+                            desc.as_str(),
+                            self.input.len(),
+                        ))
+                    } else {
+                        None
+                    }
+                }))
+                .collect();
+        }
+
+        // Inline `@path` file mention completion.
+        if let Some(range) = self.active_mention_range() {
+            return self.enumerate_path_completions(range);
+        }
+
+        Vec::new()
+    }
+
+    /// Locate the `@mention` token the cursor is currently inside, if any.
+    /// Returns the byte range `(start, end)` of the token inclusive of the
+    /// leading `@`. A mention only triggers completion when:
+    ///
+    /// - The `@` is at the start of the input or preceded by whitespace, so it
+    ///   is not confused with e.g. `user@example` in pasted prose.
+    /// - The cursor sits somewhere inside the `@`-prefixed run, not after a
+    ///   whitespace that terminated it.
+    /// - The text between `@` and the cursor contains no whitespace.
+    pub fn active_mention_range(&self) -> Option<(usize, usize)> {
+        mention_range_at(&self.input, self.byte_cursor())
+    }
+
+    /// Enumerate filesystem entries that extend the `@path` prefix the cursor
+    /// is currently in. `mention_range` is the inclusive `(@..cursor)` byte
+    /// range produced by [`Self::active_mention_range`]. Pulls from the cached
+    /// recursive project scan (populated on first use) and filters with
+    /// [`path_query_match`], so each keystroke only filters — it never touches
+    /// the filesystem. Empty descriptions match opencode's minimal aesthetic;
+    /// directories are distinguished by their trailing `/` label.
+    fn enumerate_path_completions(&mut self, mention_range: (usize, usize)) -> Vec<Completion> {
+        let (at_start, cursor_end) = mention_range;
+        // Skip the `@` itself — only the path portion is replaced/extended.
+        // Clone into an owned String so the borrow on `self.input` ends before
+        // we mutably borrow `self` for the cache populate below.
+        let after_at = self.input[at_start + 1..cursor_end].to_string();
+
+        // Lazy-populate the cache on first `@` mention; subsequent calls reuse
+        // it. `path_scan()` is `&mut self`, so clone the entries out to avoid
+        // holding a borrow across the iterator below.
+        let entries: Vec<String> = self.path_scan().entries.clone();
+
+        let mut comps: Vec<Completion> = entries
             .iter()
-            .filter(|(cmd, _)| cmd.starts_with(&current))
-            .copied()
-            .chain(
-                self.custom_commands
-                    .iter()
-                    .filter(|(command, _)| command.starts_with(&current))
-                    .map(|(command, description)| (command.as_str(), description.as_str())),
-            )
-            .collect()
+            .filter(|p| path_query_match(p, &after_at))
+            .take(MAX_PATH_COMPLETIONS)
+            .map(|p| Completion {
+                label: p.clone(),
+                description: String::new(),
+                replace_start: at_start + 1,
+                replace_end: cursor_end,
+            })
+            .collect();
+        // path_query_match + scan already sort, but the take() may have
+        // shuffled entries between filter passes; re-sort for stability.
+        comps.sort_by(|a, b| {
+            let a_dir = a.label.ends_with('/');
+            let b_dir = b.label.ends_with('/');
+            b_dir
+                .cmp(&a_dir)
+                .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+        });
+        comps
+    }
+
+    /// Borrow the cached recursive project listing, populating it on first
+    /// access. Mirrors opencode's per-directory picker cache: one
+    /// [`scan_project_files`] call per App session, then pure filtering.
+    fn path_scan(&mut self) -> &PathScan {
+        if self.path_scan_cache.is_none() {
+            self.path_scan_cache = Some(scan_project_files(&self.cwd));
+        }
+        self.path_scan_cache.as_ref().unwrap()
     }
 
     /// Toggle the expansion of the tool-step card / reasoning trace at `mi`,
@@ -451,7 +830,7 @@ impl App {
     ///
     /// Returns `true` when a card was actually toggled, so callers can gate
     /// side effects like clearing the text selection.
-    fn toggle_card_pinned(&mut self, messages: &mut [ChatMessage], mi: usize) -> bool {
+    fn toggle_card_pinned(&mut self, messages: &mut [TranscriptMessage], mi: usize) -> bool {
         let pinned_to_top = self.sticky_card == Some(mi);
         let sticky_header_line = self.sticky_header_line;
         let toggled = resolve_focused_mut(messages, &self.focus_stack, mi)
@@ -488,6 +867,60 @@ impl App {
         toggled
     }
 
+    fn visible_interactive_targets(&self) -> Vec<InteractiveTarget> {
+        let mut targets = self.layout_map.interactive_targets();
+        if let Some(message_idx) = self.sticky_card {
+            if let Some(message) = self.focused_messages().get(message_idx) {
+                let target = if message.is_thinking() {
+                    InteractiveTarget::thinking(message_idx)
+                } else if message.is_tool_step() || message.is_subagent_task() {
+                    InteractiveTarget::tool_step(message_idx)
+                } else {
+                    return targets;
+                };
+                if !targets.contains(&target) {
+                    targets.insert(0, target);
+                }
+            }
+        }
+        targets
+    }
+
+    fn retain_visible_focused_target(&mut self) {
+        if self.active_modal != Modal::None {
+            self.focused_target = None;
+            return;
+        }
+        if let Some(target) = self.focused_target {
+            if !self.visible_interactive_targets().contains(&target) {
+                self.focused_target = None;
+            }
+        }
+    }
+
+    fn focus_interactive_target(&mut self, direction: i8) {
+        let targets = self.visible_interactive_targets();
+        if targets.is_empty() {
+            self.focused_target = None;
+            return;
+        }
+
+        let current = self
+            .focused_target
+            .and_then(|target| targets.iter().position(|candidate| *candidate == target));
+        let next = match (current, direction < 0) {
+            (Some(0), true) => targets.len() - 1,
+            (Some(idx), true) => idx - 1,
+            (Some(idx), false) => (idx + 1) % targets.len(),
+            (None, true) => targets.len() - 1,
+            (None, false) => 0,
+        };
+
+        self.focused_target = Some(targets[next]);
+        self.selection = SelectionState::None;
+        self.drag.cancel();
+    }
+
     /// Whether the view is currently zoomed into a sub-agent task.
     pub fn in_subagent_view(&self) -> bool {
         !self.focus_stack.is_empty()
@@ -495,7 +928,7 @@ impl App {
 
     /// The message slice currently in view: the root conversation, or the
     /// focused sub-agent task's child messages.
-    pub fn focused_messages(&self) -> &[ChatMessage] {
+    pub fn focused_messages(&self) -> &[TranscriptMessage] {
         let Some(call_id) = self.focus_stack.last() else {
             return &self.messages;
         };
@@ -524,6 +957,7 @@ impl App {
         self.sticky_rect = None;
         self.sticky_header_line = None;
         self.pin_header_line = None;
+        self.focused_target = None;
     }
 
     /// Zoom into a sub-agent task's child messages.
@@ -657,7 +1091,7 @@ pub async fn run_tui(
     // so any later SIGTERM/SIGINT/SIGHUP restores it instead of stranding it.
     spawn_signal_guard();
 
-    let restored = chat_messages_from_core(initial_messages);
+    let restored = transcript_messages_from_core(initial_messages);
     let messages = Arc::new(Mutex::new(restored));
     let messages_clone = messages.clone();
     let should_quit = Arc::new(AtomicBool::new(false));
@@ -698,7 +1132,8 @@ pub async fn run_tui(
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(
-                        ChatMessage::new(Role::Assistant, t).with_attribution(provider, model),
+                        TranscriptMessage::new(Role::Assistant, t)
+                            .with_attribution(provider, model),
                     );
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
@@ -711,7 +1146,8 @@ pub async fn run_tui(
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(
-                        ChatMessage::new(Role::Assistant, "").with_attribution(provider, model),
+                        TranscriptMessage::new(Role::Assistant, "")
+                            .with_attribution(provider, model),
                     );
                     ir_clone.store(true, Ordering::SeqCst);
                     *activity_clone.lock().await = "responding".to_string();
@@ -763,7 +1199,7 @@ pub async fn run_tui(
                         }
                         let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                         msgs.push(
-                            ChatMessage::thinking(delta).with_attribution(provider, model),
+                            TranscriptMessage::thinking(delta).with_attribution(provider, model),
                         );
                         reasoning_start = Some(std::time::Instant::now());
                     }
@@ -783,7 +1219,10 @@ pub async fn run_tui(
                     let target = msgs.iter_mut().rfind(|message| {
                         matches!(
                             &message.kind,
-                            MessageKind::Thinking { duration_ms: None, .. }
+                            MessageKind::Thinking {
+                                duration_ms: None,
+                                ..
+                            }
                         )
                     });
                     if let Some(last) = target {
@@ -811,7 +1250,7 @@ pub async fn run_tui(
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(
-                        ChatMessage::tool_step(id, name, arguments)
+                        TranscriptMessage::tool_step(id, name, arguments)
                             .with_attribution(provider, model),
                     );
                     ir_clone.store(true, Ordering::SeqCst);
@@ -830,9 +1269,24 @@ pub async fn run_tui(
                         .any(|message| message.finish_tool_step(&id, output.clone(), duration_ms))
                     {
                         let mut message =
-                            ChatMessage::tool_step(id.clone(), name.clone(), "{}")
+                            TranscriptMessage::tool_step(id.clone(), name.clone(), "{}")
                                 .with_attribution(provider, model);
                         message.finish_tool_step(&id, output, duration_ms);
+                        msgs.push(message);
+                    }
+                }
+                AgentResponse::ToolCancelled { id, .. } => {
+                    // Convergence: an in-flight call was aborted by an
+                    // interrupt. Flip its card (and any nested sub-agent
+                    // children) to Cancelled so it never stays "running".
+                    let mut msgs = messages_clone.lock().await;
+                    if !msgs.iter_mut().any(|message| message.cancel_tool_step(&id)) {
+                        // The ToolCall event may have been dropped with the
+                        // aborted turn; synthesize a minimal cancelled card so
+                        // the user still sees the call was abandoned.
+                        let mut message =
+                            TranscriptMessage::tool_step(id.clone(), "tool", "{}");
+                        message.cancel_tool_step(&id);
                         msgs.push(message);
                     }
                 }
@@ -864,7 +1318,7 @@ pub async fn run_tui(
                     messages_clone.lock().await.clear();
                 }
                 AgentResponse::ConversationReplaced(messages) => {
-                    *messages_clone.lock().await = chat_messages_from_core(messages);
+                    *messages_clone.lock().await = transcript_messages_from_core(messages);
                 }
                 AgentResponse::SessionsOverview(sessions) => {
                     *sessions_overview_clone.lock().await = sessions;
@@ -875,7 +1329,7 @@ pub async fn run_tui(
                     before_chars,
                     after_chars,
                 } => {
-                    messages_clone.lock().await.push(ChatMessage::new(
+                    messages_clone.lock().await.push(TranscriptMessage::new(
                         Role::System,
                         format!(
                             "Compacted {} messages: {} -> {} chars.",
@@ -915,7 +1369,10 @@ pub async fn run_tui(
                 }
                 AgentResponse::Error(e) => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::new(Role::System, format!("Error: {}", e)));
+                    msgs.push(TranscriptMessage::new(
+                        Role::System,
+                        format!("Error: {}", e),
+                    ));
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
                 }
@@ -924,7 +1381,7 @@ pub async fn run_tui(
                 }
                 AgentResponse::ProviderSwitched { provider, model } => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(ChatMessage::new(
+                    msgs.push(TranscriptMessage::new(
                         Role::System,
                         format!("System: Provider switched to {} ({})", provider, model),
                     ));
@@ -947,6 +1404,7 @@ pub async fn run_tui(
         max_scroll: 0,
         sticky_card: None,
         sticky_rect: None,
+        hint_goal_rect: None,
         sticky_header_line: None,
         pin_header_line: None,
         focus_stack: Vec::new(),
@@ -961,7 +1419,8 @@ pub async fn run_tui(
         current_provider: initial_provider,
         current_model: initial_model,
         cwd_display,
-        current_mode: AgentMode::Build,
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        path_scan_cache: None,
         current_goal: None,
         loop_status: "idle".to_string(),
         activity_status: String::new(),
@@ -976,6 +1435,10 @@ pub async fn run_tui(
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
+        hovered_reasoning: None,
+        focused_target: None,
+        focus_zone: input::FocusZone::Compose,
+        cursor_hidden: false,
         copy_toast_until: None,
         copy_toast_message: String::new(),
         copy_toast_failed: false,
@@ -987,10 +1450,6 @@ pub async fn run_tui(
         setup_endpoint: None,
         setup_model: None,
         key_status: HashMap::new(),
-        sidebar_forced: None,
-        sidebar_scroll: 0,
-        sidebar_max_scroll: 0,
-        sidebar_rect: None,
         theme: Theme::default(),
         mcp_statuses,
     };
@@ -1091,7 +1550,6 @@ async fn run_app_loop<B: Backend>(
             app.current_provider = runtime.current_provider.lock().await.clone();
             app.current_model = runtime.current_model.lock().await.clone();
             let harness = runtime.harness.lock().await.clone();
-            app.current_mode = harness.mode;
             app.current_goal = harness.goal;
             app.loop_status = harness.loop_status;
             app.activity_status = runtime.activity_status.lock().await.clone();
@@ -1173,7 +1631,7 @@ async fn run_app_loop<B: Backend>(
                 app.pending_permission.is_some(),
             );
 
-            // Compute the displayed input text first so the chat layout can
+            // Compute the displayed input text first so the transcript layout can
             // reserve the right height for a wrapping, growing input box.
             let masked_input = if app.active_modal == Modal::ApiKey {
                 "•".repeat(app.input.chars().count())
@@ -1196,7 +1654,7 @@ async fn run_app_loop<B: Backend>(
             // a navigation bar; otherwise render the root conversation.
             let view_messages = app.focused_messages();
             let subagent_bar = app.focus_stack.last().and_then(|current| {
-                let tasks: Vec<&ChatMessage> = app
+                let tasks: Vec<&TranscriptMessage> = app
                     .messages
                     .iter()
                     .filter(|message| message.is_subagent_task())
@@ -1211,37 +1669,89 @@ async fn run_app_loop<B: Backend>(
                 })
             });
 
-            let chat_render = render::draw_chat(
+            let transcript_render = render::draw_transcript(
                 f,
                 &mut layout_map,
-                render::ChatView {
+                render::TranscriptView {
                     messages: view_messages,
                     scroll: app.scroll,
                     selection: &app.selection,
-                    current_provider: &app.current_provider,
-                    current_model: &app.current_model,
-                    cwd: &app.cwd_display,
-                    current_mode: app.current_mode,
-                    current_goal: app.current_goal.as_ref(),
                     activity: &status,
                     spinner_phase: app.spinner_tick,
                     input: &masked_input,
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    sidebar_visible: app.sidebar_visible(f.size().width),
-                    loop_status: &app.loop_status,
-                    sidebar_scroll: app.sidebar_scroll,
+                    // Suppress the hover affordance whenever a modal is open so
+                    // no stale highlight bleeds through an overlay.
+                    hovered_reasoning: (app.active_modal == Modal::None)
+                        .then_some(app.hovered_reasoning)
+                        .flatten(),
+                    focused_target: (app.active_modal == Modal::None)
+                        .then_some(app.focused_target)
+                        .flatten(),
                     theme: &app.theme,
-                    mcp_statuses: &app.mcp_statuses,
                 },
             );
-            let input_rect = chat_render.input_rect;
-            app.content_lines = chat_render.content_lines;
-            app.view_height = chat_render.view_height;
-            app.sidebar_rect = chat_render.sidebar.rect;
-            app.sidebar_max_scroll = chat_render.sidebar.content_lines;
-            match chat_render.sticky {
+            let input_rect = transcript_render.input_rect;
+            let hint_rect = transcript_render.hint_rect;
+            let content_lines = transcript_render.content_lines;
+            let view_height = transcript_render.view_height;
+            let sticky = transcript_render.sticky;
+
+            // The hint bar (workspace / model / goal / MCP / context) lives
+            // directly below the input box and carries the info the old top
+            // header showed. Rendered only when the chrome is visible. It is
+            // drawn before the composer because it borrows `view_messages`
+            // (an immutable borrow of `app`) while `draw_composer` needs a
+            // mutable borrow of `app.input_scroll`.
+            let hint_goal_rect = if !chrome_hidden && hint_rect.height > 0 {
+                render::draw_hint_bar(
+                    f,
+                    hint_rect,
+                    render::HintBarView {
+                        cwd: &app.cwd_display,
+                        current_provider: &app.current_provider,
+                        current_model: &app.current_model,
+                        current_goal: app.current_goal.as_ref(),
+                        messages: view_messages,
+                        mcp_statuses: &app.mcp_statuses,
+                        focus_zone: app.focus_zone,
+                    },
+                    &app.theme,
+                )
+                .goal_rect
+            } else {
+                None
+            };
+
+            // The input box is only shown when no overlay modal is open. The
+            // `focused` flag drops the panel to its dim "blurred" palette and
+            // hides the caret whenever keyboard focus is on the conversation
+            // stream (Browse zone), so the user can see at a glance which
+            // surface the next keypress will land on.
+            if !chrome_hidden {
+                let compose_focused = app.focus_zone.is_compose();
+                render::draw_composer(
+                    f,
+                    input_rect,
+                    &masked_input,
+                    app.byte_cursor(),
+                    compose_focused,
+                    &app.theme,
+                    &mut layout_map,
+                    app.active_modal != Modal::ApiKey,
+                    &mut app.input_scroll,
+                );
+            }
+
+            // Now that `view_messages` is no longer borrowed, persist the
+            // per-frame layout state back onto `app` for the next iteration
+            // and for click routing.
+            app.content_lines = content_lines;
+            app.view_height = view_height;
+            app.hint_goal_rect = hint_goal_rect;
+            match sticky {
                 Some(info) => {
                     app.sticky_card = Some(info.message_idx);
                     app.sticky_rect = Some(info.rect);
@@ -1254,32 +1764,14 @@ async fn run_app_loop<B: Backend>(
                 }
             }
 
-            // The input box is only shown when no overlay modal is open.
-            if !chrome_hidden {
-                render::draw_composer(
-                    f,
-                    input_rect,
-                    &masked_input,
-                    app.byte_cursor(),
-                    &app.theme,
-                    &mut layout_map,
-                    app.active_modal != Modal::ApiKey,
-                    &mut app.input_scroll,
-                );
-
-                // Right-aligned hint line below the input box.
-                let hint_rect = chat_render.hint_rect;
-                render::draw_hint(f, hint_rect, &[("ctrl+h", "help")], &app.theme);
-            }
-
-            // Slash suggestions
-            if app.active_modal == Modal::None && app.input.starts_with('/') {
-                let suggestions = app.suggestion_matches();
-                if !suggestions.is_empty() {
-                    render::draw_suggestions(
+            // Completion menu: slash commands or `@path` file mentions.
+            if app.active_modal == Modal::None && app.completion_kind() != CompletionKind::None {
+                let completions = app.completions();
+                if !completions.is_empty() {
+                    render::draw_completion_menu(
                         f,
                         &mut layout_map,
-                        &suggestions,
+                        &completions,
                         app.suggestion_index,
                         input_rect,
                         &app.theme,
@@ -1378,6 +1870,23 @@ async fn run_app_loop<B: Backend>(
             app.layout_map = layout_map;
         })?;
 
+        // Cursor visibility follows the focus zone so the caret only shows up
+        // where keys actually land. While a modal is open the modal itself
+        // owns the caret (and may hide it for non-edit modals like Help); in
+        // Browse zone the input box is blurred so the caret is hidden too.
+        // Toggled only when the desired state changes to avoid spamming the
+        // terminal with redundant escape codes every frame.
+        let cursor_should_hide = app.active_modal == Modal::None
+            && app.focus_zone.is_browse();
+        if cursor_should_hide != app.cursor_hidden {
+            if cursor_should_hide {
+                let _ = terminal.hide_cursor();
+            } else {
+                let _ = terminal.show_cursor();
+            }
+            app.cursor_hidden = cursor_should_hide;
+        }
+
         // Recompute the bottom scroll offset for the next frame and keep the
         // manual scroll position within bounds when not following.
         let natural_max = app.content_lines.saturating_sub(app.view_height as usize) as u16;
@@ -1395,13 +1904,7 @@ async fn run_app_loop<B: Backend>(
                 .unwrap_or(natural_max);
             app.scroll = app.scroll.min(limit);
         }
-
-        // Clamp the sidebar scroll against the freshly measured content
-        // height. The sidebar cannot follow the bottom (its content is static
-        // per frame), so a simple saturating clamp is enough.
-        let sidebar_view_height = app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0);
-        let sidebar_max = app.sidebar_max_scroll.saturating_sub(sidebar_view_height);
-        app.sidebar_scroll = app.sidebar_scroll.min(sidebar_max);
+        app.retain_visible_focused_target();
 
         // Drain all currently-ready input events before redrawing. The first
         // event blocks for the normal poll interval; any further events the
@@ -1425,11 +1928,18 @@ async fn run_app_loop<B: Backend>(
             }
             events_drained = true;
             let event = event::read()?;
-            // Pre-compute suggestion data to avoid borrow conflicts with process_event.
-            let suggestions = app.suggestion_matches();
-            let suggestion_count = suggestions.len();
-            let has_exact_suggestion = suggestions.iter().any(|(command, _)| *command == app.input);
-            let input_starts_with_slash = app.input.starts_with('/');
+            // Pre-compute completion data to avoid borrow conflicts with process_event.
+            let completions = app.completions();
+            let suggestion_count = completions.len();
+            // The "exact match" auto-accept on Enter only makes sense for slash
+            // commands: there, typing an unambiguous prefix and pressing Enter
+            // should expand to the unique command rather than send `/go` as a
+            // (rejected) command. Path mentions are accepted only via Tab so
+            // plain Enter still ships the message as the user typed it.
+            let has_exact_suggestion = completions
+                .iter()
+                .any(|c| c.replace_start == 0 && c.replace_end == app.input.len() && c.label == app.input);
+            let completion_kind = app.completion_kind();
             let in_subagent_view = app.in_subagent_view();
             let action = input::process_event(
                 event,
@@ -1438,16 +1948,23 @@ async fn run_app_loop<B: Backend>(
                 input::InputContext {
                     active_modal: app.active_modal,
                     is_responding: runtime.is_responding.load(Ordering::SeqCst),
-                    input_starts_with_slash,
+                    completion_kind,
                     suggestion_count,
                     has_exact_suggestion,
                     suggestion_index: app.suggestion_index,
                     permission_confirm_always: app.permission_confirm_always,
                     in_subagent_view,
-                    sidebar_rect: app.sidebar_rect,
+                    has_focused_target: app.focused_target.is_some(),
+                    focus_zone: app.focus_zone,
                 },
                 &mut app.drag,
             );
+            if !app.input.is_empty() {
+                app.focused_target = None;
+                // Non-empty input implies the user is composing; make the zone
+                // match so key bindings resolve to the input box.
+                app.focus_zone = input::FocusZone::Compose;
+            }
 
             match action {
                 input::InputAction::None => {}
@@ -1479,7 +1996,7 @@ async fn run_app_loop<B: Backend>(
                             .messages
                             .lock()
                             .await
-                            .push(ChatMessage::new(Role::User, text.clone()));
+                            .push(TranscriptMessage::new(Role::User, text.clone()));
                         if !text.is_empty() && app.input_history.last() != Some(&text) {
                             app.input_history.push(text.clone());
                         }
@@ -1527,7 +2044,7 @@ async fn run_app_loop<B: Backend>(
                         .messages
                         .lock()
                         .await
-                        .push(ChatMessage::new(Role::User, cmd.clone()));
+                        .push(TranscriptMessage::new(Role::User, cmd.clone()));
                     if app.input_history.last() != Some(&cmd) {
                         app.input_history.push(cmd.clone());
                     }
@@ -1766,6 +2283,65 @@ async fn run_app_loop<B: Backend>(
                     drop(messages);
                     app.selection = SelectionState::None;
                 }
+                input::InputAction::FocusNextTarget => {
+                    app.focus_interactive_target(1);
+                }
+                input::InputAction::FocusPrevTarget => {
+                    app.focus_interactive_target(-1);
+                }
+                input::InputAction::EnterBrowseZone { backward } => {
+                    // Hand keyboard focus from the input box over to the
+                    // conversation stream. Direction picks the closest card:
+                    // forward (Tab) selects the first one, backward (Shift+Tab)
+                    // selects the last one.
+                    app.focus_zone = input::FocusZone::Browse;
+                    let dir: i8 = if backward { -1 } else { 1 };
+                    app.focus_interactive_target(dir);
+                }
+                input::InputAction::ReturnToComposeZone => {
+                    app.focus_zone = input::FocusZone::Compose;
+                }
+                input::InputAction::ActivateFocusedTarget => {
+                    if let Some(target) = app.focused_target {
+                        match target.kind {
+                            InteractiveTargetKind::ToolStep => {
+                                let mut messages = runtime.messages.lock().await;
+                                let enter_id = resolve_focused_mut(
+                                    &mut messages,
+                                    &app.focus_stack,
+                                    target.message_idx,
+                                )
+                                .and_then(|message| {
+                                    if message.is_subagent_task() {
+                                        message.tool_step_call_id().map(String::from)
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(id) = enter_id {
+                                    drop(messages);
+                                    app.enter_subagent(id);
+                                } else {
+                                    let toggled =
+                                        app.toggle_card_pinned(&mut messages, target.message_idx);
+                                    drop(messages);
+                                    if toggled {
+                                        app.selection = SelectionState::None;
+                                    }
+                                }
+                            }
+                            InteractiveTargetKind::Thinking => {
+                                let mut messages = runtime.messages.lock().await;
+                                let toggled =
+                                    app.toggle_card_pinned(&mut messages, target.message_idx);
+                                drop(messages);
+                                if toggled {
+                                    app.selection = SelectionState::None;
+                                }
+                            }
+                        }
+                    }
+                }
                 input::InputAction::Paste => {
                     // Ctrl+V: read the system clipboard off the event loop.
                     // The result is delivered back through `paste_rx` and
@@ -1783,47 +2359,6 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::NextSibling => {
                     app.cycle_sibling(1);
                 }
-                input::InputAction::ToggleSidebar => {
-                    // Cycle: auto → forced on → forced off → auto. Starting
-                    // from `None` (auto), always force on first so the user
-                    // sees an immediate effect even on a wide terminal where
-                    // auto already shows the pane.
-                    app.sidebar_forced = match app.sidebar_forced {
-                        None => Some(true),
-                        Some(true) => Some(false),
-                        Some(false) => None,
-                    };
-                    // Reset scroll so a freshly shown pane starts at the top.
-                    if app.sidebar_forced == Some(true) {
-                        app.sidebar_scroll = 0;
-                    }
-                }
-                input::InputAction::SidebarScrollUp => {
-                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(2);
-                }
-                input::InputAction::SidebarScrollDown => {
-                    let max = app
-                        .sidebar_max_scroll
-                        .saturating_sub(app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0));
-                    app.sidebar_scroll = (app.sidebar_scroll + 2).min(max);
-                }
-                input::InputAction::SidebarScrollPageUp => {
-                    let page = app
-                        .sidebar_rect
-                        .map(|r| (r.height as usize).saturating_sub(1).max(1))
-                        .unwrap_or(1);
-                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(page);
-                }
-                input::InputAction::SidebarScrollPageDown => {
-                    let page = app
-                        .sidebar_rect
-                        .map(|r| (r.height as usize).saturating_sub(1).max(1))
-                        .unwrap_or(1);
-                    let max = app
-                        .sidebar_max_scroll
-                        .saturating_sub(app.sidebar_rect.map(|r| r.height as usize).unwrap_or(0));
-                    app.sidebar_scroll = (app.sidebar_scroll + page).min(max);
-                }
                 input::InputAction::InsertChar(c) => {
                     // Already handled by process_event mutating app.input
                     let _ = c;
@@ -1835,7 +2370,7 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::CursorLeft => {}
                 input::InputAction::CursorRight => {}
                 input::InputAction::SuggestNext => {
-                    let count = app.suggestion_matches().len();
+                    let count = app.completions().len();
                     if count > 0 {
                         let next = match app.suggestion_index {
                             Some(i) => (i + 1) % count,
@@ -1845,7 +2380,7 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::SuggestPrev => {
-                    let count = app.suggestion_matches().len();
+                    let count = app.completions().len();
                     if count > 0 {
                         let prev = match app.suggestion_index {
                             Some(i) => {
@@ -1862,11 +2397,43 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::AcceptSuggestion(idx_str) => {
                     if let Ok(idx) = idx_str.parse::<usize>() {
-                        let cmds: Vec<_> =
-                            app.suggestion_matches().iter().map(|(c, _)| *c).collect();
-                        if let Some(cmd) = cmds.get(idx) {
-                            app.input = cmd.to_string();
-                            app.cursor_position = app.input.chars().count();
+                        let completions = app.completions();
+                        if let Some(comp) = completions.get(idx) {
+                            let replace_start = comp.replace_start;
+                            let replace_end = comp.replace_end;
+                            let mut label = comp.label.clone();
+                            // File accept: append a trailing space so the user
+                            // can keep typing their message (matches
+                            // opencode's splice behaviour). Directories end in
+                            // `/` and the popup re-triggers showing the dir's
+                            // contents, so no space is appended there.
+                            let is_dir = label.ends_with('/');
+                            if !is_dir {
+                                let needs_space = app
+                                    .input
+                                    .get(replace_end..)
+                                    .and_then(|s| s.chars().next())
+                                    .map(|c| !c.is_whitespace())
+                                    .unwrap_or(true);
+                                if needs_space {
+                                    label.push(' ');
+                                }
+                            }
+                            // Splice `label` into the input over the
+                            // `[replace_start, replace_end)` byte range, then
+                            // land the cursor just past the inserted text.
+                            let mut new_input =
+                                String::with_capacity(app.input.len() + label.len());
+                            new_input.push_str(&app.input[..replace_start]);
+                            new_input.push_str(&label);
+                            let cursor_byte = replace_start + label.len();
+                            new_input.push_str(&app.input[replace_end..]);
+                            app.input = new_input;
+                            app.cursor_position = app.input[..cursor_byte].chars().count();
+                            // Drop the cached project scan so newly-created
+                            // files become visible on the next `@` mention
+                            // without a restart.
+                            app.path_scan_cache = None;
                         }
                     }
                 }
@@ -2009,22 +2576,64 @@ async fn run_app_loop<B: Backend>(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    // Sticky pinned card header: collapse it on click.
-                    if app.sticky_rect.is_some_and(|r| {
+                    // Hint bar's goal segment: surface the full goal via the
+                    // existing `/goal status` command. Acts as the
+                    // click-to-expand affordance promised by the hint bar.
+                    if app.hint_goal_rect.is_some_and(|r| {
+                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                    }) {
+                        let cmd = "/goal status".to_string();
+                        runtime.is_responding.store(true, Ordering::SeqCst);
+                        *runtime.activity_status.lock().await = "queued".to_string();
+                        app.follow_bottom = true;
+                        app.pin_header_line = None;
+                        runtime
+                            .messages
+                            .lock()
+                            .await
+                            .push(TranscriptMessage::new(Role::User, cmd.clone()));
+                        let _ = app.tx.send(AgentRequest::SlashCommand(cmd));
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.sticky_rect.is_some_and(|r| {
+                        // Sticky pinned card header: collapse it on click.
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         if let Some(mi) = app.sticky_card {
                             let mut messages = runtime.messages.lock().await;
+                            app.focused_target =
+                                app.focused_messages().get(mi).and_then(|message| {
+                                    if message.is_thinking() {
+                                        Some(InteractiveTarget::thinking(mi))
+                                    } else if message.is_tool_step() || message.is_subagent_task() {
+                                        Some(InteractiveTarget::tool_step(mi))
+                                    } else {
+                                        None
+                                    }
+                                });
                             app.toggle_card_pinned(&mut messages, mi);
                             drop(messages);
                         }
+                        // Activating a card via click implies keyboard focus
+                        // follows it as well.
+                        app.focus_zone = input::FocusZone::Browse;
                         app.selection = SelectionState::None;
                         app.drag.cancel();
                     } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        if cursor.block_idx == usize::MAX {
+                        if cursor.message_idx == crate::render::INPUT_MSG_IDX {
+                            // Click inside the live input box: hand keyboard
+                            // focus back to the prompt so the next keypress
+                            // edits rather than navigating cards.
+                            app.focus_zone = input::FocusZone::Compose;
+                            app.focused_target = None;
+                            app.selection = SelectionState::start_range(cursor);
+                            app.drag.start(cursor);
+                        } else if cursor.block_idx == TOOL_STEP_BLOCK_IDX {
                             // Clicked a tool-step card header: navigate into a
                             // sub-agent task, otherwise toggle that card.
                             let mi = cursor.message_idx;
+                            app.focused_target = Some(InteractiveTarget::tool_step(mi));
                             let mut messages = runtime.messages.lock().await;
                             let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
                                 .and_then(|message| {
@@ -2041,14 +2650,17 @@ async fn run_app_loop<B: Backend>(
                                 app.toggle_card_pinned(&mut messages, mi);
                                 drop(messages);
                             }
+                            app.focus_zone = input::FocusZone::Browse;
                             app.selection = SelectionState::None;
                             app.drag.cancel();
-                        } else if cursor.block_idx == usize::MAX - 1 {
+                        } else if cursor.block_idx == THINKING_BLOCK_IDX {
                             // Clicked a reasoning trace header: toggle that trace.
                             let mi = cursor.message_idx;
+                            app.focused_target = Some(InteractiveTarget::thinking(mi));
                             let mut messages = runtime.messages.lock().await;
                             app.toggle_card_pinned(&mut messages, mi);
                             drop(messages);
+                            app.focus_zone = input::FocusZone::Browse;
                             app.selection = SelectionState::None;
                             app.drag.cancel();
                         } else {
@@ -2064,9 +2676,11 @@ async fn run_app_loop<B: Backend>(
                                 app.selection = SelectionState::start_range(cursor);
                                 app.drag.start(cursor);
                             }
+                            app.focused_target = None;
                         }
                     } else {
                         app.selection = SelectionState::None;
+                        app.focused_target = None;
                         app.drag.cancel();
                     }
                 }
@@ -2098,6 +2712,32 @@ async fn run_app_loop<B: Backend>(
                             message_idx: mi,
                             block_idx: bi,
                         };
+                    }
+                }
+                input::InputAction::Hover { x, y } => {
+                    // Only reasoning-trace headers carry a hover affordance
+                    // today. When the pointer rests on one — either the inline
+                    // header (block_idx == THINKING_BLOCK_IDX) or the sticky pinned
+                    // variant — record its message index so the next draw
+                    // brightens it; otherwise clear it.
+                    if app.sticky_rect.is_some_and(|r| {
+                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                    }) {
+                        if let Some(mi) = app.sticky_card {
+                            let is_thinking = runtime
+                                .messages
+                                .lock()
+                                .await
+                                .get(mi)
+                                .map(|m| m.is_thinking())
+                                .unwrap_or(false);
+                            app.hovered_reasoning = is_thinking.then_some(mi);
+                        }
+                    } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
+                        app.hovered_reasoning =
+                            (cursor.block_idx == THINKING_BLOCK_IDX).then_some(cursor.message_idx);
+                    } else {
+                        app.hovered_reasoning = None;
                     }
                 }
                 input::InputAction::ConfigureKey => {
@@ -2197,10 +2837,10 @@ fn compact_retry_reason(message: &str) -> String {
 /// indices are recorded against whichever slice was rendered, so mutations must
 /// resolve through the same context.
 fn resolve_focused_mut<'a>(
-    messages: &'a mut [ChatMessage],
+    messages: &'a mut [TranscriptMessage],
     focus_stack: &[String],
     mi: usize,
-) -> Option<&'a mut ChatMessage> {
+) -> Option<&'a mut TranscriptMessage> {
     let Some(current) = focus_stack.last() else {
         return messages.get_mut(mi);
     };
@@ -2214,9 +2854,9 @@ fn resolve_focused_mut<'a>(
 /// conversation, or the focused sub-agent task's child stream) for bulk
 /// expand/collapse operations. Callers filter by kind as needed.
 fn focused_messages_mut<'a>(
-    messages: &'a mut [ChatMessage],
+    messages: &'a mut [TranscriptMessage],
     focus_stack: &[String],
-) -> Box<dyn Iterator<Item = &'a mut ChatMessage> + 'a> {
+) -> Box<dyn Iterator<Item = &'a mut TranscriptMessage> + 'a> {
     match focus_stack.last() {
         None => Box::new(messages.iter_mut()),
         Some(current) => {
@@ -2234,11 +2874,11 @@ fn focused_messages_mut<'a>(
     }
 }
 
-/// Extract selected text from either chat messages or the live input box,
+/// Extract selected text from either transcript messages or the live input box,
 /// depending on which the semantic selection covers.
 fn extract_selection_text(
     sel: &SelectionState,
-    messages: &[crate::document::ChatMessage],
+    messages: &[crate::document::TranscriptMessage],
     input: &str,
     layout_map: &crate::layout::LayoutMap,
 ) -> Option<String> {
@@ -2420,7 +3060,7 @@ pub async fn start_tui(
     .await
 }
 
-fn chat_message_from_core(message: Message) -> Option<ChatMessage> {
+fn transcript_message_from_core(message: Message) -> Option<TranscriptMessage> {
     if message.hidden || message.role == Role::System {
         return None;
     }
@@ -2442,14 +3082,14 @@ fn chat_message_from_core(message: Message) -> Option<ChatMessage> {
     if content.is_empty() {
         None
     } else {
-        let mut chat = ChatMessage::new(message.role, content);
-        chat.provider = provider;
-        chat.model = model;
-        Some(chat)
+        let mut msg = TranscriptMessage::new(message.role, content);
+        msg.provider = provider;
+        msg.model = model;
+        Some(msg)
     }
 }
 
-fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
+fn transcript_messages_from_core(messages: Vec<Message>) -> Vec<TranscriptMessage> {
     let mut restored = Vec::new();
     for mut message in messages {
         if message.hidden || message.role == Role::System {
@@ -2461,7 +3101,7 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
         let model = message.model.clone();
         if message.role == Role::Assistant {
             if let Some(reasoning) = message.reasoning_content.take() {
-                let mut thinking = ChatMessage::thinking(reasoning);
+                let mut thinking = TranscriptMessage::thinking(reasoning);
                 thinking.provider = provider.clone();
                 thinking.model = model.clone();
                 thinking.set_thinking_duration(0);
@@ -2470,7 +3110,8 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
                     // Historical results match by tool name, so use it as the id.
-                    let mut step = ChatMessage::tool_step(call.name.clone(), call.name, call.arguments);
+                    let mut step =
+                        TranscriptMessage::tool_step(call.name.clone(), call.name, call.arguments);
                     step.provider = provider.clone();
                     step.model = model.clone();
                     restored.push(step);
@@ -2490,7 +3131,7 @@ fn chat_messages_from_core(messages: Vec<Message>) -> Vec<ChatMessage> {
                 }
             }
         }
-        if let Some(message) = chat_message_from_core(message) {
+        if let Some(message) = transcript_message_from_core(message) {
             restored.push(message);
         }
     }
@@ -2518,14 +3159,14 @@ mod tests {
 
     #[test]
     fn restored_history_hides_harness_messages() {
-        assert!(chat_message_from_core(Message::hidden(Role::User, "internal")).is_none());
-        assert!(chat_message_from_core(Message::new(Role::System, "system")).is_none());
+        assert!(transcript_message_from_core(Message::hidden(Role::User, "internal")).is_none());
+        assert!(transcript_message_from_core(Message::new(Role::System, "system")).is_none());
     }
     #[test]
     fn restored_history_uses_command_display_content() {
         let message = Message::new(Role::User, "Expanded internal prompt")
             .with_display_content("/review working-tree");
-        let restored = chat_message_from_core(message).unwrap();
+        let restored = transcript_message_from_core(message).unwrap();
         assert_eq!(restored.raw, "/review working-tree");
     }
 
@@ -2536,7 +3177,7 @@ mod tests {
         // traceable in the transcript.
         let message = Message::new(Role::Assistant, "Hello from kimi")
             .with_attribution("kimi-code", "kimi-for-coding");
-        let restored = chat_message_from_core(message).unwrap();
+        let restored = transcript_message_from_core(message).unwrap();
         assert_eq!(restored.provider.as_deref(), Some("kimi-code"));
         assert_eq!(restored.model.as_deref(), Some("kimi-for-coding"));
         assert_eq!(
@@ -2545,13 +3186,16 @@ mod tests {
         );
 
         // A plain user message carries no attribution.
-        let user = chat_message_from_core(Message::new(Role::User, "hi")).unwrap();
+        let user = transcript_message_from_core(Message::new(Role::User, "hi")).unwrap();
         assert!(user.attribution_label().is_none());
 
         // A provider without an id still surfaces the model alone.
         let model_only = Message::new(Role::Assistant, "x").with_attribution("", "gpt-4o");
-        let restored = chat_message_from_core(model_only).unwrap();
-        assert_eq!(restored.attribution_label(), Some((String::new(), "gpt-4o".to_string())));
+        let restored = transcript_message_from_core(model_only).unwrap();
+        assert_eq!(
+            restored.attribution_label(),
+            Some((String::new(), "gpt-4o".to_string()))
+        );
     }
 
     #[test]
@@ -2569,7 +3213,7 @@ mod tests {
             hidden: false,
         };
 
-        let restored = chat_messages_from_core(vec![message]);
+        let restored = transcript_messages_from_core(vec![message]);
         assert_eq!(restored.len(), 1);
         let thinking = &restored[0];
         assert!(thinking.is_thinking());
@@ -2600,7 +3244,7 @@ mod tests {
             hidden: false,
         };
 
-        let restored = chat_message_from_core(message).unwrap();
+        let restored = transcript_message_from_core(message).unwrap();
         assert!(restored.raw.contains("read_file"));
     }
 
@@ -2648,7 +3292,7 @@ mod tests {
             ),
         ];
 
-        let mut restored = chat_messages_from_core(messages);
+        let mut restored = transcript_messages_from_core(messages);
         assert_eq!(restored.len(), 2);
         restored[0].set_tool_step_expanded(true);
         restored[1].set_tool_step_expanded(true);
@@ -2679,27 +3323,27 @@ mod tests {
 
     /// Build a small conversation with two sibling sub-agent tasks, each with a
     /// couple of child messages, for focus-navigation tests.
-    fn conversation_with_subagents() -> Vec<ChatMessage> {
-        let mut a = ChatMessage::tool_step(
+    fn conversation_with_subagents() -> Vec<TranscriptMessage> {
+        let mut a = TranscriptMessage::tool_step(
             "task_a",
             "task",
             r#"{"description":"explore a","prompt":"..."}"#,
         );
         a.subagent_children_mut()
             .unwrap()
-            .push(ChatMessage::new(Role::Assistant, "child A1"));
-        let mut b = ChatMessage::tool_step(
+            .push(TranscriptMessage::new(Role::Assistant, "child A1"));
+        let mut b = TranscriptMessage::tool_step(
             "task_b",
             "task",
             r#"{"description":"explore b","prompt":"..."}"#,
         );
         b.subagent_children_mut()
             .unwrap()
-            .push(ChatMessage::new(Role::Assistant, "child B1"));
+            .push(TranscriptMessage::new(Role::Assistant, "child B1"));
         vec![
-            ChatMessage::new(Role::User, "hi"),
+            TranscriptMessage::new(Role::User, "hi"),
             a,
-            ChatMessage::new(Role::Assistant, "ok"),
+            TranscriptMessage::new(Role::Assistant, "ok"),
             b,
         ]
     }
@@ -2743,5 +3387,320 @@ mod tests {
             .filter(|m| m.is_tool_step())
             .count();
         assert_eq!(tool_steps, 2);
+    }
+
+    // ----- `@path` completion tests -----
+
+    #[test]
+    fn mention_range_detects_at_start_of_input() {
+        // Cursor at end of `@src`: range covers the whole token.
+        assert_eq!(mention_range_at("@src", 4), Some((0, 4)));
+    }
+
+    #[test]
+    fn mention_range_detects_inline_after_whitespace() {
+        // `look at @src`: the `@` follows a space, so the range starts at the
+        // `@` and ends at the cursor.
+        assert_eq!(mention_range_at("look at @src", 12), Some((8, 12)));
+    }
+
+    #[test]
+    fn mention_range_rejects_email_style_at() {
+        // `user@host` — the char before `@` is non-whitespace, so no mention.
+        assert_eq!(mention_range_at("user@host", 9), None);
+    }
+
+    #[test]
+    fn mention_range_rejects_whitespace_between_at_and_cursor() {
+        // `@src foo`: the cursor sits after a space, walking back crosses
+        // whitespace before reaching `@`, so no mention.
+        assert_eq!(mention_range_at("@src foo", 8), None);
+    }
+
+    #[test]
+    fn mention_range_rejects_cursor_before_at() {
+        // Cursor before the `@`: nothing to walk back to.
+        assert_eq!(mention_range_at("look @src", 4), None);
+    }
+
+    #[test]
+    fn mention_range_handles_multibyte_before_at() {
+        // `中文 @x` — the `@` is preceded by an ASCII space, so we detect it
+        // even when multibyte chars appear earlier in the input.
+        let s = "中文 @x";
+        // Byte offset of the cursor at end (after `x`).
+        let cursor_byte = s.len();
+        let at_byte = s.find('@').unwrap();
+        assert_eq!(mention_range_at(s, cursor_byte), Some((at_byte, cursor_byte)));
+    }
+
+    #[test]
+    fn path_query_match_empty_query_keeps_top_level_only() {
+        // Empty query: only top-level entries survive.
+        assert!(path_query_match("Cargo.toml", ""));
+        assert!(path_query_match("src/", ""));
+        assert!(!path_query_match("src/main.rs", ""));
+        assert!(!path_query_match("src/nested/deep.rs", ""));
+    }
+
+    #[test]
+    fn path_query_match_substring_case_insensitive() {
+        // `@cargo` matches `Cargo.toml` regardless of case.
+        assert!(path_query_match("Cargo.toml", "cargo"));
+        assert!(path_query_match("src/Cargo.toml", "cargo"));
+        assert!(!path_query_match("README.md", "cargo"));
+    }
+
+    #[test]
+    fn path_query_match_directory_descend_on_trailing_slash() {
+        // `@src/` is a directory descend: prefix-match to enumerate its
+        // descendants, NOT every path containing `src/` anywhere.
+        assert!(path_query_match("src/main.rs", "src/"));
+        assert!(path_query_match("src/components/button.rs", "src/"));
+        assert!(!path_query_match("tests/src_runner.rs", "src/"));
+    }
+
+    #[test]
+    fn path_query_match_mid_path_substring() {
+        // `@src/foo` falls through to plain substring (no trailing slash),
+        // so it only matches paths that literally contain `src/foo`.
+        assert!(path_query_match("src/foo.rs", "src/foo"));
+        assert!(path_query_match("src/foo/bar.rs", "src/foo"));
+        // `src/components/foo.rs` does NOT contain `src/foo` as a substring,
+        // so it is excluded — the user can type `@foo` instead for a wider
+        // filename match.
+        assert!(!path_query_match("src/components/foo.rs", "src/foo"));
+        assert!(!path_query_match("src/bar.rs", "src/foo"));
+    }
+
+    /// Build a minimal `App` scoped to a tempdir project so we can exercise
+    /// the completion pipeline end-to-end without touching the user's real
+    /// filesystem. Mirrors how a real session captures cwd at startup.
+    fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for d in dirs {
+            std::fs::create_dir_all(tmp.path().join(d)).expect("mkdir");
+        }
+        for f in files {
+            // Create parent dirs as needed so `src/foo.rs` lays down cleanly.
+            let path = tmp.path().join(f);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir for file");
+            }
+            std::fs::write(path, "x").expect("write file");
+        }
+        let cwd = tmp.path().to_path_buf();
+        let app = App {
+            input: String::new(),
+            messages: Vec::new(),
+            scroll: 0,
+            follow_bottom: true,
+            content_lines: 0,
+            view_height: 0,
+            max_scroll: 0,
+            sticky_card: None,
+            sticky_rect: None,
+            hint_goal_rect: None,
+            sticky_header_line: None,
+            pin_header_line: None,
+            focus_stack: Vec::new(),
+            tx: new_test_channel(),
+            should_quit: Arc::new(AtomicBool::new(false)),
+            suggestion_index: None,
+            custom_commands: Vec::new(),
+            cursor_position: 0,
+            input_scroll: 0,
+            active_modal: Modal::None,
+            modal_index: 0,
+            current_provider: "mock".to_string(),
+            current_model: "mock".to_string(),
+            cwd_display: ".".to_string(),
+            cwd: cwd.clone(),
+            path_scan_cache: None,
+            current_goal: None,
+            loop_status: "idle".to_string(),
+            activity_status: String::new(),
+            pending_permission: None,
+            sessions_overview: Vec::new(),
+            permission_confirm_always: false,
+            permission_scroll: 0,
+            permission_max_scroll: 0,
+            input_history: Vec::new(),
+            history_index: None,
+            pending_images: Vec::new(),
+            selection: SelectionState::None,
+            drag: SelectionDrag::default(),
+            layout_map: LayoutMap::new(),
+            hovered_reasoning: None,
+            focused_target: None,
+            focus_zone: input::FocusZone::Compose,
+            cursor_hidden: false,
+            copy_toast_until: None,
+            copy_toast_message: String::new(),
+            copy_toast_failed: false,
+            ctrl_c_armed_ticks: 0,
+            esc_armed_ticks: 0,
+            spinner_tick: 0,
+            stashed_input: String::new(),
+            setup_solution: None,
+            setup_endpoint: None,
+            setup_model: None,
+            key_status: HashMap::new(),
+            theme: Theme::default(),
+            mcp_statuses: Vec::new(),
+        };
+        (app, tmp)
+    }
+
+    /// Stand-up helper for tests that just need a sender half of the agent
+    /// channel; the receiver is dropped because no test drives the agent loop.
+    fn new_test_channel() -> mpsc::UnboundedSender<AgentRequest> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tx
+    }
+
+    #[test]
+    fn completions_returns_empty_when_input_does_not_trigger() {
+        // Plain text without `@` or `/` produces no completions.
+        let (mut app, _tmp) = app_in_tempdir(&["Cargo.toml"], &[]);
+        app.input = "hello world".to_string();
+        app.cursor_position = app.input.chars().count();
+        assert!(app.completions().is_empty());
+        assert_eq!(app.completion_kind(), CompletionKind::None);
+    }
+
+    #[test]
+    fn completions_classifies_slash_input_as_slash_kind() {
+        let (mut app, _tmp) = app_in_tempdir(&["Cargo.toml"], &[]);
+        app.input = "/go".to_string();
+        app.cursor_position = app.input.chars().count();
+        let completions = app.completions();
+        assert_eq!(app.completion_kind(), CompletionKind::Slash);
+        assert!(completions.iter().any(|c| c.label == "/goal"));
+        // Slash candidates replace the whole input.
+        for c in &completions {
+            assert_eq!(c.replace_start, 0);
+            assert_eq!(c.replace_end, app.input.len());
+        }
+    }
+
+    #[test]
+    fn completions_path_returns_top_level_for_bare_at() {
+        // A bare `@` lists top-level entries only: the file plus the
+        // synthesized top-level directory entry.
+        let (mut app, _tmp) =
+            app_in_tempdir(&["Cargo.toml", "src/main.rs", "README.md"], &["src"]);
+        app.input = "@".to_string();
+        app.cursor_position = 1;
+        let completions = app.completions();
+        assert_eq!(app.completion_kind(), CompletionKind::Path);
+
+        let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+        // Dirs come first alphabetically, then files alphabetically.
+        assert!(labels.contains(&"src/"));
+        assert!(labels.contains(&"Cargo.toml"));
+        assert!(labels.contains(&"README.md"));
+        // No nested paths leak into the bare-`@` menu.
+        assert!(!labels.iter().any(|l| l.contains("main.rs")));
+        // Replace range points just past the `@` (byte 1), ends at cursor (1).
+        for c in &completions {
+            assert_eq!(c.replace_start, 1);
+            assert_eq!(c.replace_end, 1);
+            assert!(c.description.is_empty(), "path menu carries no description");
+        }
+    }
+
+    #[test]
+    fn completions_path_descends_into_subdirectory() {
+        // `@src/` triggers directory descend: only paths under `src/` match.
+        let (mut app, _tmp) = app_in_tempdir(
+            &["src/main.rs", "src/util/mod.rs", "tests/smoke.rs"],
+            &["src", "src/util", "tests"],
+        );
+        app.input = "@src/".to_string();
+        app.cursor_position = app.input.chars().count();
+        let completions = app.completions();
+        let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"src/"));
+        assert!(labels.contains(&"src/main.rs"));
+        assert!(labels.contains(&"src/util/"));
+        assert!(labels.contains(&"src/util/mod.rs"));
+        // Nothing from `tests/` leaks in — descend is a prefix match.
+        assert!(!labels.iter().any(|l| l.contains("tests")));
+    }
+
+    #[test]
+    fn completions_path_substring_match_picks_files_across_dirs() {
+        // `@main` finds `src/main.rs` via substring match.
+        let (mut app, _tmp) = app_in_tempdir(&["src/main.rs", "lib/other.rs"], &["src", "lib"]);
+        app.input = "@main".to_string();
+        app.cursor_position = app.input.chars().count();
+        let completions = app.completions();
+        let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"src/main.rs"));
+        assert!(!labels.iter().any(|l| l.contains("other.rs")));
+    }
+
+    #[test]
+    fn completions_path_skips_dotgit_directory() {
+        // `.git/` is always excluded even though hidden files are kept.
+        let (mut app, _tmp) = app_in_tempdir(
+            &[".git/HEAD", ".git/config", "src/main.rs", ".env"],
+            &[".git", "src"],
+        );
+        app.input = "@".to_string();
+        app.cursor_position = 1;
+        let completions = app.completions();
+        let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+        // Hidden files like `.env` are listed; `.git/` and its contents are not.
+        assert!(labels.contains(&".env"));
+        assert!(labels.contains(&"src/"));
+        assert!(!labels.iter().any(|l| l.starts_with(".git")));
+    }
+
+    #[test]
+    fn completions_path_cache_populated_once() {
+        // The scan should run only the first time `@` triggers; we verify by
+        // observing `path_scan_cache` transitioning from None to Some.
+        let (mut app, _tmp) = app_in_tempdir(&["Cargo.toml"], &[]);
+        assert!(app.path_scan_cache.is_none());
+        app.input = "@".to_string();
+        app.cursor_position = 1;
+        let _ = app.completions();
+        let first_scan = app
+            .path_scan_cache
+            .as_ref()
+            .expect("scan populated")
+            .clone();
+        // A second call must not re-scan: cache stays the same Vec pointer
+        // content. We compare lengths because the Vec itself may move.
+        app.input = "@Ca".to_string();
+        app.cursor_position = app.input.chars().count();
+        let _ = app.completions();
+        let second_scan = app
+            .path_scan_cache
+            .as_ref()
+            .expect("scan still populated")
+            .clone();
+        assert_eq!(first_scan.entries, second_scan.entries);
+    }
+
+    #[test]
+    fn manual_walk_returns_files_and_synthesized_dirs() {
+        // The manual fallback path (used when rg is missing) must still
+        // produce directory entries with trailing slashes and skip `.git`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("src/nested")).unwrap();
+        std::fs::write(tmp.path().join("src/nested/foo.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("top.md"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/HEAD"), "x").unwrap();
+
+        let entries = manual_walk(tmp.path());
+        assert!(entries.contains(&"top.md".to_string()));
+        assert!(entries.contains(&"src/".to_string()));
+        assert!(entries.contains(&"src/nested/".to_string()));
+        assert!(entries.contains(&"src/nested/foo.rs".to_string()));
+        assert!(!entries.iter().any(|e| e.starts_with(".git")));
     }
 }

@@ -1,6 +1,6 @@
 # User message
 
-Sent user prompts displayed in the chat transcript.
+Sent user prompts displayed in the transcript.
 
 ## Appearance
 

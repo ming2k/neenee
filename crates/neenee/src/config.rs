@@ -1,5 +1,7 @@
 use directories::ProjectDirs;
 use neenee_core::mcp::McpServerConfig;
+use neenee_core::skills::SkillsConfig;
+use neenee_core::tools::WebSearchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -46,6 +48,12 @@ pub struct Config {
     // Volcengine (ByteDance)
     pub volcengine_api_key: Option<String>,
     pub volcengine_model: Option<String>,
+    /// Skill configuration ([skills] table).
+    #[serde(default)]
+    pub skills: SkillsConfig,
+    /// Web tool configuration ([websearch] table): search backend, proxy, timeout.
+    #[serde(default)]
+    pub websearch: WebSearchConfig,
 }
 
 impl Default for Config {
@@ -79,6 +87,8 @@ impl Default for Config {
             glm_model: Some("glm-4-plus".to_string()),
             volcengine_api_key: None,
             volcengine_model: Some("deepseek-v3-250324".to_string()),
+            skills: SkillsConfig::default(),
+            websearch: WebSearchConfig::default(),
         }
     }
 }

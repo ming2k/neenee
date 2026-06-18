@@ -8,8 +8,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "socks", "gzip", "brotli"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 async-trait = "0.1"
 glob = "0.3"
 walkdir = "2"
@@ -19,3 +20,6 @@ httpdate = "1"
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
+
+[dev-dependencies]
+toml = "0.8"

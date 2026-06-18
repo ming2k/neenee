@@ -12,11 +12,11 @@ shows the technical name, arguments, and result.
 
 | Attribute | Value |
 |-----------|-------|
-| Background | `element_bg` (33, 37, 54) band, inset 2 cols (`CHAT_H_INSET`) |
+| Background | `element_bg` (33, 37, 54) band, inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD |
 | Marker color | Status-colored (`success` / `error_fg` / `info`) |
 | Header text | Human-readable description + duration, `text_muted` BOLD |
-| Header text column | 4 from chat edge (band col 2, after `+ ` prefix) |
+| Header text column | 4 from transcript edge (band col 2, after `+ ` prefix) |
 
 The header shows only what the tool did and how long it took. The technical
 tool name is inside the expanded body.
@@ -46,10 +46,10 @@ the header-only collapsed form.
 | Truncation marker | `…` in `dim_fg`, shown only when output exceeds 8 lines |
 | Lines truncated to | Inner width (hard cut, no per-line ellipsis) |
 
-Clicking any preview row toggles the card open (the whole preview is
-registered as part of the header's hit region). Expanding swaps the preview
-for the full structured body (Tool / Arguments / Result) — the preview is
-only for the collapsed glance.
+Clicking any preview row focuses and toggles the card open (the whole preview
+is registered as part of the header's hit region). Expanding swaps the preview
+for the full structured body (Tool / Arguments / Result) — the preview is only
+for the collapsed glance.
 
 ## Expanded
 
@@ -114,6 +114,8 @@ See [expandable card](expandable-card.md#behavior) for the shared toggle,
 sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 
 - `Ctrl+T` expands or collapses all tool-step cards.
+- `Tab` / `Shift+Tab` includes visible tool-step cards in the keyboard focus
+  order; `Enter` / `Space` activates the focused card.
 
 ## Sub-agent children
 

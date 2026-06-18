@@ -14,19 +14,20 @@ use unicode_width::UnicodeWidthStr;
 use crate::layout::{BlockRegion, LayoutMap};
 
 use super::design::{
-    COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_TEXT_ROW_OFFSET, COMPOSER_VERTICAL_CHROME_ROWS,
+    COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS, COMPOSER_TEXT_ROW_OFFSET,
+    COMPOSER_VERTICAL_CHROME_ROWS,
 };
 use super::text_layout::{padded_tail, wrap_text, WrappedLine};
 use super::Theme;
 
 /// Special message_idx for the live input box in the layout map, so semantic
-/// selection / copy works on input text just like chat messages.
+/// selection / copy works on input text just like transcript messages.
 pub const INPUT_MSG_IDX: usize = usize::MAX - 2;
 
 /// Build the wrapped-line list the composer renders, including the synthetic
 /// trailing row it appends when the caret rests past the last wrapped line
 /// (e.g. just after an inserted newline). Both the height computation in
-/// [`super::draw_chat`] and the actual rendering in [`draw_composer`] go
+/// [`super::draw_transcript`] and the actual rendering in [`draw_composer`] go
 /// through this so the box never scrolls its own prompt glyph out of view on
 /// the first newline.
 fn composer_wrapped(input: &str, text_width: usize, byte_cursor: usize) -> Vec<WrappedLine> {
@@ -46,16 +47,25 @@ fn composer_wrapped(input: &str, text_width: usize, byte_cursor: usize) -> Vec<W
 /// the trailing caret row. Always at least 1 so an empty box still reserves a
 /// prompt line.
 pub(super) fn input_row_count(input: &str, text_width: usize, byte_cursor: usize) -> usize {
-    composer_wrapped(input, text_width, byte_cursor).len().max(1)
+    composer_wrapped(input, text_width, byte_cursor)
+        .len()
+        .max(1)
 }
 
 /// Draw the flat input box panel at the bottom of the screen.
+///
+/// `focused` reflects whether the prompt currently owns keyboard focus (the
+/// Compose zone). When `false` the panel is rendered with the dimmer
+/// "read-only" palette and the caret is hidden, so the user can see at a
+/// glance that keys will route to the conversation stream instead of the
+/// input box.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_composer(
     frame: &mut Frame,
     input_rect: Rect,
     input: &str,
     byte_cursor: usize,
+    focused: bool,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     record: bool,
@@ -65,14 +75,24 @@ pub fn draw_composer(
     // prefixed with `› ` on the first wrapped line / a two-space indent on
     // continuations. The top and bottom edges are half-block rows so the panel
     // floats a half row off the app background.
-    let panel_bg = theme.input_bg;
+    //
+    // When the prompt is blurred (Browse zone), the panel drops to the dimmer
+    // `user_panel_bg` and the prompt glyph uses `text_muted`, matching the
+    // already-sent user-message styling so the live box visibly recedes.
+    let panel_bg = if focused { theme.input_bg } else { theme.user_panel_bg };
+    let prompt_fg = if focused { theme.accent } else { theme.text_muted };
     let app_bg = theme.app_bg;
     let full_w = input_rect.width as usize;
-    let text_width = full_w.saturating_sub(COMPOSER_PROMPT_PREFIX_COLS).max(1);
-    let mut wrapped = composer_wrapped(input, text_width, byte_cursor);
+    // Reserve the left prompt prefix (`› `) and a matching right pad so text
+    // never touches either edge of the input panel — the box reads as a
+    // balanced solid band like the header.
+    let text_width = full_w
+        .saturating_sub(COMPOSER_PROMPT_PREFIX_COLS + COMPOSER_RIGHT_PAD_COLS)
+        .max(1);
+    let wrapped = composer_wrapped(input, text_width, byte_cursor);
 
     // Number of text rows that fit inside the box (top/bottom transition rows
-    // consume two lines). The box is sized by draw_chat to fit the wrapped text
+    // consume two lines). The box is sized by draw_transcript to fit the wrapped text
     // up to half the terminal height, so when the text exceeds this height we
     // scroll to keep the cursor visible.
     let visible_rows = (input_rect.height as usize)
@@ -122,7 +142,7 @@ pub fn draw_composer(
     // marks every wrapped continuation, so the box reads as a shell-style
     // prompt. Only the visible slice is rendered so overflowing content can
     // scroll while the box stays within its terminal-sized bounds.
-    let prompt_glyph = Span::styled("›", Style::default().bg(panel_bg).fg(theme.accent));
+    let prompt_glyph = Span::styled("›", Style::default().bg(panel_bg).fg(prompt_fg));
     let prompt_gap = Span::styled(" ", Style::default().bg(panel_bg));
     let indent = Span::styled(
         " ".repeat(COMPOSER_PROMPT_PREFIX_COLS),
@@ -184,10 +204,14 @@ pub fn draw_composer(
     }
 
     // Position the caret relative to the visible slice, after the `> ` /
-    // indent prefix.
-    let visible_cursor_line = cursor_line.saturating_sub(scroll);
-    let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
-    let cursor_x =
-        input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16 + cursor_col.min(text_width) as u16;
-    frame.set_cursor(cursor_x, cursor_y);
+    // indent prefix. Skipped when the prompt is blurred (Browse zone): the
+    // caret would otherwise sit visibly inside a box that no longer accepts
+    // input, contradicting the dimmed styling.
+    if focused {
+        let visible_cursor_line = cursor_line.saturating_sub(scroll);
+        let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
+        let cursor_x =
+            input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16 + cursor_col.min(text_width) as u16;
+        frame.set_cursor(cursor_x, cursor_y);
+    }
 }

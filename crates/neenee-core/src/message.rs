@@ -78,7 +78,11 @@ impl Message {
     }
 
     pub fn with_images(mut self, images: Vec<ImagePart>) -> Self {
-        self.images = if images.is_empty() { None } else { Some(images) };
+        self.images = if images.is_empty() {
+            None
+        } else {
+            Some(images)
+        };
         self
     }
 

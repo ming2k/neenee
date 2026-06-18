@@ -122,7 +122,7 @@ impl Tool for PlanEnterTool {
     }
 
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
@@ -178,7 +178,7 @@ impl Tool for PlanExitTool {
     }
 
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {

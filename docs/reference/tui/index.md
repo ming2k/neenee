@@ -9,7 +9,7 @@ The neenee terminal UI is built with [ratatui] and rendered by the
 ┌──────────────────────────────────────────────────────────┐
 │  Header                                            (0–4)  │
 ├──────────────────────────────────────────────────────────┤
-│  Chat viewport                                  (Min 0)  │
+│  Transcript viewport                            (Min 0)  │
 ├──────────────────────────────────────────────────────────┤
 │  Status bar                                (0 or 1 row)  │
 │  Input box                         (2 + wrapped lines)  │
@@ -34,7 +34,6 @@ measurements table.
 | [Thinking card](thinking-card.md) | Expandable card for reasoning text |
 | [Status bar](status-bar.md) | Animated braille spinner + activity label |
 | [Hint line](hint-line.md) | Right-aligned keybinding hints |
-| [Sidebar](layout.md#sidebar-column) | Right-side persistent pane (goal, plans, loop) |
 | [Modals](modals.md) | Models, Sessions, History, Permission, API key, Help |
 
 ## Other reference
@@ -47,7 +46,7 @@ measurements table.
 
 | File | Responsibility |
 |------|---------------|
-| `render/mod.rs` | Draw orchestration: `draw_chat`, `ChatView`, `ChatRender`, `chat_band_rect`, `CHAT_H_INSET` |
+| `render/mod.rs` | Draw orchestration: `draw_transcript`, `TranscriptView`, `TranscriptRender`, `transcript_band_rect`, `TRANSCRIPT_H_INSET` |
 | `render/design.rs` | Non-color design tokens: spacing, gutters, fixed row counts, text measurement limits |
 | `render/theme.rs` | `Theme` (all color tokens) |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop`, color helpers |
@@ -56,10 +55,9 @@ measurements table.
 | `render/turn_artifacts.rs` | Tool-step, thinking, and sub-agent cards; sticky header; sub-agent bar |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
 | `render/chrome.rs` | `draw_status_bar`, `draw_hint`, `draw_suggestions`, `spinner_frame` |
-| `render/sidebar.rs` | `draw_sidebar`, `SidebarView`, `SIDEBAR_WIDTH`, `SIDEBAR_AUTO_WIDTH` |
 | `render/overlays.rs` | Modals: models, sessions, history, permission, API key, help, solution |
 | `render/markdown_table.rs` | `build_table_render`, `shrink_column_widths` |
-| `document.rs` | Document model: `ChatMessage`, `Block` enum, `MessageKind`, markdown parsing, `parse_arguments_kv` |
+| `document.rs` | Document model: `TranscriptMessage`, `Block` enum, `MessageKind`, markdown parsing, `parse_arguments_kv` |
 | `layout.rs` | `LayoutMap`, `BlockRegion`, `SemanticCursor`, hit-testing |
 | `selection.rs` | `SelectionState`, `get_selected_text`, character-boundary snapping |
 | `input.rs` | Event-to-action mapping: keyboard, mouse, `InputAction` enum |

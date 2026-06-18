@@ -1,28 +1,28 @@
 use neenee_core::commands::{discover_commands, expand_command, CustomCommand};
-use neenee_core::skills::Skill;
+use neenee_core::skills::{ListSkillsTool, ReloadSkillsTool, SkillRegistry, UseSkillTool};
 use neenee_core::{
     async_trait,
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
     providers::{
-        openai_compat_provider, GeminiProvider, LlamaServerProvider, MockProvider, OpenAIProvider,
-        KIMI_CODE_USER_AGENT,
+        openai_provider_spec, GeminiProvider, LlamaServerProvider, MockProvider,
+        OpenAiCompatProvider, KIMI_CODE_USER_AGENT,
     },
     tools::{
         BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, TaskTool,
-        TodoWriteTool, UseSkillTool, WebFetchTool, WebSearchTool, WriteFileTool,
+        TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
     Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalAccountingResult,
-    GoalService, GoalStatus, GoalStore, HarnessError, HarnessSnapshot, ImagePart, Message, Provider,
-    ProviderStreamEvent, Role, SessionOverview, TurnTimer, GOAL_COMPLETE_MARKER,
+    GoalService, GoalStatus, GoalStore, HarnessError, HarnessSnapshot, ImagePart, Message,
+    Provider, ProviderStreamEvent, Role, SessionOverview, Tool, TurnTimer, GOAL_COMPLETE_MARKER,
 };
 use neenee_tui::start_tui;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::sync::{Mutex, RwLock};
 use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -142,7 +142,7 @@ fn make_provider(
     base_url: Option<String>,
     user_agent: Option<String>,
 ) -> Arc<dyn Provider> {
-    if let Some(spec) = openai_compat_provider(provider_type) {
+    if let Some(spec) = openai_provider_spec(provider_type) {
         return Arc::new(spec.build(api_key, Some(model), user_agent));
     }
     match provider_type {
@@ -151,12 +151,12 @@ fn make_provider(
             base_url.unwrap_or_else(|| "http://localhost:8080".to_string()),
             model,
         )),
-        "custom" => Arc::new(OpenAIProvider::with_base_url(
+        "custom" => Arc::new(OpenAiCompatProvider::with_base_url(
             api_key,
             model,
             &base_url.unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string()),
         )),
-        "openai" => Arc::new(OpenAIProvider::new(api_key, model)),
+        "openai" => Arc::new(OpenAiCompatProvider::new(api_key, model)),
         _ => Arc::new(MockProvider),
     }
 }
@@ -333,6 +333,8 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "goal",
     "loop",
     "init",
+    "skills",
+    "skill",
     "clear",
     "help",
     "exit",
@@ -417,15 +419,14 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, Ha
         attempt += 1;
         let activity_for_run = tool_activity.clone();
         let streamed_for_run = streamed_text.clone();
-        let result = tokio::select! {
-            _ = token.cancelled() => return Err(HarnessError::Interrupted),
-            result = agent.run_streaming_with_events(&mut turn_history, |event| {
+        let result = agent
+            .run_streaming_with_events(&mut turn_history, &token, |event| {
                 if matches!(event, AgentEvent::ToolCall { .. }) {
                     activity_for_run.store(true, Ordering::SeqCst);
                 }
                 relay_agent_event(&tx, event, &streamed_for_run);
-            }) => result,
-        };
+            })
+            .await;
 
         let Err(error) = result else {
             break result;
@@ -628,6 +629,7 @@ fn relay_agent_event(
             output,
             duration_ms,
         },
+        AgentEvent::ToolCancelled { id, name } => AgentResponse::ToolCancelled { id, name },
         AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
@@ -979,7 +981,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Agent logic
     let initial_provider: Arc<dyn Provider> = {
         let provider_type = config.default_provider.clone();
-        if let Some(spec) = openai_compat_provider(&provider_type) {
+        if let Some(spec) = openai_provider_spec(&provider_type) {
             let api_key = std::env::var(spec.env_api_key)
                 .ok()
                 .or_else(|| config_api_key(&config, &provider_type))
@@ -1067,9 +1069,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         holder: provider_holder,
     });
 
-    // Shared skills registry for the use_skill tool
-    let skills_registry: Arc<Mutex<Vec<Skill>>> = Arc::new(Mutex::new(Vec::new()));
-    let _skills_for_agent = skills_registry.clone();
+    // Shared skills registry for the skill tools.
+    let skills_registry = Arc::new(SkillRegistry::load(&config.skills).await);
 
     let mcp = load_mcp_tools(&config.mcp).await;
     let mcp_statuses = mcp.statuses;
@@ -1082,13 +1083,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(GrepTool),
         Arc::new(GlobTool),
         Arc::new(ListDirTool),
-        Arc::new(WebFetchTool),
-        Arc::new(WebSearchTool),
+        Arc::new(WebFetchTool::with_config(config.websearch.clone())),
+        Arc::new(WebSearchTool::with_config(config.websearch.clone())),
         Arc::new(TodoWriteTool::new()),
         Arc::new(CreateProjectTool),
         Arc::new(InitConfigTool),
         Arc::new(UseSkillTool {
-            skills: skills_registry.clone(),
+            registry: skills_registry.clone(),
+        }),
+        Arc::new(ListSkillsTool {
+            registry: skills_registry.clone(),
+        }),
+        Arc::new(ReloadSkillsTool {
+            registry: skills_registry.clone(),
         }),
     ];
     tools.extend(mcp.tools);
@@ -1101,14 +1108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tools,
         AgentMode::Build,
         goal_service.clone(),
+        (*skills_registry).clone(),
     ));
-
-    // Sync skills from agent into the shared registry so use_skill can find them
-    {
-        let agent_skills = agent.skills.clone();
-        let mut reg = skills_registry.lock().unwrap();
-        *reg = agent_skills;
-    }
 
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session.
     let startup: StartupMode = parse_args(std::env::args().skip(1).collect());
@@ -1162,7 +1163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_p_name = config.default_provider.clone();
     let initial_m_name = {
         let pt = initial_p_name.as_str();
-        if let Some(spec) = openai_compat_provider(pt) {
+        if let Some(spec) = openai_provider_spec(pt) {
             spec.resolve_model(config_model(&config, pt))
         } else {
             match pt {
@@ -1189,6 +1190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn Agent Background Task
     let mcp_statuses_for_tui = mcp_statuses.clone();
+    let skills_registry_for_commands = skills_registry.clone();
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
@@ -1256,7 +1258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let new_p: Arc<dyn Provider> = {
                         let pt = provider_type.as_str();
                         // An explicit env var wins, then the persisted config key.
-                        let api_key = openai_compat_provider(pt)
+                        let api_key = openai_provider_spec(pt)
                             .map(|spec| spec.env_api_key)
                             .or(match pt {
                                 "openai" => Some("OPENAI_API_KEY"),
@@ -1982,6 +1984,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        "/skills" => {
+                            let sub = parts.get(1).copied().unwrap_or("list");
+                            match sub {
+                                "list" => {
+                                    let tool = ListSkillsTool {
+                                        registry: skills_registry_for_commands.clone(),
+                                    };
+                                    match tool.call("{}").await {
+                                        Ok(output) => {
+                                            let _ = resp_tx.send(AgentResponse::Text(output));
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                                "reload" => {
+                                    let tool = ReloadSkillsTool {
+                                        registry: skills_registry_for_commands.clone(),
+                                    };
+                                    match tool.call("{}").await {
+                                        Ok(output) => {
+                                            let _ = resp_tx.send(AgentResponse::Text(output));
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                                other => {
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                                        "Unknown skills command '{}'. Use 'list' or 'reload'.",
+                                        other
+                                    )));
+                                }
+                            }
+                        }
+                        "/skill" => {
+                            let name = cmd.strip_prefix("/skill").unwrap_or("").trim();
+                            if name.is_empty() {
+                                let _ = resp_tx
+                                    .send(AgentResponse::Error("Usage: /skill <name>".to_string()));
+                            } else {
+                                let args = serde_json::json!({ "name": name }).to_string();
+                                let tool = UseSkillTool {
+                                    registry: skills_registry_for_commands.clone(),
+                                };
+                                match tool.call(&args).await {
+                                    Ok(output) => {
+                                        let _ = resp_tx.send(AgentResponse::Text(output));
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                    }
+                                }
+                            }
+                        }
                         "/clear" => {
                             history.lock().await.clear();
                             let _ = session.replace_messages(Vec::new()).await;
@@ -2026,6 +2085,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /goal     — Set, inspect, complete, or clear the active goal\n\
                                 /loop [N|resume|status|stop] — Run or resume bounded autonomous goal work\n\
                                 /init [path] — Initialize a .neenee/ config tree\n\
+                                /skills [list|reload] — List or reload available skills\n\
+                                /skill <name> — Load a skill by name\n\
                                 /help     — Show available commands and keybindings\n\
                                 /exit     — Exit the program{}", custom_help)
                             ));
@@ -2120,16 +2181,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn format_goal_status(goal: &Goal) -> String {
-    let mut lines = vec![format!("Goal ({:?}): {}", goal.status, goal.objective)];
-    for (index, item) in goal.checklist.iter().enumerate() {
-        lines.push(format!(
-            "{}. [{:?}] {}",
-            index + 1,
-            item.status,
-            item.content
-        ));
+    use neenee_core::GoalChecklistStatus;
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Goal [{}]: {}",
+        goal.status.as_str(),
+        goal.objective
+    ));
+
+    if !goal.checklist.is_empty() {
+        let total = goal.checklist.len();
+        let done = goal
+            .checklist
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.status,
+                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
+                )
+            })
+            .count();
+        lines.push(String::new());
+        lines.push(format!("Plans ({done}/{total}):"));
+        for item in &goal.checklist {
+            let (glyph, label) = match item.status {
+                GoalChecklistStatus::Completed => ("✓", "done"),
+                GoalChecklistStatus::Cancelled => ("✗", "cancelled"),
+                GoalChecklistStatus::InProgress => ("◎", "in progress"),
+                GoalChecklistStatus::Pending => ("○", "pending"),
+            };
+            lines.push(format!(
+                "  {glyph} {content}  ({label})",
+                content = item.content
+            ));
+        }
     }
+
+    let has_token_budget = goal.token_budget.is_some_and(|b| b > 0);
+    let has_time = goal.time_used_seconds > 0;
+    if has_token_budget || has_time {
+        lines.push(String::new());
+        lines.push("Budget:".to_string());
+        if let Some(budget) = goal.token_budget.filter(|b| *b > 0) {
+            let used = goal.tokens_used;
+            let pct = ((used as f64) / (budget as f64) * 100.0).clamp(0.0, 100.0) as u8;
+            lines.push(format!(
+                "  tokens  {used} / {budget}  {}",
+                budget_bar(pct, 24)
+            ));
+        }
+        if has_time {
+            lines.push(format!(
+                "  time    {}",
+                humanize_seconds(goal.time_used_seconds)
+            ));
+        }
+    }
+
     lines.join("\n")
+}
+
+/// Render a fixed-width ASCII progress bar for `pct` (0..=100). The bar fills
+/// with `#` and empties with `-`, bracketed by `[` / `]` for a total width of
+/// `width` characters (including the brackets).
+fn budget_bar(pct: u8, width: usize) -> String {
+    if width < 4 {
+        return format!("[{pct}%]");
+    }
+    let bar_width = width - 2;
+    let filled = ((pct as usize) * bar_width / 100).min(bar_width);
+    let empty = bar_width - filled;
+    format!("[{}{}]", "#".repeat(filled), "-".repeat(empty))
+}
+
+/// Format a duration in seconds as a compact `Xh YYm` / `Xm YYs` / `Xs` string.
+fn humanize_seconds(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 #[cfg(test)]
@@ -2223,7 +2358,7 @@ mod tests {
         }
 
         fn access(&self) -> neenee_core::ToolAccess {
-            neenee_core::ToolAccess::ReadOnly
+            neenee_core::ToolAccess::Read
         }
 
         async fn call(&self, _arguments: &str) -> Result<String, String> {
@@ -2247,8 +2382,12 @@ mod tests {
         assert!(neenee_core::is_context_overflow(
             "maximum context length exceeded for this model"
         ));
-        assert!(neenee_core::is_context_overflow("too many tokens in request"));
-        assert!(!neenee_core::is_context_overflow("network connection reset"));
+        assert!(neenee_core::is_context_overflow(
+            "too many tokens in request"
+        ));
+        assert!(!neenee_core::is_context_overflow(
+            "network connection reset"
+        ));
     }
 
     #[test]
@@ -2266,8 +2405,29 @@ mod tests {
         };
 
         let status = format_goal_status(&goal);
-        assert!(status.contains("ship"));
-        assert!(status.contains("[InProgress] verify"));
+        assert!(status.contains("Goal [active]: ship"));
+        assert!(status.contains("Plans (0/1):"));
+        assert!(status.contains("◎ verify  (in progress)"));
+    }
+
+    #[test]
+    fn goal_status_renders_budget_bar_and_time() {
+        let goal = Goal {
+            objective: "ship".to_string(),
+            status: GoalStatus::Active,
+            checklist: Vec::new(),
+            tokens_used: 40_000,
+            token_budget: Some(50_000),
+            time_used_seconds: 125,
+        };
+
+        let status = format_goal_status(&goal);
+        // 80% of a 24-char bar (bar_width=22) → 17 filled, 5 empty.
+        let expected_bar = budget_bar(80, 24);
+        assert_eq!(expected_bar.len(), 24);
+        assert_eq!(expected_bar.matches('#').count(), 17);
+        assert!(status.contains(&format!("tokens  40000 / 50000  {expected_bar}")));
+        assert!(status.contains("time    2m05s"));
     }
 
     #[tokio::test]
@@ -2283,6 +2443,7 @@ mod tests {
             Vec::new(),
             AgentMode::Build,
             goal_service.clone(),
+            SkillRegistry::empty(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -2359,6 +2520,7 @@ mod tests {
             vec![Arc::new(RetryReadTool)],
             AgentMode::Build,
             goal_service.clone(),
+            SkillRegistry::empty(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
 

@@ -1,7 +1,7 @@
 //! Expandable card renderers: tool-step, thinking, child tool step, sub-agent
 //! task, and bash preview, plus their per-tool content renderers (code,
 //! listing, grep, bash) and shared header / section helpers. Also produces
-//! the sticky pinned-card header that [`super::draw_chat`] overlays while a
+//! the sticky pinned-card header that [`super::draw_transcript`] overlays while a
 //! card body is scrolled into view.
 
 use ratatui::{
@@ -13,22 +13,25 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::document::{Block, ChatMessage};
-use crate::layout::{BlockRegion, LayoutMap};
+use crate::document::{Block, TranscriptMessage};
+use crate::layout::{
+    BlockRegion, InteractiveTarget, LayoutMap, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
+};
 use crate::selection::SelectionState;
 
 use super::chrome::spinner_frame;
 use super::message_body::draw_message_body;
 use super::text_layout::{
-    block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, strip_ansi,
-    wrap_text, WrappedLine,
+    block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
+    WrappedLine,
 };
+use super::tools::{ArgLayout, DiffLine, DiffOp, PreviewLine, PreviewTone, ResultKind, ToolStatus};
 use super::{
-    chat_band_rect, StickyInfo, SubagentBarInfo, Theme, CARD_MIN_WIDTH, CHAT_BODY_PREFIX_COLS,
-    CHAT_BODY_RIGHT_INSET, CHAT_H_INSET, REASONING_TRACE_BLOCK_GAP_ROWS,
-    REASONING_TRACE_BODY_BOTTOM_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS, TOOL_CARD_CHILDREN_GAP_ROWS,
-    TOOL_CARD_SECTION_GAP_ROWS,
+    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, CARD_MIN_WIDTH,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS,
+    TOOL_CARD_CHILDREN_GAP_ROWS, TOOL_CARD_SECTION_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
+    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 
 /// Tracked info for an expanded card, used to render a sticky header pinned
@@ -37,6 +40,9 @@ pub(super) struct StickyCard {
     message_idx: usize,
     header: String,
     color: Color,
+    /// Tool glyph shown in the pinned header so it matches the real header
+    /// (a space for reasoning traces, which have no tool icon).
+    icon: char,
     background: Option<Color>,
     /// usize::MAX for tool steps, usize::MAX - 1 for reasoning traces.
     block_idx: usize,
@@ -49,34 +55,55 @@ pub(super) struct StickyCard {
 /// expanded, padded to the full width so it reads as a colored band. The body
 /// content is expected to start at column 2 so it left-aligns with the header
 /// text.
-fn card_header_line(
-    arrow: &str,
+/// Build a tool-card header band: an optional expand marker (`+`/`-`), an
+/// optional status glyph (the colored "rail" — spinner / `✓` / `✗`), the tool
+/// icon, and the summary, padded to a full-width colored band.
+///
+/// Only the status glyph carries `status_color`; the expand marker, icon, and
+/// summary use the muted `header_color`, so color reads purely as run state.
+/// Empty `expand` / `status_glyph` segments (and their trailing space) are
+/// skipped so the subagent and pinned headers can omit them cleanly.
+fn tool_header_line(
+    expand: &str,
+    status_glyph: &str,
+    status_color: Color,
+    icon: char,
     header: &str,
-    arrow_color: Color,
     header_color: Color,
     bg: Color,
     full_width: usize,
 ) -> Line<'static> {
-    let lead_arrow = format!("{} ", arrow);
-    let lead_header = header.to_string();
-    let used = lead_arrow.width() + lead_header.width();
-    Line::from(vec![
-        Span::styled(
-            lead_arrow,
-            Style::default()
-                .bg(bg)
-                .fg(arrow_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            lead_header,
-            Style::default()
-                .bg(bg)
-                .fg(header_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(padded_tail(full_width, used), Style::default().bg(bg)),
-    ])
+    let base = Style::default().bg(bg);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
+    let mut used = 0usize;
+
+    if !expand.is_empty() {
+        let s = format!("{} ", expand);
+        used += s.width();
+        spans.push(Span::styled(
+            s,
+            base.fg(header_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !status_glyph.is_empty() {
+        let s = format!("{} ", status_glyph);
+        used += s.width();
+        spans.push(Span::styled(
+            s,
+            base.fg(status_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let icon_s = format!("{} ", icon);
+    used += icon_s.width();
+    spans.push(Span::styled(icon_s, base.fg(header_color)));
+
+    used += header.width();
+    spans.push(Span::styled(
+        header.to_string(),
+        base.fg(header_color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(padded_tail(full_width, used), base));
+    Line::from(spans)
 }
 
 /// Render the shared header band of an expandable card and record its rect in
@@ -89,14 +116,15 @@ fn card_header_line(
 #[allow(clippy::too_many_arguments)]
 fn draw_expandable_card_header(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
     expanded: bool,
-    marker_override: Option<&str>,
+    status_glyph: &str,
+    status_color: Color,
+    icon: char,
     header: &str,
-    arrow_color: Color,
     header_color: Color,
     bg: Color,
     layout_map: &mut LayoutMap,
@@ -104,19 +132,21 @@ fn draw_expandable_card_header(
     current_y: &mut u16,
     content_lines: &mut usize,
 ) -> usize {
-    let arrow = marker_override.unwrap_or(if expanded { "-" } else { "+" });
+    let expand = if expanded { "-" } else { "+" };
     let header_line_idx = *content_lines;
 
     *content_lines += 1;
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+    } else if *current_y < transcript_area.y + transcript_area.height {
+        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(
-            Paragraph::new(card_header_line(
-                arrow,
+            Paragraph::new(tool_header_line(
+                expand,
+                status_glyph,
+                status_color,
+                icon,
                 header,
-                arrow_color,
                 header_color,
                 bg,
                 full_width,
@@ -142,7 +172,7 @@ fn draw_expandable_card_header(
 /// count is supplied by component spacing tokens in `design.rs`.
 fn draw_blank_rows(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     style: Style,
     rows: usize,
@@ -154,8 +184,8 @@ fn draw_blank_rows(
         *content_lines += 1;
         if *skip_rows > 0 {
             *skip_rows = skip_rows.saturating_sub(1);
-        } else if *current_y < chat_area.y + chat_area.height {
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        } else if *current_y < transcript_area.y + transcript_area.height {
+            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(padded_tail(full_width, 0), style))),
                 rect,
@@ -172,7 +202,7 @@ fn draw_blank_rows(
 #[allow(clippy::too_many_arguments)]
 fn draw_section_label(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     label: &str,
     pad_style: Style,
@@ -184,7 +214,7 @@ fn draw_section_label(
     *content_lines += 1;
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
+    } else if *current_y < transcript_area.y + transcript_area.height {
         let indent = 2usize;
         let used = indent + label.len();
         let line = Line::from(vec![
@@ -192,43 +222,7 @@ fn draw_section_label(
             Span::styled(label, label_style),
             Span::styled(padded_tail(full_width, used), pad_style),
         ]);
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
-        frame.render_widget(Paragraph::new(line), rect);
-        *current_y += 1;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_tool_meta_row(
-    frame: &mut Frame,
-    chat_area: Rect,
-    full_width: usize,
-    label: &str,
-    value: &str,
-    pad_style: Style,
-    label_style: Style,
-    value_style: Style,
-    label_width: usize,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
-) {
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let indent = 2usize;
-        let gap = 2usize;
-        let label_text = format!("{:<width$}", label, width = label_width);
-        let used = indent + label_width + gap + value.width();
-        let line = Line::from(vec![
-            Span::styled(" ".repeat(indent), pad_style),
-            Span::styled(label_text, label_style),
-            Span::styled(" ".repeat(gap), pad_style),
-            Span::styled(value.to_string(), value_style),
-            Span::styled(padded_tail(full_width, used), pad_style),
-        ]);
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(Paragraph::new(line), rect);
         *current_y += 1;
     }
@@ -240,7 +234,7 @@ fn draw_tool_meta_row(
 #[allow(clippy::too_many_arguments)]
 fn draw_meta_value_row_wrapped(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     label: &str,
     value: &str,
@@ -279,7 +273,7 @@ fn draw_meta_value_row_wrapped(
             *skip_rows = skip_rows.saturating_sub(1);
             continue;
         }
-        if *current_y >= chat_area.y + chat_area.height {
+        if *current_y >= transcript_area.y + transcript_area.height {
             break;
         }
 
@@ -297,7 +291,7 @@ fn draw_meta_value_row_wrapped(
         let used = value_indent + wl.text.width();
         spans.push(Span::styled(padded_tail(full_width, used), pad_style));
         let line = Line::from(spans);
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(Paragraph::new(line), rect);
         *current_y += 1;
     }
@@ -311,7 +305,7 @@ fn draw_meta_value_row_wrapped(
 #[allow(clippy::too_many_arguments)]
 fn draw_tool_body_section(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -334,7 +328,7 @@ fn draw_tool_body_section(
     if separator {
         draw_blank_rows(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             pad_style,
             TOOL_CARD_SECTION_GAP_ROWS,
@@ -346,7 +340,7 @@ fn draw_tool_body_section(
 
     draw_section_label(
         frame,
-        chat_area,
+        transcript_area,
         full_width,
         label,
         pad_style,
@@ -362,7 +356,7 @@ fn draw_tool_body_section(
     if code_mode {
         draw_code_content(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             mi,
             block_idx,
@@ -385,7 +379,7 @@ fn draw_tool_body_section(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
 
@@ -401,7 +395,7 @@ fn draw_tool_body_section(
             line.spans
                 .push(Span::styled(padded_tail(full_width, used), pad_style));
 
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(Paragraph::new(line), rect);
             layout_map.push(BlockRegion {
                 message_idx: mi,
@@ -424,7 +418,7 @@ fn draw_tool_body_section(
 #[allow(clippy::too_many_arguments)]
 fn draw_code_content(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -469,7 +463,7 @@ fn draw_code_content(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
 
@@ -498,7 +492,7 @@ fn draw_code_content(
                 theme.selected_bg,
                 full_width,
             );
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(Paragraph::new(line), rect);
             layout_map.push(BlockRegion {
                 message_idx: mi,
@@ -520,7 +514,7 @@ fn draw_code_content(
 #[allow(clippy::too_many_arguments)]
 fn draw_listing_content(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -568,7 +562,7 @@ fn draw_listing_content(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
             let block_wl = WrappedLine {
@@ -587,7 +581,7 @@ fn draw_listing_content(
             let used = indent + wl.text.width();
             line.spans
                 .push(Span::styled(padded_tail(full_width, used), pad));
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(Paragraph::new(line), rect);
             layout_map.push(BlockRegion {
                 message_idx: mi,
@@ -656,7 +650,7 @@ fn parse_grep_line(line: &str) -> Option<GrepLine<'_>> {
 #[allow(clippy::too_many_arguments)]
 fn emit_simple_rows(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -689,7 +683,7 @@ fn emit_simple_rows(
             *skip_rows = skip_rows.saturating_sub(1);
             continue;
         }
-        if *current_y >= chat_area.y + chat_area.height {
+        if *current_y >= transcript_area.y + transcript_area.height {
             break;
         }
         let block_wl = WrappedLine {
@@ -708,7 +702,7 @@ fn emit_simple_rows(
         let used = indent + wl.text.width();
         line.spans
             .push(Span::styled(padded_tail(full_width, used), pad));
-        let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(Paragraph::new(line), rect);
         layout_map.push(BlockRegion {
             message_idx: mi,
@@ -733,7 +727,7 @@ fn emit_simple_rows(
 #[allow(clippy::too_many_arguments)]
 fn draw_grep_content(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -786,7 +780,7 @@ fn draw_grep_content(
                     current_path = Some(parsed.path);
                     emit_simple_rows(
                         frame,
-                        chat_area,
+                        transcript_area,
                         full_width,
                         mi,
                         block_idx,
@@ -821,7 +815,7 @@ fn draw_grep_content(
                         *skip_rows = skip_rows.saturating_sub(1);
                         continue;
                     }
-                    if *current_y >= chat_area.y + chat_area.height {
+                    if *current_y >= transcript_area.y + transcript_area.height {
                         break;
                     }
                     let lineno_span = if wrap_idx == 0 {
@@ -858,7 +852,7 @@ fn draw_grep_content(
                     }
                     let used = content_cols + wl.text.width();
                     spans.push(Span::styled(padded_tail(full_width, used), pad));
-                    let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+                    let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
                     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
                     layout_map.push(BlockRegion {
                         message_idx: mi,
@@ -875,7 +869,7 @@ fn draw_grep_content(
             None => {
                 emit_simple_rows(
                     frame,
-                    chat_area,
+                    transcript_area,
                     full_width,
                     mi,
                     block_idx,
@@ -904,7 +898,7 @@ fn draw_grep_content(
 #[allow(clippy::too_many_arguments)]
 fn draw_bash_content(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     block_idx: usize,
@@ -965,7 +959,7 @@ fn draw_bash_content(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
             let block_wl = WrappedLine {
@@ -984,7 +978,7 @@ fn draw_bash_content(
             let used = indent + wl.text.width();
             line.spans
                 .push(Span::styled(padded_tail(full_width, used), pad));
-            let rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(Paragraph::new(line), rect);
             layout_map.push(BlockRegion {
                 message_idx: mi,
@@ -1009,10 +1003,11 @@ fn draw_bash_content(
 #[allow(clippy::too_many_arguments)]
 fn draw_tool_result_section(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     name: &str,
+    arguments: &str,
     output: &str,
     selection: &SelectionState,
     theme: &Theme,
@@ -1029,7 +1024,7 @@ fn draw_tool_result_section(
     if separator {
         draw_blank_rows(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             body_pad,
             TOOL_CARD_SECTION_GAP_ROWS,
@@ -1038,11 +1033,18 @@ fn draw_tool_result_section(
             content_lines,
         );
     }
+    let kind = super::tools::presenter_for(name).result_kind();
+    // Diff steps relabel the section so it reads as a change, not raw output.
+    let label = if kind == ResultKind::Diff {
+        "Diff"
+    } else {
+        "Result"
+    };
     draw_section_label(
         frame,
-        chat_area,
+        transcript_area,
         full_width,
-        "Result",
+        label,
         body_pad,
         body_label,
         skip_rows,
@@ -1051,10 +1053,10 @@ fn draw_tool_result_section(
     );
 
     let block_idx = 1usize;
-    match name {
-        "list_dir" | "glob" => draw_listing_content(
+    match kind {
+        ResultKind::Listing => draw_listing_content(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             mi,
             block_idx,
@@ -1068,9 +1070,9 @@ fn draw_tool_result_section(
             indent,
             inner_w,
         ),
-        "grep" => draw_grep_content(
+        ResultKind::Grep => draw_grep_content(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             mi,
             block_idx,
@@ -1084,9 +1086,9 @@ fn draw_tool_result_section(
             indent,
             inner_w,
         ),
-        "bash" => draw_bash_content(
+        ResultKind::Bash => draw_bash_content(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             mi,
             block_idx,
@@ -1100,9 +1102,9 @@ fn draw_tool_result_section(
             indent + 2,
             inner_w.saturating_sub(2),
         ),
-        _ => draw_code_content(
+        ResultKind::Code => draw_code_content(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             mi,
             block_idx,
@@ -1116,6 +1118,88 @@ fn draw_tool_result_section(
             indent,
             inner_w,
         ),
+        ResultKind::Diff => draw_diff_content(
+            frame,
+            transcript_area,
+            full_width,
+            &super::tools::diff_lines_for(name, arguments),
+            theme,
+            skip_rows,
+            current_y,
+            content_lines,
+            indent,
+            inner_w,
+        ),
+    }
+}
+
+/// Render a red/green line diff inside an expanded edit/write card body. Each
+/// [`DiffLine`] is a row in the `code_bg` block: a colored `+`/`-`/` ` sign
+/// gutter then the (wrapped) line text. The diff is a derived view of the
+/// tool's arguments, so rows aren't registered for text selection.
+#[allow(clippy::too_many_arguments)]
+fn draw_diff_content(
+    frame: &mut Frame,
+    transcript_area: Rect,
+    full_width: usize,
+    diff: &[DiffLine],
+    theme: &Theme,
+    skip_rows: &mut usize,
+    current_y: &mut u16,
+    content_lines: &mut usize,
+    indent: usize,
+    inner_w: usize,
+) {
+    let bg = theme.code_bg;
+    let pad = Style::default().bg(bg);
+    let sign_w = 2usize; // `+ ` / `- ` / `  `
+    let text_w = inner_w.saturating_sub(sign_w).max(1);
+
+    for line in diff {
+        let (sign, fg) = match line.op {
+            DiffOp::Add => ('+', theme.success),
+            DiffOp::Remove => ('-', theme.error_fg),
+            DiffOp::Context => (' ', theme.dim_fg),
+        };
+        let wrapped = wrap_text(&line.text, text_w);
+        let wrapped = if wrapped.is_empty() {
+            vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }]
+        } else {
+            wrapped
+        };
+        for (i, wl) in wrapped.iter().enumerate() {
+            *content_lines += 1;
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *current_y >= transcript_area.y + transcript_area.height {
+                break;
+            }
+            // The sign only marks the first wrapped row; continuations align
+            // under the text with a blank gutter.
+            let gutter = if i == 0 {
+                format!("{} ", sign)
+            } else {
+                "  ".to_string()
+            };
+            let used = indent + sign_w + wl.text.width();
+            let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ".repeat(indent), pad),
+                    Span::styled(gutter, Style::default().bg(bg).fg(fg)),
+                    Span::styled(wl.text.clone(), Style::default().bg(bg).fg(fg)),
+                    Span::styled(padded_tail(full_width, used), pad),
+                ])),
+                line_rect,
+            );
+            *current_y += 1;
+        }
     }
 }
 
@@ -1127,53 +1211,66 @@ fn draw_tool_result_section(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_subagent_inline_card(
     frame: &mut Frame,
-    chat_area: Rect,
-    msg: &ChatMessage,
+    transcript_area: Rect,
+    msg: &TranscriptMessage,
     mi: usize,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
+    focused: bool,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
     };
 
-    let (status_color, done) = match &msg.kind {
-        crate::document::MessageKind::ToolStep {
-            output: Some(output),
-            ..
-        } if output.starts_with("Error") => (theme.error_fg, true),
-        crate::document::MessageKind::ToolStep {
-            output: Some(_), ..
-        } => (theme.success, true),
-        _ => (theme.info, false),
-    };
+    let status = msg
+        .tool_step_status()
+        .map(ToolStatus::from_status)
+        .unwrap_or(ToolStatus::Running);
+    let status_color = status.color(theme);
 
-    let chat_area = chat_band_rect(chat_area);
-    let full_width = chat_area.width as usize;
+    let transcript_area = transcript_band_rect(transcript_area);
+    let full_width = transcript_area.width as usize;
     if full_width < CARD_MIN_WIDTH {
         return;
     }
 
     let bg = theme.element_bg;
-    let marker = if done { "✓" } else { "▸" };
+    let marker = match status {
+        ToolStatus::Running => "▸",
+        ToolStatus::Cancelled => "⊘",
+        ToolStatus::Ok | ToolStatus::Failed => "✓",
+    };
+    let icon = match &msg.kind {
+        crate::document::MessageKind::ToolStep { name, .. } => {
+            super::tools::presenter_for(name).icon()
+        }
+        _ => ' ',
+    };
 
-    // Header band: marker + header text, registered as a tool-step card header
-    // (block_idx = usize::MAX) so the existing click/Enter handling recognizes
-    // it; the app decides to navigate rather than toggle for `task` steps.
+    // Header band: status marker + tool icon + header text, registered as a
+    // tool-step card header (block_idx = usize::MAX) so the existing
+    // click/Enter handling recognizes it; the app decides to navigate rather
+    // than toggle for `task` steps. No expand marker — the card navigates.
     *content_lines += 1;
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+    } else if *current_y < transcript_area.y + transcript_area.height {
+        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(
-            Paragraph::new(card_header_line(
+            Paragraph::new(tool_header_line(
+                "",
                 marker,
-                &header,
                 status_color,
-                theme.text,
+                icon,
+                &header,
+                if focused {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
                 bg,
                 full_width,
             )),
@@ -1201,11 +1298,11 @@ pub(super) fn draw_subagent_inline_card(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
             let used = 2 + wl.text.width();
-            let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("  ", Style::default().bg(bg)),
@@ -1235,14 +1332,14 @@ pub(super) fn draw_subagent_inline_card(
 
 /// Render the sub-agent navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
-/// right. Drawn across the full chat width inside the app_bg gutters.
+/// right. Drawn across the full transcript width inside the app_bg gutters.
 pub(super) fn draw_subagent_bar(
     frame: &mut Frame,
     rect: Rect,
     bar: &SubagentBarInfo,
     theme: &Theme,
 ) {
-    let band = chat_band_rect(rect);
+    let band = transcript_band_rect(rect);
     let full_width = band.width as usize;
     if full_width < CARD_MIN_WIDTH {
         return;
@@ -1289,8 +1386,8 @@ pub(super) fn draw_subagent_bar(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_tool_step_card(
     frame: &mut Frame,
-    chat_area: Rect,
-    msg: &ChatMessage,
+    transcript_area: Rect,
+    msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
     theme: &Theme,
@@ -1300,39 +1397,46 @@ pub(super) fn draw_tool_step_card(
     content_lines: &mut usize,
     sticky_cards: &mut Vec<StickyCard>,
     spinner_phase: usize,
+    focused: bool,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
     };
 
-    let status_color = match &msg.kind {
-        crate::document::MessageKind::ToolStep {
-            output: Some(output),
-            ..
-        } if output.starts_with("Error") => theme.error_fg,
-        crate::document::MessageKind::ToolStep {
-            output: Some(_), ..
-        } => theme.success,
-        _ => theme.info,
+    // Status rail: a colored glyph in the header conveys run state at a glance
+    // (spinner while running, `✓` success, `✗` failure, `⊘` cancelled). The
+    // expand marker and tool icon stay muted so color reads purely as status.
+    let status = msg
+        .tool_step_status()
+        .map(ToolStatus::from_status)
+        .unwrap_or(ToolStatus::Running);
+    let status_color = status.color(theme);
+    let status_glyph: &str = match status {
+        ToolStatus::Running => spinner_frame(spinner_phase),
+        ToolStatus::Ok => "✓",
+        ToolStatus::Failed => "✗",
+        ToolStatus::Cancelled => "⊘",
     };
-    let running = matches!(
-        &msg.kind,
-        crate::document::MessageKind::ToolStep { output: None, .. }
-    );
+    let icon = match &msg.kind {
+        crate::document::MessageKind::ToolStep { name, .. } => {
+            super::tools::presenter_for(name).icon()
+        }
+        _ => ' ',
+    };
 
     let expanded = msg.tool_step_expanded() == Some(true);
     // Render into the inset band so the `element_bg`/`menu_bg`/`code_bg` bands
     // never touch the terminal frame — they sit inside the uniform 2-cell
     // `app_bg` gutters shared with user panels and code blocks. All helpers
-    // below (header, body sections, child tool steps) read `chat_area.x` /
-    // `chat_area.width` directly, so shrinking here propagates everywhere.
-    let chat_area = chat_band_rect(chat_area);
-    let full_width = chat_area.width as usize;
+    // below (header, body sections, child tool steps) read `transcript_area.x` /
+    // `transcript_area.width` directly, so shrinking here propagates everywhere.
+    let transcript_area = transcript_band_rect(transcript_area);
+    let full_width = transcript_area.width as usize;
     if full_width < CARD_MIN_WIDTH {
         // Too narrow to draw a card; fall back to plain block rendering.
         draw_message_body(
             frame,
-            chat_area,
+            transcript_area,
             msg,
             mi,
             selection,
@@ -1350,18 +1454,23 @@ pub(super) fn draw_tool_step_card(
     // border lines). Tool-step cards keep the shared card header treatment;
     // reasoning traces use their own prose-aligned header. `inner_width` is the
     // full band width; each body section subtracts its own indent before wrapping.
-    let inner_width = chat_area.width as usize;
+    let inner_width = transcript_area.width as usize;
     let header_line_idx = draw_expandable_card_header(
         frame,
-        chat_area,
+        transcript_area,
         full_width,
         mi,
         usize::MAX,
         expanded,
-        running.then(|| spinner_frame(spinner_phase)),
-        &header,
+        status_glyph,
         status_color,
-        theme.text_muted,
+        icon,
+        &header,
+        if focused {
+            theme.text
+        } else {
+            theme.text_muted
+        },
         theme.element_bg,
         layout_map,
         skip_rows,
@@ -1369,11 +1478,11 @@ pub(super) fn draw_tool_step_card(
         content_lines,
     );
 
-    // Bash-only collapsed preview: under the header, show the `$ command` line
-    // and a truncated (ANSI-stripped) excerpt of the output so the user can
-    // see what ran and roughly what it produced without expanding. Other tool
-    // types keep the all-or-nothing collapsed header. Expand for the full
-    // structured view (Tool / Arguments / Result with a code gutter).
+    // Collapsed preview: under the header, lift a few lines of key content
+    // (the `$ command` + output excerpt for bash, the first matches for grep,
+    // …) so the user can see what a step did without expanding. Which lines
+    // (if any) appear is owned by each tool's presenter; tools without a
+    // preview keep the all-or-nothing collapsed header.
     if !expanded {
         if let crate::document::MessageKind::ToolStep {
             name,
@@ -1382,14 +1491,14 @@ pub(super) fn draw_tool_step_card(
             ..
         } = &msg.kind
         {
-            if name == "bash" && !output.trim().is_empty() {
-                draw_bash_preview(
+            let preview = super::tools::collapsed_preview_for(name, arguments, output);
+            if !preview.is_empty() {
+                draw_tool_preview(
                     frame,
-                    chat_area,
+                    transcript_area,
                     full_width,
                     mi,
-                    arguments,
-                    output,
+                    &preview,
                     theme,
                     layout_map,
                     skip_rows,
@@ -1420,12 +1529,11 @@ pub(super) fn draw_tool_step_card(
             .bg(body_bg)
             .fg(theme.text_muted)
             .add_modifier(Modifier::BOLD);
-        let meta_value_style = Style::default().bg(body_bg).fg(theme.dim_fg);
         let command_style = Style::default().bg(body_bg).fg(theme.text);
 
         draw_blank_rows(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             pad,
             TOOL_CARD_BODY_TOP_GAP_ROWS,
@@ -1441,138 +1549,94 @@ pub(super) fn draw_tool_step_card(
             ..
         } = &msg.kind
         {
-            let kv = crate::document::parse_arguments_kv(arguments);
-            if name == "bash" {
-                let command = kv
-                    .iter()
-                    .find(|(k, _)| k == "command")
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or_default();
-                draw_tool_meta_row(
-                    frame,
-                    chat_area,
-                    full_width,
-                    "Tool",
-                    name,
-                    pad,
-                    meta_label_style,
-                    meta_value_style,
-                    meta_label_width,
-                    skip_rows,
-                    current_y,
-                    content_lines,
-                );
-                draw_meta_value_row_wrapped(
-                    frame,
-                    chat_area,
-                    full_width,
-                    "Arguments",
-                    command,
-                    pad,
-                    meta_label_style,
-                    command_style,
-                    meta_label_width,
-                    full_width.saturating_sub(indent + meta_label_width + 2),
-                    skip_rows,
-                    current_y,
-                    content_lines,
-                );
-                if let Some(output_str) = output {
-                    if !output_str.is_empty() {
-                        draw_tool_result_section(
+            // ── Arguments ── (only when the layout adds detail beyond the
+            // header summary). No redundant `Tool` row — the header band
+            // already identifies the tool via its icon + summary.
+            match super::tools::presenter_for(name).arg_layout() {
+                ArgLayout::None => {}
+                ArgLayout::Command => {
+                    let kv = crate::document::parse_arguments_kv(arguments);
+                    let command = kv
+                        .iter()
+                        .find(|(k, _)| k == "command")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or_default();
+                    draw_meta_value_row_wrapped(
+                        frame,
+                        transcript_area,
+                        full_width,
+                        "Arguments",
+                        command,
+                        pad,
+                        meta_label_style,
+                        command_style,
+                        meta_label_width,
+                        full_width.saturating_sub(indent + meta_label_width + 2),
+                        skip_rows,
+                        current_y,
+                        content_lines,
+                    );
+                }
+                ArgLayout::KeyValue => {
+                    let display_args: String = crate::document::parse_arguments_kv(arguments)
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !display_args.is_empty() {
+                        draw_tool_body_section(
                             frame,
-                            chat_area,
+                            transcript_area,
                             full_width,
                             mi,
-                            name,
-                            output_str,
+                            0,
+                            "Arguments",
+                            &display_args,
+                            arg_style,
+                            pad,
+                            label_style,
+                            indent,
+                            inner_w,
+                            false,
+                            false,
                             selection,
                             theme,
                             layout_map,
                             skip_rows,
                             current_y,
                             content_lines,
-                            indent,
-                            inner_w,
-                            false,
-                            pad,
-                            label_style,
                         );
                     }
                 }
-            } else {
-                draw_tool_meta_row(
-                    frame,
-                    chat_area,
-                    full_width,
-                    "Tool",
-                    name,
-                    pad,
-                    meta_label_style,
-                    meta_value_style,
-                    meta_label_width,
-                    skip_rows,
-                    current_y,
-                    content_lines,
-                );
+            }
 
-                let display_args: String = kv
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !display_args.is_empty() {
-                    draw_tool_body_section(
+            // ── Result / Diff ── (only when output exists). The renderer is
+            // chosen by the tool's `result_kind`: listings, grep matches,
+            // command output, an edit/write diff, or a line-numbered code
+            // fallback. The label sits on the body background; only the content
+            // uses `code_bg`.
+            if let Some(output_str) = output {
+                if !output_str.is_empty() {
+                    draw_tool_result_section(
                         frame,
-                        chat_area,
+                        transcript_area,
                         full_width,
                         mi,
-                        0,
-                        "Arguments",
-                        &display_args,
-                        arg_style,
-                        pad,
-                        label_style,
-                        indent,
-                        inner_w,
-                        false,
-                        false,
+                        name,
+                        arguments,
+                        output_str,
                         selection,
                         theme,
                         layout_map,
                         skip_rows,
                         current_y,
                         content_lines,
+                        indent,
+                        inner_w,
+                        false,
+                        pad,
+                        label_style,
                     );
-                }
-
-                // ── Result ── (only when output exists). Dispatched per tool
-                // name so listings, grep matches, and command output each get a
-                // purpose-built renderer; unknown tools fall back to a
-                // line-numbered code block. The label sits on the body
-                // background while only the result content uses `code_bg`.
-                if let Some(output_str) = output {
-                    if !output_str.is_empty() {
-                        draw_tool_result_section(
-                            frame,
-                            chat_area,
-                            full_width,
-                            mi,
-                            name,
-                            output_str,
-                            selection,
-                            theme,
-                            layout_map,
-                            skip_rows,
-                            current_y,
-                            content_lines,
-                            indent,
-                            inner_w,
-                            false,
-                            pad,
-                            label_style,
-                        );
-                    }
                 }
             }
         }
@@ -1582,7 +1646,7 @@ pub(super) fn draw_tool_step_card(
             if !children.is_empty() {
                 draw_blank_rows(
                     frame,
-                    chat_area,
+                    transcript_area,
                     full_width,
                     pad,
                     TOOL_CARD_CHILDREN_GAP_ROWS,
@@ -1595,7 +1659,7 @@ pub(super) fn draw_tool_step_card(
                 if child.is_tool_step() {
                     draw_child_tool_step(
                         frame,
-                        chat_area,
+                        transcript_area,
                         child,
                         status_color,
                         theme,
@@ -1604,14 +1668,14 @@ pub(super) fn draw_tool_step_card(
                         content_lines,
                     );
                 } else {
-                    let remaining_height = chat_area
+                    let remaining_height = transcript_area
                         .y
-                        .saturating_add(chat_area.height)
+                        .saturating_add(transcript_area.height)
                         .saturating_sub(*current_y);
                     let child_area = Rect::new(
-                        chat_area.x + 6,
+                        transcript_area.x + 6,
                         *current_y,
-                        chat_area.width.saturating_sub(12),
+                        transcript_area.width.saturating_sub(12),
                         remaining_height,
                     );
                     draw_message_body(
@@ -1633,7 +1697,7 @@ pub(super) fn draw_tool_step_card(
 
         draw_blank_rows(
             frame,
-            chat_area,
+            transcript_area,
             full_width,
             pad,
             TOOL_CARD_BODY_BOTTOM_GAP_ROWS,
@@ -1643,21 +1707,12 @@ pub(super) fn draw_tool_step_card(
         );
     }
 
-    // Bottom border.
-    let _ = status_color;
     if expanded {
         sticky_cards.push(StickyCard {
             message_idx: mi,
             header,
-            color: match &msg.kind {
-                crate::document::MessageKind::ToolStep {
-                    output: Some(o), ..
-                } if o.starts_with("Error") => theme.error_fg,
-                crate::document::MessageKind::ToolStep {
-                    output: Some(_), ..
-                } => theme.success,
-                _ => theme.info,
-            },
+            color: status_color,
+            icon,
             background: Some(theme.element_bg),
             block_idx: usize::MAX,
             header_line: header_line_idx,
@@ -1670,8 +1725,8 @@ pub(super) fn draw_tool_step_card(
 #[allow(clippy::too_many_arguments)]
 fn draw_child_tool_step(
     frame: &mut Frame,
-    chat_area: Rect,
-    child: &ChatMessage,
+    transcript_area: Rect,
+    child: &TranscriptMessage,
     status_color: Color,
     theme: &Theme,
     skip_rows: &mut usize,
@@ -1682,7 +1737,7 @@ fn draw_child_tool_step(
         return;
     };
     let body_bg = theme.menu_bg;
-    let full_width = chat_area.width as usize;
+    let full_width = transcript_area.width as usize;
     let indent = 6usize;
 
     let header_text = format!("⚒ {}", header);
@@ -1693,11 +1748,11 @@ fn draw_child_tool_step(
             *skip_rows = skip_rows.saturating_sub(1);
             continue;
         }
-        if *current_y >= chat_area.y + chat_area.height {
+        if *current_y >= transcript_area.y + transcript_area.height {
             break;
         }
         let used = indent + wl.text.width();
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
@@ -1724,11 +1779,11 @@ fn draw_child_tool_step(
                 *skip_rows = skip_rows.saturating_sub(1);
                 continue;
             }
-            if *current_y >= chat_area.y + chat_area.height {
+            if *current_y >= transcript_area.y + transcript_area.height {
                 break;
             }
             let used = indent + wl.text.width();
-            let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+            let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
@@ -1746,7 +1801,7 @@ fn draw_child_tool_step(
 }
 
 fn advance_plain_blank_rows(
-    chat_area: Rect,
+    transcript_area: Rect,
     rows: usize,
     skip_rows: &mut usize,
     current_y: &mut u16,
@@ -1756,7 +1811,7 @@ fn advance_plain_blank_rows(
         *content_lines += 1;
         if *skip_rows > 0 {
             *skip_rows = skip_rows.saturating_sub(1);
-        } else if *current_y < chat_area.y + chat_area.height {
+        } else if *current_y < transcript_area.y + transcript_area.height {
             *current_y += 1;
         }
     }
@@ -1769,7 +1824,7 @@ fn reasoning_trace_header_line(
     header_color: Color,
     full_width: usize,
 ) -> Line<'static> {
-    let marker_prefix_cols = CHAT_H_INSET as usize;
+    let marker_prefix_cols = TRANSCRIPT_H_INSET as usize;
     let marker_text = format!("{} ", marker);
     let header_text = header.to_string();
     let used = marker_prefix_cols + marker_text.width() + header_text.width();
@@ -1794,7 +1849,7 @@ fn reasoning_trace_header_line(
 #[allow(clippy::too_many_arguments)]
 fn draw_reasoning_trace_header(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
     expanded: bool,
@@ -1805,21 +1860,29 @@ fn draw_reasoning_trace_header(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
+    hovered: bool,
 ) -> usize {
     let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
     let header_line_idx = *content_lines;
+    // Hover affordance: the muted header lights up to the primary foreground
+    // (dark→bright) to signal the line is clickable.
+    let header_color = if hovered {
+        theme.text
+    } else {
+        theme.text_muted
+    };
 
     *content_lines += 1;
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < chat_area.y + chat_area.height {
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+    } else if *current_y < transcript_area.y + transcript_area.height {
+        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(
             Paragraph::new(reasoning_trace_header_line(
                 marker,
                 header,
                 theme.info,
-                theme.text_muted,
+                header_color,
                 full_width,
             )),
             line_rect,
@@ -1830,7 +1893,7 @@ fn draw_reasoning_trace_header(
             start_byte: 0,
             end_byte: 0,
             text: String::new(),
-            prefix_cols: CHAT_H_INSET,
+            prefix_cols: TRANSCRIPT_H_INSET,
             rect: line_rect,
         });
         *current_y += 1;
@@ -1845,8 +1908,8 @@ fn draw_reasoning_trace_header(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_reasoning_trace(
     frame: &mut Frame,
-    chat_area: Rect,
-    msg: &ChatMessage,
+    transcript_area: Rect,
+    msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
     theme: &Theme,
@@ -1856,6 +1919,7 @@ pub(super) fn draw_reasoning_trace(
     content_lines: &mut usize,
     sticky_cards: &mut Vec<StickyCard>,
     spinner_phase: usize,
+    hovered: bool,
 ) {
     let Some(header) = msg.thinking_header() else {
         return;
@@ -1868,12 +1932,12 @@ pub(super) fn draw_reasoning_trace(
             ..
         }
     );
-    let full_width = chat_area.width as usize;
+    let full_width = transcript_area.width as usize;
 
-    if full_width < (CHAT_BODY_PREFIX_COLS + 1) as usize {
+    if full_width < (TRANSCRIPT_BODY_PREFIX_COLS + 1) as usize {
         draw_message_body(
             frame,
-            chat_area,
+            transcript_area,
             msg,
             mi,
             selection,
@@ -1889,7 +1953,7 @@ pub(super) fn draw_reasoning_trace(
 
     let header_line_idx = draw_reasoning_trace_header(
         frame,
-        chat_area,
+        transcript_area,
         full_width,
         mi,
         expanded,
@@ -1900,17 +1964,18 @@ pub(super) fn draw_reasoning_trace(
         skip_rows,
         current_y,
         content_lines,
+        hovered,
     );
 
     if expanded {
-        let body_prefix = " ".repeat(CHAT_BODY_PREFIX_COLS as usize);
-        let body_wrap_width = chat_area
+        let body_prefix = " ".repeat(TRANSCRIPT_BODY_PREFIX_COLS as usize);
+        let body_wrap_width = transcript_area
             .width
-            .saturating_sub(CHAT_BODY_PREFIX_COLS + CHAT_BODY_RIGHT_INSET)
+            .saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + TRANSCRIPT_BODY_RIGHT_INSET)
             as usize;
 
         advance_plain_blank_rows(
-            chat_area,
+            transcript_area,
             REASONING_TRACE_BODY_TOP_GAP_ROWS,
             skip_rows,
             current_y,
@@ -1921,7 +1986,7 @@ pub(super) fn draw_reasoning_trace(
             if let Block::Text { content } = block {
                 if emitted_any_block {
                     advance_plain_blank_rows(
-                        chat_area,
+                        transcript_area,
                         REASONING_TRACE_BLOCK_GAP_ROWS,
                         skip_rows,
                         current_y,
@@ -1936,7 +2001,7 @@ pub(super) fn draw_reasoning_trace(
                         *skip_rows = skip_rows.saturating_sub(1);
                         continue;
                     }
-                    if *current_y >= chat_area.y + chat_area.height {
+                    if *current_y >= transcript_area.y + transcript_area.height {
                         break;
                     }
                     let sel_range = block_selection_range(selection, mi, bi);
@@ -1948,7 +2013,8 @@ pub(super) fn draw_reasoning_trace(
                         Style::default().fg(theme.text_muted),
                         theme.selected_bg,
                     );
-                    let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+                    let line_rect =
+                        Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
                     layout_map.push(BlockRegion {
                         message_idx: mi,
@@ -1956,7 +2022,7 @@ pub(super) fn draw_reasoning_trace(
                         start_byte: wl.start_byte,
                         end_byte: wl.end_byte,
                         text: wl.text.clone(),
-                        prefix_cols: CHAT_BODY_PREFIX_COLS,
+                        prefix_cols: TRANSCRIPT_BODY_PREFIX_COLS,
                         rect: line_rect,
                     });
                     *current_y += 1;
@@ -1964,7 +2030,7 @@ pub(super) fn draw_reasoning_trace(
             }
         }
         advance_plain_blank_rows(
-            chat_area,
+            transcript_area,
             REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
             skip_rows,
             current_y,
@@ -1977,6 +2043,7 @@ pub(super) fn draw_reasoning_trace(
             message_idx: mi,
             header,
             color: theme.text_muted,
+            icon: ' ',
             background: None,
             block_idx: usize::MAX - 1,
             header_line: header_line_idx,
@@ -1987,22 +2054,18 @@ pub(super) fn draw_reasoning_trace(
 
 /// Maximum number of output lines shown in the collapsed bash preview before
 /// the `…` truncation marker kicks in.
-const BASH_PREVIEW_LINES: usize = 8;
-
-/// Render a compact, truncated preview of a completed bash call under the
-/// collapsed card header: a `$ <command>` line and the first
-/// `BASH_PREVIEW_LINES` lines of ANSI-stripped output (with a `…` marker
-/// when there is more). Each rendered row is registered with `block_idx =
-/// usize::MAX` so clicking anywhere on the preview toggles the card open,
-/// matching the expandable-card interaction model.
+/// Render a tool's collapsed-state preview (see [`super::tools::ToolPresenter::collapsed_preview`])
+/// under the card header: each [`PreviewLine`] becomes one row in the body
+/// background, hard-truncated to the inner width and colored by its tone. Rows
+/// are registered with `block_idx = usize::MAX` so clicking anywhere on the
+/// preview toggles the card open, matching the expandable-card interaction.
 #[allow(clippy::too_many_arguments)]
-fn draw_bash_preview(
+fn draw_tool_preview(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     full_width: usize,
     mi: usize,
-    arguments: &str,
-    output: &str,
+    lines: &[PreviewLine],
     theme: &Theme,
     layout_map: &mut LayoutMap,
     skip_rows: &mut usize,
@@ -2014,51 +2077,29 @@ fn draw_bash_preview(
     let indent = 2usize;
     let inner_w = full_width.saturating_sub(indent).max(1);
 
-    // Extract the command from the JSON arguments, keep only its first line.
-    let command = crate::document::parse_arguments_kv(arguments)
-        .into_iter()
-        .find(|(k, _)| k == "command")
-        .map(|(_, v)| v)
-        .unwrap_or_default();
-    let command_first = command.lines().next().unwrap_or(&command);
-
-    // Build the preview rows: the `$ command` line, then the visible output
-    // lines, then a `…` marker when the output was truncated.
-    let clean_output = strip_ansi(output);
-    let out_lines: Vec<&str> = clean_output.lines().collect();
-    let truncated = out_lines.len() > BASH_PREVIEW_LINES;
-    let visible: Vec<&str> = out_lines.into_iter().take(BASH_PREVIEW_LINES).collect();
-
-    // Each entry is (text, fg color). Lines are hard-truncated to the inner
-    // width (no per-line ellipsis) so the preview height stays predictable;
-    // the trailing `…` row already signals "more output below".
-    let mut rows: Vec<(String, Color)> = Vec::with_capacity(2 + visible.len());
-    let cmd_max = inner_w.saturating_sub(2); // reserve `$ `
-    let cmd_first_trunc: String = command_first.chars().take(cmd_max).collect();
-    rows.push((format!("$ {}", cmd_first_trunc), theme.text));
-    for line in &visible {
-        let trunc: String = line.chars().take(inner_w).collect();
-        rows.push((trunc, theme.text_muted));
-    }
-    if truncated {
-        rows.push(("…".to_string(), theme.dim_fg));
-    }
-
-    for (text, fg) in &rows {
+    for line in lines {
         *content_lines += 1;
         if *skip_rows > 0 {
             *skip_rows = skip_rows.saturating_sub(1);
             continue;
         }
-        if *current_y >= chat_area.y + chat_area.height {
+        if *current_y >= transcript_area.y + transcript_area.height {
             break;
         }
+        let fg = match line.tone {
+            PreviewTone::Primary => theme.text,
+            PreviewTone::Muted => theme.text_muted,
+            PreviewTone::Faint => theme.dim_fg,
+        };
+        // Hard-truncate to the inner width (no per-line ellipsis) so the preview
+        // height stays predictable; a trailing `…` row already signals "more".
+        let text: String = line.text.chars().take(inner_w).collect();
         let used = indent + text.width();
-        let line_rect = Rect::new(chat_area.x, *current_y, chat_area.width, 1);
+        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ".repeat(indent), pad),
-                Span::styled(text.clone(), Style::default().bg(body_bg).fg(*fg)),
+                Span::styled(text, Style::default().bg(body_bg).fg(fg)),
                 Span::styled(padded_tail(full_width, used), pad),
             ])),
             line_rect,
@@ -2082,26 +2123,49 @@ fn draw_bash_preview(
 /// needed.
 pub(super) fn draw_sticky_header_if_needed(
     frame: &mut Frame,
-    chat_area: Rect,
+    transcript_area: Rect,
     sticky_cards: &[StickyCard],
     scroll: u16,
+    hovered_reasoning: Option<usize>,
+    focused_target: Option<InteractiveTarget>,
     theme: &Theme,
 ) -> Option<StickyInfo> {
     let first_visible = scroll as usize;
     let card = sticky_cards
         .iter()
         .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)?;
+    // Reasoning sticky headers brighten on hover (dark→bright affordance),
+    // matching the inline reasoning-trace header.
+    let reasoning_hovered =
+        card.background.is_none() && hovered_reasoning == Some(card.message_idx);
+    let focused = focused_target.is_some_and(|target| {
+        target.message_idx == card.message_idx
+            && match target.kind {
+                crate::layout::InteractiveTargetKind::ToolStep => {
+                    card.block_idx == TOOL_STEP_BLOCK_IDX
+                }
+                crate::layout::InteractiveTargetKind::Thinking => {
+                    card.block_idx == THINKING_BLOCK_IDX
+                }
+            }
+    });
     let line_rect = if let Some(bg) = card.background {
         // Pin inside the same inset band the cards render into so the sticky
         // header aligns exactly with the (possibly scrolled-away) real header.
-        let band = chat_band_rect(chat_area);
-        let line_rect = Rect::new(band.x, chat_area.y, band.width, 1);
+        let band = transcript_band_rect(transcript_area);
+        let line_rect = Rect::new(band.x, transcript_area.y, band.width, 1);
         frame.render_widget(
-            Paragraph::new(card_header_line(
+            Paragraph::new(tool_header_line(
                 "-",
-                &card.header,
+                "",
                 card.color,
-                theme.text_muted,
+                card.icon,
+                &card.header,
+                if focused {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
                 bg,
                 band.width as usize,
             )),
@@ -2109,14 +2173,24 @@ pub(super) fn draw_sticky_header_if_needed(
         );
         line_rect
     } else {
-        let line_rect = Rect::new(chat_area.x, chat_area.y, chat_area.width, 1);
+        let line_rect = Rect::new(
+            transcript_area.x,
+            transcript_area.y,
+            transcript_area.width,
+            1,
+        );
+        let header_color = if reasoning_hovered || focused {
+            theme.text
+        } else {
+            theme.text_muted
+        };
         frame.render_widget(
             Paragraph::new(reasoning_trace_header_line(
                 "-",
                 &card.header,
                 card.color,
-                theme.text_muted,
-                chat_area.width as usize,
+                header_color,
+                transcript_area.width as usize,
             )),
             line_rect,
         );

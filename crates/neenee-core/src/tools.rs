@@ -1,9 +1,13 @@
 use crate::{Tool, ToolAccess};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+
+pub mod search;
+use search::SearchProvider;
 
 /// Read a file from disk.
 pub struct ReadFileTool;
@@ -28,7 +32,7 @@ impl Tool for ReadFileTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -214,11 +218,23 @@ impl Tool for BashTool {
         let timeout_duration = Duration::from_secs(timeout_secs);
 
         let future = if cfg!(target_os = "windows") {
-            Command::new("cmd").args(["/C", command]).output()
+            Command::new("cmd")
+                .args(["/C", command])
+                .kill_on_drop(true)
+                .output()
         } else {
-            Command::new("sh").arg("-c").arg(command).output()
+            Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .kill_on_drop(true)
+                .output()
         };
 
+        // `kill_on_drop` guarantees the child is terminated when this future is
+        // dropped — both on timeout (the `Timeout` wrapper drops its inner
+        // future when the deadline elapses) and when the turn is interrupted
+        // mid-run (see `execute_tools_concurrent`), so a cancelled command
+        // never leaves an orphaned process behind.
         let output = timeout(timeout_duration, future)
             .await
             .map_err(|_| format!("Command timed out after {} seconds", timeout_secs))?
@@ -285,7 +301,7 @@ impl Tool for GrepTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -347,7 +363,7 @@ impl Tool for ListDirTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -429,55 +445,9 @@ impl Tool for ListDirTool {
     }
 }
 
-/// Use a skill (loads skill content into context).
-pub struct UseSkillTool {
-    pub skills: std::sync::Arc<std::sync::Mutex<Vec<crate::skills::Skill>>>,
-}
-
-#[async_trait]
-impl Tool for UseSkillTool {
-    fn name(&self) -> &str {
-        "use_skill"
-    }
-    fn description(&self) -> &str {
-        "Load a skill into the conversation context. Skills provide domain-specific expertise. \
-         Call this when the task matches a skill's description."
-    }
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "The skill name to load" }
-            },
-            "required": ["name"]
-        })
-    }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
-    }
-    async fn call(&self, arguments: &str) -> Result<String, String> {
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
-        let name = args["name"].as_str().ok_or("Missing 'name'")?;
-
-        let skills = self
-            .skills
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        for skill in skills.iter() {
-            if skill.name == name {
-                return Ok(format!(
-                    "[Skill '{}' loaded]\n{}\n[/Skill]",
-                    skill.name, skill.content
-                ));
-            }
-        }
-        Err(format!(
-            "Skill '{}' not found. Available skills can be discovered via the system prompt.",
-            name
-        ))
-    }
-}
+/// Re-export skill tools so the rest of the crate can keep using
+/// `crate::tools::{UseSkillTool, ListSkillsTool, ReloadSkillsTool}`.
+pub use crate::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 
 /// Fast file pattern matching using globs.
 pub struct GlobTool;
@@ -525,7 +495,7 @@ impl Tool for GlobTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -585,17 +555,101 @@ impl Tool for GlobTool {
 }
 
 /// Fetch a URL and return its text content (HTML stripped to text).
-pub struct WebFetchTool;
+pub struct WebFetchTool {
+    config: Arc<WebSearchConfig>,
+}
 
-fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .user_agent("neenee/0.1 (+ai-coding-agent)")
+impl WebFetchTool {
+    pub fn new() -> Self {
+        Self {
+            config: Arc::new(WebSearchConfig::default()),
+        }
+    }
+    pub fn with_config(config: WebSearchConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+        }
+    }
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Configuration for the web tools (`webfetch`, `websearch`), stored under the
+/// `[websearch]` table in `config.toml`.
+///
+/// Defaults target the hosted Exa MCP search (anonymous, no key) with Parallel
+/// as the fallback — mirroring how other coding agents handle web search
+/// out-of-the-box. Note: with the defaults, search queries are sent to
+/// third-party servers (Exa/Parallel); switch `provider` to a self-hosted
+/// `searxng` instance if query privacy matters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// Primary search backend. One of: `"exa"` (default; hosted MCP, anonymous
+    /// or `exa_api_key`), `"parallel"` (hosted MCP), `"duckduckgo"` (best-effort
+    /// scraping, frequently blocked), `"searxng"` (self-hosted, keyless), or
+    /// `"tavily"` (hosted API, requires `tavily_api_key`).
+    pub provider: String,
+    /// Fallback backend tried when `provider` fails. Empty string disables it.
+    /// Default `"parallel"`.
+    pub fallback: String,
+    /// Optional proxy URL applied to both `webfetch` and `websearch`.
+    /// Supports `http://`, `https://`, `socks5://`, and `socks5h://`. Takes
+    /// precedence over the `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` env vars.
+    pub proxy: Option<String>,
+    /// Per-request timeout in seconds (default 20).
+    pub timeout_secs: u64,
+    /// Exa API key (optional; anonymous use works without it).
+    pub exa_api_key: Option<String>,
+    /// Parallel Search API key (optional; anonymous use works without it).
+    pub parallel_api_key: Option<String>,
+    /// SearXNG JSON search endpoint, e.g. `http://localhost:8080/search`.
+    /// Required when `provider = "searxng"`.
+    pub searxng_url: Option<String>,
+    /// Tavily API key. Required when `provider = "tavily"`.
+    pub tavily_api_key: Option<String>,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: "exa".to_string(),
+            fallback: "parallel".to_string(),
+            proxy: None,
+            timeout_secs: 20,
+            exa_api_key: None,
+            parallel_api_key: None,
+            searxng_url: None,
+            tavily_api_key: None,
+        }
+    }
+}
+
+/// Build the shared HTTP client honoring the web tools' proxy and timeout.
+fn http_client(config: &WebSearchConfig) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.timeout_secs.max(1)))
+        .user_agent("neenee/0.1 (+ai-coding-agent)");
+    if let Some(proxy_url) = config
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("Invalid proxy '{}': {}", proxy_url, e))?;
+        builder = builder.proxy(proxy);
+    }
+    builder
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
         return text;
     }
@@ -607,7 +661,7 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 }
 
 /// Naive HTML → text conversion. Collapses whitespace and strips tags/scripts.
-fn html_to_text(html: &str) -> String {
+pub(crate) fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut skip = false;
@@ -701,7 +755,7 @@ impl Tool for WebFetchTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -711,7 +765,7 @@ impl Tool for WebFetchTool {
             return Err("URL must start with http:// or https://".to_string());
         }
         let raw = args["raw"].as_bool().unwrap_or(false);
-        let client = http_client()?;
+        let client = http_client(&self.config)?;
         let response = client
             .get(url)
             .send()
@@ -748,159 +802,46 @@ impl Tool for WebFetchTool {
     }
 }
 
-/// Search the web using DuckDuckGo (no API key required, best-effort).
-pub struct WebSearchTool;
-
-#[derive(Debug)]
-struct SearchResult {
-    title: String,
-    url: String,
-    snippet: String,
+/// Search the web via a pluggable backend. The provider (and an optional
+/// fallback) are selected from `[websearch]` config; see the [`search`] module
+/// for the available backends. Default backend is Exa (hosted, anonymous,
+/// reliable) with Parallel as fallback — mirroring other coding agents.
+///
+/// This struct is a thin shell: it only parses arguments, builds the shared
+/// HTTP client (proxy/timeout), and delegates to the provider chain. All
+/// backend-specific logic lives behind the [`SearchProvider`] trait so new
+/// backends can be added without touching this tool.
+pub struct WebSearchTool {
+    config: Arc<WebSearchConfig>,
+    primary: Box<dyn SearchProvider>,
+    fallback: Option<Box<dyn SearchProvider>>,
 }
 
-/// Parse DuckDuckGo HTML results. Tolerant to markup variations.
-fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
-    let mut results = Vec::new();
-    // DDG html endpoint wraps result links in <a class="result__a" href="...">
-    for piece in html.split("result__a") {
-        if results.len() >= 10 {
-            break;
-        }
-        let Some(href_start) = piece.find("href=\"") else {
-            continue;
+impl WebSearchTool {
+    pub fn new() -> Self {
+        Self::with_config(WebSearchConfig::default())
+    }
+
+    pub fn with_config(config: WebSearchConfig) -> Self {
+        let primary = search::build_provider(&config, &config.provider);
+        let fallback_name = config.fallback.trim();
+        let fallback = if fallback_name.is_empty() {
+            None
+        } else {
+            Some(search::build_provider(&config, fallback_name))
         };
-        let rest = &piece[href_start + 6..];
-        let Some(end) = rest.find('"') else {
-            continue;
-        };
-        let raw_url = &rest[..end];
-        // DDG redirects through /l/?uddg=<encoded>; extract the real url
-        let url = decode_ddg_redirect(raw_url);
-        if url.is_empty() || !url.starts_with("http") {
-            continue;
-        }
-        let title_rest = &rest[end..];
-        let title = extract_until(title_start_after(title_rest), '<');
-        let snippet = extract_snippet(piece);
-        if title.trim().is_empty() {
-            continue;
-        }
-        results.push(SearchResult {
-            title: decode_entities(&title),
-            url,
-            snippet: decode_entities(&snippet),
-        });
-    }
-    results
-}
-
-/// Parse DuckDuckGo Lite results.
-/// Lite uses `<a class="result-link" href="...">title</a>` and
-/// `<td class="result-snippet">snippet</td>`.
-fn parse_ddg_lite_results(html: &str) -> Vec<SearchResult> {
-    let mut results = Vec::new();
-    // Split on the result link marker so each piece contains one result.
-    for piece in html.split("result-link") {
-        if results.len() >= 10 {
-            break;
-        }
-        let Some(href_start) = piece.find("href=\"") else {
-            continue;
-        };
-        let rest = &piece[href_start + 6..];
-        let Some(end) = rest.find('"') else {
-            continue;
-        };
-        let raw_url = &rest[..end];
-        let url = decode_ddg_redirect(raw_url);
-        if url.is_empty() || !url.starts_with("http") {
-            continue;
-        }
-        let title = extract_until(title_start_after(&rest[end..]), '<');
-        if title.trim().is_empty() {
-            continue;
-        }
-        let snippet = extract_lite_snippet(piece);
-        results.push(SearchResult {
-            title: decode_entities(&title),
-            url,
-            snippet: decode_entities(&snippet),
-        });
-    }
-    results
-}
-
-fn title_start_after(rest: &str) -> &str {
-    if let Some(idx) = rest.find('>') {
-        &rest[idx + 1..]
-    } else {
-        ""
-    }
-}
-
-fn extract_until(text: &str, terminator: char) -> String {
-    text.find(terminator)
-        .map(|idx| text[..idx].to_string())
-        .unwrap_or_else(|| text.to_string())
-}
-
-fn extract_snippet(piece: &str) -> String {
-    if let Some(idx) = piece.find("result__snippet") {
-        let rest = &piece[idx..];
-        if let Some(gt) = rest.find('>') {
-            return extract_until(&rest[gt + 1..], '<');
+        Self {
+            config: Arc::new(config),
+            primary,
+            fallback,
         }
     }
-    String::new()
 }
 
-fn extract_lite_snippet(piece: &str) -> String {
-    if let Some(idx) = piece.find("result-snippet") {
-        let rest = &piece[idx..];
-        if let Some(gt) = rest.find('>') {
-            return extract_until(&rest[gt + 1..], '<');
-        }
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self::new()
     }
-    String::new()
-}
-
-fn decode_ddg_redirect(raw: &str) -> String {
-    if let Some(stripped) = raw.strip_prefix("//duckduckgo.com/l/?uddg=") {
-        let encoded = stripped.split('&').next().unwrap_or("");
-        if let Ok(decoded) = url_decode(encoded) {
-            return decoded;
-        }
-    }
-    raw.to_string()
-}
-
-fn url_decode(value: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => out.push(' '),
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).map_err(|e| e.to_string())?;
-                let byte = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
-                out.push(byte as char);
-                i += 2;
-            }
-            c => out.push(c as char),
-        }
-        i += 1;
-    }
-    Ok(out)
-}
-
-fn decode_entities(text: &str) -> String {
-    text.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
 }
 
 #[async_trait]
@@ -909,8 +850,12 @@ impl Tool for WebSearchTool {
         "websearch"
     }
     fn description(&self) -> &str {
-        "Search the web and return the top results (title, url, snippet). Uses DuckDuckGo so no \
-         API key is required. Best for finding current information, documentation, or examples."
+        "Search the web and return results as text. The backend is configurable via the \
+         `[websearch]` table in config.toml: `exa` (default; hosted, anonymous, reliable), \
+         `parallel` (hosted), `duckduckgo` (keyless scraping, frequently blocked), `searxng` \
+         (self-hosted, keyless), or `tavily` (hosted, needs key). A `fallback` backend is \
+         tried automatically if the primary fails. Best for current information, \
+         documentation, or examples."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -922,102 +867,31 @@ impl Tool for WebSearchTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let query = args["query"].as_str().ok_or("Missing 'query'")?;
-        let client = http_client()?;
+        let client = http_client(&self.config)?;
 
-        // Try DuckDuckGo Lite first (simpler, more stable markup), then fall back to the
-        // regular HTML endpoint. If both fail, surface the last error so the user/model can
-        // tell what happened instead of getting a misleading "No results found".
-        let (results, source) = match search_ddg_lite(&client, query).await {
-            Ok(results) if !results.is_empty() => (results, "DuckDuckGo Lite"),
-            _ => match search_ddg_html(&client, query).await {
-                Ok(results) => (results, "DuckDuckGo HTML"),
-                Err(error) => return Err(error),
+        match self.primary.search(&client, query).await {
+            Ok(text) => Ok(text),
+            Err(primary_err) => match &self.fallback {
+                Some(fallback) => match fallback.search(&client, query).await {
+                    Ok(text) => Ok(text),
+                    Err(fallback_err) => Err(format!(
+                        "Primary backend {} failed: {}\nFallback backend {} also failed: {}",
+                        self.primary.name(),
+                        primary_err,
+                        fallback.name(),
+                        fallback_err
+                    )),
+                },
+                None => Err(primary_err),
             },
-        };
-
-        if results.is_empty() {
-            return Ok(format!(
-                "No results found for '{}' (tried DuckDuckGo Lite and HTML endpoints).",
-                query
-            ));
         }
-        let formatted = results
-            .iter()
-            .enumerate()
-            .map(|(idx, result)| {
-                format!(
-                    "{}. {}\n   {}\n   {}",
-                    idx + 1,
-                    result.title,
-                    result.url,
-                    result.snippet
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Ok(format!(
-            "Search results for '{}' (via {}):\n\n{}",
-            query, source, formatted
-        ))
     }
-}
-
-async fn search_ddg_lite(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<Vec<SearchResult>, String> {
-    let endpoint = "https://lite.duckduckgo.com/lite/";
-    let response = client
-        .post(endpoint)
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        )
-        .form(&[("q", query), ("kl", "us-en")])
-        .send()
-        .await
-        .map_err(|e| format!("DuckDuckGo Lite request failed: {}", e))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("DuckDuckGo Lite returned HTTP {}", status));
-    }
-    let html = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read DuckDuckGo Lite response: {}", e))?;
-    Ok(parse_ddg_lite_results(&html))
-}
-
-async fn search_ddg_html(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<Vec<SearchResult>, String> {
-    let endpoint = "https://html.duckduckgo.com/html/";
-    let response = client
-        .post(endpoint)
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        )
-        .form(&[("q", query), ("kl", "us-en")])
-        .send()
-        .await
-        .map_err(|e| format!("DuckDuckGo HTML request failed: {}", e))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("DuckDuckGo HTML returned HTTP {}", status));
-    }
-    let html = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read DuckDuckGo HTML response: {}", e))?;
-    Ok(parse_ddg_results(&html))
 }
 
 /// A lightweight, standalone task list (decoupled from the persistent goal).
@@ -1096,7 +970,7 @@ impl Tool for TodoWriteTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
@@ -1206,7 +1080,7 @@ impl Tool for TaskTool {
         })
     }
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.run_sub_agent(arguments, Box::new(|_| {})).await
@@ -1246,7 +1120,7 @@ impl TaskTool {
         let sub_tools: Vec<Arc<dyn crate::Tool>> = self
             .tools
             .iter()
-            .filter(|tool| tool.access() == crate::ToolAccess::ReadOnly && tool.name() != "task")
+            .filter(|tool| tool.access() == crate::ToolAccess::Read && tool.name() != "task")
             .cloned()
             .collect();
 
@@ -1255,8 +1129,13 @@ impl TaskTool {
                 .await
                 .map_err(|err| format!("failed to create sub-agent goal store: {err}"))?,
         );
-        let sub_agent =
-            crate::Agent::new(self.provider.clone(), sub_tools, crate::AgentMode::Build, goal_service);
+        let sub_agent = crate::Agent::new(
+            self.provider.clone(),
+            sub_tools,
+            crate::AgentMode::Build,
+            goal_service,
+            crate::skills::SkillRegistry::empty(),
+        );
 
         let system = format!(
             "You are a focused research sub-agent. Your single job is to answer the assigned task \
@@ -1269,10 +1148,17 @@ impl TaskTool {
             crate::Message::new(crate::Role::System, system),
             crate::Message::new(crate::Role::User, prompt.to_string()),
         ];
+        // The sub-agent runs with its own (never-cancelled) token. When the
+        // parent turn is interrupted, the parent's dispatch drops this future
+        // and emits a `ToolCancelled` for the `task` call id; the TUI then
+        // recursively cancels the nested tool cards, so the sub-agent does not
+        // need a token linked to the parent.
         let result = sub_agent
-            .run_streaming_with_events(&mut messages, |event| {
-                Self::forward_event(event, &mut on_event)
-            })
+            .run_streaming_with_events(
+                &mut messages,
+                &tokio_util::sync::CancellationToken::new(),
+                |event| Self::forward_event(event, &mut on_event),
+            )
             .await
             .map_err(|error| error.to_string())?;
         let content = result.message.content.trim().to_string();
@@ -1368,7 +1254,7 @@ mod tests {
             json!({"type": "object"})
         }
         fn access(&self) -> ToolAccess {
-            ToolAccess::ReadOnly
+            ToolAccess::Read
         }
         async fn call(&self, _arguments: &str) -> Result<String, String> {
             Ok("echo".to_string())
@@ -1448,47 +1334,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_ddg_results_extracts_title_url_and_snippet() {
-        let html = r#"
-            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fnews">AI News</a>
-            <a class="result__snippet">Latest artificial intelligence headlines.</a>
-            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org">Research</a>
-            <a class="result__snippet">Research papers on AI.</a>
-        "#;
-        let results = parse_ddg_results(html);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "AI News");
-        assert_eq!(results[0].url, "https://example.com/news");
-        assert_eq!(
-            results[0].snippet,
-            "Latest artificial intelligence headlines."
-        );
+    fn websearch_config_defaults_to_exa_with_parallel_fallback() {
+        let cfg = WebSearchConfig::default();
+        assert_eq!(cfg.provider, "exa");
+        assert_eq!(cfg.fallback, "parallel");
+        assert!(cfg.proxy.is_none());
+        assert_eq!(cfg.timeout_secs, 20);
     }
 
     #[test]
-    fn parse_ddg_lite_results_extracts_title_url_and_snippet() {
-        let html = r#"
-            <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.example.com%2Fone">Lite Result One</a>
-            <td class="result-snippet">A snippet from the lite endpoint.</td>
-            <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Flite.example.com%2Ftwo">Lite Result Two</a>
-            <td class="result-snippet">Another lite snippet.</td>
+    fn websearch_config_round_trips_through_toml() {
+        let toml = r#"
+            provider = "searxng"
+            fallback = ""
+            proxy = "socks5h://127.0.0.1:1080"
+            timeout_secs = 8
+            searxng_url = "http://localhost:8080/search"
         "#;
-        let results = parse_ddg_lite_results(html);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Lite Result One");
-        assert_eq!(results[0].url, "https://lite.example.com/one");
-        assert_eq!(results[0].snippet, "A snippet from the lite endpoint.");
-    }
-
-    #[test]
-    fn parse_ddg_results_skips_invalid_redirects() {
-        let html = r#"
-            <a class="result__a" href="/not-a-redirect">Bad Link</a>
-            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fvalid.example.com">Good Link</a>
-        "#;
-        let results = parse_ddg_results(html);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Good Link");
+        let cfg: WebSearchConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.provider, "searxng");
+        assert_eq!(cfg.fallback, "");
+        assert_eq!(cfg.proxy.as_deref(), Some("socks5h://127.0.0.1:1080"));
+        assert_eq!(cfg.timeout_secs, 8);
+        assert_eq!(cfg.searxng_url.as_deref(), Some("http://localhost:8080/search"));
     }
 
     #[test]

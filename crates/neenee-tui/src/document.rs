@@ -6,14 +6,42 @@
 
 use neenee_core::{Role, SubTaskEvent};
 
+/// Lifecycle of a tool step, stored explicitly (not inferred from `output`)
+/// so an aborted call has its own terminal state instead of being stuck in
+/// "no output yet". This is the single source of truth for tool-step state —
+/// the renderer classifies it into a [`crate::render::tools::ToolStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolStepStatus {
+    /// Still in flight (no terminal event observed yet).
+    #[default]
+    Running,
+    /// Finished with a non-error output.
+    Ok,
+    /// Finished with an output beginning with `Error` (core convention).
+    Failed,
+    /// Aborted mid-flight (e.g. the user interrupted the turn). Terminal, just
+    /// like `Ok`/`Failed`: a later result or cancel event is ignored.
+    Cancelled,
+}
+
+impl ToolStepStatus {
+    /// Whether this state can still transition (i.e. the step is in flight).
+    pub fn is_running(self) -> bool {
+        matches!(self, ToolStepStatus::Running)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageKind {
-    Chat,
+    Text,
     ToolStep {
         id: String,
         name: String,
         arguments: String,
         output: Option<String>,
+        /// Explicit lifecycle. Kept in sync with `output` by the
+        /// `finish_tool_step` / `cancel_tool_step` transitions below.
+        status: ToolStepStatus,
         expanded: bool,
         duration_ms: Option<u64>,
         /// Wall-clock instant the step started, so the UI can show a live
@@ -22,7 +50,7 @@ pub enum MessageKind {
         /// serialized — session restore reconstructs finished steps without it.
         started_at: Option<std::time::Instant>,
         /// Child events emitted by a sub-agent spawned from this tool step.
-        children: Vec<ChatMessage>,
+        children: Vec<TranscriptMessage>,
     },
     Thinking {
         content: String,
@@ -102,12 +130,12 @@ impl Block {
 /// header's context-window indicator. `raw` is display state for tool steps
 /// (a short summary when collapsed), so tool-step bulk is measured directly
 /// from `arguments` + `output` + nested children; thinking text uses `content`;
-/// chat text uses `raw`.
-fn context_chars_of(messages: &[ChatMessage]) -> usize {
+/// plain-text messages use `raw`.
+fn context_chars_of(messages: &[TranscriptMessage]) -> usize {
     let mut chars = 0usize;
     for m in messages {
         match &m.kind {
-            MessageKind::Chat => chars += m.raw.len(),
+            MessageKind::Text => chars += m.raw.len(),
             MessageKind::Thinking { content, .. } => chars += content.len(),
             MessageKind::ToolStep {
                 arguments,
@@ -128,13 +156,13 @@ fn context_chars_of(messages: &[ChatMessage]) -> usize {
 
 /// Rough token estimate for the active context, using the same ~4 chars/token
 /// heuristic as `neenee_core`'s `estimate_string_tokens_len`.
-pub fn estimate_context_tokens(messages: &[ChatMessage]) -> usize {
+pub fn estimate_context_tokens(messages: &[TranscriptMessage]) -> usize {
     (context_chars_of(messages) / 4).max(1)
 }
 
-/// A structured chat message.
+/// A structured transcript message.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ChatMessage {
+pub struct TranscriptMessage {
     pub role: Role,
     pub blocks: Vec<Block>,
     /// The original raw markdown/text, preserved for exact copy.
@@ -144,11 +172,11 @@ pub struct ChatMessage {
     /// core [`Message`] so the transcript stays traceable across model
     /// switches. `None` for messages that don't carry attribution.
     pub provider: Option<String>,
-    /// Model id that produced this message, companion to [`ChatMessage::provider`].
+    /// Model id that produced this message, companion to [`TranscriptMessage::provider`].
     pub model: Option<String>,
 }
 
-impl ChatMessage {
+impl TranscriptMessage {
     pub fn new(role: Role, raw: impl Into<String>) -> Self {
         let raw = raw.into();
         let blocks = parse_blocks(&raw);
@@ -156,7 +184,7 @@ impl ChatMessage {
             role,
             blocks,
             raw,
-            kind: MessageKind::Chat,
+            kind: MessageKind::Text,
             provider: None,
             model: None,
         }
@@ -197,6 +225,7 @@ impl ChatMessage {
                 name: name.into(),
                 arguments: arguments.into(),
                 output: None,
+                status: ToolStepStatus::Running,
                 expanded: false,
                 duration_ms: None,
                 started_at: Some(std::time::Instant::now()),
@@ -218,19 +247,96 @@ impl ChatMessage {
         let MessageKind::ToolStep {
             id: step_id,
             output: step_output,
+            status,
             duration_ms: step_duration,
             ..
         } = &mut self.kind
         else {
             return false;
         };
-        if step_id != id || step_output.is_some() {
+        if step_id != id || !status.is_running() {
             return false;
         }
-        *step_output = Some(output.into());
+        let output = output.into();
+        *status = if output.starts_with("Error") {
+            ToolStepStatus::Failed
+        } else {
+            ToolStepStatus::Ok
+        };
+        *step_output = Some(output);
         *step_duration = Some(duration_ms);
         self.refresh_tool_step();
         true
+    }
+
+    /// Mark a still-running tool step as cancelled. Idempotent: a step that
+    /// already reached a terminal state (`Ok` / `Failed` / `Cancelled`) is left
+    /// untouched and returns `false`. When the step is a `task` (sub-agent),
+    /// its still-running nested tool children are cancelled too, so an aborted
+    /// sub-agent never leaves a "running" child card behind.
+    pub fn cancel_tool_step(&mut self, id: &str) -> bool {
+        let MessageKind::ToolStep {
+            id: step_id,
+            status,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        if step_id != id || !status.is_running() {
+            return false;
+        }
+        // Apply the transition through `cancel_all_running`, which also handles
+        // the nested-children sweep and refreshes the rendered view in one
+        // place.
+        self.cancel_all_running()
+    }
+
+    /// Recursively cancel every still-running tool step within this message
+    /// (used for sub-agent children and as a defensive sweep). Returns `true`
+    /// if anything transitioned.
+    pub fn cancel_all_running(&mut self) -> bool {
+        let (step_running, child_changed) = {
+            let MessageKind::ToolStep {
+                status,
+                started_at,
+                duration_ms,
+                children,
+                ..
+            } = &mut self.kind
+            else {
+                return false;
+            };
+            let mut changed = false;
+            if status.is_running() {
+                *status = ToolStepStatus::Cancelled;
+                // Freeze the elapsed time at the moment of cancellation so the
+                // card stops showing a live-running timer.
+                if duration_ms.is_none() {
+                    *duration_ms = started_at
+                        .map(|started| started.elapsed().as_millis() as u64)
+                        .or(Some(0));
+                }
+                changed = true;
+            }
+            let mut child_changed = changed;
+            for child in children.iter_mut() {
+                child_changed |= child.cancel_all_running();
+            }
+            (changed, child_changed)
+        };
+        if step_running || child_changed {
+            self.refresh_tool_step();
+        }
+        step_running || child_changed
+    }
+
+    /// The explicit lifecycle of a tool step, or `None` for non-tool messages.
+    pub fn tool_step_status(&self) -> Option<ToolStepStatus> {
+        match &self.kind {
+            MessageKind::ToolStep { status, .. } => Some(*status),
+            _ => None,
+        }
     }
 
     /// Append a sub-agent event as a nested child of this tool step.
@@ -242,16 +348,16 @@ impl ChatMessage {
         };
         match event {
             SubTaskEvent::StreamStart => {
-                children.push(ChatMessage::new(Role::Assistant, ""));
+                children.push(TranscriptMessage::new(Role::Assistant, ""));
             }
             SubTaskEvent::StreamDelta(delta) => {
                 if let Some(last) = children
                     .last_mut()
-                    .filter(|m| m.role == Role::Assistant && matches!(m.kind, MessageKind::Chat))
+                    .filter(|m| m.role == Role::Assistant && matches!(m.kind, MessageKind::Text))
                 {
                     last.push_stream(delta);
                 } else {
-                    let mut msg = ChatMessage::new(Role::Assistant, "");
+                    let mut msg = TranscriptMessage::new(Role::Assistant, "");
                     msg.push_stream(delta);
                     children.push(msg);
                 }
@@ -261,7 +367,7 @@ impl ChatMessage {
                     last.raw = content.clone();
                     last.reparse();
                 } else {
-                    children.push(ChatMessage::new(Role::Assistant, content.clone()));
+                    children.push(TranscriptMessage::new(Role::Assistant, content.clone()));
                 }
             }
             SubTaskEvent::ToolCall {
@@ -269,7 +375,7 @@ impl ChatMessage {
                 name,
                 arguments,
             } => {
-                children.push(ChatMessage::tool_step(
+                children.push(TranscriptMessage::tool_step(
                     id.clone(),
                     name.clone(),
                     arguments.clone(),
@@ -296,7 +402,7 @@ impl ChatMessage {
                 }) {
                     child.finish_tool_step(id, output.clone(), *duration_ms);
                 } else {
-                    let mut msg = ChatMessage::tool_step(id.clone(), "tool", "{}");
+                    let mut msg = TranscriptMessage::tool_step(id.clone(), "tool", "{}");
                     msg.finish_tool_step(id, output.clone(), *duration_ms);
                     children.push(msg);
                 }
@@ -346,7 +452,7 @@ impl ChatMessage {
 
     /// The nested child messages emitted by a sub-agent task. Returns `None`
     /// for non-tool-step messages.
-    pub fn subagent_children(&self) -> Option<&[ChatMessage]> {
+    pub fn subagent_children(&self) -> Option<&[TranscriptMessage]> {
         match &self.kind {
             MessageKind::ToolStep { children, .. } => Some(children),
             _ => None,
@@ -355,7 +461,7 @@ impl ChatMessage {
 
     /// Mutable access to a tool step's child messages (used when the view is
     /// zoomed into a sub-agent and its children are the active message stream).
-    pub fn subagent_children_mut(&mut self) -> Option<&mut Vec<ChatMessage>> {
+    pub fn subagent_children_mut(&mut self) -> Option<&mut Vec<TranscriptMessage>> {
         match &mut self.kind {
             MessageKind::ToolStep { children, .. } => Some(children),
             _ => None,
@@ -385,7 +491,7 @@ impl ChatMessage {
             return None;
         }
         let MessageKind::ToolStep {
-            output,
+            status,
             duration_ms,
             started_at,
             children,
@@ -395,16 +501,15 @@ impl ChatMessage {
             return None;
         };
         let tool_calls = children.iter().filter(|child| child.is_tool_step()).count();
-        let line = match output {
-            Some(o) if o.starts_with("Error") => {
-                format!("↳ Failed · {} tool calls", tool_calls)
-            }
-            Some(_) => format!(
+        let line = match status {
+            ToolStepStatus::Failed => format!("↳ Failed · {} tool calls", tool_calls),
+            ToolStepStatus::Cancelled => format!("↳ Cancelled · {} tool calls", tool_calls),
+            ToolStepStatus::Ok => format!(
                 "↳ Completed · {} tool calls · {}",
                 tool_calls,
                 duration_text(*duration_ms)
             ),
-            None => {
+            ToolStepStatus::Running => {
                 // Running: show accumulated stats (tool count + live elapsed)
                 // followed by the most recent child activity.
                 let elapsed_ms = started_at
@@ -414,12 +519,9 @@ impl ChatMessage {
                 match children.last() {
                     Some(child)
                         if child.is_tool_step()
-                            && matches!(
-                                &child.kind,
-                                MessageKind::ToolStep { output: None, .. }
-                            ) =>
+                            && child.tool_step_status() == Some(ToolStepStatus::Running) =>
                     {
-                        // A tool step with no output yet is in-flight.
+                        // A tool step still in flight.
                         let header = child
                             .tool_step_header()
                             .unwrap_or_else(|| "tool".to_string());
@@ -510,20 +612,23 @@ impl ChatMessage {
         let MessageKind::ToolStep {
             name,
             arguments,
-            output,
+            status,
             duration_ms,
             ..
         } = &self.kind
         else {
             return None;
         };
-        let summary = argument_summary(name, arguments);
-        Some(match output {
-            Some(o) if o.starts_with("Error") => {
+        let summary = crate::render::tools::summary_for(name, arguments);
+        Some(match status {
+            ToolStepStatus::Running => summary,
+            ToolStepStatus::Ok => format!("{} · {}", summary, duration_text(*duration_ms)),
+            ToolStepStatus::Failed => {
                 format!("{} · failed {}", summary, duration_text(*duration_ms))
             }
-            Some(_) => format!("{} · {}", summary, duration_text(*duration_ms)),
-            None => summary,
+            ToolStepStatus::Cancelled => {
+                format!("{} · cancelled {}", summary, duration_text(*duration_ms))
+            }
         })
     }
 
@@ -533,6 +638,7 @@ impl ChatMessage {
             name,
             arguments,
             output,
+            status,
             expanded,
             duration_ms,
             started_at: _,
@@ -565,13 +671,12 @@ impl ChatMessage {
             }
             self.blocks = blocks;
         } else {
-            let summary = argument_summary(name, arguments);
-            let suffix = match output {
-                Some(o) if o.starts_with("Error") => {
-                    format!(" · failed {}", duration_text(*duration_ms))
-                }
-                Some(_) => format!(" · {}", duration_text(*duration_ms)),
-                None => String::new(),
+            let summary = crate::render::tools::summary_for(name, arguments);
+            let suffix = match status {
+                ToolStepStatus::Running => String::new(),
+                ToolStepStatus::Ok => format!(" · {}", duration_text(*duration_ms)),
+                ToolStepStatus::Failed => format!(" · failed {}", duration_text(*duration_ms)),
+                ToolStepStatus::Cancelled => format!(" · cancelled {}", duration_text(*duration_ms)),
             };
             self.raw = format!("{}{}", summary, suffix);
             self.blocks = parse_blocks(&self.raw);
@@ -633,68 +738,6 @@ fn duration_text(duration_ms: Option<u64>) -> String {
         Some(ms) if ms < 1000 => format!("{}ms", ms),
         Some(ms) => format!("{:.1}s", ms as f64 / 1000.0),
     }
-}
-
-fn argument_summary(name: &str, arguments: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return truncate(arguments, 72);
-    };
-    let Some(object) = value.as_object() else {
-        return truncate(arguments, 72);
-    };
-
-    let get = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
-
-    let summary = match name {
-        "read_file" => get("path")
-            .map(|path| format!("Read {}", path))
-            .unwrap_or_else(|| "Read file".to_string()),
-        "write_file" => get("path")
-            .map(|path| format!("Write {}", path))
-            .unwrap_or_else(|| "Write file".to_string()),
-        "edit_file" => get("path")
-            .map(|path| format!("Edit {}", path))
-            .unwrap_or_else(|| "Edit file".to_string()),
-        "bash" => get("command")
-            .map(|cmd| {
-                let first = cmd.lines().next().unwrap_or(cmd);
-                format!("Run {}", truncate(first, 64))
-            })
-            .unwrap_or_else(|| "Run command".to_string()),
-        "grep" => {
-            let pattern = get("pattern").unwrap_or("...");
-            let path = get("path").unwrap_or(".");
-            format!("Grep \"{}\" in {}", truncate(pattern, 48), path)
-        }
-        "glob" => get("pattern")
-            .map(|pattern| format!("Glob {}", pattern))
-            .unwrap_or_else(|| "Glob files".to_string()),
-        "list_dir" => get("path")
-            .map(|path| format!("List {}", path))
-            .unwrap_or_else(|| "List directory".to_string()),
-        "webfetch" => get("url")
-            .map(|url| format!("Fetch {}", url))
-            .unwrap_or_else(|| "Fetch URL".to_string()),
-        "websearch" => get("query")
-            .map(|query| format!("Search \"{}\"", truncate(query, 56)))
-            .unwrap_or_else(|| "Web search".to_string()),
-        "todo" => "Update todo list".to_string(),
-        "task" => get("description")
-            .map(|desc| format!("Task: {}", truncate(desc, 56)))
-            .unwrap_or_else(|| "Run sub-task".to_string()),
-        "create_project" => get("name")
-            .map(|name| format!("Create project {}", name))
-            .unwrap_or_else(|| "Create project".to_string()),
-        "use_skill" => get("name")
-            .map(|name| format!("Use skill {}", name))
-            .unwrap_or_else(|| "Use skill".to_string()),
-        "goal_checklist" => "Update goal checklist".to_string(),
-        _ => ["path", "pattern", "command", "name", "url", "query"]
-            .iter()
-            .find_map(|key| get(key).map(|value| format!("{}={}", key, value)))
-            .unwrap_or_else(|| arguments.to_string()),
-    };
-    truncate(&summary, 72)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -1199,7 +1242,7 @@ mod tests {
 
     #[test]
     fn test_push_stream() {
-        let mut streamed = ChatMessage::new(Role::Assistant, "");
+        let mut streamed = TranscriptMessage::new(Role::Assistant, "");
         for chunk in [
             "# Result\n\n",
             "First paragraph.\n\n",
@@ -1210,7 +1253,7 @@ mod tests {
             streamed.push_stream(chunk);
         }
 
-        let completed = ChatMessage::new(Role::Assistant, streamed.raw.clone());
+        let completed = TranscriptMessage::new(Role::Assistant, streamed.raw.clone());
         assert_eq!(streamed.blocks, completed.blocks);
     }
 
@@ -1351,7 +1394,8 @@ mod tests {
 
     #[test]
     fn tool_step_collapses_and_restores_full_semantic_detail() {
-        let mut message = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
+        let mut message =
+            TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
         // Collapsed running: human-readable summary only — no tool name.
         assert!(message.raw.contains("Read README.md"));
         assert!(!message.raw.contains("read_file"));
@@ -1369,7 +1413,7 @@ mod tests {
 
     #[test]
     fn subagent_task_is_detected_and_addressable() {
-        let task = ChatMessage::tool_step(
+        let task = TranscriptMessage::tool_step(
             "call_42",
             "task",
             r#"{"description":"explore src","prompt":"..."}"#,
@@ -1380,7 +1424,7 @@ mod tests {
         assert_eq!(task.subagent_label(), "explore src");
 
         // A regular tool step is not a sub-agent task.
-        let read = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"a"}"#);
+        let read = TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"a"}"#);
         assert!(!read.is_subagent_task());
         assert!(read.subagent_status_line().is_none());
     }
@@ -1388,7 +1432,7 @@ mod tests {
     #[test]
     fn subagent_status_reflects_children_and_completion() {
         let mut task =
-            ChatMessage::tool_step("call_9", "task", r#"{"description":"d","prompt":"p"}"#);
+            TranscriptMessage::tool_step("call_9", "task", r#"{"description":"d","prompt":"p"}"#);
 
         // No children yet, still running.
         let running = task.subagent_status_line().expect("running status");
@@ -1424,7 +1468,8 @@ mod tests {
 
     #[test]
     fn subagent_failed_status_reports_failure() {
-        let mut task = ChatMessage::tool_step("c", "task", r#"{"description":"d","prompt":"p"}"#);
+        let mut task =
+            TranscriptMessage::tool_step("c", "task", r#"{"description":"d","prompt":"p"}"#);
         task.push_subtask_event(&SubTaskEvent::ToolCall {
             id: "i".into(),
             name: "bash".into(),
@@ -1433,5 +1478,78 @@ mod tests {
         assert!(task.finish_tool_step("c", "Error: boom", 100));
         let status = task.subagent_status_line().unwrap();
         assert!(status.starts_with("↳ Failed"), "got: {status}");
+    }
+
+    #[test]
+    fn cancel_tool_step_transitions_to_a_terminal_state() {
+        let mut step = TranscriptMessage::tool_step("call_1", "websearch", r#"{"query":"rust"}"#);
+        // Running -> Cancelled is a real terminal transition.
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Running));
+        assert!(step.cancel_tool_step("call_1"));
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Cancelled));
+
+        // The header advertises the cancelled state instead of staying blank.
+        let header = step.tool_step_header().expect("header");
+        assert!(header.contains("cancelled"), "got: {header}");
+        // The raw (collapsed) transcript line mirrors the header.
+        assert!(step.raw.contains("cancelled"), "got: {}", step.raw);
+
+        // Cancelled is terminal: a late result or another cancel is ignored.
+        assert!(!step.finish_tool_step("call_1", "late result", 10));
+        assert!(!step.cancel_tool_step("call_1"));
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Cancelled));
+    }
+
+    #[test]
+    fn cancel_only_acts_on_the_matching_call_id() {
+        let mut step = TranscriptMessage::tool_step("call_1", "websearch", "{}");
+        // A different id does nothing and leaves the step running.
+        assert!(!step.cancel_tool_step("call_9"));
+        assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Running));
+    }
+
+    #[test]
+    fn cancelling_a_subagent_also_cancels_its_running_children() {
+        let mut task =
+            TranscriptMessage::tool_step("task_1", "task", r#"{"description":"d","prompt":"p"}"#);
+        // A nested tool call still in flight.
+        task.push_subtask_event(&SubTaskEvent::ToolCall {
+            id: "inner".into(),
+            name: "grep".into(),
+            arguments: r#"{"pattern":"foo"}"#.into(),
+        });
+        let children = task.subagent_children().expect("has children");
+        assert_eq!(children[0].tool_step_status(), Some(ToolStepStatus::Running));
+
+        // Interrupting the parent task cancels it AND the nested running child,
+        // so the sub-agent view never shows a stuck "running" card.
+        assert!(task.cancel_tool_step("task_1"));
+        assert_eq!(task.tool_step_status(), Some(ToolStepStatus::Cancelled));
+        let children = task.subagent_children().expect("has children");
+        assert_eq!(
+            children[0].tool_step_status(),
+            Some(ToolStepStatus::Cancelled),
+            "nested child must converge with the parent"
+        );
+
+        let status = task.subagent_status_line().expect("status line");
+        assert!(status.starts_with("↳ Cancelled"), "got: {status}");
+    }
+
+    #[test]
+    fn cancel_all_running_is_a_defensive_sweep_that_skips_terminal_steps() {
+        let mut a = TranscriptMessage::tool_step("a", "read_file", "{}");
+        let mut b = TranscriptMessage::tool_step("b", "read_file", "{}");
+        // `b` already finished successfully; the sweep must not clobber it.
+        assert!(b.finish_tool_step("b", "contents", 5));
+        assert_eq!(b.tool_step_status(), Some(ToolStepStatus::Ok));
+
+        // The sweep cancels a running step and is then a no-op on it.
+        assert!(a.cancel_all_running());
+        assert!(!a.cancel_all_running());
+        assert_eq!(a.tool_step_status(), Some(ToolStepStatus::Cancelled));
+        // A finished step is untouched by the sweep.
+        assert!(!b.cancel_all_running());
+        assert_eq!(b.tool_step_status(), Some(ToolStepStatus::Ok));
     }
 }

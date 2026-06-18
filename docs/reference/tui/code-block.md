@@ -1,6 +1,6 @@
 # Code block
 
-Fenced code in the chat transcript.
+Fenced code in the transcript.
 
 ## Appearance
 

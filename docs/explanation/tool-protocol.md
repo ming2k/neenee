@@ -15,7 +15,7 @@ on every request. They are never cached across turns by the runtime.
 flowchart TD
     A["Agent::new — stores tools"] --> B["run_with_events / run_streaming_with_events<br/>once per turn"]
     B --> C["provider.prepare_tools(self.tools)"]
-    C --> D["Tool::to_openai_function<br/>cached in OpenAIProvider.tools"]
+    C --> D["Tool::to_openai_function<br/>cached in OpenAiCompatProvider.tools"]
     D --> E["provider.request_body(messages, stream)"]
     E --> F["body.tools = cached schemas<br/>body.tool_choice = auto"]
 ```
@@ -38,24 +38,71 @@ through the universal fallback below.
 ## Native transport
 
 OpenAI-compatible providers return tool calls through two equivalent paths.
+Both paths share the same schema declaration and the same `ToolCall`
+reassembly contract; only the response parsing differs.
 
 ### Streaming
 
-`stream_chat_events` (`providers.rs`) consumes the SSE stream. Each
-chunk is parsed by `parse_openai_stream_data`, which reads three optional
-delta fields:
+`OpenAiCompatProvider::stream_chat_events` (`crates/neenee-core/src/providers.rs`)
+consumes the SSE stream. The provider buffers raw bytes, splits on newlines,
+strips the `data:` prefix, and skips the `data: [DONE]` terminator. Every
+other line is parsed by `parse_openai_stream_data` (`providers.rs`), which
+reads three optional delta fields from `choices[0].delta`:
 
 | Delta field | Event emitted | Used to reconstruct |
 |-------------|---------------|---------------------|
-| `content` | `TextDelta` | assistant text |
-| `reasoning_content` | `ReasoningDelta` | reasoning text |
-| `tool_calls[]` | `ToolCallDelta` per index | tool calls |
+| `content` | `ProviderStreamEvent::TextDelta` | assistant text |
+| `reasoning_content` | `ProviderStreamEvent::ReasoningDelta` | reasoning text |
+| `tool_calls[]` | `ProviderStreamEvent::ToolCallDelta` per `index` | tool calls |
 
-Tool calls arrive as fragments keyed by `delta.tool_calls[].index`. The
-streaming loop inside `Agent::run_streaming_with_events`
-(`crates/neenee-core/src/lib.rs`) accumulates `id`, `name`, and `arguments`
-per index while text and reasoning deltas render live. Tools execute only
-after the stream terminates:
+The `ToolCallDelta` event carries a per-call `index` so the agent can
+reassemble parallel calls that arrive interleaved:
+
+```rust
+pub enum ProviderStreamEvent {
+    TextDelta(String),
+    ReasoningDelta(String),
+    ToolCallDelta {
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: String,
+    },
+}
+```
+
+Tool calls arrive as fragments keyed by `delta.tool_calls[].index`. A single
+call is usually split across many SSE events: the first fragment carries the
+`id` and `function.name`, while later fragments carry pieces of
+`function.arguments` that must be concatenated. The streaming loop inside
+`Agent::run_streaming_with_events` (`crates/neenee-core/src/lib.rs`)
+accumulates them into a `Vec<ToolCall>`:
+
+```rust
+while calls.len() <= index {
+    calls.push(ToolCall {
+        id: String::new(),
+        name: String::new(),
+        arguments: String::new(),
+    });
+}
+let call = &mut calls[index];
+if let Some(id) = id { call.id.push_str(&id); }
+if let Some(name) = name { call.name.push_str(&name); }
+call.arguments.push_str(&arguments);
+```
+
+A concrete SSE sequence for one `read_file` call might look like:
+
+```text
+data: {"choices":[{"delta":{"role":"assistant"}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"src/lib.rs\"}"}}]}}]}
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+```
+
+Tools execute only after the stream terminates:
 
 ```mermaid
 flowchart TD
@@ -67,6 +114,14 @@ flowchart TD
 
 Side effects never fire mid-stream. This matters for retry: a stream that
 fails before `[DONE]` can be retried without leaving partial tool state.
+
+Two identifier spaces are worth distinguishing. The provider's `call.id`
+is preserved in the assistant `Message` and in the `tool_call_id` of the
+result message, because OpenAI-compatible runtimes require every `tool`
+message to reference a preceding assistant `tool_calls` entry. The UI,
+however, receives fresh event ids generated inside
+`Agent::dispatch_tool_calls`; this keeps tool-step cards stable even when a
+provider omits ids or emits duplicates.
 
 ### Non-streaming
 

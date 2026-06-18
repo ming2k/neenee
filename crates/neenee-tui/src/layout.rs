@@ -6,6 +6,9 @@
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
+pub const TOOL_STEP_BLOCK_IDX: usize = usize::MAX;
+pub const THINKING_BLOCK_IDX: usize = usize::MAX - 1;
+
 /// Identifies a specific position inside the document model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SemanticCursor {
@@ -23,6 +26,39 @@ impl SemanticCursor {
             message_idx,
             block_idx,
             byte_offset,
+        }
+    }
+}
+
+/// User-activatable target recorded from the semantic layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractiveTarget {
+    pub message_idx: usize,
+    pub block_idx: usize,
+    pub kind: InteractiveTargetKind,
+}
+
+/// Category of an activatable target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveTargetKind {
+    ToolStep,
+    Thinking,
+}
+
+impl InteractiveTarget {
+    pub fn tool_step(message_idx: usize) -> Self {
+        Self {
+            message_idx,
+            block_idx: TOOL_STEP_BLOCK_IDX,
+            kind: InteractiveTargetKind::ToolStep,
+        }
+    }
+
+    pub fn thinking(message_idx: usize) -> Self {
+        Self {
+            message_idx,
+            block_idx: THINKING_BLOCK_IDX,
+            kind: InteractiveTargetKind::Thinking,
         }
     }
 }
@@ -209,6 +245,29 @@ impl LayoutMap {
             .filter(|r| r.message_idx == message_idx && r.block_idx == block_idx)
             .collect()
     }
+
+    /// Return visible activatable targets in screen order.
+    pub fn interactive_targets(&self) -> Vec<InteractiveTarget> {
+        let mut regions: Vec<&BlockRegion> = self
+            .regions
+            .iter()
+            .filter(|region| matches!(region.block_idx, TOOL_STEP_BLOCK_IDX | THINKING_BLOCK_IDX))
+            .collect();
+        regions.sort_by_key(|region| (region.rect.y, region.rect.x));
+
+        let mut targets = Vec::new();
+        for region in regions {
+            let target = match region.block_idx {
+                TOOL_STEP_BLOCK_IDX => InteractiveTarget::tool_step(region.message_idx),
+                THINKING_BLOCK_IDX => InteractiveTarget::thinking(region.message_idx),
+                _ => continue,
+            };
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
 }
 
 /// Helper to measure how many display columns a string occupies.
@@ -287,5 +346,45 @@ mod tests {
         map.push(region("world", 10, 3, Rect::new(0, 4, 20, 1)));
 
         assert_eq!(map.hit_test(4, 4).unwrap().byte_offset, 11);
+    }
+
+    #[test]
+    fn interactive_targets_are_visible_ordered_and_deduplicated() {
+        let mut map = LayoutMap::new();
+        map.push(BlockRegion {
+            message_idx: 2,
+            block_idx: TOOL_STEP_BLOCK_IDX,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: Rect::new(0, 5, 10, 1),
+        });
+        map.push(BlockRegion {
+            message_idx: 2,
+            block_idx: TOOL_STEP_BLOCK_IDX,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: Rect::new(0, 6, 10, 1),
+        });
+        map.push(BlockRegion {
+            message_idx: 3,
+            block_idx: THINKING_BLOCK_IDX,
+            start_byte: 0,
+            end_byte: 0,
+            text: String::new(),
+            prefix_cols: 0,
+            rect: Rect::new(0, 7, 10, 1),
+        });
+
+        assert_eq!(
+            map.interactive_targets(),
+            vec![
+                InteractiveTarget::tool_step(2),
+                InteractiveTarget::thinking(3)
+            ]
+        );
     }
 }

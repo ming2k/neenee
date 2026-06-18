@@ -4,7 +4,7 @@
 //! Selection is stored in terms of `SemanticCursor` (message, block, byte offset)
 //! so copying always returns the *original* text, not terminal-wrapped output.
 
-use crate::document::{Block, ChatMessage};
+use crate::document::{Block, TranscriptMessage};
 use crate::layout::SemanticCursor;
 use std::borrow::Cow;
 
@@ -219,7 +219,7 @@ impl SelectionState {
 /// selection returns the actually-displayed text with borders stripped.
 pub fn get_selected_text<'a>(
     state: &SelectionState,
-    messages: &'a [ChatMessage],
+    messages: &'a [TranscriptMessage],
     table_grid: &dyn Fn(usize, usize) -> Option<&'a str>,
 ) -> Option<String> {
     match state {
@@ -319,7 +319,7 @@ pub(crate) fn inclusive_end(text: &str, offset: usize) -> usize {
 /// can never cause an out-of-boundary slice.
 fn extract_within_message<'a>(
     message_idx: usize,
-    msg: &'a ChatMessage,
+    msg: &'a TranscriptMessage,
     start: &SemanticCursor,
     end: &SemanticCursor,
     table_grid: &dyn Fn(usize, usize) -> Option<&'a str>,
@@ -411,12 +411,12 @@ impl SelectionDrag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Block, ChatMessage};
+    use crate::document::{Block, TranscriptMessage};
     use neenee_core::Role;
 
     #[test]
     fn test_block_selection() {
-        let msg = ChatMessage::new(Role::Assistant, "Hello world");
+        let msg = TranscriptMessage::new(Role::Assistant, "Hello world");
         let messages = vec![msg];
         let sel = SelectionState::Block {
             message_idx: 0,
@@ -430,7 +430,8 @@ mod tests {
 
     #[test]
     fn expanded_tool_step_copy_uses_semantic_detail() {
-        let mut message = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
+        let mut message =
+            TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
         message.finish_tool_step("call_1", "file contents", 42);
         message.set_tool_step_expanded(true);
         // Block 0 = display arguments (key-value text), block 1 = output.
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_range_selection_within_block() {
-        let msg = ChatMessage::new(Role::Assistant, "Hello world");
+        let msg = TranscriptMessage::new(Role::Assistant, "Hello world");
         let messages = vec![msg];
         // Head points at the last char; inclusive semantics select it.
         let sel = SelectionState::Range {
@@ -472,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_range_cross_blocks() {
-        let mut msg = ChatMessage::new(Role::Assistant, "");
+        let mut msg = TranscriptMessage::new(Role::Assistant, "");
         msg.blocks = vec![
             Block::Text {
                 content: "First".to_string(),
@@ -495,7 +496,7 @@ mod tests {
 
     #[test]
     fn multibyte_selection_never_panics_and_includes_head_char() {
-        let msg = ChatMessage::new(Role::Assistant, "你好世界");
+        let msg = TranscriptMessage::new(Role::Assistant, "你好世界");
         let messages = vec![msg];
 
         // Head in the middle of 世 (byte 7 is not a boundary) — must not panic.
@@ -511,7 +512,7 @@ mod tests {
 
     #[test]
     fn selection_head_past_text_end_is_clamped() {
-        let msg = ChatMessage::new(Role::Assistant, "短文本");
+        let msg = TranscriptMessage::new(Role::Assistant, "短文本");
         let messages = vec![msg];
         let sel = SelectionState::Range {
             anchor: SemanticCursor::new(0, 0, 0),
@@ -530,7 +531,7 @@ mod tests {
             assert_eq!((mi, bi), (0, 0));
             Some(grid)
         };
-        let mut msg = ChatMessage::new(Role::Assistant, "");
+        let mut msg = TranscriptMessage::new(Role::Assistant, "");
         msg.blocks = vec![Block::Table {
             headers: vec!["a".to_string(), "b".to_string()],
             rows: vec![vec!["c".to_string(), "d".to_string()]],
@@ -551,7 +552,7 @@ mod tests {
         // Whole first data line selected via byte range over the grid.
         let grid = "┌─────┬──────┐\n│ hello │ world │\n└─────┴──────┘";
         let grid_fn = |_: usize, _: usize| Some(grid);
-        let mut msg = ChatMessage::new(Role::Assistant, "");
+        let mut msg = TranscriptMessage::new(Role::Assistant, "");
         msg.blocks = vec![Block::Table {
             headers: vec!["hello".to_string(), "world".to_string()],
             rows: vec![],
@@ -575,7 +576,7 @@ mod tests {
     fn table_cell_copy_returns_cell_text() {
         // header row 0: "name" (cell 0), "value" (cell 1)
         // body  row 1: "a"    (cell 2), "b"     (cell 3)
-        let mut msg = ChatMessage::new(Role::Assistant, "");
+        let mut msg = TranscriptMessage::new(Role::Assistant, "");
         msg.blocks = vec![Block::Table {
             headers: vec!["name".to_string(), "value".to_string()],
             rows: vec![vec!["a".to_string(), "b".to_string()]],
@@ -605,7 +606,7 @@ mod tests {
     fn table_cell_copy_includes_wrapped_text() {
         // A cell whose source text is long (would wrap when rendered) is copied
         // in full — the selection is logical-cell-granular, not line-granular.
-        let mut msg = ChatMessage::new(Role::Assistant, "");
+        let mut msg = TranscriptMessage::new(Role::Assistant, "");
         let long = "the quick brown fox jumps over the lazy dog";
         msg.blocks = vec![Block::Table {
             headers: vec!["desc".to_string()],

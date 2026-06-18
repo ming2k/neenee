@@ -38,7 +38,7 @@ see [Provider capabilities](provider-capabilities.md) and
 Tool schemas live inside the provider, not the conversation. Each turn calls
 `provider.prepare_tools(&self.tools)` before any network work, caching every
 tool's OpenAI function schema (`Tool::to_openai_function()`) in
-`OpenAIProvider.tools`. Every HTTP request then re-injects the full cached
+`OpenAiCompatProvider.tools`. Every HTTP request then re-injects the full cached
 set:
 
 ```text
@@ -50,11 +50,11 @@ Tool schemas are request-scoped. Every ReAct round, including the round that
 carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
-`OpenAIProvider` declares schemas natively. The OpenAI-compatible registry
+`OpenAiCompatProvider` declares schemas natively. The OpenAI-compatible registry
 presets (`kimi-code`, `kimi`, `deepseek`, `qwen`, `glm`, `volcengine`) and
 the bespoke `custom` entry all inherit the same path: each is built by
-`OpenAiCompatProvider::build` (or `OpenAIProvider::with_base_url` for
-`custom`) into an `OpenAIProvider`, so they delegate to its
+`OpenAiProviderSpec::build` (or `OpenAiCompatProvider::with_base_url` for
+`custom`) into an `OpenAiCompatProvider`, so they delegate to its
 `prepare_tools`. `GeminiProvider` and `LlamaServerProvider` do not override
 the default `prepare_tools` and never send a `tools` field; tool calls on
 those providers travel only through the universal fallback below.

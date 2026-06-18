@@ -20,7 +20,7 @@ use neenee_core::PermissionRequest;
 use super::primitives::{
     centered_rect, contrast_fg, draw_dim_backdrop, panel_block, viewport_rect,
 };
-use super::{Theme, CHAT_H_INSET};
+use super::{Theme, TRANSCRIPT_H_INSET};
 
 const PERMISSION_SHEET_MAX_WIDTH: u16 = 118;
 const PERMISSION_SHEET_MIN_WIDTH: u16 = 64;
@@ -301,7 +301,7 @@ pub fn draw_history_modal(
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        " Chat History",
+        " Input History",
         Style::default()
             .fg(theme.primary)
             .add_modifier(Modifier::BOLD),
@@ -408,7 +408,7 @@ pub fn draw_permission_sheet(
         )));
     }
 
-    let available_width = size.width.saturating_sub(2 * CHAT_H_INSET).max(1);
+    let available_width = size.width.saturating_sub(2 * TRANSCRIPT_H_INSET).max(1);
     let preferred_width = available_width.saturating_mul(PERMISSION_SHEET_WIDTH_PERCENT) / 100;
     let min_width = PERMISSION_SHEET_MIN_WIDTH.min(available_width);
     let sheet_width = preferred_width
@@ -573,15 +573,26 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         row("alt+enter", "insert newline (ctrl+j)"),
         row("esc", "interrupt (×2) / close"),
         row("ctrl+c", "copy · interrupt · quit (×2)"),
-        row("↑ / ↓", "history · navigate"),
-        row("tab", "accept suggestion"),
+        Line::from(""),
+        Line::from(section("Focus zones")),
+        Line::from(desc(
+            "Two zones split the keyboard. The hint bar shows [COMPOSE] or",
+        )),
+        Line::from(desc(
+            "[BROWSE] so you always know where the next key lands.",
+        )),
+        row("tab", "compose → browse (empty input)"),
+        row("shift+tab", "compose → browse (last card)"),
+        row("esc / any key", "browse → compose"),
+        row("↑ / ↓", "compose: history · browse: cycle cards"),
+        row("tab", "browse: cycle cards · compose: suggestion"),
+        row("enter / ␠", "browse: activate focused card"),
         Line::from(""),
         Line::from(section("Views & tools")),
         row("ctrl+h", "this help"),
         row("ctrl+m", "switch model"),
         row("ctrl+r", "search history"),
         row("ctrl+t", "toggle tool steps"),
-        row("ctrl+b", "toggle sidebar (plans)"),
         row("/", "slash commands"),
         Line::from(""),
         Line::from(section("Modes")),

@@ -24,7 +24,7 @@ Transient activity indicator shown directly above the input box.
 | Running tool / queued / waiting | Yes |
 | Overlay modal open | No |
 
-When hidden, the row is returned to the chat viewport.
+When hidden, the row is returned to the transcript viewport.
 
 ## Activity labels
 

@@ -51,7 +51,8 @@ impl GoalStore {
 
     pub async fn open_in_memory() -> Result<Self, String> {
         let conn = tokio::task::spawn_blocking(|| {
-            Connection::open_in_memory().map_err(|err| format!("failed to open in-memory db: {err}"))
+            Connection::open_in_memory()
+                .map_err(|err| format!("failed to open in-memory db: {err}"))
         })
         .await
         .map_err(|err| format!("db open task failed: {err}"))??;
@@ -147,7 +148,14 @@ impl GoalStore {
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
-                params![thread_id, goal_id, objective, status_str, token_budget, now_ms],
+                params![
+                    thread_id,
+                    goal_id,
+                    objective,
+                    status_str,
+                    token_budget,
+                    now_ms
+                ],
             )
             .map_err(|err| format!("replace_goal failed: {err}"))?;
             Ok::<_, String>(())
@@ -155,9 +163,9 @@ impl GoalStore {
         .await
         .map_err(|err| format!("replace_goal task failed: {err}"))??;
 
-        self.get_goal(&thread_id_for_get).await?.ok_or_else(|| {
-            "replace_goal succeeded but row is missing".to_string()
-        })
+        self.get_goal(&thread_id_for_get)
+            .await?
+            .ok_or_else(|| "replace_goal succeeded but row is missing".to_string())
     }
 
     /// Insert a new goal only if there is no existing unfinished goal.
@@ -179,8 +187,9 @@ impl GoalStore {
         let conn = Arc::clone(&self.conn);
         let inserted = tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|err| err.to_string())?;
-            let rows = conn.execute(
-                r#"
+            let rows = conn
+                .execute(
+                    r#"
                 INSERT INTO thread_goals (
                     thread_id, goal_id, objective, status, token_budget,
                     tokens_used, time_used_seconds, created_at_ms, updated_at_ms
@@ -196,9 +205,16 @@ impl GoalStore {
                     updated_at_ms = excluded.updated_at_ms
                 WHERE thread_goals.status = 'complete'
                 "#,
-                params![thread_id, goal_id, objective, status_str, token_budget, now_ms],
-            )
-            .map_err(|err| format!("insert_goal failed: {err}"))?;
+                    params![
+                        thread_id,
+                        goal_id,
+                        objective,
+                        status_str,
+                        token_budget,
+                        now_ms
+                    ],
+                )
+                .map_err(|err| format!("insert_goal failed: {err}"))?;
             Ok::<_, String>(rows > 0)
         })
         .await
@@ -427,12 +443,13 @@ fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadGoal, rusqlite::Err
         thread_id: row.get(0)?,
         goal_id: row.get(1)?,
         objective: row.get(2)?,
-        status: GoalStatus::try_from(row.get::<_, String>(3)?.as_str())
-            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(
+        status: GoalStatus::try_from(row.get::<_, String>(3)?.as_str()).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
                 3,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
-            ))?,
+            )
+        })?,
         token_budget: row.get(4)?,
         tokens_used: row.get(5)?,
         time_used_seconds: row.get(6)?,
@@ -446,9 +463,7 @@ fn status_after_budget_limit(
     tokens_used: i64,
     token_budget: Option<i64>,
 ) -> GoalStatus {
-    if status == GoalStatus::Active
-        && token_budget.is_some_and(|budget| tokens_used >= budget)
-    {
+    if status == GoalStatus::Active && token_budget.is_some_and(|budget| tokens_used >= budget) {
         GoalStatus::BudgetLimited
     } else {
         status

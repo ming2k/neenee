@@ -15,3 +15,7 @@ pulldown-cmark = "0.10"
 unicode-width = "0.1"
 arboard = "3.4"
 dirs = "5"
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"

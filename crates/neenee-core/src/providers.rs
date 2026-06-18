@@ -104,7 +104,7 @@ impl Provider for MockProvider {
     }
 }
 
-pub struct OpenAIProvider {
+pub struct OpenAiCompatProvider {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
@@ -112,12 +112,12 @@ pub struct OpenAIProvider {
     /// Stable provider/solution id surfaced via [`Provider::provider_id`] so
     /// assistant messages can be attributed. Defaults to `"openai"`; the
     /// OpenAI-compatible registry overrides it to the preset id (e.g.
-    /// `"kimi-code"`) in [`OpenAiCompatProvider::build`].
+    /// `"kimi-code"`) in [`OpenAiProviderSpec::build`].
     pub id: String,
     tools: Mutex<Option<Vec<Value>>>,
 }
 
-impl OpenAIProvider {
+impl OpenAiCompatProvider {
     pub fn new(api_key: String, model: String) -> Self {
         Self::with_base_url(api_key, model, "https://api.openai.com/v1/chat/completions")
     }
@@ -279,7 +279,7 @@ fn parse_openai_stream_data(data: &str) -> Vec<ProviderStreamEvent> {
 }
 
 #[async_trait]
-impl Provider for OpenAIProvider {
+impl Provider for OpenAiCompatProvider {
     fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
         let schemas: Vec<Value> = tools.iter().map(|t| t.to_openai_function()).collect();
         let _ = self.tools.lock().map(|mut guard| {
@@ -804,13 +804,13 @@ pub const KIMI_CODE_USER_AGENT: &str = "opencode/1.17.4";
 
 /// Specification for an OpenAI-compatible provider.
 ///
-/// Every provider in [`OPENAI_COMPAT_PROVIDERS`] speaks the OpenAI
+/// Every provider in [`OPENAI_PROVIDER_SPECS`] speaks the OpenAI
 /// chat-completions wire format and differs only in endpoint, default model,
 /// the environment variables consulted, and (rarely) a pinned model or a
 /// required user agent. Modelling them as *data* rather than one delegating
 /// newtype per vendor means adding a provider is a single table entry instead
 /// of ~30 lines of boilerplate trait delegation.
-pub struct OpenAiCompatProvider {
+pub struct OpenAiProviderSpec {
     /// Stable identifier used in config (`default_provider`) and the TUI.
     pub id: &'static str,
     /// Full chat-completions endpoint URL.
@@ -830,10 +830,10 @@ pub struct OpenAiCompatProvider {
 
 /// The single registry of OpenAI-compatible providers — the source of truth for
 /// their endpoints, default models, and environment variables.
-pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
+pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
     // Kimi Code — OpenAI-compatible coding-agent endpoint. The fixed model ID
     // is mapped to the latest coding model by Kimi Code.
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "kimi-code",
         base_url: "https://api.kimi.com/coding/v1/chat/completions",
         default_model: "kimi-for-coding",
@@ -843,7 +843,7 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
         default_user_agent: Some(KIMI_CODE_USER_AGENT),
     },
     // Kimi Open Platform (Moonshot AI). Models: moonshot-v1-{8k,32k,128k}.
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "kimi",
         base_url: "https://api.moonshot.cn/v1/chat/completions",
         default_model: "moonshot-v1-8k",
@@ -853,7 +853,7 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
         default_user_agent: None,
     },
     // DeepSeek. Models: deepseek-chat, deepseek-reasoner (returns reasoning_content).
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "deepseek",
         base_url: "https://api.deepseek.com/v1/chat/completions",
         default_model: "deepseek-chat",
@@ -863,7 +863,7 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
         default_user_agent: None,
     },
     // Qwen (Tongyi / Alibaba DashScope). Models: qwen-plus, qwen-max, qwen-coder-plus.
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "qwen",
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         default_model: "qwen-plus",
@@ -873,7 +873,7 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
         default_user_agent: None,
     },
     // GLM (Zhipu AI / 智谱). Models: glm-4-plus, glm-4, glm-4-air, glm-4-flash.
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "glm",
         base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         default_model: "glm-4-plus",
@@ -883,7 +883,7 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
         default_user_agent: None,
     },
     // Volcengine (火山引擎 / ByteDance Ark). Models: deepseek-v3-250324, doubao-pro-256k.
-    OpenAiCompatProvider {
+    OpenAiProviderSpec {
         id: "volcengine",
         base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
         default_model: "deepseek-v3-250324",
@@ -895,11 +895,11 @@ pub const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatProvider] = &[
 ];
 
 /// Look up an OpenAI-compatible provider spec by its identifier.
-pub fn openai_compat_provider(id: &str) -> Option<&'static OpenAiCompatProvider> {
-    OPENAI_COMPAT_PROVIDERS.iter().find(|spec| spec.id == id)
+pub fn openai_provider_spec(id: &str) -> Option<&'static OpenAiProviderSpec> {
+    OPENAI_PROVIDER_SPECS.iter().find(|spec| spec.id == id)
 }
 
-impl OpenAiCompatProvider {
+impl OpenAiProviderSpec {
     /// Resolve the model to use: a pinned `fixed_model` always wins, otherwise
     /// the caller's override, otherwise the provider default.
     pub fn resolve_model(&self, override_model: Option<String>) -> String {
@@ -909,19 +909,19 @@ impl OpenAiCompatProvider {
         override_model.unwrap_or_else(|| self.default_model.to_string())
     }
 
-    /// Build a concrete [`OpenAIProvider`] for this spec. `user_agent` overrides
+    /// Build a concrete [`OpenAiCompatProvider`] for this spec. `user_agent` overrides
     /// the spec default (used by the Kimi coding endpoint).
     pub fn build(
         &self,
         api_key: String,
         override_model: Option<String>,
         user_agent: Option<String>,
-    ) -> OpenAIProvider {
+    ) -> OpenAiCompatProvider {
         let model = self.resolve_model(override_model);
         let agent = user_agent
             .or_else(|| self.default_user_agent.map(str::to_string))
             .unwrap_or_else(|| NEENEE_USER_AGENT.to_string());
-        let mut provider = OpenAIProvider::with_base_url_and_user_agent(
+        let mut provider = OpenAiCompatProvider::with_base_url_and_user_agent(
             api_key,
             model,
             self.base_url,
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn openai_request_filters_empty_assistant_history() {
-        let provider = OpenAIProvider::new("test-key".to_string(), "test-model".to_string());
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
         let body = provider.request_body(
             vec![
                 Message::new(Role::User, "hello"),
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn openai_request_drops_orphan_tool_results() {
-        let provider = OpenAIProvider::new("test-key".to_string(), "test-model".to_string());
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
         let matched = ToolCall {
             id: "call_matched".to_string(),
             name: "read_file".to_string(),
@@ -1059,9 +1059,12 @@ mod tests {
 
     #[test]
     fn kimi_code_uses_fixed_coding_endpoint_and_model() {
-        let spec = openai_compat_provider("kimi-code").expect("kimi-code spec");
+        let spec = openai_provider_spec("kimi-code").expect("kimi-code spec");
         // A pinned model ignores any caller override.
-        assert_eq!(spec.resolve_model(Some("ignored".to_string())), "kimi-for-coding");
+        assert_eq!(
+            spec.resolve_model(Some("ignored".to_string())),
+            "kimi-for-coding"
+        );
 
         let provider = spec.build("test-key".to_string(), None, None);
         assert_eq!(provider.base_url, spec.base_url);
@@ -1076,7 +1079,7 @@ mod tests {
 
     #[test]
     fn openai_compat_spec_resolves_model_override_and_default() {
-        let spec = openai_compat_provider("deepseek").expect("deepseek spec");
+        let spec = openai_provider_spec("deepseek").expect("deepseek spec");
         assert_eq!(spec.resolve_model(None), "deepseek-chat");
         assert_eq!(
             spec.resolve_model(Some("deepseek-reasoner".to_string())),

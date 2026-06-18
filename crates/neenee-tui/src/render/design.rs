@@ -1,16 +1,17 @@
 //! Non-color design tokens: spacing, gutters, fixed row counts, and text
 //! measurement limits shared by renderer components.
 
-/// Uniform horizontal inset applied to chat-area components so bands, bars,
-/// and text do not touch the terminal frame.
-pub(super) const CHAT_H_INSET: u16 = 2;
+/// Uniform horizontal inset applied to transcript-area components so bands,
+/// bars, and text do not touch the terminal frame.
+pub(super) const TRANSCRIPT_H_INSET: u16 = 2;
 
-/// Extra leading whitespace applied to prose after the chat-area gutter.
-pub(super) const CHAT_BODY_LEADING_INDENT: u16 = 2;
-/// Left prefix used by prose-like content: chat gutter + body indent.
-pub(super) const CHAT_BODY_PREFIX_COLS: u16 = CHAT_H_INSET + CHAT_BODY_LEADING_INDENT;
+/// Extra leading whitespace applied to prose after the transcript-area gutter.
+pub(super) const TRANSCRIPT_BODY_LEADING_INDENT: u16 = 2;
+/// Left prefix used by prose-like content: transcript gutter + body indent.
+pub(super) const TRANSCRIPT_BODY_PREFIX_COLS: u16 =
+    TRANSCRIPT_H_INSET + TRANSCRIPT_BODY_LEADING_INDENT;
 /// Right-side slack reserved when wrapping prose-like content.
-pub(super) const CHAT_BODY_RIGHT_INSET: u16 = CHAT_H_INSET;
+pub(super) const TRANSCRIPT_BODY_RIGHT_INSET: u16 = TRANSCRIPT_H_INSET;
 
 /// Minimum readable width for compact expandable card bands.
 pub(super) const CARD_MIN_WIDTH: usize = 8;
@@ -35,33 +36,32 @@ pub(super) const REASONING_TRACE_BODY_TOP_GAP_ROWS: usize = 1;
 pub(super) const REASONING_TRACE_BLOCK_GAP_ROWS: usize = 1;
 pub(super) const REASONING_TRACE_BODY_BOTTOM_GAP_ROWS: usize = 1;
 
-/// Header is a floating half-block panel: a top transition row, one or more
-/// content rows, and a bottom transition row. The panel grows by one row when
-/// a goal-checklist dock is shown. Hidden entirely when an overlay modal is
-/// open (chrome_hidden).
-pub(super) const HEADER_ROWS: u16 = 3;
-pub(super) const HEADER_WITH_CHECKLIST_ROWS: u16 = 4;
-/// Internal left indent of header content inside the panel (after the side
-/// gutter), matching the composer's prompt prefix feel.
-pub(super) const HEADER_PANEL_INNER_PADDING: usize = 2;
-pub(super) const HEADER_GOAL_GAP: usize = 3;
-pub(super) const HEADER_RIGHT_GAP_MIN: usize = 1;
-pub(super) const HEADER_GOAL_MAX_CHARS: usize = 32;
+/// Hint bar: a single-line status strip pinned directly below the input box
+/// that surfaces workspace + model + goal + MCP + context-usage info that the
+/// old top header used to carry. Always one row tall when visible (hidden only
+/// while an overlay modal replaces the chrome).
+pub(super) const HINT_BAR_ROWS: u16 = 1;
+/// Internal left indent of hint-bar content, matching the composer's prompt
+/// prefix feel.
+pub(super) const HINT_BAR_INNER_PADDING: usize = 1;
+/// Gap between the cwd and the right-aligned cluster (model/goal/MCP/ctx).
+pub(super) const HINT_BAR_GAP_MIN: usize = 2;
+/// Gap between adjacent right-aligned hint segments.
+pub(super) const HINT_BAR_SEGMENT_GAP: usize = 2;
+/// Upper bound on the displayed goal objective excerpt shown in the hint bar.
+pub(super) const HINT_BAR_GOAL_MAX_CHARS: usize = 28;
 /// Upper bound on the displayed cwd. When the working directory is deeper than
 /// this, the leading path components collapse to `…` so the leaf and the
-/// right-side cluster (model name, context bar) both stay visible.
-pub(super) const HEADER_PATH_MAX_CHARS: usize = 40;
-/// Minimum chat-column width at which the context-usage bar is drawn.
-pub(super) const HEADER_CONTEXT_MIN_WIDTH: usize = 40;
+/// right-side cluster both stay visible.
+pub(super) const HINT_BAR_PATH_MAX_CHARS: usize = 32;
 /// Fill-cell count of the context-usage bar (`[██░░░░░░░░]`).
 pub(super) const CONTEXT_USAGE_BAR_CELLS: usize = 10;
 
 pub(super) const STATUS_BAR_ROWS: u16 = 1;
-pub(super) const HINT_LINE_ROWS: u16 = 1;
 pub(super) const SUBAGENT_BAR_ROWS: u16 = 1;
 
 /// Horizontal inset applied to the footer area containing status/composer/hints.
-pub(super) const FOOTER_H_INSET: u16 = CHAT_H_INSET;
+pub(super) const FOOTER_H_INSET: u16 = TRANSCRIPT_H_INSET;
 
 /// Composer chrome consists of one top and one bottom padding row.
 pub(super) const COMPOSER_VERTICAL_CHROME_ROWS: u16 = 2;
@@ -75,5 +75,16 @@ pub(super) const COMPOSER_TEXT_ROW_OFFSET: u16 = 1;
 
 /// User message panels mirror the composer: outer gutter, gap, text, then
 /// trailing fill.
-pub(super) const USER_MESSAGE_OUTER_GUTTER_COLS: usize = CHAT_H_INSET as usize;
-pub(super) const USER_MESSAGE_TEXT_GAP_COLS: usize = 1;
+pub(super) const USER_MESSAGE_OUTER_GUTTER_COLS: usize = TRANSCRIPT_H_INSET as usize;
+/// Inner left padding (in `user_panel_bg`) between the outer gutter and the
+/// text. Matches the composer's prompt prefix so sent messages and the input
+/// box share the same left margin.
+pub(super) const USER_MESSAGE_TEXT_GAP_COLS: usize = 2;
+/// Inner right padding (in `user_panel_bg`) kept clear of wrapped text so a
+/// sent message never runs its text into the panel's right edge.
+pub(super) const USER_MESSAGE_RIGHT_PAD_COLS: usize = 2;
+
+/// Inner right padding (in `input_bg`) kept clear of wrapped text inside the
+/// composer, mirroring the left prompt prefix so the box reads as a balanced
+/// panel.
+pub(super) const COMPOSER_RIGHT_PAD_COLS: usize = 2;

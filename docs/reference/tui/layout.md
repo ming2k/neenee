@@ -2,37 +2,31 @@
 
 ## Overview
 
-When the terminal is at least `SIDEBAR_AUTO_WIDTH` cols wide, the right-side
-sidebar docks alongside the three vertical chunks and the combined frame looks
-like this. Below that threshold (or when toggled off with `Ctrl+B`) the
-sidebar disappears and the chat column reclaims the full viewport width.
+The viewport splits into three vertical chunks and the combined frame looks
+like this. The transcript column always reclaims the full viewport width.
 
 ```text
-    chat column (viewport_w - SIDEBAR_WIDTH)                     sidebar
-┌──────────────────────────────────────────────┬────────────────────┐
-│app_bg  ·  top viewport margin (1 row, spans full width)           │
-├──────────────────────────────────────────────┼────────────────────┤
-│Header (chunks[0])  ▄ top transition          │┊Sidebar (32 cols)  │
-│ model · goal · context bar  (panel_bg)       │┊model + provider   │
-│Header  ▀ bottom transition                   │┊active goal        │
-├──────────────────────────────────────────────┼────────────────────┤
-│Chat viewport (chunks[1])                     │┊goal checklist     │
-│(viewport_w - SIDEBAR_WIDTH)                  │┊loop status        │
-│                                              │┊token / time budget│
-├──────────────────────────────────────────────┼────────────────────┤
-│Footer (chunks[2])                            │┊                   │
-│ status? + input box + hint line              │┊                   │
-├──────────────────────────────────────────────┼────────────────────┤
-│app_bg  ·  bottom viewport margin (1 row, spans full width)        │
-└──────────────────────────────────────────────┴────────────────────┘
+    transcript column (full viewport width)
+┌──────────────────────────────────────────────┐
+│app_bg  ·  top viewport margin (1 row)         │
+├──────────────────────────────────────────────┤
+│Header (chunks[0])  ▄ top transition          │
+│ model · goal · context bar  (panel_bg)       │
+│Header  ▀ bottom transition                   │
+├──────────────────────────────────────────────┤
+│Transcript viewport (chunks[1])               │
+│                                              │
+├──────────────────────────────────────────────┤
+│Footer (chunks[2])                            │
+│ status? + input box + hint line              │
+├──────────────────────────────────────────────┤
+│app_bg  ·  bottom viewport margin (1 row)     │
+└──────────────────────────────────────────────┘
 ```
 
-The sidebar spans the full viewport height (between the two `app_bg` margin
-rows) and scrolls independently; the chat column shrinks by `SIDEBAR_WIDTH`.
-The `┊` marks the background boundary between `panel_bg` (sidebar) and the
-`app_bg` chat column. The header is a floating `panel_bg` panel inset from both
-edges by `app_bg` gutters, with half-block transitions — not a full-width band.
-The sections below break the chat column apart.
+The header is a floating `panel_bg` panel inset from both edges by `app_bg`
+gutters, with half-block transitions — not a full-width band. The sections
+below break the transcript column apart.
 
 ## Viewport
 
@@ -46,12 +40,12 @@ on every frame.
 ## Vertical chunks
 
 ratatui's `Layout::default().direction(Vertical)` splits the viewport into
-three chunks inside `draw_chat`:
+three chunks inside `draw_transcript`:
 
 | Chunk | Constraint | Contents |
 |-------|-----------|----------|
 | Header | `Length(0)` modal / `Length(3)` / `Length(4)` with checklist | Half-block `panel_bg` panel: model name, goal, context-usage bar |
-| Chat | `Min(0)` | All message content |
+| Transcript | `Min(0)` | All message content |
 | Footer | `Length(0)` modal / `status + input + 1` | Status bar, input box, hint line |
 
 ```text
@@ -62,7 +56,7 @@ three chunks inside `draw_chat`:
 │ model name + goal + context-usage bar  (panel_bg)            │
 │Header  ▀ bottom transition                                   │
 ├──────────────────────────────────────────────────────────────┤
-│Chat viewport  (all message content)                 chunks[1]│
+│Transcript viewport  (all message content)           chunks[1]│
 │                                                              │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
@@ -97,47 +91,14 @@ per-component detail.
 └────────────────────────────────────────────────────────────┘
 ```
 
-## Sidebar column
-
-When the terminal is at least `SIDEBAR_AUTO_WIDTH` cols wide (or when the
-user toggles it on with `Ctrl+B`), the right `SIDEBAR_WIDTH` cols are docked
-as a persistent sidebar that spans the full viewport height. The chat column
-shrinks by `SIDEBAR_WIDTH`; the sidebar has its own scroll offset and shows
-state that does not scroll with the conversation:
-
-- Model + provider
-- Active goal (objective + status pill)
-- Goal checklist (plans/todos) with per-item status glyphs
-- Loop status (when running)
-- Token/time budget bar
-
-```text
-┌──────────────────────────────────────────┬──────────────────────┐
-│Header                                    │Sidebar (32 cols)     │
-│                                          │model + provider      │
-│Chat viewport                             │active goal           │
-│(viewport_w - 32)                         │goal checklist        │
-│                                          │loop status           │
-│                                          │token / time budget   │
-│Footer (status + input + hint)            │                      │
-└──────────────────────────────────────────┴──────────────────────┘
-```
-
-| Measurement | Value |
-|------------|-------|
-| `SIDEBAR_WIDTH` | 32 cols |
-| `SIDEBAR_AUTO_WIDTH` | 132 cols (auto-show threshold) |
-| Toggle keybinding | `Ctrl+B` (cycles auto -> on -> off -> auto) |
-| Mouse wheel over the pane | Scrolls the sidebar instead of the chat |
-
 ## Horizontal gutters
 
-Every chat-area component is inset by `CHAT_H_INSET = 2` cols on each side so
+Every transcript-area component is inset by `TRANSCRIPT_H_INSET = 2` cols on each side so
 no band, bar, or text touches the terminal frame. The two gutters stay
 `app_bg` via the global frame fill. Solid-background bands (card headers and
-bodies, child tool steps) render into `chat_band_rect` (`render/mod.rs`), which
-is the chat area minus both gutters; user panels and code blocks render their
-own equivalent gutters; markdown text wraps with `CHAT_H_INSET` cells of slack
+bodies, child tool steps) render into `transcript_band_rect` (`render/mod.rs`), which
+is the transcript area minus both gutters; user panels and code blocks render their
+own equivalent gutters; markdown text wraps with `TRANSCRIPT_H_INSET` cells of slack
 on the right.
 
 ```text
@@ -145,7 +106,7 @@ on the right.
 │columns: 0 1 2 3                                 ... W-1      │
 │          v v v v                                 v           │
 │                                                              │
-│          app_bg |    chat band (chat_band_rect)   | app_bg   │
+│          app_bg |    transcript band              | app_bg   │
 │                                                              │
 │          ..  .. +-------------------------------+ ..  ..     │
 │          ..  .. |  card header / body / text    | ..  ..     │
@@ -159,8 +120,7 @@ on the right.
 
 When an overlay modal is open, `chrome_hidden = true` collapses the header and
 footer heights to 0. The modal gets the full viewport with no header, input
-box, status bar, or hint line visible. The sidebar is also hidden while a
-chrome-collapsing modal is open.
+box, status bar, or hint line visible.
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
@@ -172,14 +132,14 @@ chrome-collapsing modal is open.
 │        |                               |                   │
 │        +-------------------------------+                   │
 │                                                            │
-│header = 0,  footer = 0,  sidebar hidden                    │
+│header = 0,  footer = 0                                     │
 └────────────────────────────────────────────────────────────┘
 ```
 
 Modal types that hide chrome: Models, Sessions, Help, Permission.
 Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
 
-## Chat viewport behavior
+## Transcript viewport behavior
 
 - Messages render top-to-bottom with 1-row spacing between them.
 - Auto-follow pins to the newest content.
@@ -190,15 +150,15 @@ Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
 
 | Measurement | Value | Where |
 |------------|-------|-------|
-| Left/right gutter (all chat content) | 2 cols `app_bg` | `CHAT_H_INSET`, applied via `chat_band_rect` (cards) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
+| Left/right gutter (all transcript content) | 2 cols `app_bg` | `TRANSCRIPT_H_INSET`, applied via `transcript_band_rect` (cards) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
 | `┃` bar column | 2 (after 2-col gutter) | User messages, code blocks, input |
 | Assistant text indent | 4 cols (left) + 2-col right gutter | `line_spans("    ", ...)`; wraps at `area.width - 6` |
 | Code block indent | 2 cols (inside band) + `┃` + space | `code_gutter_line(left_indent=2)` |
-| Card marker column | 2 (inside `CHAT_H_INSET` band) | `+` / `-` at band col 0 in `card_header_line` |
+| Card marker column | 2 (inside `TRANSCRIPT_H_INSET` band) | `+` / `-` at band col 0 in `card_header_line` |
 | Card header text column | 4 (2 gutter + 2 after `+ `) | After `+ ` prefix |
-| Card body indent | 4 cols from chat edge (2 inside band) | `draw_tool_body_section`, `draw_reasoning_trace` |
+| Card body indent | 4 cols from transcript edge (2 inside band) | `draw_tool_body_section`, `draw_reasoning_trace` |
 | Line-number gutter min width | 2 chars | `.max(2)` |
 | Mouse scroll step | 4 rows | `ScrollUp/Down` handler |
 | PageUp/PageDown step | `view_height - 1` | One line of overlap |
-| Input box max height | `terminal_height / 2` | Capped so chat stays visible |
+| Input box max height | `terminal_height / 2` | Capped so transcript stays visible |
 | Message spacing | 1 row | Between consecutive messages |

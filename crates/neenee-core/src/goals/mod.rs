@@ -111,14 +111,17 @@ pub struct GoalChecklistItem {
 impl Goal {
     pub fn can_complete(&self) -> bool {
         self.checklist.is_empty()
-            || self
-                .checklist
-                .iter()
-                .all(|item| matches!(item.status, GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled))
+            || self.checklist.iter().all(|item| {
+                matches!(
+                    item.status,
+                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
+                )
+            })
     }
 
     pub fn remaining_tokens(&self) -> Option<i64> {
-        self.token_budget.map(|budget| (budget - self.tokens_used).max(0))
+        self.token_budget
+            .map(|budget| (budget - self.tokens_used).max(0))
     }
 }
 

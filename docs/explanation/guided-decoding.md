@@ -139,7 +139,7 @@ logits. The OpenAI Chat Completions contract exposes only the sampled
 text, not the per-token probability distribution. Constrained decoding
 must run inside the serving runtime where the logits live.
 
-This is the load-bearing assumption behind `OpenAIProvider`. When
+This is the load-bearing assumption behind `OpenAiCompatProvider`. When
 `prepare_tools` injects the `tools` field through `request_body`
 (`crates/neenee-core/src/providers.rs`), it is implicitly asserting two
 things about the upstream runtime:

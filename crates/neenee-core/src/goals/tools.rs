@@ -55,7 +55,7 @@ impl Tool for GetGoalTool {
     }
 
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
@@ -117,14 +117,19 @@ impl Tool for CreateGoalTool {
             token_budget: Option<i64>,
         }
 
-        let args: Args = serde_json::from_str(arguments)
-            .map_err(|err| format!("Invalid JSON: {err}"))?;
+        let args: Args =
+            serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
         let thread_id = self.context.thread_id()?;
 
         let goal = self
             .context
             .goal_service
-            .set_goal(&thread_id, &args.objective, GoalStatus::Active, args.token_budget)
+            .set_goal(
+                &thread_id,
+                &args.objective,
+                GoalStatus::Active,
+                args.token_budget,
+            )
             .await?;
         Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
     }
@@ -175,8 +180,8 @@ impl Tool for UpdateGoalTool {
             status: String,
         }
 
-        let args: Args = serde_json::from_str(arguments)
-            .map_err(|err| format!("Invalid JSON: {err}"))?;
+        let args: Args =
+            serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
         let thread_id = self.context.thread_id()?;
 
         let goal = match args.status.as_str() {
@@ -236,7 +241,7 @@ impl Tool for GoalChecklistTool {
     }
 
     fn access(&self) -> ToolAccess {
-        ToolAccess::ReadOnly
+        ToolAccess::Read
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -245,8 +250,8 @@ impl Tool for GoalChecklistTool {
             items: Vec<GoalChecklistItem>,
         }
 
-        let args: Args = serde_json::from_str(arguments)
-            .map_err(|err| format!("Invalid JSON: {err}"))?;
+        let args: Args =
+            serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
         if args.items.len() > 50 {
             return Err("Goal checklist is limited to 50 items.".to_string());
         }

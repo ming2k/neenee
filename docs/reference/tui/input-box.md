@@ -22,7 +22,7 @@ The live editable prompt at the bottom of the frame.
 ## Height growth
 
 The box grows with wrapped content, capped at half the terminal height so the
-chat history always stays visible. The layout reserves space based on
+transcript history always stays visible. The layout reserves space based on
 `wrap_text(input, text_width).len()`.
 
 ## Caret

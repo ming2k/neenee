@@ -11,10 +11,10 @@ chain-of-thought text.
 
 | Attribute | Value |
 |-----------|-------|
-| Background | `element_bg` (33, 37, 54) band, inset 2 cols (`CHAT_H_INSET`) |
+| Background | `element_bg` (33, 37, 54) band, inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD, `info` color |
 | Header text | `text_muted` BOLD |
-| Header text column | 4 from chat edge (band col 2, after `+ ` prefix) |
+| Header text column | 4 from transcript edge (band col 2, after `+ ` prefix) |
 
 ## Header format
 
@@ -38,7 +38,7 @@ are already preserved as empty rows by `wrap_text`.
 | Attribute | Value |
 |-----------|-------|
 | Background | `menu_bg` (27, 30, 44) |
-| Body indent | 2 cols inside the band (chat column 4, left-aligned with the header text) |
+| Body indent | 2 cols inside the band (transcript column 4, left-aligned with the header text) |
 | Body color | `text_muted` |
 | Body style | Plain wrapped text (no code gutter) |
 
@@ -46,6 +46,9 @@ are already preserved as empty rows by `wrap_text`.
 
 See [expandable card](expandable-card.md#behavior) for the shared toggle,
 sticky-pin, and narrow-fallback behavior.
+
+Thinking cards participate in the same keyboard focus order as tool-step
+cards. `Enter` / `Space` opens or closes the focused thinking card.
 
 ## Source
 

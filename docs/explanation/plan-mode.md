@@ -39,8 +39,8 @@ The model can switch modes itself through two built-in tools that
 
 | Tool | Access | Effect |
 |------|--------|--------|
-| `plan_enter` | `ReadOnly` | Switch to `Plan` mode |
-| `plan_exit` | `ReadOnly` | Switch back to `Build` mode; optional `plan_path` records the plan file |
+| `plan_enter` | `Read` | Switch to `Plan` mode |
+| `plan_exit` | `Read` | Switch back to `Build` mode; optional `plan_path` records the plan file |
 
 The system prompt describes the workflow: when a request is complex, spans
 multiple files, or would benefit from designing first, the model calls
@@ -63,7 +63,7 @@ target remains blocked.
 The exemption is implemented per-invocation, not per-tool:
 
 1. The `Tool` trait exposes `allowed_in_plan_mode(arguments)`
-   (`crates/neenee-core/src/lib.rs`). Its default is `access() == ReadOnly`.
+   (`crates/neenee-core/src/lib.rs`). Its default is `access() == Read`.
 2. `WriteFileTool` and `EditFileTool` override it to return `true` only when
    the resolved `path` sits inside `.neenee/plans/`, using
    `plan::is_plan_path` (`crates/neenee-core/src/plan.rs`).
