@@ -49,6 +49,14 @@ pub enum InputAction {
     ScrollUp,
     /// Scroll down.
     ScrollDown,
+    /// Scroll up by one viewport page.
+    ScrollPageUp,
+    /// Scroll down by one viewport page.
+    ScrollPageDown,
+    /// Scroll to the very top.
+    ScrollTop,
+    /// Scroll to the very bottom and re-engage auto-follow.
+    ScrollBottom,
     /// Copy current selection.
     CopySelection,
     /// Plain Ctrl+C: copy selection, interrupt, clear input, or arm quit.
@@ -374,6 +382,18 @@ pub fn process_event(
                         }
                     }
                 },
+                KeyCode::PageUp if context.active_modal == super::Modal::None => {
+                    InputAction::ScrollPageUp
+                }
+                KeyCode::PageDown if context.active_modal == super::Modal::None => {
+                    InputAction::ScrollPageDown
+                }
+                KeyCode::Home if context.active_modal == super::Modal::None => {
+                    InputAction::ScrollTop
+                }
+                KeyCode::End if context.active_modal == super::Modal::None => {
+                    InputAction::ScrollBottom
+                }
                 _ => InputAction::None,
             }
         }

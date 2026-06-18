@@ -510,13 +510,12 @@ impl Tool for ListDirTool {
                     break;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
-                let meta = entry.metadata();
-                let prefix = match meta {
-                    Ok(m) if m.is_dir() => "📁",
-                    Ok(m) if m.is_file() => "📄",
-                    _ => "?",
-                };
-                results.push(format!("{} {}", prefix, name));
+                let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+                // Unix-style `ls -p` convention: directories get a trailing
+                // slash so they're visually distinct from files at a glance,
+                // without relying on emoji that may not render everywhere.
+                let suffix = if is_dir { "/" } else { "" };
+                results.push(format!("{}{}", name, suffix));
             }
         }
 

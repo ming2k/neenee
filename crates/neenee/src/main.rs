@@ -1029,7 +1029,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(req) = req_rx.recv().await {
             match req {
                 AgentRequest::Interrupt => {
-                    generation_clone.fetch_add(1, Ordering::SeqCst);
+                    // Cancellation is driven by the token below; we deliberately
+                    // do NOT bump the generation counter here. Bumping would make
+                    // the in-flight turn's `is_current` check false, so its own
+                    // cleanup (the "... [Interrupted]" message and the transition
+                    // back to "idle") would be skipped — leaving the UI stuck in
+                    // the "running" state with no interruption feedback. A later
+                    // turn bumps the generation itself and supersedes this one.
                     agent.reject_pending_permissions();
                     let _ = resp_tx.send(AgentResponse::PermissionsCleared);
                     let mut token = ctt_clone.write().await;

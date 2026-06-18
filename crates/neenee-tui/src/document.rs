@@ -26,6 +26,16 @@ pub enum MessageKind {
     },
 }
 
+/// Table column text alignment, mirrored from pulldown-cmark so the `Block`
+/// type does not leak the parser dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableAlignment {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
 /// A single semantic block within a message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
@@ -47,6 +57,15 @@ pub enum Block {
     },
     /// A blockquote.
     Quote { content: String },
+    /// A GFM-style table, kept as a semantic unit so columns stay aligned and
+    /// copy yields the rendered grid rather than re-wrapped prose.
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+        aligns: Vec<TableAlignment>,
+        /// Pre-rendered aligned grid (what is drawn and what copy returns).
+        rendered: String,
+    },
     /// A horizontal rule.
     Rule,
     /// Soft / hard line break marker.
@@ -62,6 +81,7 @@ impl Block {
             Block::Heading { content, .. } => content,
             Block::ListItem { content, .. } => content,
             Block::Quote { content } => content,
+            Block::Table { rendered, .. } => rendered,
             Block::Rule => "",
             Block::Break => "\n",
         }
@@ -289,14 +309,17 @@ impl ChatMessage {
             return None;
         };
         let chars = content.chars().count();
-        Some(format!(
-            "Thinking · {} · {} chars",
-            duration_text(*duration_ms),
-            chars
-        ))
+        Some(match duration_ms {
+            None => format!("Thinking · {} chars", chars),
+            Some(_) => format!("Thinking · {} · {} chars", duration_text(*duration_ms), chars),
+        })
     }
 
     /// Human-readable header for the tool-step card (always one line).
+    ///
+    /// Shows only what the tool did and a duration suffix for finished
+    /// states — the technical tool name lives inside the expanded body to
+    /// reduce cognitive load.
     pub fn tool_step_header(&self) -> Option<String> {
         let MessageKind::ToolStep {
             name,
@@ -308,18 +331,14 @@ impl ChatMessage {
         else {
             return None;
         };
-        let status = match output {
-            Some(output) if output.starts_with("Error") => "failed",
-            Some(_) => "completed",
-            None => "running",
-        };
-        Some(format!(
-            "{} · {} · {} · {}",
-            name,
-            status,
-            duration_text(*duration_ms),
-            argument_summary(name, arguments)
-        ))
+        let summary = argument_summary(name, arguments);
+        Some(match output {
+            Some(o) if o.starts_with("Error") => {
+                format!("{} · failed {}", summary, duration_text(*duration_ms))
+            }
+            Some(_) => format!("{} · {}", summary, duration_text(*duration_ms)),
+            None => summary,
+        })
     }
 
     fn refresh_tool_step(&mut self) {
@@ -335,27 +354,41 @@ impl ChatMessage {
         else {
             return;
         };
-        self.raw = if *expanded {
-            let arguments = pretty_json(arguments);
-            match output {
-                Some(output) => format!("```json\n{}\n```\n\nResult\n\n{}", arguments, output),
-                None => format!("```json\n{}\n```", arguments),
+        if *expanded {
+            // Expanded tool-step bodies are rendered directly from the
+            // structured data (see render_tool_step_card), not from parsed
+            // markdown. We still populate `blocks` so semantic selection and
+            // copy work: block 0 = display arguments, block 1 = output.
+            let kv = parse_arguments_kv(arguments);
+            let display_args: String = kv
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.raw = display_args.clone();
+            let mut blocks = vec![Block::Text {
+                content: display_args,
+            }];
+            if let Some(out) = output {
+                self.raw.push_str("\n\n");
+                self.raw.push_str(out);
+                blocks.push(Block::Text {
+                    content: out.clone(),
+                });
             }
+            self.blocks = blocks;
         } else {
-            let status = match output {
-                Some(output) if output.starts_with("Error") => "failed",
-                Some(_) => "completed",
-                None => "running",
+            let summary = argument_summary(name, arguments);
+            let suffix = match output {
+                Some(o) if o.starts_with("Error") => {
+                    format!(" · failed {}", duration_text(*duration_ms))
+                }
+                Some(_) => format!(" · {}", duration_text(*duration_ms)),
+                None => String::new(),
             };
-            format!(
-                "⚒ {} · {} · {} · {}",
-                name,
-                status,
-                duration_text(*duration_ms),
-                argument_summary(name, arguments)
-            )
-        };
-        self.blocks = parse_blocks(&self.raw);
+            self.raw = format!("{}{}", summary, suffix);
+            self.blocks = parse_blocks(&self.raw);
+        }
     }
 
     /// Re-parse blocks from raw text (e.g. after streaming append).
@@ -383,11 +416,28 @@ impl ChatMessage {
     }
 }
 
-fn pretty_json(arguments: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| arguments.to_string())
+/// Parse a JSON arguments string into ordered `(key, display_value)` pairs
+/// suitable for compact rendering in the tool-step card body.
+///
+/// String values are shown unquoted; other JSON types keep their native
+/// representation. Non-JSON input falls back to a single pair.
+pub fn parse_arguments_kv(arguments: &str) -> Vec<(String, String)> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return vec![("raw".to_string(), arguments.trim().to_string())];
+    };
+    let Some(object) = value.as_object() else {
+        return vec![("value".to_string(), arguments.trim().to_string())];
+    };
+    object
+        .iter()
+        .map(|(key, val)| {
+            let display = match val {
+                serde_json::Value::String(s) => s.clone(),
+                _ => val.to_string(),
+            };
+            (key.clone(), display)
+        })
+        .collect()
 }
 
 fn duration_text(duration_ms: Option<u64>) -> String {
@@ -409,20 +459,9 @@ fn argument_summary(name: &str, arguments: &str) -> String {
     let get = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
 
     let summary = match name {
-        "read_file" => {
-            if let Some(path) = get("path") {
-                let mut s = format!("Read {}", path);
-                if let Some(limit) = object.get("limit").and_then(|v| v.as_u64()) {
-                    s.push_str(&format!(" [limit={}]", limit));
-                }
-                if let Some(offset) = object.get("offset").and_then(|v| v.as_u64()) {
-                    s.push_str(&format!(" [offset={}]", offset));
-                }
-                s
-            } else {
-                "Read file".to_string()
-            }
-        }
+        "read_file" => get("path")
+            .map(|path| format!("Read {}", path))
+            .unwrap_or_else(|| "Read file".to_string()),
         "write_file" => get("path")
             .map(|path| format!("Write {}", path))
             .unwrap_or_else(|| "Write file".to_string()),
@@ -536,9 +575,21 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                         checked: None,
                     });
                 }
-                Tag::Table(_) => table = Some(TableAccumulator::default()),
-                Tag::TableHead | Tag::TableRow => {
+                Tag::Table(aligns) => {
+                    table = Some(TableAccumulator {
+                        aligns: aligns.into_iter().map(table_alignment).collect(),
+                        ..TableAccumulator::default()
+                    })
+                }
+                Tag::TableHead => {
                     if let Some(table) = &mut table {
+                        table.in_head = true;
+                        table.start_row();
+                    }
+                }
+                Tag::TableRow => {
+                    if let Some(table) = &mut table {
+                        table.in_head = false;
                         table.start_row();
                     }
                 }
@@ -624,15 +675,20 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
                 }
                 TagEnd::Table => {
                     if let Some(table) = table.take() {
-                        push_block(
-                            &mut blocks,
-                            Block::Text {
-                                content: table.render(),
-                            },
-                        );
+                        let rendered = table.render();
+                        if !rendered.is_empty() {
+                            push_block(
+                                &mut blocks,
+                                Block::Table {
+                                    headers: table.header,
+                                    rows: table.rows,
+                                    aligns: table.aligns,
+                                    rendered,
+                                },
+                            );
+                        }
                     }
-                }
-                _ => {}
+                }                _ => {}
             },
             Event::Text(t) => {
                 if in_code {
@@ -734,9 +790,12 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
 
 #[derive(Default)]
 struct TableAccumulator {
+    aligns: Vec<TableAlignment>,
+    header: Vec<String>,
     rows: Vec<Vec<String>>,
     row: Vec<String>,
     cell: String,
+    in_head: bool,
 }
 
 impl TableAccumulator {
@@ -748,8 +807,14 @@ impl TableAccumulator {
         if !self.cell.is_empty() {
             self.end_cell();
         }
-        if !self.row.is_empty() {
-            self.rows.push(std::mem::take(&mut self.row));
+        if self.row.is_empty() {
+            return;
+        }
+        let row = std::mem::take(&mut self.row);
+        if self.in_head {
+            self.header = row;
+        } else {
+            self.rows.push(row);
         }
     }
 
@@ -761,13 +826,103 @@ impl TableAccumulator {
         self.row.push(std::mem::take(&mut self.cell));
     }
 
-    fn render(self) -> String {
-        self.rows
-            .into_iter()
-            .map(|row| format!("│ {} │", row.join(" │ ")))
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Render the table as a GFM-style aligned grid using box-drawing borders.
+    ///
+    /// Columns are sized to their widest cell (intrinsic width) so vertical
+    /// separators line up across all rows. The header is followed by a
+    /// separator rule. Wide tables that exceed the viewport are handed to the
+    /// renderer's normal line wrapping rather than being truncated.
+    fn render(&self) -> String {
+        if self.header.is_empty() {
+            return String::new();
+        }
+        let ncols = self.header.len();
+        let width = |cell: &str| display_width(cell);
+
+        // Per-column intrinsic width: max of header and every body cell.
+        let mut widths = vec![0usize; ncols];
+        for (i, h) in self.header.iter().enumerate().take(ncols) {
+            widths[i] = widths[i].max(width(h));
+        }
+        for row in &self.rows {
+            for (i, cell) in row.iter().enumerate().take(ncols) {
+                widths[i] = widths[i].max(width(cell));
+            }
+        }
+
+        // Pad missing body cells up to the column count so the grid stays rectangular.
+        let body_rows: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let mut padded = row.clone();
+                if padded.len() < ncols {
+                    padded.resize(ncols, String::new());
+                }
+                padded
+            })
+            .collect();
+
+        let join_borders = |sep: &str| -> String {
+            widths
+                .iter()
+                .map(|w| "─".repeat(w + 2))
+                .collect::<Vec<_>>()
+                .join(sep)
+        };
+
+        let mut out = String::new();
+        out.push_str(&format!("┌{}┐\n", join_borders("┬")));
+        out.push_str(&format_row(&self.header, &widths, &self.aligns));
+        out.push('\n');
+        out.push_str(&format!("├{}┤\n", join_borders("┼")));
+        for row in &body_rows {
+            out.push_str(&format_row(row, &widths, &self.aligns));
+            out.push('\n');
+        }
+        out.push_str(&format!("└{}┘", join_borders("┴")));
+        out
     }
+}
+
+/// Format one table row as `│ cell │ cell │`, honoring per-column alignment.
+fn format_row(cells: &[String], widths: &[usize], aligns: &[TableAlignment]) -> String {
+    let ncols = widths.len();
+    let parts: Vec<String> = (0..ncols)
+        .map(|i| {
+            let cell = cells.get(i).map(String::as_str).unwrap_or("");
+            let align = aligns.get(i).copied().unwrap_or(TableAlignment::None);
+            pad_cell(cell, widths[i], align)
+        })
+        .collect();
+    format!("│ {} │", parts.join(" │ "))
+}
+
+fn pad_cell(cell: &str, width: usize, align: TableAlignment) -> String {
+    let cell_w = display_width(cell);
+    let pad = width.saturating_sub(cell_w);
+    match align {
+        TableAlignment::Right => format!("{}{}", " ".repeat(pad), cell),
+        TableAlignment::Center => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(right))
+        }
+        TableAlignment::None | TableAlignment::Left => format!("{}{}", cell, " ".repeat(pad)),
+    }
+}
+
+fn table_alignment(a: pulldown_cmark::Alignment) -> TableAlignment {
+    match a {
+        pulldown_cmark::Alignment::None => TableAlignment::None,
+        pulldown_cmark::Alignment::Left => TableAlignment::Left,
+        pulldown_cmark::Alignment::Center => TableAlignment::Center,
+        pulldown_cmark::Alignment::Right => TableAlignment::Right,
+    }
+}
+
+fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 struct ListAccumulator {
@@ -938,24 +1093,93 @@ mod tests {
                 ..
             } if content == "next"
         )));
-        assert!(blocks.iter().any(|block| matches!(
-            block,
-            Block::Text { content } if content.contains("│ Name │ State │")
-                && content.contains("│ neenee │ ready │")
-        )));
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { headers, rows, .. } => Some((headers, rows)),
+                _ => None,
+            });
+        let (headers, rows) = table.expect("table block present");
+        assert_eq!(headers, &["Name".to_string(), "State".to_string()]);
+        assert_eq!(rows, &[vec!["neenee".to_string(), "ready".to_string()]]);
+
+        // The rendered grid must align columns and separate the header from
+        // the body, the regression that motivated reintroducing Block::Table.
+        let rendered = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { rendered, .. } => Some(rendered.as_str()),
+                _ => None,
+            })
+            .expect("rendered table text");
+        assert!(
+            rendered.contains("┌"),
+            "missing top border: {rendered}"
+        );
+        assert!(
+            rendered.contains("├"),
+            "missing header/body separator: {rendered}"
+        );
+        // Pipes must line up: the header and data rows share the same `│`
+        // positions, so splitting on `│` yields the same number of pieces.
+        let pipes = |line: &str| line.matches('│').count();
+        let header_line = rendered.lines().nth(1).unwrap();
+        let data_line = rendered.lines().nth(3).unwrap();
+        assert_eq!(
+            pipes(header_line),
+            pipes(data_line),
+            "header and body rows must align: {rendered}"
+        );
+    }
+
+    #[test]
+    fn table_alignment_and_uneven_cells_line_up() {
+        let blocks = parse_blocks(
+            "| Tool | Count |\n| :--- | ---: |\n| read | 1 |\n| webfetch | 250 |",
+        );
+        let rendered = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { rendered, aligns, .. } => Some((rendered.as_str(), aligns.clone())),
+                _ => None,
+            })
+            .expect("table block");
+        let (rendered, aligns) = rendered;
+        assert_eq!(
+            aligns,
+            vec![TableAlignment::Left, TableAlignment::Right],
+            "alignment must be captured: {rendered}"
+        );
+        // Right-aligned numeric column: digits hug the right border, so the
+        // single-digit "1" gets more left padding than "250" does.
+        let data_lines: Vec<&str> = rendered.lines().skip(3).take(2).collect();
+        assert!(
+            data_lines[0].ends_with("│     1 │"),
+            "got: {}",
+            data_lines[0]
+        );
+        assert!(
+            data_lines[1].ends_with("│   250 │"),
+            "got: {}",
+            data_lines[1]
+        );
     }
 
     #[test]
     fn tool_step_collapses_and_restores_full_semantic_detail() {
         let mut message = ChatMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
-        assert!(message.raw.contains("read_file · running"));
-        assert!(!message.raw.contains("```json"));
+        // Collapsed running: human-readable summary only — no tool name.
+        assert!(message.raw.contains("Read README.md"));
+        assert!(!message.raw.contains("read_file"));
 
         assert!(message.finish_tool_step("call_1", "contents", 1234));
-        assert!(message.raw.contains("completed"));
+        // Collapsed completed: summary + duration suffix.
+        assert!(message.raw.contains("Read README.md"));
+        assert!(message.raw.contains("1.2s"));
         message.set_tool_step_expanded(true);
 
-        assert!(message.raw.contains("```json"));
+        // Expanded: arguments as compact key-value text + output verbatim.
+        assert!(message.raw.contains("path: README.md"));
         assert!(message.raw.contains("contents"));
     }
 }

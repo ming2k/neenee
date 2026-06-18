@@ -48,6 +48,25 @@ pub struct BlockRegion {
 #[derive(Debug, Clone, Default)]
 pub struct LayoutMap {
     regions: Vec<BlockRegion>,
+    /// The displayed grid text for each `Block::Table`, keyed by
+    /// `(message_idx, block_idx)`. Stored at render time because table
+    /// columns are reshaped to fit the viewport, so this grid can differ
+    /// from the width-independent `rendered` field stored on the block.
+    /// Whole-table copy (middle-click) resolves against this text.
+    table_grids: std::collections::HashMap<(usize, usize), String>,
+    /// Hit boxes for individual table cells, so a click inside a cell resolves
+    /// to that cell (row-major index: `row * ncols + col`, header is row 0)
+    /// rather than to the whole grid line.
+    table_cell_hits: Vec<TableCellHit>,
+}
+
+/// A clickable region belonging to one logical table cell.
+#[derive(Debug, Clone)]
+pub struct TableCellHit {
+    pub message_idx: usize,
+    pub block_idx: usize,
+    pub cell_idx: usize,
+    pub rect: Rect,
 }
 
 impl LayoutMap {
@@ -63,6 +82,38 @@ impl LayoutMap {
     /// Clear all regions (call at the start of each frame).
     pub fn clear(&mut self) {
         self.regions.clear();
+        self.table_grids.clear();
+        self.table_cell_hits.clear();
+    }
+
+    /// Record the displayed grid text for a table block.
+    pub fn record_table_grid(&mut self, message_idx: usize, block_idx: usize, text: String) {
+        self.table_grids.insert((message_idx, block_idx), text);
+    }
+
+    /// Look up the displayed grid text previously recorded for a table block.
+    pub fn table_grid(&self, message_idx: usize, block_idx: usize) -> Option<&str> {
+        self.table_grids
+            .get(&(message_idx, block_idx))
+            .map(String::as_str)
+    }
+
+    /// Record a clickable hit box for one table cell.
+    pub fn push_table_cell_hit(&mut self, hit: TableCellHit) {
+        self.table_cell_hits.push(hit);
+    }
+
+    /// Resolve a screen point to the table cell it lies inside, if any.
+    pub fn table_cell_at(&self, x: u16, y: u16) -> Option<(usize, usize, usize)> {
+        self.table_cell_hits
+            .iter()
+            .find(|h| {
+                h.rect.x <= x
+                    && x < h.rect.x + h.rect.width
+                    && h.rect.y <= y
+                    && y < h.rect.y + h.rect.height
+            })
+            .map(|h| (h.message_idx, h.block_idx, h.cell_idx))
     }
 
     /// Find the semantic cursor at a given screen coordinate.

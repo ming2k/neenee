@@ -1,9 +1,9 @@
 pub use async_trait::async_trait;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{future::join_all, stream::BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 const MAX_TOOL_ROUNDS: usize = 32;
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
@@ -708,18 +708,28 @@ impl Agent {
                 if !tool_calls.is_empty() {
                     for call in tool_calls {
                         self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
-                        let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                    }
+                    // Emit all ToolCall events up front.
+                    let call_ids: Vec<String> = tool_calls
+                        .iter()
+                        .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
+                        .collect();
+                    for (call, id) in tool_calls.iter().zip(&call_ids) {
                         on_event(AgentEvent::ToolCall {
-                            id: call_id.clone(),
+                            id: id.clone(),
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
                         });
-                        let started = std::time::Instant::now();
-                        let result = self.execute_tool(call, &mut on_event).await;
-                        let duration_ms = started.elapsed().as_millis() as u64;
+                    }
+                    // Execute all tool calls concurrently.
+                    let results =
+                        self.execute_tools_concurrent(tool_calls, &mut on_event).await;
+                    for ((call, id), (result, duration_ms)) in
+                        tool_calls.iter().zip(&call_ids).zip(results)
+                    {
                         self.emit_goal_update(call, &mut on_event);
                         on_event(AgentEvent::ToolResult {
-                            id: call_id,
+                            id: id.clone(),
                             name: call.name.clone(),
                             output: result.clone(),
                             duration_ms,
@@ -745,7 +755,7 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
                 let started = std::time::Instant::now();
-                let result = self.execute_tool(&call, &mut on_event).await;
+                let result = self.execute_tool_evented(&call, &mut on_event).await;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 self.emit_goal_update(&call, &mut on_event);
                 on_event(AgentEvent::ToolResult {
@@ -871,18 +881,28 @@ impl Agent {
             if let Some(tool_calls) = &response.tool_calls {
                 for call in tool_calls {
                     self.guard_repeated_call(call, &mut previous_call, &mut repeated_calls)?;
-                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
+                }
+                // Emit all ToolCall events up front.
+                let call_ids: Vec<String> = tool_calls
+                    .iter()
+                    .map(|_| format!("call_{}", uuid::Uuid::new_v4()))
+                    .collect();
+                for (call, id) in tool_calls.iter().zip(&call_ids) {
                     on_event(AgentEvent::ToolCall {
-                        id: call_id.clone(),
+                        id: id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     });
-                    let started = std::time::Instant::now();
-                    let result = self.execute_tool(call, &mut on_event).await;
-                    let duration_ms = started.elapsed().as_millis() as u64;
+                }
+                // Execute all tool calls concurrently.
+                let results =
+                    self.execute_tools_concurrent(tool_calls, &mut on_event).await;
+                for ((call, id), (result, duration_ms)) in
+                    tool_calls.iter().zip(&call_ids).zip(results)
+                {
                     self.emit_goal_update(call, &mut on_event);
                     on_event(AgentEvent::ToolResult {
-                        id: call_id,
+                        id: id.clone(),
                         name: call.name.clone(),
                         output: result.clone(),
                         duration_ms,
@@ -909,7 +929,7 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
                 let started = std::time::Instant::now();
-                let result = self.execute_tool(&call, &mut on_event).await;
+                let result = self.execute_tool_evented(&call, &mut on_event).await;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 self.emit_goal_update(&call, &mut on_event);
                 on_event(AgentEvent::ToolResult {
@@ -964,10 +984,11 @@ impl Agent {
         }
     }
 
-    async fn execute_tool<F>(&self, call: &ToolCall, on_event: &mut F) -> String
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
+    async fn execute_tool(
+        &self,
+        call: &ToolCall,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> String {
         let tool = match self.tools.iter().find(|t| t.name() == call.name) {
             Some(t) => t,
             None => return format!("Error: Tool '{}' not found", call.name),
@@ -1006,7 +1027,7 @@ impl Agent {
                     .unwrap_or_else(|e| e.into_inner())
                     .pending
                     .insert(request.id.clone(), sender);
-                on_event(AgentEvent::PermissionRequest(request.clone()));
+                let _ = event_tx.send(AgentEvent::PermissionRequest(request.clone()));
 
                 match receiver.await.unwrap_or(PermissionDecision::Reject) {
                     PermissionDecision::Once => {}
@@ -1033,16 +1054,87 @@ impl Agent {
                 &call.id,
                 &call.arguments,
                 Box::new(|event| {
-                    on_event(AgentEvent::SubTask {
+                    let _ = event_tx.send(AgentEvent::SubTask {
                         parent_call_id: parent_call_id.clone(),
                         event,
-                    })
+                    });
                 }),
             )
             .await
         {
             Ok(output) => output,
             Err(err) => format!("Error executing {}: {}", call.name, err),
+        }
+    }
+
+    /// Single-call wrapper that forwards channel events to a mutable callback.
+    /// Used by text-fallback paths (one tool call at a time).
+    async fn execute_tool_evented<F>(&self, call: &ToolCall, on_event: &mut F) -> String
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let fut = self.execute_tool(call, &tx);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    if let Some(event) = event {
+                        on_event(event);
+                    }
+                }
+                result = &mut fut => {
+                    while let Ok(event) = rx.try_recv() {
+                        on_event(event);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+
+    /// Execute multiple tool calls concurrently, forwarding interleaved events
+    /// to the callback in real time. Returns `(result, duration_ms)` pairs in
+    /// the same order as the input calls.
+    async fn execute_tools_concurrent<F>(
+        &self,
+        calls: &[ToolCall],
+        on_event: &mut F,
+    ) -> Vec<(String, u64)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let futs: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                let tx = tx.clone();
+                async move {
+                    let started = std::time::Instant::now();
+                    let result = self.execute_tool(call, &tx).await;
+                    (result, started.elapsed().as_millis() as u64)
+                }
+            })
+            .collect();
+
+        let all = join_all(futs);
+        tokio::pin!(all);
+
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    if let Some(event) = event {
+                        on_event(event);
+                    }
+                }
+                results = &mut all => {
+                    while let Ok(event) = rx.try_recv() {
+                        on_event(event);
+                    }
+                    return results;
+                }
+            }
         }
     }
 }
@@ -1400,7 +1492,7 @@ mod tests {
         };
 
         assert!(agent
-            .execute_tool(&call, &mut |_| {})
+            .execute_tool_evented(&call, &mut |_| {})
             .await
             .contains("[Plan mode]"));
     }
@@ -1422,7 +1514,7 @@ mod tests {
         let task_call = call.clone();
         let task = tokio::spawn(async move {
             task_agent
-                .execute_tool(&task_call, &mut |event| {
+                .execute_tool_evented(&task_call, &mut |event| {
                     let _ = event_tx.send(event);
                 })
                 .await
@@ -1439,7 +1531,7 @@ mod tests {
 
         let mut prompted_again = false;
         let output = agent
-            .execute_tool(&call, &mut |event| {
+            .execute_tool_evented(&call, &mut |event| {
                 if matches!(event, AgentEvent::PermissionRequest(_)) {
                     prompted_again = true;
                 }
@@ -1465,7 +1557,7 @@ mod tests {
         let task_agent = agent.clone();
         let task = tokio::spawn(async move {
             task_agent
-                .execute_tool(&call, &mut |event| {
+                .execute_tool_evented(&call, &mut |event| {
                     let _ = event_tx.send(event);
                 })
                 .await

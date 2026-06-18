@@ -25,6 +25,77 @@ collapsed to a one-line status by default and `Ctrl+T` toggles complete JSON
 arguments and output. Session replay rebuilds the same steps in FIFO order,
 including parallel calls with identical tool names.
 
+## Provider capabilities
+
+The harness distinguishes two model capability surfaces. Tools are declared
+to the provider on every request; reasoning is observed from the provider
+when the model emits it. For the capability model and wire-level protocol,
+see [Provider capabilities](provider-capabilities.md) and
+[Tool protocol](tool-protocol.md).
+
+### Declared: tools
+
+Tool schemas live inside the provider, not the conversation. Each turn calls
+`provider.prepare_tools(&self.tools)` before any network work, caching every
+tool's OpenAI function schema (`Tool::to_openai_function()`) in
+`OpenAIProvider.tools`. Every HTTP request then re-injects the full cached
+set:
+
+```text
+body["tools"]       = all cached schemas
+body["tool_choice"] = "auto"
+```
+
+Tool schemas are request-scoped. Every ReAct round, including the round that
+carries tool results back upstream, sends the same complete schema set
+alongside the full message history. The provider is stateless across turns.
+
+`OpenAIProvider` declares schemas natively. The OpenAI-compatible wrappers
+(`DeepSeekProvider`, `QwenProvider`, `GLMProvider`, `VolcengineProvider`,
+Moonshot, Ollama) inherit the same path by delegating to it. `GeminiProvider`
+does not override the default `prepare_tools` and never sends a `tools`
+field; tool calls on Gemini travel only through the universal fallback
+below.
+
+### Observed: reasoning
+
+The harness never declares reasoning support and never sends a flag that
+requests it. Providers passively read `reasoning_content` from stream deltas
+(`parse_openai_stream_data`) and complete messages (`chat`), forwarding it as
+`ProviderStreamEvent::ReasoningDelta`. Only models that emit the field
+(`deepseek-reasoner`, reasoning-tuned GLM and Qwen variants) surface
+reasoning; other models produce no `ReasoningDelta` events.
+
+Reasoning is rendering metadata. It is not summarized, not re-injected as
+follow-up context, and not used for control flow.
+
+### Tool call transport
+
+Both execution paths feed one shared registry:
+
+| Path | Transport | Tool calls |
+|------|-----------|-----------|
+| `chat()` | Single HTTP round trip | `choices[0].message.tool_calls` complete |
+| `stream_chat_events()` | SSE stream | `delta.tool_calls` fragments accumulated by `index` |
+
+The streaming path accumulates `id`, `name`, and `arguments` per index while
+text and reasoning deltas render live. After the stream reaches `[DONE]`,
+calls with an empty `id` are assigned `call_<uuid>`, calls with an empty
+`name` are dropped, and the survivors are handed to `execute_tool`. Side
+effects never fire mid-stream.
+
+### Universal fallback
+
+For providers without native function calling, `Agent::parse_tool_call()`
+extracts `{"tool": "<name>", "arguments": {…}}` from assistant text.
+`Agent::attach_fallback_tool_call()` then promotes the parsed call onto the
+preceding assistant message as a native `tool_calls` entry so
+OpenAI-compatible `tool_call_id` pairing stays valid on the next round.
+
+Fallback text is withdrawn from the visible transcript before the tool card
+is emitted, matching the native streaming path. The same registry, permission
+broker, and result-message format apply to native and fallback calls.
+
 ## Goal state
 
 `/goal <objective>` creates an active goal and persists it in config. The goal

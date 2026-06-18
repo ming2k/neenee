@@ -23,7 +23,7 @@ use std::{
     collections::HashMap,
     error::Error,
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::Arc,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -32,7 +32,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::document::{ChatMessage, MessageKind};
 use crate::layout::LayoutMap;
 use crate::render::Theme;
-use crate::selection::{get_selected_text, SelectionDrag, SelectionState};
+use crate::selection::{
+    floor_char_boundary, get_selected_text, inclusive_end, SelectionDrag, SelectionState,
+};
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/models", "List available LLM backends"),
@@ -197,12 +199,18 @@ pub struct App {
     pub drag: SelectionDrag,
     /// Layout map for the current frame (updated each draw).
     pub layout_map: LayoutMap,
-    /// Show a brief "copied" toast.
-    pub copy_toast_ticks: u8,
+    /// Show a brief "copied" toast. Held until this deadline elapses so the
+    /// duration is wall-clock consistent regardless of the event-loop cadence.
+    pub copy_toast_until: Option<std::time::Instant>,
     pub copy_toast_message: String,
     pub copy_toast_failed: bool,
     /// Ticks remaining in which a second Ctrl+C quits.
     pub ctrl_c_armed_ticks: u8,
+    /// Ticks remaining in which a second Esc interrupts the running task.
+    pub esc_armed_ticks: u8,
+    /// Monotonic per-frame counter that drives the status bar spinner so the
+    /// harness never looks frozen while a turn is in flight.
+    pub spinner_tick: usize,
     /// Input stashed while the API-key modal borrows the input line.
     pub stashed_input: String,
     /// Solution index currently being configured.
@@ -344,6 +352,53 @@ impl App {
     }
 }
 
+/// Undo raw mode, leave the alternate screen, and turn off mouse tracking.
+/// Used both on graceful shutdown and from the signal guard so an externally
+/// killed process (e.g. `pkill neenee`) does not strand the terminal in a
+/// state where every mouse move spews SGR escape codes into the shell.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+    use std::io::Write;
+    let _ = stdout.flush();
+}
+
+/// Catch termination signals and restore the terminal before exiting. Without
+/// this, SIGTERM/SIGHUP (as sent by `pkill`) terminates the process without
+/// running `run_tui`'s normal cleanup, leaving the host terminal in raw mode
+/// with mouse capture enabled.
+fn spawn_signal_guard() {
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut interrupt = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut hangup = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut quit = match signal(SignalKind::quit()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+            _ = hangup.recv() => {}
+            _ = quit.recv() => {}
+        }
+        restore_terminal();
+        std::process::exit(130);
+    });
+}
+
 pub async fn run_tui(
     tx: mpsc::UnboundedSender<AgentRequest>,
     mut rx: mpsc::UnboundedReceiver<AgentResponse>,
@@ -360,6 +415,9 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.show_cursor()?;
+    // Install the signal guard after the terminal enters raw mode + alt screen
+    // so any later SIGTERM/SIGINT/SIGHUP restores it instead of stranding it.
+    spawn_signal_guard();
 
     let restored = chat_messages_from_core(initial_messages);
     let messages = Arc::new(Mutex::new(restored));
@@ -624,10 +682,12 @@ pub async fn run_tui(
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
-        copy_toast_ticks: 0,
+        copy_toast_until: None,
         copy_toast_message: String::new(),
         copy_toast_failed: false,
         ctrl_c_armed_ticks: 0,
+        esc_armed_ticks: 0,
+        spinner_tick: 0,
         stashed_input: String::new(),
         setup_solution: None,
         setup_endpoint: None,
@@ -681,6 +741,10 @@ async fn run_app_loop<B: Backend>(
     // clipboard (arboard/wl-copy) can never freeze the event loop.
     let (copy_tx, mut copy_rx) =
         mpsc::unbounded_channel::<Result<clipboard::CopyOutcome, String>>();
+    // Number of clipboard copies still in flight. While this is non-zero the
+    // event loop uses a short poll interval so the "copied" toast appears
+    // within ~16ms of completion instead of waiting up to the full idle tick.
+    let copy_pending = Arc::new(AtomicUsize::new(0));
 
     loop {
         if app.should_quit.load(Ordering::SeqCst) {
@@ -688,10 +752,11 @@ async fn run_app_loop<B: Backend>(
         }
 
         // Apply any completed background clipboard copies.
-        while let Ok(result) = copy_rx.try_recv() {
-            set_copy_feedback(app, result);
-            app.copy_toast_ticks = 5;
-        }
+            while let Ok(result) = copy_rx.try_recv() {
+                set_copy_feedback(app, result);
+                app.copy_toast_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
+            }
 
         // Sync provider/model from listener
         {
@@ -723,11 +788,23 @@ async fn run_app_loop<B: Backend>(
         }
 
         // Decrement toast timers
-        if app.copy_toast_ticks > 0 {
-            app.copy_toast_ticks -= 1;
+        if let Some(until) = app.copy_toast_until {
+            if std::time::Instant::now() >= until {
+                app.copy_toast_until = None;
+            }
         }
         if app.ctrl_c_armed_ticks > 0 {
             app.ctrl_c_armed_ticks -= 1;
+        }
+        // The Esc armed toast only makes sense while a task is running; once
+        // the turn finishes there is nothing left to interrupt, so let it
+        // expire immediately rather than mislead the user.
+        if app.esc_armed_ticks > 0 {
+            if runtime.is_responding.load(Ordering::SeqCst) {
+                app.esc_armed_ticks -= 1;
+            } else {
+                app.esc_armed_ticks = 0;
+            }
         }
 
         // Pull messages from the shared lock into app state for rendering
@@ -739,6 +816,11 @@ async fn run_app_loop<B: Backend>(
             app.scroll = app.max_scroll;
         }
 
+        // Advance the status-bar spinner phase for this frame. The draw call
+        // only reads it, so a single wrapping increment per frame gives a
+        // smooth ~10 fps braille animation tied to the 100ms event poll.
+        app.spinner_tick = app.spinner_tick.wrapping_add(1);
+
         // Draw frame
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
@@ -746,6 +828,29 @@ async fn run_app_loop<B: Backend>(
                 &app.loop_status,
                 &app.activity_status,
                 app.pending_permission.is_some(),
+            );
+
+            // Compute the displayed input text first so the chat layout can
+            // reserve the right height for a wrapping, growing input box.
+            let masked_input = if app.active_modal == Modal::ApiKey {
+                "•".repeat(app.input.chars().count())
+            } else {
+                app.input.clone()
+            };
+            let accent = match app.current_mode {
+                AgentMode::Plan => ratatui::style::Color::Rgb(137, 180, 250),
+                AgentMode::Build => app.theme.accent,
+            };
+
+            // Overlay modals (Models, Sessions, Help, Permission) replace the
+            // entire chrome. Modals that type into the input line keep it.
+            let chrome_hidden = !matches!(
+                app.active_modal,
+                Modal::None
+                    | Modal::ApiKey
+                    | Modal::Endpoint
+                    | Modal::ModelName
+                    | Modal::HistorySearch
             );
 
             let chat_render = render::draw_chat(
@@ -760,6 +865,9 @@ async fn run_app_loop<B: Backend>(
                     current_mode: app.current_mode,
                     current_goal: app.current_goal.as_ref(),
                     activity: &status,
+                    spinner_phase: app.spinner_tick,
+                    input: &masked_input,
+                    chrome_hidden,
                     theme: &app.theme,
                 },
             );
@@ -777,41 +885,37 @@ async fn run_app_loop<B: Backend>(
                 }
             }
 
-            let masked_input = if app.active_modal == Modal::ApiKey {
-                "•".repeat(app.input.chars().count())
-            } else {
-                app.input.clone()
-            };
-            let accent = match app.current_mode {
-                AgentMode::Plan => ratatui::style::Color::Rgb(137, 180, 250),
-                AgentMode::Build => app.theme.accent,
-            };
-            render::draw_input(
-                f,
-                input_rect,
-                &masked_input,
-                app.cursor_display_x(),
-                accent,
-                &app.theme,
-            );
+            // The input box is only shown when no overlay modal is open.
+            if !chrome_hidden {
+                render::draw_input(
+                    f,
+                    input_rect,
+                    &masked_input,
+                    app.cursor_display_x(),
+                    accent,
+                    &app.theme,
+                    &mut layout_map,
+                    app.active_modal != Modal::ApiKey,
+                );
 
-            // Right-aligned hint line below the input box.
-            let hint_rect = Rect::new(
-                input_rect.x,
-                input_rect.y + input_rect.height,
-                input_rect.width,
-                1,
-            );
-            render::draw_hint(
-                f,
-                hint_rect,
-                &[
-                    ("ctrl+p", "commands"),
-                    ("ctrl+h", "help"),
-                    ("enter", "send"),
-                ],
-                &app.theme,
-            );
+                // Right-aligned hint line below the input box.
+                let hint_rect = Rect::new(
+                    input_rect.x,
+                    input_rect.y + input_rect.height,
+                    input_rect.width,
+                    1,
+                );
+                render::draw_hint(
+                    f,
+                    hint_rect,
+                    &[
+                        ("ctrl+p", "commands"),
+                        ("ctrl+h", "help"),
+                        ("enter", "send"),
+                    ],
+                    &app.theme,
+                );
+            }
 
             // Slash suggestions
             if app.active_modal == Modal::None && app.input.starts_with('/') {
@@ -896,7 +1000,7 @@ async fn run_app_loop<B: Backend>(
             }
 
             // Copy toast
-            if app.copy_toast_ticks > 0 {
+            if app.copy_toast_until.is_some() {
                 render::draw_copy_toast(
                     f,
                     &app.copy_toast_message,
@@ -905,7 +1009,10 @@ async fn run_app_loop<B: Backend>(
                 );
             }
             if app.ctrl_c_armed_ticks > 0 {
-                render::draw_exit_toast(f, &app.theme);
+                render::draw_armed_toast(f, "press Ctrl+C again to exit", &app.theme);
+            }
+            if app.esc_armed_ticks > 0 {
+                render::draw_armed_toast(f, "press Esc again to interrupt", &app.theme);
             }
 
             app.layout_map = layout_map;
@@ -918,7 +1025,27 @@ async fn run_app_loop<B: Backend>(
             app.scroll = app.scroll.min(app.max_scroll);
         }
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Drain all currently-ready input events before redrawing. The first
+        // event blocks for the normal poll interval; any further events the
+        // terminal has already queued are coalesced with non-blocking polls
+        // so they share a single redraw. Without this, pasting text triggers
+        // one full screen redraw per pasted character.
+        //
+        // While a clipboard copy is in flight, shorten the idle poll so the
+        // "copied" toast shows within ~16ms of the copy finishing.
+        let mut events_drained = false;
+        'event_batch: loop {
+            let timeout = if events_drained {
+                std::time::Duration::ZERO
+            } else if copy_pending.load(Ordering::SeqCst) > 0 {
+                std::time::Duration::from_millis(16)
+            } else {
+                std::time::Duration::from_millis(100)
+            };
+            if !event::poll(timeout)? {
+                break;
+            }
+            events_drained = true;
             let event = event::read()?;
             // Pre-compute suggestion data to avoid borrow conflicts with process_event.
             let suggestions = app.suggestion_matches();
@@ -1032,7 +1159,15 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::Interrupt => {
-                    let _ = app.tx.send(AgentRequest::Interrupt);
+                    // Mirror Ctrl+C's quit pattern: the first Esc only arms a
+                    // ~2s window (and shows a toast); the second Esc within
+                    // that window actually interrupts the running task.
+                    if app.esc_armed_ticks > 0 {
+                        app.esc_armed_ticks = 0;
+                        let _ = app.tx.send(AgentRequest::Interrupt);
+                    } else {
+                        app.esc_armed_ticks = 20;
+                    }
                 }
                 input::InputAction::OpenModels => {
                     app.active_modal = Modal::Models;
@@ -1089,26 +1224,55 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::ScrollUp => {
                     app.follow_bottom = false;
-                    if app.scroll > 0 {
-                        app.scroll -= 1;
-                    }
+                    // Mouse wheel tick = 4 lines, not 1, so scrolling feels fast
+                    // and responsive instead of crawling line-by-line.
+                    app.scroll = app.scroll.saturating_sub(4);
                 }
                 input::InputAction::ScrollDown => {
-                    if app.scroll < app.max_scroll {
-                        app.scroll += 1;
-                    }
+                    app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
                     if app.scroll >= app.max_scroll {
                         app.follow_bottom = true;
                     }
                 }
+                input::InputAction::ScrollPageUp => {
+                    app.follow_bottom = false;
+                    // Leave one line of overlap so the reader keeps context.
+                    let step = app.view_height.saturating_sub(1).max(1);
+                    app.scroll = app.scroll.saturating_sub(step);
+                }
+                input::InputAction::ScrollPageDown => {
+                    let step = app.view_height.saturating_sub(1).max(1);
+                    app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
+                    if app.scroll >= app.max_scroll {
+                        app.follow_bottom = true;
+                    }
+                }
+                input::InputAction::ScrollTop => {
+                    app.follow_bottom = false;
+                    app.scroll = 0;
+                }
+                input::InputAction::ScrollBottom => {
+                    app.scroll = app.max_scroll;
+                    app.follow_bottom = true;
+                }
                 input::InputAction::CopySelection => {
-                    if let Some(text) = get_selected_text(&app.selection, &app.messages) {
-                        spawn_clipboard_copy(&copy_tx, text);
+                    if let Some(text) = extract_selection_text(
+                        &app.selection,
+                        &app.messages,
+                        &app.input,
+                        &app.layout_map,
+                    ) {
+                        spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
                     }
                 }
                 input::InputAction::CtrlC => {
-                    if let Some(text) = get_selected_text(&app.selection, &app.messages) {
-                        spawn_clipboard_copy(&copy_tx, text);
+                    if let Some(text) = extract_selection_text(
+                        &app.selection,
+                        &app.messages,
+                        &app.input,
+                        &app.layout_map,
+                    ) {
+                        spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
                     } else if matches!(
                         app.active_modal,
                         Modal::ApiKey | Modal::Endpoint | Modal::ModelName
@@ -1288,12 +1452,12 @@ async fn run_app_loop<B: Backend>(
                         if app.modal_index == 1 {
                             app.permission_confirm_always = false;
                             app.modal_index = 1;
-                            continue;
+                            break 'event_batch;
                         }
                     } else if app.modal_index == 1 {
                         app.permission_confirm_always = true;
                         app.modal_index = 0;
-                        continue;
+                        break 'event_batch;
                     }
                     if let Some(request) = app.pending_permission.take() {
                         let decision = if app.permission_confirm_always {
@@ -1370,8 +1534,24 @@ async fn run_app_loop<B: Backend>(
                             app.selection = SelectionState::None;
                             app.drag.cancel();
                         } else {
-                            app.selection = SelectionState::start_range(cursor);
-                            app.drag.start(cursor);
+                            // Tables are selected per cell: a click inside a
+                            // cell selects that whole logical cell (including
+                            // any line-wrapped continuation), never crossing
+                            // `│` borders into adjacent cells. Non-table blocks
+                            // use the normal per-character drag.
+                            if let Some((mi, bi, cell)) =
+                                app.layout_map.table_cell_at(x, y)
+                            {
+                                app.selection = SelectionState::TableCell {
+                                    message_idx: mi,
+                                    block_idx: bi,
+                                    cell_idx: cell,
+                                };
+                                app.drag.cancel();
+                            } else {
+                                app.selection = SelectionState::start_range(cursor);
+                                app.drag.start(cursor);
+                            }
                         }
                     } else {
                         app.selection = SelectionState::None;
@@ -1480,11 +1660,53 @@ fn compact_retry_reason(message: &str) -> String {
     }
 }
 
+/// Extract selected text from either chat messages or the live input box,
+/// depending on which the semantic selection covers.
+fn extract_selection_text(
+    sel: &SelectionState,
+    messages: &[crate::document::ChatMessage],
+    input: &str,
+    layout_map: &crate::layout::LayoutMap,
+) -> Option<String> {
+    let on_input = match sel {
+        SelectionState::None => false,
+        SelectionState::Block { message_idx, .. } => {
+            *message_idx == crate::render::INPUT_MSG_IDX
+        }
+        SelectionState::TableCell { message_idx, .. } => {
+            *message_idx == crate::render::INPUT_MSG_IDX
+        }
+        SelectionState::Range { anchor, head } => {
+            anchor.message_idx == crate::render::INPUT_MSG_IDX
+                && head.message_idx == crate::render::INPUT_MSG_IDX
+        }
+    };
+    if !on_input {
+        return get_selected_text(sel, messages, &|mi, bi| layout_map.table_grid(mi, bi));
+    }
+    match sel {
+        SelectionState::Block { .. } => Some(input.to_string()),
+        SelectionState::Range { anchor, head } => {
+            let (start, end) = if anchor.byte_offset <= head.byte_offset {
+                (anchor.byte_offset, head.byte_offset)
+            } else {
+                (head.byte_offset, anchor.byte_offset)
+            };
+            let start = floor_char_boundary(input, start);
+            let end = inclusive_end(input, end);
+            (start < end).then(|| input[start..end].to_string())
+        }
+        _ => None,
+    }
+}
+
 fn spawn_clipboard_copy(
     tx: &mpsc::UnboundedSender<Result<clipboard::CopyOutcome, String>>,
+    copy_pending: Arc<AtomicUsize>,
     text: String,
 ) {
     let tx = tx.clone();
+    copy_pending.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
         let result = match tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -1496,6 +1718,7 @@ fn spawn_clipboard_copy(
             Err(_) => Err("clipboard copy timed out".to_string()),
         };
         let _ = tx.send(result);
+        copy_pending.fetch_sub(1, Ordering::SeqCst);
     });
 }
 

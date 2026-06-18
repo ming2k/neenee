@@ -70,7 +70,12 @@ async fn copy_with_command(command: &str, args: &[&str], text: &str) -> Result<(
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        // Redirect stderr to /dev/null instead of piping it: helpers like
+        // `wl-copy` fork a long-lived background daemon to hold the selection,
+        // and that daemon inherits the stderr pipe. With a piped stderr,
+        // `wait_with_output` would block until that daemon exits (i.e. until
+        // the selection is replaced), making every copy appear to hang.
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("failed to start {}: {}", command, error))?;
     let mut stdin = child
@@ -82,19 +87,18 @@ async fn copy_with_command(command: &str, args: &[&str], text: &str) -> Result<(
         .await
         .map_err(|error| format!("failed to write to {}: {}", command, error))?;
     drop(stdin);
-    let output = child
-        .wait_with_output()
+    // Wait only for the foreground process to exit. `wl-copy` daemonizes
+    // after reading stdin and setting the selection, so this returns within
+    // milliseconds; it must not wait for the background daemon (which would
+    // block until the selection is replaced).
+    let status = child
+        .wait()
         .await
         .map_err(|error| format!("{} failed: {}", command, error))?;
-    if output.status.success() {
+    if status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!("{} exited with {}", command, output.status)
-        } else {
-            format!("{}: {}", command, stderr)
-        })
+        Err(format!("{} exited with {}", command, status))
     }
 }
 
