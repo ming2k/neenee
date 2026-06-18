@@ -1273,7 +1273,8 @@ impl TaskTool {
             .run_streaming_with_events(&mut messages, |event| {
                 Self::forward_event(event, &mut on_event)
             })
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
         let content = result.message.content.trim().to_string();
         if content.is_empty() {
             Ok("(sub-agent returned no answer)".to_string())

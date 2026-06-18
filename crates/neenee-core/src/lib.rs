@@ -44,6 +44,83 @@ pub fn public_error_message(error: &str) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+/// Heuristic: does this provider error indicate the request exceeded the
+/// model's context window? Used to trigger a compaction-and-retry instead of a
+/// plain failure.
+pub fn is_context_overflow(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "context length",
+        "context_length",
+        "context window",
+        "context_window",
+        "maximum context",
+        "too many tokens",
+        "token limit",
+    ]
+    .iter()
+    .any(|pattern| error.contains(pattern))
+}
+
+/// A typed harness error.
+///
+/// Replaces the previous practice of smuggling control signals through error
+/// *string contents* — a retryable JSON prefix, substring scans for context
+/// overflow, and an `"Interrupted"` sentinel — so the turn loop and its callers
+/// match outcomes exhaustively by variant instead of by fragile string compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessError {
+    /// A transient failure (rate limit, overload, timeout) that may be retried.
+    Retryable {
+        message: String,
+        retry_after_ms: Option<u64>,
+    },
+    /// The request exceeded the model's context window.
+    ContextOverflow(String),
+    /// The turn was cancelled by the user.
+    Interrupted,
+    /// Any other terminal failure; the message is user-facing.
+    Other(String),
+}
+
+impl HarnessError {
+    /// Classify a raw provider/transport error string into a typed error. This
+    /// is the single place the legacy string encoding is decoded.
+    pub fn classify(error: String) -> Self {
+        if let Some(retry) = parse_retryable_error(&error) {
+            return Self::Retryable {
+                message: retry.message,
+                retry_after_ms: retry.retry_after_ms,
+            };
+        }
+        if is_context_overflow(&error) {
+            return Self::ContextOverflow(error);
+        }
+        Self::Other(error)
+    }
+}
+
+impl std::fmt::Display for HarnessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable { message, .. }
+            | Self::ContextOverflow(message)
+            | Self::Other(message) => write!(f, "{message}"),
+            Self::Interrupted => write!(f, "Interrupted"),
+        }
+    }
+}
+
+impl std::error::Error for HarnessError {}
+
+/// Raw provider/transport error strings classify into a typed error when
+/// propagated with `?` inside the turn loop.
+impl From<String> for HarnessError {
+    fn from(error: String) -> Self {
+        Self::classify(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
@@ -766,7 +843,7 @@ impl Agent {
         }
     }
 
-    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, String> {
+    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
         self.run_with_events(messages, |event| {
             if let AgentEvent::PermissionRequest(request) = event {
                 self.reply_permission(&request.id, PermissionDecision::Reject);
@@ -779,7 +856,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         mut on_event: F,
-    ) -> Result<TurnOutcome, String>
+    ) -> Result<TurnOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -790,10 +867,10 @@ impl Agent {
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(format!(
+                return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
-                ));
+                )));
             }
 
             remove_empty_assistant_messages(messages);
@@ -801,7 +878,9 @@ impl Agent {
 
             let response = self.provider.chat(messages.clone()).await?;
             if !valid_assistant_response(&response) {
-                return Err("Provider returned an empty assistant response.".to_string());
+                return Err(HarnessError::Other(
+                    "Provider returned an empty assistant response.".to_string(),
+                ));
             }
             state.token_usage.total_tokens += estimate_message_tokens(&response);
             messages.push(response.clone());
@@ -828,7 +907,7 @@ impl Agent {
         &self,
         messages: &mut Vec<Message>,
         mut on_event: F,
-    ) -> Result<TurnOutcome, String>
+    ) -> Result<TurnOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -839,10 +918,10 @@ impl Agent {
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(format!(
+                return Err(HarnessError::Other(format!(
                     "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
                     MAX_TOOL_ROUNDS
-                ));
+                )));
             }
 
             remove_empty_assistant_messages(messages);
@@ -923,7 +1002,9 @@ impl Agent {
                 hidden: false,
             };
             if !valid_assistant_response(&response) {
-                return Err("Provider returned an empty assistant response.".to_string());
+                return Err(HarnessError::Other(
+                    "Provider returned an empty assistant response.".to_string(),
+                ));
             }
             state.token_usage.total_tokens += estimate_message_tokens(&response);
             messages.push(response.clone());
@@ -963,7 +1044,7 @@ impl Agent {
         state: &mut TurnState,
         streamed_text: bool,
         on_event: &mut F,
-    ) -> Result<bool, String>
+    ) -> Result<bool, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1058,7 +1139,7 @@ impl Agent {
         call: &ToolCall,
         previous_call: &mut Option<(String, String)>,
         repeated_calls: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), HarnessError> {
         let signature = (call.name.clone(), call.arguments.clone());
         if previous_call.as_ref() == Some(&signature) {
             *repeated_calls += 1;
@@ -1068,10 +1149,10 @@ impl Agent {
         }
 
         if *repeated_calls > MAX_REPEATED_TOOL_CALLS {
-            return Err(format!(
+            return Err(HarnessError::Other(format!(
                 "Agent stopped after repeating the same '{}' tool call {} times.",
                 call.name, MAX_REPEATED_TOOL_CALLS
-            ));
+            )));
         }
         Ok(())
     }
@@ -1923,7 +2004,7 @@ mod tests {
         agent: &Agent,
         prompt: &str,
         decision: PermissionDecision,
-    ) -> (Vec<AgentEvent>, Result<TurnOutcome, String>) {
+    ) -> (Vec<AgentEvent>, Result<TurnOutcome, HarnessError>) {
         let mut messages = vec![Message::new(Role::User, prompt)];
         let mut events = Vec::new();
         let outcome = agent
@@ -2025,7 +2106,10 @@ mod tests {
 
         let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
 
-        assert!(outcome.unwrap_err().contains("repeating the same"));
+        assert!(matches!(
+            outcome.unwrap_err(),
+            HarnessError::Other(message) if message.contains("repeating the same")
+        ));
         // The first MAX_REPEATED_TOOL_CALLS calls run; the fourth is blocked.
         assert_eq!(
             calls.lock().unwrap().len(),

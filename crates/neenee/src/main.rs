@@ -3,7 +3,6 @@ use neenee_core::skills::Skill;
 use neenee_core::{
     async_trait,
     mcp::load_mcp_tools,
-    parse_retryable_error,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
     providers::{
         openai_compat_provider, GeminiProvider, LlamaServerProvider, MockProvider, OpenAIProvider,
@@ -14,7 +13,7 @@ use neenee_core::{
         TodoWriteTool, UseSkillTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
     Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalAccountingResult,
-    GoalService, GoalStatus, GoalStore, HarnessSnapshot, ImagePart, Message, Provider,
+    GoalService, GoalStatus, GoalStore, HarnessError, HarnessSnapshot, ImagePart, Message, Provider,
     ProviderStreamEvent, Role, SessionOverview, TurnTimer, GOAL_COMPLETE_MARKER,
 };
 use neenee_tui::start_tui;
@@ -288,13 +287,13 @@ async fn start_interactive_turn(context: InteractiveTurnContext, input: TurnInpu
         let is_current = context.generation_counter.load(Ordering::SeqCst) == generation;
         match result {
             Ok(_) => {}
-            Err(error) if error == "Interrupted" && is_current => {
+            Err(HarnessError::Interrupted) if is_current => {
                 let _ = context
                     .tx
                     .send(AgentResponse::Text("... [Interrupted]".to_string()));
             }
             Err(error) if is_current => {
-                let _ = context.tx.send(AgentResponse::Error(error));
+                let _ = context.tx.send(AgentResponse::Error(error.to_string()));
             }
             Err(_) => {}
         }
@@ -340,7 +339,7 @@ async fn resume_session(
     Ok((id, session.transcript().await))
 }
 
-async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, String> {
+async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, HarnessError> {
     let TurnContext {
         agent,
         history,
@@ -403,7 +402,7 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
         let activity_for_run = tool_activity.clone();
         let streamed_for_run = streamed_text.clone();
         let result = tokio::select! {
-            _ = token.cancelled() => return Err("Interrupted".to_string()),
+            _ = token.cancelled() => return Err(HarnessError::Interrupted),
             result = agent.run_streaming_with_events(&mut turn_history, |event| {
                 if matches!(event, AgentEvent::ToolCall { .. }) {
                     activity_for_run.store(true, Ordering::SeqCst);
@@ -415,7 +414,7 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
         let Err(error) = result else {
             break result;
         };
-        if is_context_overflow(&error)
+        if matches!(error, HarnessError::ContextOverflow(_))
             && !compacted_after_overflow
             && !tool_activity.load(Ordering::SeqCst)
         {
@@ -441,29 +440,33 @@ async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, St
             }
         }
 
-        let Some(retry) = parse_retryable_error(&error) else {
+        let HarnessError::Retryable {
+            message,
+            retry_after_ms,
+        } = error
+        else {
             break Err(error);
         };
         if tool_activity.load(Ordering::SeqCst) || attempt >= retry_limit {
-            break Err(retry.message);
+            break Err(HarnessError::Other(message));
         }
         if streamed_text.swap(false, Ordering::SeqCst) {
             let _ = tx.send(AgentResponse::StreamDiscard);
         }
-        let delay_ms = retry_delay_ms(attempt, retry.retry_after_ms, retry_base_ms, retry_max_ms);
+        let delay_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
         let _ = tx.send(AgentResponse::RetryScheduled {
             attempt: attempt + 1,
             max_attempts: retry_limit,
             delay_ms,
-            message: retry.message,
+            message,
         });
         tokio::select! {
-            _ = token.cancelled() => return Err("Interrupted".to_string()),
+            _ = token.cancelled() => return Err(HarnessError::Interrupted),
             _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
         }
     };
     if session.id().await != admitted_session_id {
-        return Err("Interrupted".to_string());
+        return Err(HarnessError::Interrupted);
     }
     let _ = tx.send(AgentResponse::Activity("saving response".to_string()));
     *history.lock().await = turn_history.clone();
@@ -640,21 +643,6 @@ fn send_compaction(tx: &mpsc::UnboundedSender<AgentResponse>, checkpoint: &Compa
     });
 }
 
-fn is_context_overflow(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    [
-        "context length",
-        "context_length",
-        "context window",
-        "context_window",
-        "maximum context",
-        "too many tokens",
-        "token limit",
-    ]
-    .iter()
-    .any(|pattern| error.contains(pattern))
-}
-
 fn short_session_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
@@ -780,7 +768,7 @@ async fn start_goal_loop(
                     )));
                 }
                 Ok(false) => {}
-                Err(error) if error == "Interrupted" => {
+                Err(HarnessError::Interrupted) => {
                     terminal_status = "interrupted";
                     let _ = context
                         .session
@@ -807,7 +795,7 @@ async fn start_goal_loop(
                             status: terminal_status.to_string(),
                         }))
                         .await;
-                    let _ = context.tx.send(AgentResponse::Error(error));
+                    let _ = context.tx.send(AgentResponse::Error(error.to_string()));
                     break;
                 }
             }
@@ -2205,11 +2193,11 @@ mod tests {
 
     #[test]
     fn context_overflow_detection_is_conservative() {
-        assert!(is_context_overflow(
+        assert!(neenee_core::is_context_overflow(
             "maximum context length exceeded for this model"
         ));
-        assert!(is_context_overflow("too many tokens in request"));
-        assert!(!is_context_overflow("network connection reset"));
+        assert!(neenee_core::is_context_overflow("too many tokens in request"));
+        assert!(!neenee_core::is_context_overflow("network connection reset"));
     }
 
     #[test]
@@ -2347,7 +2335,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error, "upstream unavailable");
+        assert_eq!(error.to_string(), "upstream unavailable");
         assert!(!std::iter::from_fn(|| rx.try_recv().ok())
             .any(|response| matches!(response, AgentResponse::RetryScheduled { .. })));
         let _ = std::fs::remove_dir_all(directory);
