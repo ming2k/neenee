@@ -1320,7 +1320,7 @@ pub(super) fn draw_subagent_bar(
         .bg(bg)
         .fg(theme.text)
         .add_modifier(Modifier::BOLD);
-    let accent = Style::default().bg(bg).fg(theme.accent);
+    let accent = Style::default().bg(bg).fg(theme.primary);
 
     let left_label = format!(" {} ", "Subagent");
     let desc = bar.label.to_string();
@@ -1784,7 +1784,7 @@ fn draw_child_tool_step(
                     Span::styled(" ".repeat(indent), Style::default().bg(body_bg)),
                     Span::styled(
                         wl.text.clone(),
-                        Style::default().bg(body_bg).fg(theme.assistant_fg),
+                        Style::default().bg(body_bg).fg(theme.text),
                     ),
                     Span::styled(padded_tail(full_width, used), Style::default().bg(body_bg)),
                 ])),

@@ -58,7 +58,7 @@ pub(super) fn draw_message_body(
                 let base = match msg.role {
                     neenee_core::Role::User => Style::default().fg(theme.user_fg),
                     neenee_core::Role::System => Style::default().fg(theme.system_fg),
-                    _ => Style::default().fg(theme.assistant_fg),
+                    _ => Style::default().fg(theme.text),
                 };
                 let full_width = area.width as usize;
                 let body_wrap_width = area
@@ -688,10 +688,10 @@ pub(super) fn draw_message_body(
                         break;
                     }
 
-                    let base = Style::default().fg(theme.assistant_fg);
+                    let base = Style::default().fg(theme.text);
                     let line = line_spans(
                         &prefix,
-                        Style::default().fg(theme.accent),
+                        Style::default().fg(theme.primary),
                         &wl.text,
                         line_selection(sel_range, wl),
                         base,

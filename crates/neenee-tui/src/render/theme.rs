@@ -5,7 +5,6 @@ use ratatui::style::Color;
 /// Styles used during rendering.
 pub struct Theme {
     pub user_fg: Color,
-    pub assistant_fg: Color,
     pub error_fg: Color,
     pub system_fg: Color,
     pub code_fg: Color,
@@ -14,7 +13,6 @@ pub struct Theme {
     pub quote_fg: Color,
     pub dim_fg: Color,
     pub selected_bg: Color,
-    pub accent: Color,
     // opencode-style semantic design tokens.
     /// Base background painted across the entire terminal frame so the TUI
     /// owns every pixel rather than relying on the terminal emulator default.
@@ -50,7 +48,6 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             user_fg: Color::Rgb(165, 177, 164),
-            assistant_fg: Color::Rgb(213, 213, 205),
             error_fg: Color::Rgb(190, 111, 104),
             system_fg: Color::Rgb(111, 116, 110),
             code_fg: Color::Rgb(166, 178, 163),
@@ -59,7 +56,6 @@ impl Default for Theme {
             quote_fg: Color::Rgb(156, 145, 118),
             dim_fg: Color::Rgb(94, 99, 94),
             selected_bg: Color::Rgb(38, 48, 44),
-            accent: Color::Rgb(142, 161, 145),
             // Zen palette: ink-black base, charcoal surfaces, quiet sage
             // accents. Contrast comes from luminance, not saturated hue, so
             // the interface stays calm while preserving semantic cues.

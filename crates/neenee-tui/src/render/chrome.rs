@@ -74,7 +74,7 @@ pub fn draw_status_bar(
         return;
     }
     let spinner = spinner_glyph();
-    let spinner_color = breathing_color(spinner_phase, theme.accent, theme.app_bg);
+    let spinner_color = breathing_color(spinner_phase, theme.primary, theme.app_bg);
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -85,7 +85,7 @@ pub fn draw_status_bar(
         Span::styled(
             status,
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.primary)
                 .add_modifier(Modifier::ITALIC),
         ),
     ]);
@@ -272,7 +272,7 @@ pub fn draw_hint_bar(
     let zone_fg = if focus_zone.is_browse() {
         theme.warning
     } else {
-        theme.accent
+        theme.primary
     };
     let zone_text = format!(" {} ", zone_label);
     let zone_pill_width = zone_text.width() + 2; // +2 for the surrounding brackets
@@ -347,7 +347,7 @@ pub fn draw_hint_bar(
     right_spans.push(Span::styled(
         current_model.to_string(),
         Style::default()
-            .fg(theme.accent)
+            .fg(theme.primary)
             .add_modifier(Modifier::BOLD)
             .bg(bg),
     ));

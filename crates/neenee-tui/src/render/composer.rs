@@ -80,7 +80,7 @@ pub fn draw_composer(
     // `user_panel_bg` and the prompt glyph uses `text_muted`, matching the
     // already-sent user-message styling so the live box visibly recedes.
     let panel_bg = if focused { theme.input_bg } else { theme.user_panel_bg };
-    let prompt_fg = if focused { theme.accent } else { theme.text_muted };
+    let prompt_fg = if focused { theme.primary } else { theme.text_muted };
     let app_bg = theme.app_bg;
     let full_w = input_rect.width as usize;
     // Reserve the left prompt prefix (`› `) and a matching right pad so text
