@@ -14,7 +14,7 @@ cards are the two concrete instances.
 
 | Attribute | Value |
 |-----------|-------|
-| Background | `element_bg` (33, 37, 54) band, no border lines |
+| Background | `element_bg` (21, 23, 22) band, no border lines |
 | Band inset | 2 cols of `app_bg` on each side (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD, at band column 0 (transcript column 2) |
 | Header text | Starts at band column 2 (transcript column 4), BOLD, color set by the concrete card |
@@ -49,9 +49,10 @@ separating space band column 1, and the header text band column 2 onward.
 |---------|--------|
 | `Tab` | Move keyboard focus to the next visible card |
 | `Shift+Tab` | Move keyboard focus to the previous visible card |
-| `Enter` / `Space` on focused card | Toggle that card |
+| `Enter` / `Space` on a focused **thinking** card | Toggle that card |
+| `Enter` on a focused **tool-step** card | Open the [full-output detail overlay](tool-step-card.md#detail-overlay) (ADR-0001) — the inline expand/collapse for tool steps was replaced by the overlay; click a tool-step header to toggle it inline instead |
 | Click header or preview | Focus and toggle that card |
-| `Ctrl+T` | Expand or collapse all tool-step cards |
+| `Ctrl+T` | Expand or collapse all tool-step cards (bulk density toggle) |
 | Sticky pin | When an expanded card's body scrolls past the top of the viewport, its header pins under the HUD bar (rendered with `-`) |
 | Narrow terminal (`< 8` cols) | Falls back to plain block rendering via `render_message_blocks` |
 
@@ -101,6 +102,9 @@ focus target.
 
 ## Source
 
-Shared header rendering: `render_expandable_card_header` and
-`card_header_line` in `render.rs`. Sticky-pin tracking: `StickyCard` in
-`render.rs`. `BlockRegion` is defined in `layout.rs`.
+Shared header rendering: `draw_expandable_card_header` and
+`tool_header_line` in `crates/neenee-tui/src/render/turn_artifacts.rs`.
+Sticky-pin tracking: `StickyCard` in the same module. `BlockRegion` is
+defined in `crates/neenee-tui/src/layout.rs`. The structured output the
+tool-step body renders from is documented in
+[ADR-0001](../../adr/0001-tool-rendering-redesign.md).

@@ -181,8 +181,9 @@ borders from rendered tables.
 Beyond rendering content, the TUI maintains state whose only purpose is
 to communicate that the agent is busy:
 
-- A monotonic `spinner_tick` advances once per frame and drives a braille
-  spinner, so the status bar animates at roughly 10 fps even while the
+- A monotonic `spinner_tick` advances once per frame and drives the
+  breathing-dot indicator (a luminance sweep, not a braille spinner), so
+  the status bar animates at roughly 10 fps even while the
   harness is waiting on a slow provider.
 - An `activity_status` string surfaces the current phase
   (`responding`, `thinking`, `retry 2/4 in 3s`, `awaiting permission`).

@@ -2,7 +2,10 @@
 
 A concrete [expandable card](expandable-card.md) for tool calls (read_file,
 bash, edit_file, etc.). The header summarizes the call; the expanded body
-shows the technical name, arguments, and result.
+shows the arguments and a structured result. Results are typed
+[`ToolOutput`](../../adr/0001-tool-rendering-redesign.md) (Shell/Code/Listing/
+Matches/…), so each tool renders from data instead of a sniffed string;
+`bash` streams stdout live into its collapsed preview while it runs.
 
 ## Collapsed
 
@@ -12,11 +15,11 @@ shows the technical name, arguments, and result.
 
 | Attribute | Value |
 |-----------|-------|
-| Background | `element_bg` (33, 37, 54) band, inset 2 cols (`TRANSCRIPT_H_INSET`) |
+| Background | `element_bg` (21, 23, 22) band, inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD |
-| Marker color | Status-colored (`success` / `error_fg` / `info`) |
-| Header text | Human-readable description + duration, `text_muted` BOLD |
-| Header text column | 4 from transcript edge (band col 2, after `+ ` prefix) |
+| Status indicator | Breathing `●` while running (luminance sweep), `✓` ok, `✗` failed, `⊘` cancelled |
+| Tool icon | Per-tool glyph from the presenter registry (`❯` bash, `✎` edit/write, `▤`/`⌕`/`▦` read/grep/list, …) |
+| Header text | Human-readable description + duration, BOLD |
 
 The header shows only what the tool did and how long it took. The technical
 tool name is inside the expanded body.
@@ -39,7 +42,7 @@ the header-only collapsed form.
 
 | Attribute | Value |
 |-----------|-------|
-| Background | `menu_bg` (27, 30, 44) — recessed from the `element_bg` header |
+| Background | `menu_bg` (17, 19, 18) — recessed from the `element_bg` header |
 | Body indent | 2 cols (same as the expanded body, aligns with the header text) |
 | Command line | `$ ` + first line of the command, `text` color |
 | Output lines | First 8 lines (`BASH_PREVIEW_LINES`), ANSI-stripped, `text_muted` |
@@ -95,10 +98,11 @@ purpose-built renderer instead of a generic code block:
 
 | Tool | Renderer | Notes |
 |------|----------|-------|
-| `list_dir`, `glob` | `render_listing_content` | One entry per row, no gutter. Directories (entries ending in `/`) in `info`, files in `code_fg`. |
-| `grep` | `render_grep_content` | Matches grouped under a bold `heading_fg` file-path header; each match shown as `{lineno}  {content}` with the line-number column aligned and dimmed. |
-| `bash` | `render_bash_content` | Plain wrapped rows, no gutter (line numbers are meaningless for command output). Section markers emitted by the tool (`Exit N`, `STDOUT:`, `STDERR:`, `(success, stderr):`, `[Output truncated`, `[Output was large`) are highlighted in `warning`. |
-| `read_file`, `edit_file`, others | `render_code_content` | Code block with line-number gutter on `code_bg` (the original behavior). Used as the fallback for unrecognized tools. |
+| `list_dir`, `glob` | `draw_listing_content` | One entry per row, no gutter. Directories (entries ending in `/`) in `info`, files in `code_fg`. |
+| `grep` | `draw_grep_content` | Matches grouped under a bold `heading_fg` file-path header; each match shown as `{lineno}  {content}` with the line-number column aligned and dimmed. |
+| `bash` | `draw_bash_content` | Renders from the structured `Shell` payload: stdout lines, then stderr in `error_fg`, then an `exit N` / `[output truncated]` footer. No string-sniffing of `Exit`/`STDERR:` markers. While running, the collapsed preview streams stdout live. |
+| `edit_file`, `write_file` | `draw_diff_content` | A real `similar`-based unified diff: line-number gutter, `+`/`-` sign column, and intra-line word highlight on the changed spans. |
+| `read_file`, others | `draw_code_content` | Code block with line-number gutter on `code_bg` (the fallback for unrecognized tools). |
 
 ### Status colors
 
@@ -108,14 +112,28 @@ purpose-built renderer instead of a generic code block:
 | Failed | `error_fg` (red) | ` · failed 0ms` |
 | Running | `info` (cyan) | (no suffix) |
 
+## Detail overlay
+
+`Enter` on a focused tool-step card opens a centered, scrollable panel showing
+the step's complete output — the full structured payload, not the
+transcript-truncated view. For `Shell` it renders `$ command`, stdout, stderr
+(in `error_fg`), and the exit/truncation footer directly from the
+`ToolOutput::Shell` fields. `↑`/`↓`/wheel scrolls; `Esc`/`Enter` closes.
+Sub-agent `task` cards still navigate into the child session on `Enter`
+instead of opening the overlay. The bulk `Ctrl+T` toggle still
+inline-expands every card for those who want the old all-expanded view. See
+[ADR-0001](../../adr/0001-tool-rendering-redesign.md).
+
 ## Interaction
 
 See [expandable card](expandable-card.md#behavior) for the shared toggle,
 sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 
+- `Enter` on a focused tool-step opens the [detail overlay](#detail-overlay)
+  (clicking the header toggles it inline).
 - `Ctrl+T` expands or collapses all tool-step cards.
 - `Tab` / `Shift+Tab` includes visible tool-step cards in the keyboard focus
-  order; `Enter` / `Space` activates the focused card.
+  order.
 
 ## Sub-agent children
 
@@ -124,10 +142,15 @@ expanded body (6-space indent). Child cards show a compact `⚒` header line.
 
 ## Source
 
-`render_tool_step_card` and `render_tool_body_section` in `render.rs`. Shared
-header via `render_expandable_card_header`. Bash collapsed preview via
-`render_bash_preview` (with `strip_ansi` and `BASH_PREVIEW_LINES`). Result
-rendering dispatched by `render_tool_result_section` to
-`render_listing_content`, `render_grep_content`, `render_bash_content`, or
-`render_code_content`. Header data from `tool_step_header()` and
-`parse_arguments_kv()` in `document.rs`.
+`draw_tool_step_card` and `draw_tool_body_section` in
+`crates/neenee-tui/src/render/turn_artifacts.rs`. Shared header via
+`draw_expandable_card_header`. Bash collapsed/expanded preview via the
+`BashPresenter`/`draw_bash_content` (with `strip_ansi` and
+`BASH_PREVIEW_LINES`). Result rendering dispatched by
+`draw_tool_result_section` to `draw_listing_content`,
+`draw_grep_content`, `draw_bash_content`, `draw_diff_content`, or
+`draw_code_content`. The structured payload comes from `ToolOutput`
+([ADR-0001](../../adr/0001-tool-rendering-redesign.md)); header data from
+`tool_step_header()` and `parse_arguments_kv()` in `document.rs`. The
+detail overlay is `draw_tool_step_detail_overlay` in
+`crates/neenee-tui/src/render/overlays.rs`.

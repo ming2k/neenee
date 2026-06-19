@@ -196,18 +196,36 @@ Both transport paths converge on `Agent::execute_tool`
 (`crates/neenee-core/src/lib.rs`). The dispatcher:
 
 1. Looks up the tool by name. Unknown tools return
-   `Error: Tool '{}' not found`.
+   `ToolOutput::Text("Error: Tool '{}' not found")`.
 2. Enforces the Plan-mode gate. A non-read-only tool in `AgentMode::Plan`
    returns
    `[Plan mode] Tool '{name}' is blocked. Switch to Build mode to execute it.`
 3. Routes `ToolAccess::Write` tools through the permission broker.
-4. Invokes `tool.call_with_events`, rewrapping `SubTaskEvent` from tools
-   that emit them (only `TaskTool` does today).
+4. Invokes `tool.call_structured_with_events`, which returns a typed
+   [`ToolOutput`](`crate::ToolOutput`) (`Text` / `Error` / `Shell` /
+   `Code` / `Listing` / `Matches`). The trait default delegates to the
+   legacy `call` and wraps the string as `Text`; migrated tools override
+   it to return richer variants — `bash` spawns with piped stdout/stderr
+   and streams stdout line-by-line as [`ToolStream`](`crate::ToolStream`)
+   events while it runs. `SubTaskEvent`s from `TaskTool` are rewrapped and
+   forwarded alongside.
 
 Permission scope is computed via `tool.permission_scope(&call.arguments)`.
 The returned string identifies the resource a cached `Always` rule must
 match — a path for file tools, the full command for `bash`, or `"*"` for
 tools that do not override the default.
+
+### Results
+
+`Agent::record_tool_result` emits `AgentEvent::ToolResult` carrying both
+the structured `ToolOutput` and its `to_text()` flattening (the legacy
+display string, kept so the transcript/UI render unchanged during the
+Strangler migration), plus `duration_ms`. The terminal status (`Ok` /
+`Failed`) is derived from the structured payload — a non-zero shell exit
+or `ToolOutput::Error` marks the step failed — replacing the old
+`output.starts_with("Error")` heuristic, which misclassified `Exit N`
+bash failures as success. See [ADR-0001](../adr/0001-tool-rendering-redesign.md)
+for the structured-output redesign.
 
 ## Design notes
 
