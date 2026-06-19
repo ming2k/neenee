@@ -13,4 +13,5 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 |-----|-------|--------|
 | [0001](0001-tool-rendering-redesign.md) | Tool-step rendering redesign: log entries over expandable cards | Accepted |
 | [0002](0002-model-channel-abstraction.md) | Model/channel abstraction and picker redesign | Proposed |
-| [0003](0003-extract-neenee-app-crate.md) | Extract `neenee-app` from the binary crate | Accepted |
+| [0003](0003-extract-neenee-app-crate.md) | Extract `neenee-app` from the binary crate | Superseded by ADR-0004 |
+| [0004](0004-six-crate-topology.md) | Six-crate topology: core / app / providers / tools / harness / cli | Accepted |
