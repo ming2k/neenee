@@ -174,7 +174,7 @@ fn prune_tool_results_inner(messages: &mut [Message], protect_recent_chars: usiz
     }
 }
 
-pub(crate) fn estimate_message_tokens(message: &Message) -> i64 {
+pub fn estimate_message_tokens(message: &Message) -> i64 {
     let text_len = message.content.len()
         + message
             .reasoning_content
@@ -189,7 +189,7 @@ pub(crate) fn estimate_message_tokens(message: &Message) -> i64 {
     estimate_string_tokens_len(text_len + tool_text)
 }
 
-pub(crate) fn estimate_string_tokens(s: &str) -> i64 {
+pub fn estimate_string_tokens(s: &str) -> i64 {
     estimate_string_tokens_len(s.len())
 }
 

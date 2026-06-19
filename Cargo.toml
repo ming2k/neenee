@@ -4,6 +4,7 @@ members = [
     "crates/neenee-app",
     "crates/neenee-providers",
     "crates/neenee-tools",
+    "crates/neenee-harness",
     "crates/neenee-tui",
     "crates/neenee",
 ]

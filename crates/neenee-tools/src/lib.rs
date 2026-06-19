@@ -621,8 +621,8 @@ impl Tool for ListDirTool {
 }
 
 /// Re-export skill tools so callers can use them as `neenee_tools::UseSkillTool`
-/// etc. without reaching into `neenee_core::skills::tools`.
-pub use neenee_core::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
+/// etc. without reaching into `neenee_harness::skills::tools`.
+pub use neenee_harness::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 
 /// Fast file pattern matching using globs.
 pub struct GlobTool;
@@ -1287,12 +1287,12 @@ impl TaskTool {
                 .await
                 .map_err(|err| format!("failed to create sub-agent goal store: {err}"))?,
         );
-        let sub_agent = neenee_core::Agent::new(
+        let sub_agent = neenee_harness::Agent::new(
             self.provider.clone(),
             sub_tools,
             neenee_core::AgentMode::Build,
             goal_service,
-            neenee_core::skills::SkillRegistry::empty(),
+            neenee_harness::skills::SkillRegistry::empty(),
         );
 
         let system = format!(

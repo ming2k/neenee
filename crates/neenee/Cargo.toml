@@ -8,6 +8,7 @@ neenee-core = { path = "../neenee-core" }
 neenee-app = { path = "../neenee-app" }
 neenee-providers = { path = "../neenee-providers" }
 neenee-tools = { path = "../neenee-tools" }
+neenee-harness = { path = "../neenee-harness" }
 neenee-tui = { path = "../neenee-tui" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

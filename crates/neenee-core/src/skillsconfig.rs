@@ -1,5 +1,9 @@
-//! Skill-related configuration that can be shared between `neenee-core` and
-//! the main `neenee` crate.
+//! Shared configuration schema for skills.
+//!
+//! Lives in `neenee-core` for the same reason [`crate::WebSearchConfig`] and
+//! [`crate::McpServerConfig`] do: the app-layer `Config` owns the `[skills]`
+//! table and the loader (in `neenee-harness::skills`) needs to read it, and
+//! `neenee-app` does not depend on `neenee-harness`.
 
 use serde::{Deserialize, Serialize};
 

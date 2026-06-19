@@ -934,10 +934,45 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
     );
 }
 
-    // NOTE: the `ask_user_tool_blocks_and_returns_selected_answers` test
-    // previously lived here but used `crate::tools::AskUserTool`. After the
-    // neenee-tools extraction (this commit) it cannot reach the tool without
-    // a cyclic dev-dep, so it has been temporarily removed. It will be
-    // restored as part of the neenee-harness extraction when `tests.rs`
-    // itself moves out of core (then `neenee_tools::AskUserTool` is a
-    // normal dependency, not a cyclic dev-dep).
+#[tokio::test]
+async fn ask_user_tool_blocks_and_returns_selected_answers() {
+    let ask_args = serde_json::json!({
+        "questions": [{
+            "header": "style",
+            "question": "Which error handling style?",
+            "options": [
+                { "label": "anyhow (Recommended)", "description": "Simple" },
+                { "label": "thiserror", "description": "Structured" }
+            ],
+            "multi_select": false
+        }]
+    });
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(vec![
+            tool_round(&[("c1", "ask_user", &ask_args.to_string())]),
+            text_round("done"),
+        ])),
+        vec![Arc::new(neenee_tools::AskUserTool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let mut messages = vec![Message::new(Role::User, "choose")];
+    let mut events = Vec::new();
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            if let AgentEvent::UserQuestionRequest(request) = &event {
+                agent.reply_user_question(&request.id, vec![vec!["thiserror".to_string()]]);
+            }
+            events.push(event);
+        })
+        .await;
+
+    assert_eq!(outcome.unwrap().message.content, "done");
+    let lines = transcript(&events);
+    assert!(lines.iter().any(|line| line.starts_with("user-question")));
+    assert!(lines
+        .iter()
+        .any(|line| line.starts_with("tool-result ask_user") && line.contains("thiserror")));
+}

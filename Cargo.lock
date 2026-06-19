@@ -1435,6 +1435,7 @@ dependencies = [
  "futures",
  "neenee-app",
  "neenee-core",
+ "neenee-harness",
  "neenee-providers",
  "neenee-tools",
  "neenee-tui",
@@ -1497,6 +1498,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "neenee-harness"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "futures",
+ "glob",
+ "neenee-app",
+ "neenee-core",
+ "neenee-tools",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "neenee-providers"
 version = "0.1.0"
 dependencies = [
@@ -1520,6 +1544,7 @@ dependencies = [
  "futures",
  "glob",
  "neenee-core",
+ "neenee-harness",
  "reqwest",
  "serde",
  "serde_json",

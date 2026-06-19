@@ -25,14 +25,14 @@
 //!   ---
 //!   ```
 
-pub mod config;
+
 pub mod discovery;
 pub mod metadata;
 pub mod remote;
 pub mod render;
 pub mod tools;
 
-pub use config::SkillsConfig;
+pub use neenee_core::SkillsConfig;
 pub use metadata::{Skill, SkillDependency, SkillPolicy, SkillScope};
 pub use render::{build_skills_index, resolve_mentions};
 pub use tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
