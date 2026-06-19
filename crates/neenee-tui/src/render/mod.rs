@@ -38,7 +38,8 @@ use message_body::draw_message_body;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_api_key_modal, draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
-    draw_permission_sheet, draw_sessions_modal, draw_solution_input_modal, relative_time,
+    draw_permission_sheet, draw_sessions_modal, draw_solution_input_modal,
+    draw_tool_step_detail_overlay, relative_time,
 };
 use primitives::viewport_rect;
 #[cfg(test)]

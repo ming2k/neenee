@@ -607,6 +607,102 @@ pub fn draw_armed_toast(frame: &mut Frame, message: &str, theme: &Theme) {
 }
 
 /// Draw the help / keybindings modal.
+/// Full-output detail overlay for a focused tool step (ADR-0001 Step 8). Shows
+/// the step's complete output in a centered, scrollable panel so a long result
+/// can be inspected without scrolling the whole transcript. Shell output is
+/// broken into `$ command`, stdout, stderr (in `error_fg`), and an exit footer
+/// straight from the structured payload — no string-sniffing.
+pub fn draw_tool_step_detail_overlay(
+    frame: &mut Frame,
+    msg: &crate::document::TranscriptMessage,
+    scroll: u16,
+    theme: &Theme,
+) {
+    use crate::document::MessageKind;
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    let area = centered_rect(92, 84, viewport_rect(frame));
+    frame.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(header) = msg.tool_step_header() {
+        lines.push(Line::from(Span::styled(
+            header,
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let body_style = Style::default().fg(theme.text);
+    let stderr_style = Style::default().fg(theme.error_fg);
+    let marker_style = Style::default().fg(theme.warning).add_modifier(Modifier::BOLD);
+    match &msg.kind {
+        MessageKind::ToolStep {
+            structured:
+                Some(neenee_core::ToolOutput::Shell {
+                    command,
+                    stdout,
+                    stderr,
+                    exit,
+                    truncated,
+                }),
+            ..
+        } => {
+            if !command.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("$ {}", command),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                )));
+            }
+            for line in stdout.split('\n') {
+                lines.push(Line::from(Span::styled(line.to_string(), body_style)));
+            }
+            if !stderr.is_empty() {
+                for line in stderr.split('\n') {
+                    lines.push(Line::from(Span::styled(line.to_string(), stderr_style)));
+                }
+            }
+            if *truncated {
+                lines.push(Line::from(Span::styled(
+                    "[output truncated]".to_string(),
+                    marker_style,
+                )));
+            }
+            if matches!(exit, Some(c) if *c != 0) {
+                lines.push(Line::from(Span::styled(
+                    format!("exit {}", exit.unwrap()),
+                    marker_style,
+                )));
+            }
+        }
+        MessageKind::ToolStep {
+            output: Some(output),
+            ..
+        } => {
+            for line in output.split('\n') {
+                lines.push(Line::from(Span::styled(line.to_string(), body_style)));
+            }
+        }
+        _ => {}
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑/↓ or wheel scroll · esc close ",
+        Style::default().fg(theme.text_muted),
+    )));
+
+    let block = panel_block(theme.primary, theme.panel_bg);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(block),
+        area,
+    );
+}
+
 pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop);
     let area = centered_rect(58, 70, viewport_rect(frame));

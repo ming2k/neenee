@@ -317,3 +317,42 @@ fn bash_running_streams_live_preview() {
     );
     insta::assert_snapshot!(render_grid(&m, 80, 24));
 }
+
+#[test]
+fn tool_step_detail_overlay_renders_full_shell_output() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let m = tool_step_structured(
+        "bash",
+        r#"{"command":"cargo test"}"#,
+        neenee_core::ToolOutput::Shell {
+            command: "cargo test".into(),
+            stdout: "running 3 tests\n...\ntest result: ok. 3 passed".into(),
+            stderr: "warning: unused import".into(),
+            exit: Some(0),
+            truncated: false,
+        },
+        false,
+    );
+    let backend = TestBackend::new(60, 14);
+    let mut terminal = Terminal::new(backend).expect("backend");
+    terminal
+        .draw(|f| {
+            super::draw_tool_step_detail_overlay(f, &m, 0, &Theme::default());
+        })
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    let bw = buf.area.width as usize;
+    let mut rows: Vec<String> = Vec::new();
+    for y in 0..buf.area.height as usize {
+        let mut row = String::new();
+        for x in 0..bw {
+            let sym: &str = buf.content[y * bw + x].symbol().as_ref();
+            row.push_str(sym);
+        }
+        rows.push(row.trim_end().to_string());
+    }
+    while rows.last().map_or(false, |r| r.is_empty()) {
+        rows.pop();
+    }
+    insta::assert_snapshot!(rows.join("\n"));
+}

@@ -413,6 +413,7 @@ pub fn process_event(
                     super::Modal::Endpoint => InputAction::SubmitEndpoint,
                     super::Modal::ModelName => InputAction::SubmitModelName,
                     super::Modal::Help => InputAction::CloseModal,
+                    super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
                             return InputAction::ActivateFocusedTarget;
@@ -643,6 +644,7 @@ pub fn process_event(
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
                     super::Modal::Permission => InputAction::ScrollUp,
+                    super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName
@@ -664,6 +666,7 @@ pub fn process_event(
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
                     super::Modal::Permission => InputAction::ScrollDown,
+                    super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::ApiKey
                     | super::Modal::Endpoint
                     | super::Modal::ModelName

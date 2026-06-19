@@ -459,6 +459,10 @@ pub enum Modal {
     ModelName,
     Help,
     Sessions,
+    /// Full-output detail overlay for a focused tool step. The step is
+    /// identified by `App::tool_detail_message_idx`; `tool_detail_scroll`
+    /// holds the overlay's own scroll offset.
+    ToolStepDetail,
 }
 
 pub struct App {
@@ -542,6 +546,11 @@ pub struct App {
     /// it as a dark→bright hover affordance hinting that it is clickable.
     /// `None` whenever the pointer is elsewhere or an overlay modal is open.
     pub hovered_reasoning: Option<usize>,
+    /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
+    /// overlay. `None` when the overlay is closed.
+    pub tool_detail_message_idx: Option<usize>,
+    /// Scroll offset (rows) of the [`Modal::ToolStepDetail`] overlay.
+    pub tool_detail_scroll: u16,
     /// Keyboard-focused activatable target in the current frame. Mouse support
     /// is an acceleration path; this is the equivalent keyboard-first path.
     pub focused_target: Option<InteractiveTarget>,
@@ -1461,6 +1470,8 @@ pub async fn run_tui(
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
         hovered_reasoning: None,
+        tool_detail_message_idx: None,
+        tool_detail_scroll: 0,
         focused_target: None,
         focus_zone: input::FocusZone::Compose,
         cursor_hidden: false,
@@ -1869,6 +1880,19 @@ async fn run_app_loop<B: Backend>(
                     &app.theme,
                 ),
                 Modal::Help => render::draw_help_modal(f, &app.theme),
+                Modal::ToolStepDetail => {
+                    if let Some(msg) = app
+                        .tool_detail_message_idx
+                        .and_then(|idx| app.messages.get(idx))
+                    {
+                        render::draw_tool_step_detail_overlay(
+                            f,
+                            msg,
+                            app.tool_detail_scroll,
+                            &app.theme,
+                        );
+                    }
+                }
                 Modal::Sessions => render::draw_sessions_modal(
                     f,
                     &app.sessions_overview,
@@ -2221,10 +2245,16 @@ async fn run_app_loop<B: Backend>(
                         app.suggestion_index = None;
                         app.modal_index = 0;
                     }
+                    if app.active_modal == Modal::ToolStepDetail {
+                        app.tool_detail_message_idx = None;
+                        app.tool_detail_scroll = 0;
+                    }
                     app.active_modal = Modal::None;
                 }
                 input::InputAction::ScrollUp => {
-                    if app.active_modal == Modal::Permission {
+                    if app.active_modal == Modal::ToolStepDetail {
+                        app.tool_detail_scroll = app.tool_detail_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Permission {
                         app.permission_scroll = app.permission_scroll.saturating_sub(4);
                     } else {
                         app.follow_bottom = false;
@@ -2235,7 +2265,9 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::ScrollDown => {
-                    if app.active_modal == Modal::Permission {
+                    if app.active_modal == Modal::ToolStepDetail {
+                        app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Permission {
                         app.permission_scroll = app
                             .permission_scroll
                             .saturating_add(4)
@@ -2404,12 +2436,15 @@ async fn run_app_loop<B: Backend>(
                                     drop(messages);
                                     app.enter_subagent(id);
                                 } else {
-                                    let toggled =
-                                        app.toggle_card_pinned(&mut messages, target.message_idx);
+                                    // Open the full-output detail overlay instead
+                                    // of the inline expand/collapse (the latter is
+                                    // the cramped UX the redesign replaces). The
+                                    // bulk `ctrl+t` toggle still inline-expands
+                                    // every card if desired.
                                     drop(messages);
-                                    if toggled {
-                                        app.selection = SelectionState::None;
-                                    }
+                                    app.tool_detail_message_idx = Some(target.message_idx);
+                                    app.tool_detail_scroll = 0;
+                                    app.active_modal = Modal::ToolStepDetail;
                                 }
                             }
                             InteractiveTargetKind::Thinking => {
@@ -2593,6 +2628,7 @@ async fn run_app_loop<B: Backend>(
                     | Modal::Endpoint
                     | Modal::ModelName
                     | Modal::Help
+                    | Modal::ToolStepDetail
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
@@ -2615,6 +2651,7 @@ async fn run_app_loop<B: Backend>(
                     | Modal::Endpoint
                     | Modal::ModelName
                     | Modal::Help
+                    | Modal::ToolStepDetail
                     | Modal::None => {}
                 },
                 input::InputAction::PermissionSubmit => {
@@ -3673,6 +3710,8 @@ mod tests {
             drag: SelectionDrag::default(),
             layout_map: LayoutMap::new(),
             hovered_reasoning: None,
+            tool_detail_message_idx: None,
+            tool_detail_scroll: 0,
             focused_target: None,
             focus_zone: input::FocusZone::Compose,
             cursor_hidden: false,

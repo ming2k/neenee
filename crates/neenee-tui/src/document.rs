@@ -393,6 +393,17 @@ impl TranscriptMessage {
         }
     }
 
+    /// Wall-clock duration of a finished tool step, if recorded.
+    pub fn tool_step_duration_ms(&self) -> Option<u64> {
+        match &self.kind {
+            MessageKind::ToolStep {
+                duration_ms: Some(d),
+                ..
+            } => Some(*d),
+            _ => None,
+        }
+    }
+
     /// Append a sub-agent event as a nested child of this tool step.
     ///
     /// Returns `true` if this message is a tool step and the event was stored.
