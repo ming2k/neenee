@@ -546,6 +546,9 @@ pub struct App {
     /// it as a dark→bright hover affordance hinting that it is clickable.
     /// `None` whenever the pointer is elsewhere or an overlay modal is open.
     pub hovered_reasoning: Option<usize>,
+    /// Global tool-card density (false = Compact default, true = Comfortable:
+    /// new tool cards spawn expanded). Shared with the response listener.
+    pub tool_density: Arc<AtomicBool>,
     /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
     /// overlay. `None` when the overlay is closed.
     pub tool_detail_message_idx: Option<usize>,
@@ -1146,6 +1149,11 @@ pub async fn run_tui(
     let sessions_overview_clone = sessions_overview.clone();
     let open_sessions = Arc::new(AtomicBool::new(false));
     let open_sessions_clone = open_sessions.clone();
+    // Global tool-card density (true = Comfortable: new tool cards spawn
+    // expanded). Shared with the response listener so cards created mid-turn
+    // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
+    let tool_density = Arc::new(AtomicBool::new(false));
+    let tool_density_clone = tool_density.clone();
 
     // Spawn response listener
     tokio::spawn(async move {
@@ -1273,10 +1281,15 @@ pub async fn run_tui(
                     *activity_clone.lock().await = tool_activity_status(&name).to_string();
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(
-                        TranscriptMessage::tool_step(id, name, arguments)
-                            .with_attribution(provider, model),
-                    );
+                    let mut message =
+                        TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
+                    // Respect the global density: in Comfortable mode new tool
+                    // cards spawn expanded so mid-turn calls match the user's
+                    // last Ctrl+T choice.
+                    if tool_density_clone.load(Ordering::SeqCst) {
+                        message.set_tool_step_expanded(true);
+                    }
+                    msgs.push(message);
                     ir_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::ToolResult {
@@ -1470,6 +1483,7 @@ pub async fn run_tui(
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
         hovered_reasoning: None,
+        tool_density: tool_density.clone(),
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,
@@ -2395,6 +2409,9 @@ async fn run_app_loop<B: Backend>(
                         }
                     }
                     drop(messages);
+                    // Persist the choice as the global density so new tool cards
+                    // created mid-turn also respect it (ADR-0001 Step 8).
+                    app.tool_density.store(expand, Ordering::SeqCst);
                     app.selection = SelectionState::None;
                 }
                 input::InputAction::FocusNextTarget => {
@@ -3710,6 +3727,7 @@ mod tests {
             drag: SelectionDrag::default(),
             layout_map: LayoutMap::new(),
             hovered_reasoning: None,
+            tool_density: Arc::new(AtomicBool::new(false)),
             tool_detail_message_idx: None,
             tool_detail_scroll: 0,
             focused_target: None,
