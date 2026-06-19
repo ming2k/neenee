@@ -26,7 +26,7 @@ pub mod message;
 pub use message::{ImagePart, Message, Role, ToolCall, ToolResult};
 
 pub mod tool_output;
-pub use tool_output::{ChecklistItem, ChecklistStatus, Link, PatchOp, ToolOutput, ToolStream};
+pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStreamEvent {

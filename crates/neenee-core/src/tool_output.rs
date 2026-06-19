@@ -67,15 +67,6 @@ pub enum ToolOutput {
         old: String,
         new: String,
     },
-    /// A todo / checklist result, as structured items (the renderer can draw
-    /// interactive checkboxes from this without re-parsing).
-    Checklist {
-        items: Vec<ChecklistItem>,
-    },
-    /// Web-search results, as structured links.
-    Links {
-        results: Vec<Link>,
-    },
 }
 
 /// Kind of file change in a [`ToolOutput::Patch`].
@@ -87,43 +78,6 @@ pub enum PatchOp {
     Edit,
     /// A file was deleted (`new` is empty).
     Delete,
-}
-
-/// One row of a [`ToolOutput::Checklist`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChecklistItem {
-    pub content: String,
-    pub status: ChecklistStatus,
-}
-
-/// Lifecycle of a [`ChecklistItem`], mirrored from the tools' own enum so the
-/// type does not leak the tool module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChecklistStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-impl ChecklistStatus {
-    /// Single-char glyph for the legacy text rendering.
-    pub fn char(self) -> &'static str {
-        match self {
-            ChecklistStatus::Pending => " ",
-            ChecklistStatus::InProgress => "~",
-            ChecklistStatus::Completed => "x",
-            ChecklistStatus::Cancelled => "-",
-        }
-    }
-}
-
-/// One web-search hit in a [`ToolOutput::Links`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Link {
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
 }
 
 impl ToolOutput {
@@ -159,16 +113,6 @@ impl ToolOutput {
                 PatchOp::Edit => format!("Edited '{}' successfully", path),
                 PatchOp::Delete => format!("Deleted '{}'", path),
             },
-            ToolOutput::Checklist { items } => items
-                .iter()
-                .map(|i| format!("[{}] {}", i.status.char(), i.content))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            ToolOutput::Links { results } => results
-                .iter()
-                .map(|l| format!("{}\n{}", l.title, l.url))
-                .collect::<Vec<_>>()
-                .join("\n\n"),
         }
     }
 
@@ -184,9 +128,7 @@ impl ToolOutput {
             | ToolOutput::Code { .. }
             | ToolOutput::Listing { .. }
             | ToolOutput::Matches { .. }
-            | ToolOutput::Patch { .. }
-            | ToolOutput::Checklist { .. }
-            | ToolOutput::Links { .. } => false,
+            | ToolOutput::Patch { .. } => false,
         }
     }
 }
