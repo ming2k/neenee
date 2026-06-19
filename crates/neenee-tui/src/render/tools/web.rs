@@ -5,10 +5,6 @@ use super::{truncate, ToolPresenter, ToolView};
 pub struct WebFetchPresenter;
 
 impl ToolPresenter for WebFetchPresenter {
-    fn icon(&self) -> char {
-        '⊕'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("url")
             .map(|url| format!("Fetch {}", url))
@@ -19,10 +15,6 @@ impl ToolPresenter for WebFetchPresenter {
 pub struct WebSearchPresenter;
 
 impl ToolPresenter for WebSearchPresenter {
-    fn icon(&self) -> char {
-        '⌕'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("query")
             .map(|query| format!("Search \"{}\"", truncate(query, 56)))

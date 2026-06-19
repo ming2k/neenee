@@ -5,7 +5,7 @@ This page documents the byte-level shape of each transaction and how the
 message array evolves across the loop.
 
 For the tool protocol that decides *when* a tool call appears in a
-response, see [Tool protocol](tool-protocol.md). For the high-level turn
+response, see [Tool lifecycle](tool-lifecycle.md). For the high-level turn
 steps, see [Harness architecture](harness.md). For which providers speak
 this contract, see [Providers](../reference/providers.md).
 
@@ -46,7 +46,7 @@ The body is assembled by `OpenAiCompatProvider::request_body`
 
 When the provider has no native function calling (`GeminiProvider`,
 `LlamaServerProvider`), neither field is sent and the body uses a
-different shape. See [Tool protocol](tool-protocol.md) for the fallback.
+different shape. See [Tool lifecycle](tool-lifecycle.md) for the fallback.
 
 Orphan `tool` messages whose `tool_call_id` has no matching preceding
 assistant `tool_calls` are filtered before the body is serialized inside
@@ -252,7 +252,7 @@ assistant message becomes the turn's final answer.
 The `tools` array is byte-identical across all three requests. The
 `messages` array grows monotonically; neenee never edits prior messages
 (except the fallback promotion described in
-[Tool protocol](tool-protocol.md)).
+[Tool lifecycle](tool-lifecycle.md)).
 
 ### Exit conditions
 
@@ -301,7 +301,7 @@ plain text.
 The resulting `messages` evolution is identical to the native path. The
 only difference is whether the tool call arrives as a structured
 `tool_calls` field or is parsed out of `content`. See
-[Tool protocol](tool-protocol.md) for the parsing rules and their limits.
+[Tool lifecycle](tool-lifecycle.md) for the parsing rules and their limits.
 
 ## Retry interaction
 
@@ -331,7 +331,7 @@ by a fresh one.
 
 ## See also
 
-- [Tool protocol](tool-protocol.md) — schema injection and fallback mechanics
+- [Tool lifecycle](tool-lifecycle.md) — schema injection and fallback mechanics
 - [Provider capabilities](provider-capabilities.md) — why providers differ
   on streaming and tool support
 - [Harness architecture](harness.md) — turn execution, retry, safety bounds

@@ -9,10 +9,6 @@ const BASH_PREVIEW_LINES: usize = 8;
 pub struct BashPresenter;
 
 impl ToolPresenter for BashPresenter {
-    fn icon(&self) -> char {
-        '❯'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("command")
             .map(|cmd| {

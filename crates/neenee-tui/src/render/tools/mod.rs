@@ -1,17 +1,15 @@
 //! Per-tool presentation registry.
 //!
 //! Each tool maps to a [`ToolPresenter`] that owns how that tool looks in the
-//! transcript: its icon, the one-line collapsed summary, an optional
-//! collapsed preview, and (later) its expanded body renderer. This collapses
-//! the per-tool `match name { … }` branches that were previously scattered
-//! across `document.rs` (`argument_summary`) and `turn_artifacts.rs` (preview
-//! and result rendering) into one place — adding a tool means adding a file
-//! and one registry arm.
+//! transcript: the one-line collapsed summary, an optional collapsed preview,
+//! and (later) its expanded body renderer. This collapses the per-tool `match
+//! name { … }` branches that were previously scattered across `document.rs`
+//! (`argument_summary`) and `turn_artifacts.rs` (preview and result rendering)
+//! into one place — adding a tool means adding a file and one registry arm.
 //!
-//! Each presenter owns: an [`icon`](ToolPresenter::icon), a collapsed
-//! [`summary`](ToolPresenter::summary), an optional collapsed
-//! [`collapsed_preview`](ToolPresenter::collapsed_preview), and declarative
-//! [`result_kind`](ToolPresenter::result_kind) /
+//! Each presenter owns a collapsed [`summary`](ToolPresenter::summary), an
+//! optional collapsed [`collapsed_preview`](ToolPresenter::collapsed_preview),
+//! and declarative [`result_kind`](ToolPresenter::result_kind) /
 //! [`arg_layout`](ToolPresenter::arg_layout) classifications that drive the
 //! expanded body (`turn_artifacts` owns the drawing primitives; this module
 //! owns the per-tool decisions). `document.rs` and `turn_artifacts.rs` call the
@@ -153,10 +151,6 @@ impl ToolView<'_> {
 /// How a single tool renders in the transcript. Stateless: implementors are
 /// zero-sized unit structs resolved via [`presenter_for`].
 pub trait ToolPresenter {
-    /// Glyph shown in the icon column of the card header. Kept centralized so
-    /// the whole icon set can be swapped (ASCII / Nerd Font) in one place.
-    fn icon(&self) -> char;
-
     /// One-line, human-readable summary for the collapsed header. The registry
     /// truncates the result to the header budget, so implementors only need to
     /// truncate individual interpolated fields where it improves readability.

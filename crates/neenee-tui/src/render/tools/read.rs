@@ -5,10 +5,6 @@ use super::{ToolPresenter, ToolView};
 pub struct ReadPresenter;
 
 impl ToolPresenter for ReadPresenter {
-    fn icon(&self) -> char {
-        '▤'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("path")
             .map(|path| format!("Read {}", path))

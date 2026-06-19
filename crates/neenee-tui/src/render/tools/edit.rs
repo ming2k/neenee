@@ -8,10 +8,6 @@ use super::{ResultKind, ToolPresenter, ToolView};
 pub struct EditPresenter;
 
 impl ToolPresenter for EditPresenter {
-    fn icon(&self) -> char {
-        '✎'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         let Some(path) = view.str("path") else {
             return "Edit file".to_string();
@@ -33,10 +29,6 @@ impl ToolPresenter for EditPresenter {
 pub struct WritePresenter;
 
 impl ToolPresenter for WritePresenter {
-    fn icon(&self) -> char {
-        '✎'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         let Some(path) = view.str("path") else {
             return "Write file".to_string();

@@ -2,7 +2,7 @@
 source: crates/neenee-tui/src/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 40)"
 ---
-  - ● ❯ Run cargo test
+  - Run cargo test
 
     Arguments  cargo test
     Result

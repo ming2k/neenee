@@ -11,10 +11,6 @@ use super::{ArgLayout, ToolPresenter, ToolView};
 pub struct FallbackPresenter;
 
 impl ToolPresenter for FallbackPresenter {
-    fn icon(&self) -> char {
-        '·'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         let name = prettify_tool_name(view.name);
         match ["path", "pattern", "command", "name", "url", "query"]

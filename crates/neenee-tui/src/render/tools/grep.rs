@@ -8,10 +8,6 @@ const GREP_PREVIEW_LINES: usize = 3;
 pub struct GrepPresenter;
 
 impl ToolPresenter for GrepPresenter {
-    fn icon(&self) -> char {
-        '⌕'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         let pattern = view.str("pattern").unwrap_or("...");
         let path = view.str("path").unwrap_or(".");
@@ -53,10 +49,6 @@ impl ToolPresenter for GrepPresenter {
 pub struct GlobPresenter;
 
 impl ToolPresenter for GlobPresenter {
-    fn icon(&self) -> char {
-        '⌕'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("pattern")
             .map(|pattern| format!("Glob {}", pattern))
@@ -71,10 +63,6 @@ impl ToolPresenter for GlobPresenter {
 pub struct ListDirPresenter;
 
 impl ToolPresenter for ListDirPresenter {
-    fn icon(&self) -> char {
-        '▦'
-    }
-
     fn summary(&self, view: &ToolView) -> String {
         view.str("path")
             .map(|path| format!("List {}", path))

@@ -340,7 +340,7 @@ policy allows implicit invocation.
 
 ## See also
 
-- [Tool protocol](../explanation/tool-protocol.md) — how schemas are injected,
+- [Tool lifecycle](../explanation/tool-lifecycle.md) — how schemas are injected,
   streamed, and fell back to text
 - [Provider capabilities](../explanation/provider-capabilities.md) — which
   providers support native function calling

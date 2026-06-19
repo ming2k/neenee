@@ -17,12 +17,14 @@ Matches/…), so each tool renders from data instead of a sniffed string;
 |-----------|-------|
 | Background | `element_bg` (21, 23, 22) band, inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD |
-| Status indicator | Breathing `●` while running (luminance sweep), `✓` ok, `✗` failed, `⊘` cancelled |
-| Tool icon | Per-tool glyph from the presenter registry (`❯` bash, `✎` edit/write, `▤`/`⌕`/`▦` read/grep/list, …) |
+| Status indicator | Conveyed by header color only — no glyph. Breathing accent while running (luminance sweep), `error_fg` on failure, `text_muted` when cancelled, neutral (`text`/`text_muted` by focus) on success |
 | Header text | Human-readable description + duration, BOLD |
 
-The header shows only what the tool did and how long it took. The technical
-tool name is inside the expanded body.
+The header shows only the marker, the summary, and the duration — no status
+glyph and no per-tool icon. Run state reads purely from the header color, so a
+successful call stays calm (neutral text) while in-flight, failed, and
+cancelled calls pick up an accent color. The technical tool name is inside the
+expanded body.
 
 ## Bash collapsed preview
 
@@ -106,11 +108,19 @@ purpose-built renderer instead of a generic code block:
 
 ### Status colors
 
-| State | Color | Header suffix |
-|-------|-------|---------------|
-| Completed | `success` (green) | ` · 0ms` |
+Status is conveyed by the header text color (there is no status glyph).
+
+| State | Header color | Header suffix |
+|-------|--------------|---------------|
+| Completed | neutral (`text` focused / `text_muted` otherwise) | ` · 0ms` |
 | Failed | `error_fg` (red) | ` · failed 0ms` |
-| Running | `info` (cyan) | (no suffix) |
+| Running | breathing `info` accent (luminance sweep) | (no suffix) |
+| Cancelled | `text_muted` | (no suffix) |
+
+Success stays neutral so the common case reads as calm; only in-flight, failed,
+and cancelled calls pick up an accent. (The child-step accents and sticky-pin
+color still use the raw status palette — `success`/`error_fg`/`info`/`text_muted`
+— derived from [`ToolStatus::color`].)
 
 ## Detail overlay
 
@@ -138,7 +148,8 @@ sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 ## Sub-agent children
 
 Nested sub-task tool calls render as indented child cards inside the parent's
-expanded body (6-space indent). Child cards show a compact `⚒` header line.
+expanded body (6-space indent). Child cards show a compact one-line header
+(the summary, colored by run state) with no marker glyph.
 
 ## Source
 

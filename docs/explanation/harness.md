@@ -31,7 +31,7 @@ The harness distinguishes two model capability surfaces. Tools are declared
 to the provider on every request; reasoning is observed from the provider
 when the model emits it. For the capability model and wire-level protocol,
 see [Provider capabilities](provider-capabilities.md) and
-[Tool protocol](tool-protocol.md).
+[Tool lifecycle](tool-lifecycle.md).
 
 ### Declared: tools
 

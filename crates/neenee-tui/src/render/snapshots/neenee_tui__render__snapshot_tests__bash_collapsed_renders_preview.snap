@@ -1,8 +1,0 @@
----
-source: crates/neenee-tui/src/render/snapshot_tests.rs
-expression: "render_grid(&m, 80, 24)"
----
-  + ⠋ ❯ Run echo hi
-    $ echo hi
-    hi
-    Exit 0

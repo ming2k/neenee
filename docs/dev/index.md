@@ -10,4 +10,4 @@
 - [Request flow](../explanation/request-flow.md) — HTTP transaction shape, SSE streaming, and the ReAct loop's message evolution
 - [Provider capabilities](../explanation/provider-capabilities.md) — where tool calling and reasoning live across model weights, serving runtime, and client
 - [Guided decoding](../explanation/guided-decoding.md) — constrained decoding, FSM compilation, and chat templates
-- [Tool protocol](../explanation/tool-protocol.md) — wire-level protocol for declaring tools, transporting calls, and falling back to text
+- [Tool lifecycle](../explanation/tool-lifecycle.md) — end-to-end tool round trip: schema declaration, model interaction, dispatch, execution, and result handling

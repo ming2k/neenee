@@ -149,9 +149,6 @@ pub(super) struct StickyCard {
     message_idx: usize,
     header: String,
     color: Color,
-    /// Tool glyph shown in the pinned header so it matches the real header
-    /// (a space for reasoning traces, which have no tool icon).
-    icon: char,
     background: Option<Color>,
     /// usize::MAX for tool steps, usize::MAX - 1 for reasoning traces.
     block_idx: usize,
@@ -164,26 +161,20 @@ pub(super) struct StickyCard {
 /// expanded, padded to the full width so it reads as a colored band. The body
 /// content is expected to start at column 2 so it left-aligns with the header
 /// text.
-/// Build a tool-card header band: an optional expand marker (`+`/`-`), an
-/// optional status glyph (the colored "rail" — spinner / `✓` / `✗`), the tool
-/// icon, and the summary, padded to a full-width colored band.
 ///
-/// Only the status glyph carries `status_color`; the expand marker, icon, and
-/// summary use the muted `header_color`, so color reads purely as run state.
-/// Empty `expand` / `status_glyph` segments (and their trailing space) are
-/// skipped so the subagent and pinned headers can omit them cleanly.
+/// Run state is conveyed purely by `header_color` (breathing accent while
+/// running, error red on failure, muted when cancelled, neutral on success) —
+/// there is no status glyph or per-tool icon in the header. An empty `expand`
+/// segment (and its trailing space) is skipped so callers can omit it cleanly.
 fn tool_header_line(
     expand: &str,
-    status_glyph: &str,
-    status_color: Color,
-    icon: char,
     header: &str,
     header_color: Color,
     bg: Color,
     full_width: usize,
 ) -> Line<'static> {
     let base = Style::default().bg(bg);
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
     let mut used = 0usize;
 
     if !expand.is_empty() {
@@ -194,17 +185,6 @@ fn tool_header_line(
             base.fg(header_color).add_modifier(Modifier::BOLD),
         ));
     }
-    if !status_glyph.is_empty() {
-        let s = format!("{} ", status_glyph);
-        used += s.width();
-        spans.push(Span::styled(
-            s,
-            base.fg(status_color).add_modifier(Modifier::BOLD),
-        ));
-    }
-    let icon_s = format!("{} ", icon);
-    used += icon_s.width();
-    spans.push(Span::styled(icon_s, base.fg(header_color)));
 
     used += header.width();
     spans.push(Span::styled(
@@ -228,9 +208,6 @@ fn draw_expandable_card_header(
     mi: usize,
     block_idx: usize,
     expanded: bool,
-    status_glyph: &str,
-    status_color: Color,
-    icon: char,
     header: &str,
     header_color: Color,
     bg: Color,
@@ -238,16 +215,7 @@ fn draw_expandable_card_header(
     let expand = if expanded { "-" } else { "+" };
     let header_line_idx = *ctx.content_lines;
 
-    let line = tool_header_line(
-        expand,
-        status_glyph,
-        status_color,
-        icon,
-        header,
-        header_color,
-        bg,
-        ctx.full_width,
-    );
+    let line = tool_header_line(expand, header, header_color, bg, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1059,7 +1027,6 @@ pub(super) fn draw_subagent_inline_card(
         .tool_step_status()
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
-    let status_color = status.color(theme);
 
     let transcript_area = transcript_band_rect(transcript_area);
     let full_width = transcript_area.width as usize;
@@ -1068,23 +1035,19 @@ pub(super) fn draw_subagent_inline_card(
     }
 
     let bg = theme.raised();
-    let marker = match status {
-        ToolStatus::Running => "▸",
-        ToolStatus::Cancelled => "⊘",
-        ToolStatus::Ok | ToolStatus::Failed => "✓",
-    };
-    let icon = match &msg.kind {
-        crate::document::MessageKind::ToolStep { name, .. } => {
-            super::tools::presenter_for(name).icon()
-        }
-        _ => ' ',
-    };
 
-    // Header band: status marker + tool icon + header text, registered as a
-    // tool-step card header (block_idx = usize::MAX) so the existing
-    // click/Enter handling recognizes it; the app decides to navigate rather
-    // than toggle for `task` steps. No expand marker — the card navigates.
-    let header_color = if focused { theme.fg() } else { theme.muted() };
+    // Header band: just the summary text, registered as a tool-step card
+    // header (block_idx = usize::MAX) so the existing click/Enter handling
+    // recognizes it; the app decides to navigate rather than toggle for `task`
+    // steps. No expand marker or status glyph — the card navigates, and run
+    // state reads from the header color (this card has no spinner phase, so a
+    // running step is a steady accent rather than a breathing one).
+    let header_color = match status {
+        ToolStatus::Failed => theme.error_fg,
+        ToolStatus::Cancelled => theme.text_muted,
+        ToolStatus::Ok => if focused { theme.text } else { theme.text_muted },
+        ToolStatus::Running => theme.info,
+    };
     let mut ctx = RenderCtx::from_cursor(
         frame,
         transcript_area,
@@ -1095,16 +1058,7 @@ pub(super) fn draw_subagent_inline_card(
         current_y,
         content_lines,
     );
-    let header_line = tool_header_line(
-        "",
-        marker,
-        status_color,
-        icon,
-        &header,
-        header_color,
-        bg,
-        ctx.full_width,
-    );
+    let header_line = tool_header_line("", &header, header_color, bg, ctx.full_width);
     if let Some(rect) = ctx.paint(header_line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1219,30 +1173,26 @@ pub(super) fn draw_tool_step_card(
         return;
     };
 
-    // Status rail: a colored glyph in the header conveys run state at a glance
-    // (spinner while running, `✓` success, `✗` failure, `⊘` cancelled). The
-    // expand marker and tool icon stay muted so color reads purely as status.
+    // Run state is conveyed by color alone: a breathing accent while running,
+    // red on failure, muted when cancelled, and neutral on success. There is no
+    // status glyph or per-tool icon in the header. `status_color` drives the
+    // child tool-step accents and the sticky pin; `header_color` drives the
+    // header text (and stays neutral/focus-aware for the common success case so
+    // a finished call reads as calm rather than a wall of color).
     let status = msg
         .tool_step_status()
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
+    let header_bg = theme.raised();
     let status_color = match status {
-        // Breathing dot: luminance sweeps between the header bg and the status
-        // color so a running step reads as "alive" without a frantic spinner.
-        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), theme.raised()),
+        // Breathing accent: luminance sweeps between the header bg and the
+        // status color so a running step reads as "alive" without a spinner.
+        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), header_bg),
         _ => status.color(theme),
     };
-    let status_glyph: &str = match status {
-        ToolStatus::Running => spinner_glyph(),
-        ToolStatus::Ok => "✓",
-        ToolStatus::Failed => "✗",
-        ToolStatus::Cancelled => "⊘",
-    };
-    let icon = match &msg.kind {
-        crate::document::MessageKind::ToolStep { name, .. } => {
-            super::tools::presenter_for(name).icon()
-        }
-        _ => ' ',
+    let header_color = match status {
+        ToolStatus::Ok => if focused { theme.text } else { theme.text_muted },
+        _ => status_color,
     };
 
     let expanded = msg.tool_step_expanded() == Some(true);
@@ -1288,12 +1238,9 @@ pub(super) fn draw_tool_step_card(
             mi,
             usize::MAX,
             expanded,
-            status_glyph,
-            status_color,
-            icon,
             &header,
-            if focused { theme.fg() } else { theme.muted() },
-            theme.raised(),
+            header_color,
+            header_bg,
         );
 
         // Collapsed preview: under the header, lift a few lines of key content
@@ -1376,7 +1323,7 @@ pub(super) fn draw_tool_step_card(
             {
                 // ── Arguments ── (only when the layout adds detail beyond the
                 // header summary). No redundant `Tool` row — the header band
-                // already identifies the tool via its icon + summary.
+                // already identifies the tool via its summary.
                 match super::tools::presenter_for(name).arg_layout() {
                     ArgLayout::None => {}
                     ArgLayout::Command => {
@@ -1525,7 +1472,6 @@ pub(super) fn draw_tool_step_card(
             message_idx: mi,
             header,
             color: status_color,
-            icon,
             background: Some(theme.raised()),
             block_idx: usize::MAX,
             header_line: header_line_idx,
@@ -1549,7 +1495,7 @@ fn draw_child_tool_step(
     let indent = 6usize;
     let bg_style = Style::default().bg(body_bg);
 
-    let header_text = format!("⚒ {}", header);
+    let header_text = header.to_string();
     let header_lines = wrap_text(&header_text, full_width.saturating_sub(indent));
     for wl in &header_lines {
         let used = indent + wl.text.width();
@@ -1800,7 +1746,6 @@ pub(super) fn draw_reasoning_trace(
             message_idx: mi,
             header,
             color: theme.muted(),
-            icon: ' ',
             background: None,
             block_idx: usize::MAX - 1,
             header_line: header_line_idx,
@@ -1906,9 +1851,6 @@ pub(super) fn draw_sticky_header_if_needed(
         frame.render_widget(
             Paragraph::new(tool_header_line(
                 "-",
-                "",
-                card.color,
-                card.icon,
                 &card.header,
                 if focused {
                     theme.fg()

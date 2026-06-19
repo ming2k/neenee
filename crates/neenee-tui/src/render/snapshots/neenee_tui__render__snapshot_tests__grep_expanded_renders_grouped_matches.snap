@@ -2,7 +2,7 @@
 source: crates/neenee-tui/src/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 40)"
 ---
-  - ● ⌕ Grep "foo" in src
+  - Grep "foo" in src
 
     Result
     src/a.rs

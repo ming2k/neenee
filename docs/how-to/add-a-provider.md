@@ -164,5 +164,5 @@ Update these surfaces in the same change:
 - [Providers](../reference/providers.md) — existing provider matrix
 - [Provider capabilities](../explanation/provider-capabilities.md) —
   capability layering and why providers differ
-- [Tool protocol](../explanation/tool-protocol.md) — what the registry path
+- [Tool lifecycle](../explanation/tool-lifecycle.md) — what the registry path
   inherits

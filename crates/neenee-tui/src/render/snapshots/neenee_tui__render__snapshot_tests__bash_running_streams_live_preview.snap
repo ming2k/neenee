@@ -2,7 +2,7 @@
 source: crates/neenee-tui/src/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 24)"
 ---
-  + ● ❯ Run cargo build
+  + Run cargo build
     $ cargo build
     Compiling neenee-core v0.1.0
     Compiling neenee-tui v0.1.0
