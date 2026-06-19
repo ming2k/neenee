@@ -1070,12 +1070,17 @@ fn draw_tool_result_section(
             indent,
             inner_w,
         ),
-        ResultKind::Diff => draw_diff_content(
-            &mut ctx,
-            &super::tools::diff_lines_for(name, arguments),
-            indent,
-            inner_w,
-        ),
+        ResultKind::Diff => {
+            // Prefer the structured Patch payload (old/new from the result);
+            // fall back to parsing the arguments for legacy/restored steps.
+            let diff: Vec<DiffLine> = match structured {
+                Some(neenee_core::ToolOutput::Patch { old, new, .. }) => {
+                    super::tools::line_diff(old, new)
+                }
+                _ => super::tools::diff_lines_for(name, arguments),
+            };
+            draw_diff_content(&mut ctx, &diff, indent, inner_w);
+        }
     }
 }
 

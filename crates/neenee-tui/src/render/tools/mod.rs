@@ -27,6 +27,7 @@ mod read;
 mod web;
 
 pub use diff::{DiffLine, DiffOp};
+pub(crate) use diff::line_diff;
 
 use ratatui::style::Color;
 use serde_json::Value;

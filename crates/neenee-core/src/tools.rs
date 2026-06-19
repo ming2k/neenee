@@ -112,6 +112,10 @@ impl Tool for WriteFileTool {
         crate::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
+        self.call_structured(arguments).await.map(|o| o.to_text())
+    }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -124,11 +128,12 @@ impl Tool for WriteFileTool {
         }
 
         std::fs::write(path, content).map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-        Ok(format!(
-            "Successfully wrote {} bytes to {}",
-            content.len(),
-            path
-        ))
+        Ok(crate::ToolOutput::Patch {
+            path: path.to_string(),
+            op: crate::PatchOp::Create,
+            old: String::new(),
+            new: content.to_string(),
+        })
     }
 }
 
@@ -163,6 +168,10 @@ impl Tool for EditFileTool {
         crate::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
+        self.call_structured(arguments).await.map(|o| o.to_text())
+    }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -180,10 +189,12 @@ impl Tool for EditFileTool {
                 let new_content = normalized_content.replace(&normalized_old, new_str);
                 std::fs::write(path, new_content)
                     .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-                return Ok(format!(
-                    "Edited '{}' (matched with whitespace normalization)",
-                    path
-                ));
+                return Ok(crate::ToolOutput::Patch {
+                    path: path.to_string(),
+                    op: crate::PatchOp::Edit,
+                    old: old_str.to_string(),
+                    new: new_str.to_string(),
+                });
             }
             return Err(format!(
                 "Could not find old_string in '{}'. The text may have changed or the match is ambiguous.",
@@ -194,7 +205,12 @@ impl Tool for EditFileTool {
         let new_content = content.replace(old_str, new_str);
         std::fs::write(path, new_content)
             .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-        Ok(format!("Edited '{}' successfully", path))
+        Ok(crate::ToolOutput::Patch {
+            path: path.to_string(),
+            op: crate::PatchOp::Edit,
+            old: old_str.to_string(),
+            new: new_str.to_string(),
+        })
     }
 }
 

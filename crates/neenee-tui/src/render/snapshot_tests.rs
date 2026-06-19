@@ -356,3 +356,21 @@ fn tool_step_detail_overlay_renders_full_shell_output() {
     }
     insta::assert_snapshot!(rows.join("\n"));
 }
+
+#[test]
+fn edit_file_diff_renders_from_structured_patch() {
+    // The diff now comes from the ToolOutput::Patch payload (old/new), not
+    // from re-parsing the tool arguments.
+    let m = tool_step_structured(
+        "edit_file",
+        r#"{"path":"a.rs","old_string":"let x = 1;","new_string":"let x = 2;"}"#,
+        neenee_core::ToolOutput::Patch {
+            path: "a.rs".into(),
+            op: neenee_core::PatchOp::Edit,
+            old: "let x = 1;".into(),
+            new: "let x = 2;".into(),
+        },
+        true,
+    );
+    insta::assert_snapshot!(render_grid(&m, 80, 30));
+}
