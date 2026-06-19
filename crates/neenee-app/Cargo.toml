@@ -1,20 +1,22 @@
 [package]
-name = "neenee"
+name = "neenee-app"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 neenee-core = { path = "../neenee-core" }
-neenee-app = { path = "../neenee-app" }
-neenee-tui = { path = "../neenee-tui" }
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
-clap = { version = "4.4", features = ["derive"] }
 futures = "0.3"
-toml = "0.8"
+async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
+directories = "5.0"
+dirs = "5"
+libc = "0.2"
+crc32c = "0.6"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }

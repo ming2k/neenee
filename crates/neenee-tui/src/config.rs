@@ -1,96 +1,75 @@
-//! TUI display configuration sourced from the `[tui]` table of
-//! `config.toml` (XDG: `$XDG_CONFIG_HOME/neenee/config.toml`).
+//! TUI presentation policy on top of the data-layer `[tui]` table.
 //!
-//! Today this owns the per-step-kind default expand state: which tool steps
-//! and reasoning traces open expanded when they first appear (live or
-//! restored), before the user toggles anything with Ctrl+T. An explicit entry
-//! overrides a tool's built-in default; unlisted tools keep their built-in
-//! behavior (e.g. `edit_file` expands by default, everything else collapses).
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+//! The serialisable data struct ([`TuiConfig`]) lives in `neenee-app::config`
+//! so every frontend (TUI, future GUI) can read the same `config.toml`
+//! without cross-frontend dependencies. This module re-exports that struct
+//! for TUI-internal convenience and layers the **presenter-aware** policy on
+//! top: how a raw `[tui.default_expanded]` entry combines with each tool's
+//! built-in presenter default. That lookup touches `crate::render::tools`,
+//! so it cannot live below the TUI.
 
 use crate::render::tools::presenter_for;
 
-/// Reserved `[tui.default_expanded]` key that controls reasoning traces.
-/// Reasoning isn't a tool, so it has no presenter and is addressed by name.
-pub const THINKING_KEY: &str = "thinking";
+pub use neenee_app::config::TuiConfig;
 
-/// User-tunable TUI presentation, deserialized from the optional `[tui]`
-/// table of `config.toml`. All fields default sensibly, so a `config.toml`
-/// with no `[tui]` table (or a partially specified one) is valid.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TuiConfig {
-    /// Per-step-kind default expand state. Keys are tool names (`edit_file`,
-    /// `bash`, …) or [`THINKING_KEY`] for reasoning traces. A tool that is
-    /// unlisted here falls back to its built-in presenter default.
-    ///
-    /// ```toml
-    /// [tui.default_expanded]
-    /// edit_file = true
-    /// bash = true
-    /// thinking = false
-    /// ```
-    pub default_expanded: HashMap<String, bool>,
+/// Effective default-expand state for a tool step. An explicit config entry
+/// wins; otherwise the presenter's built-in default applies.
+pub fn tool_default_expanded(config: &TuiConfig, name: &str) -> bool {
+    config
+        .default_expanded
+        .get(name)
+        .copied()
+        .unwrap_or_else(|| presenter_for(name).default_expanded())
 }
 
-impl TuiConfig {
-    /// Effective default-expand state for a tool step. An explicit config
-    /// entry wins; otherwise the presenter's built-in default applies.
-    pub fn tool_default_expanded(&self, name: &str) -> bool {
-        self.default_expanded
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| presenter_for(name).default_expanded())
-    }
-
-    /// Effective default-expand state for a reasoning trace. Defaults to
-    /// collapsed (`false`) when not configured.
-    pub fn thinking_default_expanded(&self) -> bool {
-        self.default_expanded
-            .get(THINKING_KEY)
-            .copied()
-            .unwrap_or(false)
-    }
+/// Effective default-expand state for a reasoning trace. Defaults to
+/// collapsed (`false`) when not configured.
+pub fn thinking_default_expanded(config: &TuiConfig) -> bool {
+    config
+        .default_expanded
+        .get(neenee_app::config::THINKING_KEY)
+        .copied()
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn config(defaults: &[(&str, bool)]) -> TuiConfig {
+        let mut map = HashMap::new();
+        for (k, v) in defaults {
+            map.insert((*k).to_string(), *v);
+        }
+        TuiConfig {
+            default_expanded: map,
+        }
+    }
 
     #[test]
     fn unlisted_tool_falls_back_to_presenter_default() {
         let cfg = TuiConfig::default();
         // edit_file has a built-in default of expanded.
-        assert!(cfg.tool_default_expanded("edit_file"));
+        assert!(tool_default_expanded(&cfg, "edit_file"));
         // bash collapses by default.
-        assert!(!cfg.tool_default_expanded("bash"));
+        assert!(!tool_default_expanded(&cfg, "bash"));
     }
 
     #[test]
     fn explicit_override_wins_over_presenter_default() {
-        let mut map = HashMap::new();
-        map.insert("edit_file".to_string(), false);
-        map.insert("bash".to_string(), true);
-        let cfg = TuiConfig {
-            default_expanded: map,
-        };
-        assert!(!cfg.tool_default_expanded("edit_file"));
-        assert!(cfg.tool_default_expanded("bash"));
+        let cfg = config(&[("edit_file", false), ("bash", true)]);
+        assert!(!tool_default_expanded(&cfg, "edit_file"));
+        assert!(tool_default_expanded(&cfg, "bash"));
         // Still falls back for unlisted tools.
-        assert!(!cfg.tool_default_expanded("read_file"));
+        assert!(!tool_default_expanded(&cfg, "read_file"));
     }
 
     #[test]
     fn thinking_defaults_collapsed_and_is_overridable() {
-        assert!(!TuiConfig::default().thinking_default_expanded());
-        let mut map = HashMap::new();
-        map.insert(THINKING_KEY.to_string(), true);
-        let cfg = TuiConfig {
-            default_expanded: map,
-        };
-        assert!(cfg.thinking_default_expanded());
+        assert!(!thinking_default_expanded(&TuiConfig::default()));
+        let cfg = config(&[(neenee_app::config::THINKING_KEY, true)]);
+        assert!(thinking_default_expanded(&cfg));
     }
 
     #[test]
@@ -104,17 +83,17 @@ bash = true
 thinking = true
 "#;
         let cfg: TuiConfig = toml::from_str(toml).expect("parses");
-        assert!(cfg.tool_default_expanded("edit_file"));
-        assert!(cfg.tool_default_expanded("bash"));
-        assert!(!cfg.tool_default_expanded("read_file"));
-        assert!(cfg.thinking_default_expanded());
+        assert!(tool_default_expanded(&cfg, "edit_file"));
+        assert!(tool_default_expanded(&cfg, "bash"));
+        assert!(!tool_default_expanded(&cfg, "read_file"));
+        assert!(thinking_default_expanded(&cfg));
     }
 
     #[test]
     fn empty_config_yields_defaults() {
         let cfg: TuiConfig = toml::from_str("").expect("empty parses");
         assert!(cfg.default_expanded.is_empty());
-        assert!(cfg.tool_default_expanded("edit_file"));
-        assert!(!cfg.thinking_default_expanded());
+        assert!(tool_default_expanded(&cfg, "edit_file"));
+        assert!(!thinking_default_expanded(&cfg));
     }
 }

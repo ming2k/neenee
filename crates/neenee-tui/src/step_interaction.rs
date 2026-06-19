@@ -12,7 +12,7 @@
 //! keeping the interaction vocabulary free of layering cycles and unit-testable
 //! in isolation.
 
-use crate::config::TuiConfig;
+use crate::config::{tool_default_expanded, TuiConfig};
 use crate::document::ToolStepStatus;
 use crate::layout::{InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX};
 
@@ -91,7 +91,7 @@ pub fn default_tool_expanded(
         ToolStepStatus::Running => false,
         ToolStepStatus::Failed | ToolStepStatus::Denied => true,
         ToolStepStatus::Cancelled => false,
-        ToolStepStatus::Ok => density || config.tool_default_expanded(name),
+        ToolStepStatus::Ok => density || tool_default_expanded(config, name),
     }
 }
 

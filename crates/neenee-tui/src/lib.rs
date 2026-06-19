@@ -3759,7 +3759,7 @@ fn transcript_messages_from_core(
                 thinking.set_thinking_duration(0);
                 // Honor the configured default expand state for reasoning
                 // traces so resumed sessions match live behavior.
-                if config.thinking_default_expanded() {
+                if config::thinking_default_expanded(config) {
                     thinking.set_thinking_expanded(true);
                 }
                 restored.push(thinking);

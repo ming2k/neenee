@@ -1432,22 +1432,40 @@ name = "neenee"
 version = "0.1.0"
 dependencies = [
  "clap",
- "crc32c",
- "directories",
  "futures",
- "hex",
- "libc",
+ "neenee-app",
  "neenee-core",
  "neenee-tui",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tokio-util",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "neenee-app"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "crc32c",
+ "directories",
+ "dirs",
+ "futures",
+ "hex",
+ "libc",
+ "neenee-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "tracing",
  "uuid",
 ]
 
@@ -1484,6 +1502,7 @@ dependencies = [
  "dirs",
  "futures",
  "insta",
+ "neenee-app",
  "neenee-core",
  "pulldown-cmark",
  "ratatui",

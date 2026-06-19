@@ -3,11 +3,37 @@ use crate::paths;
 use neenee_core::mcp::McpServerConfig;
 use neenee_core::skills::SkillsConfig;
 use neenee_core::tools::WebSearchConfig;
-use neenee_tui::config::TuiConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+/// Reserved `[tui.default_expanded]` key that controls reasoning traces.
+/// Reasoning isn't a tool, so each frontend addresses it by name.
+pub const THINKING_KEY: &str = "thinking";
+
+/// User-tunable frontend presentation, deserialized from the optional `[tui]`
+/// table of `config.toml`. This is the **pure-data** form shared by every
+/// frontend (TUI, future GUI); frontend-specific presenter logic (e.g. the
+/// TUI's per-tool default-expand lookup against its render presenters) lives
+/// in the frontend crate and reads this struct as input.
+///
+/// All fields default sensibly, so a `config.toml` with no `[tui]` table (or
+/// a partially specified one) is valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// Per-step-kind default expand state. Keys are tool names (`edit_file`,
+    /// `bash`, …) or [`THINKING_KEY`] for reasoning traces.
+    ///
+    /// ```toml
+    /// [tui.default_expanded]
+    /// edit_file = true
+    /// bash = true
+    /// thinking = false
+    /// ```
+    pub default_expanded: HashMap<String, bool>,
+}
 
 /// Transport kind for a user-defined channel (ADR-0002 phase 5). Selects which
 /// `Provider` implementation the catalog builds. Mirrors the built-in

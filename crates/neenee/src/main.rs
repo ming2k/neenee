@@ -86,23 +86,12 @@ impl Provider for ProxyProvider {
     }
 }
 
-mod blobs;
-mod catalog;
-mod config;
-mod embedding;
-mod events;
-mod fsutil;
-mod lock;
-mod model_usage;
-mod paths;
-mod search_tool;
-mod session;
-use config::Config;
-use embedding::EmbeddingStore;
-use search_tool::SearchHistoryTool;
-use session::{
-    discard_trailing_loop_prompts, estimate_chars, run_compaction, CompactionCheckpoint,
-    CompactionDecision, CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
+use neenee_app::{
+    catalog, embedding, lock, model_usage, paths, config::Config, search_tool::SearchHistoryTool,
+    session::{
+        self, discard_trailing_loop_prompts, estimate_chars, run_compaction, CompactionCheckpoint,
+        CompactionDecision, CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
+    },
 };
 
 /// Compaction-related settings threaded through every turn.
@@ -1115,13 +1104,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // C12: lightweight semantic-search index for this project. The provider is
     // a deterministic mock; swap it for a local model or cloud API to get real
     // semantic similarity.
-    let embedding_store: Arc<AsyncRwLock<EmbeddingStore>> = Arc::new(AsyncRwLock::new(
-        EmbeddingStore::open(
+    let embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>> =
+        Arc::new(AsyncRwLock::new(embedding::EmbeddingStore::open(
             paths::get().project_embeddings(&project_root),
             Arc::new(embedding::MockEmbeddingProvider::new(384)),
         )
-        .await?,
-    ));
+        .await?));
 
     let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
         Arc::new(BashTool),

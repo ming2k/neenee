@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/neenee-core",
+    "crates/neenee-app",
     "crates/neenee-tui",
     "crates/neenee",
 ]

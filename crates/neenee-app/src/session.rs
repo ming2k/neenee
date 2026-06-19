@@ -453,7 +453,13 @@ impl SessionStore {
         Self::load_for_project(project_root)
     }
 
-    #[cfg(test)]
+    /// Open a `SessionStore` against an explicit `session.json` path.
+    ///
+    /// This is the low-level constructor: most callers want
+    /// [`SessionStore::load_for_project`], which resolves paths through the
+    /// global [`crate::paths`] table. Kept `pub` so external crates' tests
+    /// (e.g. the binary crate's retry tests) can point at a throwaway file
+    /// without re-wiring the global paths table.
     pub fn for_path(path: PathBuf) -> Self {
         let archive_dir = session_archive_dir(&path);
         let project_root = path
@@ -1378,10 +1384,9 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 }
 
 /// Resolve the on-disk archive directory that sits alongside `path` (its
-/// parent's `sessions/` sibling). Used by the test helper
-/// [`SessionStore::for_path`] so tests stay isolated under their own temp
-/// directory regardless of the global [`paths::Dirs`].
-#[cfg(test)]
+/// parent's `sessions/` sibling). Used by [`SessionStore::for_path`] so
+/// callers stay isolated under their own temp directory regardless of the
+/// global [`paths::Dirs`].
 fn session_archive_dir(path: &std::path::Path) -> PathBuf {
     path.parent()
         .unwrap_or_else(|| std::path::Path::new("."))
