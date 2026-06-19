@@ -1084,78 +1084,64 @@ pub(super) fn draw_subagent_inline_card(
     // tool-step card header (block_idx = usize::MAX) so the existing
     // click/Enter handling recognizes it; the app decides to navigate rather
     // than toggle for `task` steps. No expand marker — the card navigates.
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < transcript_area.y + transcript_area.height {
-        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(tool_header_line(
-                "",
-                marker,
-                status_color,
-                icon,
-                &header,
-                if focused {
-                    theme.text
-                } else {
-                    theme.text_muted
-                },
-                bg,
-                full_width,
-            )),
-            line_rect,
-        );
-        layout_map.push(BlockRegion {
+    let header_color = if focused { theme.text } else { theme.text_muted };
+    let mut ctx = RenderCtx::from_cursor(
+        frame,
+        transcript_area,
+        full_width,
+        theme,
+        layout_map,
+        skip_rows,
+        current_y,
+        content_lines,
+    );
+    let header_line = tool_header_line(
+        "",
+        marker,
+        status_color,
+        icon,
+        &header,
+        header_color,
+        bg,
+        ctx.full_width,
+    );
+    if let Some(rect) = ctx.paint(header_line) {
+        ctx.layout_map.push(BlockRegion {
             message_idx: mi,
             block_idx: usize::MAX,
             start_byte: 0,
             end_byte: 0,
             text: String::new(),
             prefix_cols: 0,
-            rect: line_rect,
+            rect,
         });
-        *current_y += 1;
     }
 
     // Live status line (e.g. "↳ Running: grep foo" / "↳ Completed · 3 calls").
     if let Some(status) = msg.subagent_status_line() {
-        let inner_width = full_width.saturating_sub(2);
+        let inner_width = ctx.full_width.saturating_sub(2);
         let wrapped = wrap_text(&status, inner_width.max(1));
-        *content_lines += wrapped.len();
+        let bg_style = Style::default().bg(bg);
         for wl in &wrapped {
-            if *skip_rows > 0 {
-                *skip_rows = skip_rows.saturating_sub(1);
-                continue;
-            }
-            if *current_y >= transcript_area.y + transcript_area.height {
-                break;
-            }
             let used = 2 + wl.text.width();
-            let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("  ", Style::default().bg(bg)),
-                    Span::styled(
-                        wl.text.clone(),
-                        Style::default().bg(bg).fg(theme.text_muted),
-                    ),
-                    Span::styled(padded_tail(full_width, used), Style::default().bg(bg)),
-                ])),
-                line_rect,
-            );
+            let line = Line::from(vec![
+                Span::styled("  ", bg_style),
+                Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.text_muted)),
+                Span::styled(padded_tail(ctx.full_width, used), bg_style),
+            ]);
             // Make the whole status line part of the same clickable header so
             // clicking anywhere on the card enters the sub-agent view.
-            layout_map.push(BlockRegion {
-                message_idx: mi,
-                block_idx: usize::MAX,
-                start_byte: 0,
-                end_byte: 0,
-                text: String::new(),
-                prefix_cols: 0,
-                rect: line_rect,
-            });
-            *current_y += 1;
+            if let Some(rect) = ctx.paint(line) {
+                ctx.layout_map.push(BlockRegion {
+                    message_idx: mi,
+                    block_idx: usize::MAX,
+                    start_byte: 0,
+                    end_byte: 0,
+                    text: String::new(),
+                    prefix_cols: 0,
+                    rect,
+                });
+            }
         }
     }
 }
