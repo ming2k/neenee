@@ -1,0 +1,21 @@
+---
+source: crates/neenee-cli/src/tui/render/snapshot_tests.rs
+assertion_line: 226
+expression: "render_grid(&m, 80, 40)"
+---
+  - Read src/lib.rs
+
+      1 fn main() {
+      2     let x = 1;
+      3 }
+      4
+
+backgrounds:
+.=reset  B=#070808  C=#111312
+0: .2 B76
+1: .2 B76
+2: .2 C76
+3: .2 C76
+4: .2 C76
+5: .2 C76
+6: .2 B76

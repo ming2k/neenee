@@ -1,0 +1,37 @@
+[package]
+name = "neenee-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "neenee"
+path = "src/main.rs"
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+neenee-app = { path = "../neenee-app" }
+neenee-providers = { path = "../neenee-providers" }
+neenee-tools = { path = "../neenee-tools" }
+neenee-harness = { path = "../neenee-harness" }
+ratatui = "0.26"
+crossterm = { version = "0.27", features = ["event-stream"] }
+arboard = "3.4"
+dirs = "5"
+pulldown-cmark = "0.10"
+unicode-width = "0.1"
+similar = { version = "2", features = ["unicode"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+clap = { version = "4.4", features = ["derive"] }
+futures = "0.3"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"

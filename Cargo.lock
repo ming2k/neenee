@@ -1428,29 +1428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "neenee"
-version = "0.1.0"
-dependencies = [
- "clap",
- "futures",
- "neenee-app",
- "neenee-core",
- "neenee-harness",
- "neenee-providers",
- "neenee-tools",
- "neenee-tui",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "neenee-app"
 version = "0.1.0"
 dependencies = [
@@ -1470,6 +1447,37 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "neenee-cli"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "clap",
+ "crossterm",
+ "dirs",
+ "futures",
+ "insta",
+ "neenee-app",
+ "neenee-core",
+ "neenee-harness",
+ "neenee-providers",
+ "neenee-tools",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "unicode-width 0.1.14",
  "uuid",
 ]
 
@@ -1555,28 +1563,6 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "neenee-tui"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "crossterm",
- "dirs",
- "futures",
- "insta",
- "neenee-app",
- "neenee-core",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "tokio",
- "toml",
- "unicode-width 0.1.14",
 ]
 
 [[package]]
