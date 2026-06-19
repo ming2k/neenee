@@ -477,22 +477,22 @@ pub struct App {
     pub content_lines: usize,
     pub view_height: u16,
     pub max_scroll: u16,
-    /// Expanded card pinned under the HUD bar (its message index + screen rect),
+    /// Expanded step pinned under the HUD bar (its message index + screen rect),
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
-    pub sticky_card: Option<usize>,
+    pub sticky_step: Option<usize>,
     pub sticky_rect: Option<ratatui::layout::Rect>,
     /// Screen rect of the goal segment in the hint bar for the current frame,
     /// so clicks inside it route to `/goal status`. `None` when no goal is
     /// shown or the hint bar is hidden (overlay modal open).
     pub hint_goal_rect: Option<ratatui::layout::Rect>,
-    /// Content-line index of the sticky card's real header. Used to re-anchor
-    /// the scroll offset when the user collapses the pinned card so the header
+    /// Content-line index of the sticky step's real header. Used to re-anchor
+    /// the scroll offset when the user collapses the pinned step so the header
     /// lands at the top of the viewport instead of jumping to unrelated content.
     pub sticky_header_line: Option<usize>,
     /// Content-line the user asked to keep pinned at the top of the viewport by
     /// collapsing a sticky header. While set, the per-frame scroll clamp is
     /// allowed to scroll past the natural `max_scroll` so a short tail of
-    /// content below the collapsed card does not yank the header back down.
+    /// content below the collapsed step does not yank the header back down.
     /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
     pub pin_header_line: Option<usize>,
     /// Stack of sub-agent task call-ids that the view is zoomed into. Empty
@@ -546,8 +546,8 @@ pub struct App {
     /// it as a dark→bright hover affordance hinting that it is clickable.
     /// `None` whenever the pointer is elsewhere or an overlay modal is open.
     pub hovered_reasoning: Option<usize>,
-    /// Global tool-card density (false = Compact default, true = Comfortable:
-    /// new tool cards spawn expanded). Shared with the response listener.
+    /// Global tool-step density (false = Compact default, true = Comfortable:
+    /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
     /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
     /// overlay. `None` when the overlay is closed.
@@ -822,7 +822,7 @@ impl App {
         self.path_scan_cache.as_ref().unwrap()
     }
 
-    /// Toggle the expansion of the tool-step card / reasoning trace at `mi`,
+    /// Toggle the expansion of the tool step / reasoning trace at `mi`,
     /// keeping its header pinned to the screen position the user interacted with.
     ///
     /// A toggle inserts or removes the body lines that sit *below* the header,
@@ -841,10 +841,10 @@ impl App {
     ///   yank it away (this is what previously let an expand push the header
     ///   off-screen while the view was following the bottom).
     ///
-    /// Returns `true` when a card was actually toggled, so callers can gate
+    /// Returns `true` when a step was actually toggled, so callers can gate
     /// side effects like clearing the text selection.
-    fn toggle_card_pinned(&mut self, messages: &mut [TranscriptMessage], mi: usize) -> bool {
-        let pinned_to_top = self.sticky_card == Some(mi);
+    fn toggle_step_pinned(&mut self, messages: &mut [TranscriptMessage], mi: usize) -> bool {
+        let pinned_to_top = self.sticky_step == Some(mi);
         let sticky_header_line = self.sticky_header_line;
         let toggled = resolve_focused_mut(messages, &self.focus_stack, mi)
             .map(|message| {
@@ -882,7 +882,7 @@ impl App {
 
     fn visible_interactive_targets(&self) -> Vec<InteractiveTarget> {
         let mut targets = self.layout_map.interactive_targets();
-        if let Some(message_idx) = self.sticky_card {
+        if let Some(message_idx) = self.sticky_step {
             if let Some(message) = self.focused_messages().get(message_idx) {
                 let target = if message.is_thinking() {
                     InteractiveTarget::thinking(message_idx)
@@ -966,7 +966,7 @@ impl App {
         self.follow_bottom = true;
         self.selection = SelectionState::None;
         self.drag.cancel();
-        self.sticky_card = None;
+        self.sticky_step = None;
         self.sticky_rect = None;
         self.sticky_header_line = None;
         self.pin_header_line = None;
@@ -1149,8 +1149,8 @@ pub async fn run_tui(
     let sessions_overview_clone = sessions_overview.clone();
     let open_sessions = Arc::new(AtomicBool::new(false));
     let open_sessions_clone = open_sessions.clone();
-    // Global tool-card density (true = Comfortable: new tool cards spawn
-    // expanded). Shared with the response listener so cards created mid-turn
+    // Global tool-step density (true = Comfortable: new tool steps spawn
+    // expanded). Shared with the response listener so steps created mid-turn
     // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
     let tool_density = Arc::new(AtomicBool::new(false));
     let tool_density_clone = tool_density.clone();
@@ -1284,7 +1284,7 @@ pub async fn run_tui(
                     let mut message =
                         TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
                     // Respect the global density: in Comfortable mode new tool
-                    // cards spawn expanded so mid-turn calls match the user's
+                    // steps spawn expanded so mid-turn calls match the user's
                     // last Ctrl+T choice.
                     if tool_density_clone.load(Ordering::SeqCst) {
                         message.set_tool_step_expanded(true);
@@ -1314,12 +1314,12 @@ pub async fn run_tui(
                 }
                 AgentResponse::ToolCancelled { id, .. } => {
                     // Convergence: an in-flight call was aborted by an
-                    // interrupt. Flip its card (and any nested sub-agent
+                    // interrupt. Flip its step (and any nested sub-agent
                     // children) to Cancelled so it never stays "running".
                     let mut msgs = messages_clone.lock().await;
                     if !msgs.iter_mut().any(|message| message.cancel_tool_step(&id)) {
                         // The ToolCall event may have been dropped with the
-                        // aborted turn; synthesize a minimal cancelled card so
+                        // aborted turn; synthesize a minimal cancelled step so
                         // the user still sees the call was abandoned.
                         let mut message =
                             TranscriptMessage::tool_step(id.clone(), "tool", "{}");
@@ -1329,7 +1329,7 @@ pub async fn run_tui(
                 }
                 AgentResponse::ToolStream { id, stream } => {
                     // Live partial output from a running tool (e.g. bash
-                    // stdout). Accumulate into the running card so it updates
+                    // stdout). Accumulate into the running step so it updates
                     // in place instead of freezing on a spinner.
                     let mut msgs = messages_clone.lock().await;
                     if !msgs.iter_mut().any(|message| message.push_tool_stream(&id, &stream)) {
@@ -1449,7 +1449,7 @@ pub async fn run_tui(
         content_lines: 0,
         view_height: 0,
         max_scroll: 0,
-        sticky_card: None,
+        sticky_step: None,
         sticky_rect: None,
         hint_goal_rect: None,
         sticky_header_line: None,
@@ -1803,12 +1803,12 @@ async fn run_app_loop<B: Backend>(
             app.hint_goal_rect = hint_goal_rect;
             match sticky {
                 Some(info) => {
-                    app.sticky_card = Some(info.message_idx);
+                    app.sticky_step = Some(info.message_idx);
                     app.sticky_rect = Some(info.rect);
                     app.sticky_header_line = Some(info.header_line);
                 }
                 None => {
-                    app.sticky_card = None;
+                    app.sticky_step = None;
                     app.sticky_rect = None;
                     app.sticky_header_line = None;
                 }
@@ -2078,8 +2078,8 @@ async fn run_app_loop<B: Backend>(
                         app.pin_header_line = None;
                         let _ = app.tx.send(AgentRequest::Chat { text, images });
                     } else if let Some((start, end)) = app.selection.normalized_range() {
-                        // Enter on a selected card: navigate into a sub-agent
-                        // task, otherwise toggle that card's expansion.
+                        // Enter on a selected step: navigate into a sub-agent
+                        // task, otherwise toggle that step's expansion.
                         if start.message_idx == end.message_idx {
                             let mi = start.message_idx;
                             let mut messages = runtime.messages.lock().await;
@@ -2097,7 +2097,7 @@ async fn run_app_loop<B: Backend>(
                                 drop(messages);
                                 app.enter_subagent(id);
                             } else {
-                                let toggled = app.toggle_card_pinned(&mut messages, mi);
+                                let toggled = app.toggle_step_pinned(&mut messages, mi);
                                 drop(messages);
                                 if toggled {
                                     app.selection = SelectionState::None;
@@ -2403,13 +2403,13 @@ async fn run_app_loop<B: Backend>(
                     });
                     let mut messages = runtime.messages.lock().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
-                        // Sub-agent task cards are navigated, not expanded.
+                        // Sub-agent task steps are navigated, not expanded.
                         if !message.is_subagent_task() {
                             message.set_tool_step_expanded(expand);
                         }
                     }
                     drop(messages);
-                    // Persist the choice as the global density so new tool cards
+                    // Persist the choice as the global density so new tool steps
                     // created mid-turn also respect it (ADR-0001 Step 8).
                     app.tool_density.store(expand, Ordering::SeqCst);
                     app.selection = SelectionState::None;
@@ -2422,7 +2422,7 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::EnterBrowseZone { backward } => {
                     // Hand keyboard focus from the input box over to the
-                    // conversation stream. Direction picks the closest card:
+                    // conversation stream. Direction picks the closest step:
                     // forward (Tab) selects the first one, backward (Shift+Tab)
                     // selects the last one.
                     app.focus_zone = input::FocusZone::Browse;
@@ -2457,7 +2457,7 @@ async fn run_app_loop<B: Backend>(
                                     // of the inline expand/collapse (the latter is
                                     // the cramped UX the redesign replaces). The
                                     // bulk `ctrl+t` toggle still inline-expands
-                                    // every card if desired.
+                                    // every step if desired.
                                     drop(messages);
                                     app.tool_detail_message_idx = Some(target.message_idx);
                                     app.tool_detail_scroll = 0;
@@ -2467,7 +2467,7 @@ async fn run_app_loop<B: Backend>(
                             InteractiveTargetKind::Thinking => {
                                 let mut messages = runtime.messages.lock().await;
                                 let toggled =
-                                    app.toggle_card_pinned(&mut messages, target.message_idx);
+                                    app.toggle_step_pinned(&mut messages, target.message_idx);
                                 drop(messages);
                                 if toggled {
                                     app.selection = SelectionState::None;
@@ -2740,10 +2740,10 @@ async fn run_app_loop<B: Backend>(
                         app.focused_target = None;
                         app.drag.cancel();
                     } else if app.sticky_rect.is_some_and(|r| {
-                        // Sticky pinned card header: collapse it on click.
+                        // Sticky pinned step header: collapse it on click.
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
-                        if let Some(mi) = app.sticky_card {
+                        if let Some(mi) = app.sticky_step {
                             let mut messages = runtime.messages.lock().await;
                             app.focused_target =
                                 app.focused_messages().get(mi).and_then(|message| {
@@ -2755,10 +2755,10 @@ async fn run_app_loop<B: Backend>(
                                         None
                                     }
                                 });
-                            app.toggle_card_pinned(&mut messages, mi);
+                            app.toggle_step_pinned(&mut messages, mi);
                             drop(messages);
                         }
-                        // Activating a card via click implies keyboard focus
+                        // Activating a step via click implies keyboard focus
                         // follows it as well.
                         app.focus_zone = input::FocusZone::Browse;
                         app.selection = SelectionState::None;
@@ -2767,14 +2767,14 @@ async fn run_app_loop<B: Backend>(
                         if cursor.message_idx == crate::render::INPUT_MSG_IDX {
                             // Click inside the live input box: hand keyboard
                             // focus back to the prompt so the next keypress
-                            // edits rather than navigating cards.
+                            // edits rather than navigating steps.
                             app.focus_zone = input::FocusZone::Compose;
                             app.focused_target = None;
                             app.selection = SelectionState::start_range(cursor);
                             app.drag.start(cursor);
                         } else if cursor.block_idx == TOOL_STEP_BLOCK_IDX {
-                            // Clicked a tool-step card header: navigate into a
-                            // sub-agent task, otherwise toggle that card.
+                            // Clicked a tool-step header: navigate into a
+                            // sub-agent task, otherwise toggle that step.
                             let mi = cursor.message_idx;
                             app.focused_target = Some(InteractiveTarget::tool_step(mi));
                             let mut messages = runtime.messages.lock().await;
@@ -2790,7 +2790,7 @@ async fn run_app_loop<B: Backend>(
                                 drop(messages);
                                 app.enter_subagent(id);
                             } else {
-                                app.toggle_card_pinned(&mut messages, mi);
+                                app.toggle_step_pinned(&mut messages, mi);
                                 drop(messages);
                             }
                             app.focus_zone = input::FocusZone::Browse;
@@ -2801,7 +2801,7 @@ async fn run_app_loop<B: Backend>(
                             let mi = cursor.message_idx;
                             app.focused_target = Some(InteractiveTarget::thinking(mi));
                             let mut messages = runtime.messages.lock().await;
-                            app.toggle_card_pinned(&mut messages, mi);
+                            app.toggle_step_pinned(&mut messages, mi);
                             drop(messages);
                             app.focus_zone = input::FocusZone::Browse;
                             app.selection = SelectionState::None;
@@ -2870,7 +2870,7 @@ async fn run_app_loop<B: Backend>(
                     if app.sticky_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
-                        if let Some(mi) = app.sticky_card {
+                        if let Some(mi) = app.sticky_step {
                             let is_thinking = runtime
                                 .messages
                                 .lock()
@@ -3697,7 +3697,7 @@ mod tests {
             content_lines: 0,
             view_height: 0,
             max_scroll: 0,
-            sticky_card: None,
+            sticky_step: None,
             sticky_rect: None,
             hint_goal_rect: None,
             sticky_header_line: None,

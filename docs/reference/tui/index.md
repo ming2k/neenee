@@ -29,9 +29,9 @@ measurements table.
 | [Input box](input-box.md) | Live editable prompt on a brighter panel |
 | [Assistant text](assistant-text.md) | Regular markdown text, 4-space indent |
 | [Code block](code-block.md) | Borderless code with `┃` bar + line-number gutter |
-| [Expandable card](expandable-card.md) | Shared shape for collapsible cards |
-| [Tool-step card](tool-step-card.md) | Expandable card for tool calls |
-| [Thinking card](thinking-card.md) | Expandable card for reasoning text |
+| [Expandable step](expandable-step.md) | Shared shape for collapsible transcript entries |
+| [Tool step](tool-step.md) | Expandable step for tool calls |
+| [Thinking step](thinking-step.md) | Expandable step for reasoning text |
 | [Status bar](status-bar.md) | Animated braille spinner + activity label |
 | [Hint line](hint-line.md) | Right-aligned keybinding hints |
 | [Modals](modals.md) | Models, Sessions, History, Permission, API key, Help |
@@ -52,7 +52,7 @@ measurements table.
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop`, color helpers |
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |
 | `render/message_body.rs` | `draw_message_body` (markdown text, user panels, code blocks) |
-| `render/turn_artifacts.rs` | Tool-step, thinking, and sub-agent cards; sticky header; sub-agent bar |
+| `render/turn_artifacts.rs` | Tool-step, thinking, and sub-agent steps; sticky header; sub-agent bar |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
 | `render/chrome.rs` | `draw_status_bar`, `draw_hint`, `draw_suggestions`, `spinner_frame` |
 | `render/overlays.rs` | Modals: models, sessions, history, permission, API key, help, solution |

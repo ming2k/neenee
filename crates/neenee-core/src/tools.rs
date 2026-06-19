@@ -1248,7 +1248,7 @@ impl TaskTool {
         // The sub-agent runs with its own (never-cancelled) token. When the
         // parent turn is interrupted, the parent's dispatch drops this future
         // and emits a `ToolCancelled` for the `task` call id; the TUI then
-        // recursively cancels the nested tool cards, so the sub-agent does not
+        // recursively cancels the nested tool steps, so the sub-agent does not
         // need a token linked to the parent.
         let result = sub_agent
             .run_streaming_with_events(

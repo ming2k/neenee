@@ -1,6 +1,6 @@
 //! Snapshot baselines for tool-step rendering.
 //!
-//! These lock the text/layout of the tool-step card so the rendering
+//! These lock the text/layout of the tool step so the rendering
 //! refactor (RenderCtx extraction, and later redesign steps) can be verified
 //! behavior-preserving. Snapshots capture the painted grid (cell symbols per
 //! row, trailing whitespace trimmed) at a fixed terminal size.
@@ -20,7 +20,7 @@ use crate::layout::LayoutMap;
 use crate::selection::SelectionState;
 
 use super::Theme;
-use super::turn_artifacts::draw_tool_step_card;
+use super::turn_artifacts::draw_tool_step;
 
 /// Build a finished tool-step message with optional output and expand state.
 fn tool_step(name: &str, arguments: &str, output: Option<&str>, expanded: bool) -> TranscriptMessage {
@@ -75,7 +75,7 @@ fn tool_step_streaming(
     m
 }
 
-/// Render `msg` as a tool-step card into a fresh `width x height` buffer and
+/// Render `msg` as a tool step into a fresh `width x height` buffer and
 /// return the painted grid as trimmed text rows joined by newlines.
 fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
@@ -90,7 +90,7 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
             let mut current_y = area.y;
             let mut content_lines = 0usize;
             let mut sticky = Vec::new();
-            draw_tool_step_card(
+            draw_tool_step(
                 f,
                 area,
                 msg,
@@ -139,7 +139,7 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
 
 /// Compact per-row background run-length map + legend for a rendered buffer.
 /// Skips rows that are entirely the terminal default so the output stays
-/// focused on the painted card.
+/// focused on the painted step.
 fn background_map(buf: &ratatui::buffer::Buffer) -> (String, String) {
     use ratatui::style::Color;
     type Bg = Option<Color>;

@@ -1,15 +1,15 @@
 //! Per-tool presentation registry.
 //!
 //! Each tool maps to a [`ToolPresenter`] that owns how that tool looks in the
-//! transcript: the one-line collapsed summary, an optional collapsed preview,
-//! and (later) its expanded body renderer. This collapses the per-tool `match
-//! name { … }` branches that were previously scattered across `document.rs`
-//! (`argument_summary`) and `turn_artifacts.rs` (preview and result rendering)
-//! into one place — adding a tool means adding a file and one registry arm.
+//! transcript: the one-line collapsed summary and the declarative
+//! classifications that drive its expanded body. This collapses the per-tool
+//! `match name { … }` branches that were previously scattered across
+//! `document.rs` (`argument_summary`) and `turn_artifacts.rs` (result
+//! rendering) into one place — adding a tool means adding a file and one
+//! registry arm.
 //!
-//! Each presenter owns a collapsed [`summary`](ToolPresenter::summary), an
-//! optional collapsed [`collapsed_preview`](ToolPresenter::collapsed_preview),
-//! and declarative [`result_kind`](ToolPresenter::result_kind) /
+//! Each presenter owns a collapsed [`summary`](ToolPresenter::summary) and
+//! declarative [`result_kind`](ToolPresenter::result_kind) /
 //! [`arg_layout`](ToolPresenter::arg_layout) classifications that drive the
 //! expanded body (`turn_artifacts` owns the drawing primitives; this module
 //! owns the per-tool decisions). `document.rs` and `turn_artifacts.rs` call the
@@ -61,8 +61,8 @@ impl ToolStatus {
         }
     }
 
-    /// Theme color used for the status rail / card accent. Centralizes the
-    /// status→color mapping that card headers, sticky pins, and sub-agent cards
+    /// Theme color used for the status rail / step accent. Centralizes the
+    /// status→color mapping that step headers, sticky pins, and sub-agent steps
     /// previously each duplicated.
     pub fn color(self, theme: &Theme) -> Color {
         match self {
@@ -70,13 +70,13 @@ impl ToolStatus {
             ToolStatus::Ok => theme.ok(),
             ToolStatus::Failed => theme.err(),
             // No dedicated cancelled accent: reuse the muted tone so a
-            // cancelled card reads as inert rather than as a fresh failure.
+            // cancelled step reads as inert rather than as a fresh failure.
             ToolStatus::Cancelled => theme.muted(),
         }
     }
 }
 
-/// How a tool's result output is rendered in the expanded card body. The
+/// How a tool's result output is rendered in the expanded step body. The
 /// drawing primitives live in `turn_artifacts`; presenters only declare which
 /// one applies, so the per-tool dispatch lives in one place (the registry).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,7 +94,7 @@ pub enum ResultKind {
     Diff,
 }
 
-/// How a tool's arguments are rendered in the expanded card body.
+/// How a tool's arguments are rendered in the expanded step body.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArgLayout {
     /// No arguments section — the header summary already captures the inputs
@@ -110,35 +110,12 @@ pub enum ArgLayout {
     KeyValue,
 }
 
-/// Emphasis level for a collapsed-preview line. The renderer maps these to
-/// theme colors so presenters stay decoupled from the palette.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PreviewTone {
-    /// Primary text (e.g. the `$ command` line).
-    Primary,
-    /// Secondary text (output / match excerpts).
-    Muted,
-    /// Faint text (truncation markers like `…`).
-    Faint,
-}
-
-/// One line of a collapsed-state preview rendered under the header band. The
-/// `text` is the intended display content (already ANSI-stripped and
-/// line-limited by the presenter); the renderer handles width truncation,
-/// padding, and color.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreviewLine {
-    pub text: String,
-    pub tone: PreviewTone,
-}
-
 /// A read-only view of a tool step, handed to a [`ToolPresenter`]. Arguments
 /// are pre-parsed into a JSON object by the registry entry points so each
 /// presenter can pull typed fields without re-parsing.
 pub struct ToolView<'a> {
     pub name: &'a str,
     pub args: &'a serde_json::Map<String, Value>,
-    pub output: Option<&'a str>,
 }
 
 impl ToolView<'_> {
@@ -155,13 +132,6 @@ pub trait ToolPresenter {
     /// truncates the result to the header budget, so implementors only need to
     /// truncate individual interpolated fields where it improves readability.
     fn summary(&self, view: &ToolView) -> String;
-
-    /// Lines shown under the header while collapsed. Defaults to none; tools
-    /// like bash / grep / read override this in step 5 to lift key output into
-    /// the collapsed view.
-    fn collapsed_preview(&self, _view: &ToolView) -> Vec<PreviewLine> {
-        Vec::new()
-    }
 
     /// Which result renderer the expanded body uses for this tool's output.
     fn result_kind(&self) -> ResultKind {
@@ -211,28 +181,8 @@ pub fn summary_for(name: &str, arguments: &str) -> String {
     let Some(obj) = parsed.as_ref().and_then(Value::as_object) else {
         return truncate(arguments, SUMMARY_BUDGET);
     };
-    let view = ToolView {
-        name,
-        args: obj,
-        output: None,
-    };
+    let view = ToolView { name, args: obj };
     truncate(&presenter_for(name).summary(&view), SUMMARY_BUDGET)
-}
-
-/// Build the collapsed-state preview lines for a finished tool step. Parses
-/// the arguments once and hands the presenter a [`ToolView`] carrying the
-/// output; presenters that don't override `collapsed_preview` return none.
-/// This is the entry point `turn_artifacts` calls for the under-header preview.
-pub fn collapsed_preview_for(name: &str, arguments: &str, output: &str) -> Vec<PreviewLine> {
-    let parsed: Option<Value> = serde_json::from_str(arguments).ok();
-    let empty = serde_json::Map::new();
-    let obj = parsed.as_ref().and_then(Value::as_object).unwrap_or(&empty);
-    let view = ToolView {
-        name,
-        args: obj,
-        output: Some(output),
-    };
-    presenter_for(name).collapsed_preview(&view)
 }
 
 /// Build the renderable diff for a tool step whose [`ToolPresenter::result_kind`]
@@ -333,7 +283,7 @@ mod tests {
             ToolStatus::from_status(ToolStepStatus::Failed),
             ToolStatus::Failed
         );
-        // The new terminal state must round-trip so an aborted card can never
+        // The new terminal state must round-trip so an aborted step can never
         // be misclassified as still running.
         assert_eq!(
             ToolStatus::from_status(ToolStepStatus::Cancelled),

@@ -327,7 +327,7 @@ impl TranscriptMessage {
     /// already reached a terminal state (`Ok` / `Failed` / `Cancelled`) is left
     /// untouched and returns `false`. When the step is a `task` (sub-agent),
     /// its still-running nested tool children are cancelled too, so an aborted
-    /// sub-agent never leaves a "running" child card behind.
+    /// sub-agent never leaves a "running" child step behind.
     pub fn cancel_tool_step(&mut self, id: &str) -> bool {
         let MessageKind::ToolStep {
             id: step_id,
@@ -365,7 +365,7 @@ impl TranscriptMessage {
             if status.is_running() {
                 *status = ToolStepStatus::Cancelled;
                 // Freeze the elapsed time at the moment of cancellation so the
-                // card stops showing a live-running timer.
+                // step stops showing a live-running timer.
                 if duration_ms.is_none() {
                     *duration_ms = started_at
                         .map(|started| started.elapsed().as_millis() as u64)
@@ -509,7 +509,7 @@ impl TranscriptMessage {
     }
 
     /// The `task` tool spawns a sub-agent. Such tool steps are rendered as a
-    /// compact, non-expandable card that navigates into a dedicated sub-agent
+    /// compact, non-expandable step that navigates into a dedicated sub-agent
     /// view on activation (see the TUI focus stack) rather than expanding
     /// inline.
     pub fn is_subagent_task(&self) -> bool {
@@ -678,7 +678,7 @@ impl TranscriptMessage {
         })
     }
 
-    /// Human-readable header for the tool-step card (always one line).
+    /// Human-readable header for the tool step (always one line).
     ///
     /// Shows only what the tool did and a duration suffix for finished
     /// states — the technical tool name lives inside the expanded body to
@@ -725,7 +725,7 @@ impl TranscriptMessage {
         };
         if *expanded {
             // Expanded tool-step bodies are rendered directly from the
-            // structured data (see draw_tool_step_card), not from parsed
+            // structured data (see draw_tool_step), not from parsed
             // markdown. We still populate `blocks` so semantic selection and
             // copy work: block 0 = display arguments, block 1 = output.
             let kv = parse_arguments_kv(arguments);
@@ -785,7 +785,7 @@ impl TranscriptMessage {
 }
 
 /// Parse a JSON arguments string into ordered `(key, display_value)` pairs
-/// suitable for compact rendering in the tool-step card body.
+/// suitable for compact rendering in the tool step body.
 ///
 /// String values are shown unquoted; other JSON types keep their native
 /// representation. Non-JSON input falls back to a single pair.
@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(children[0].tool_step_status(), Some(ToolStepStatus::Running));
 
         // Interrupting the parent task cancels it AND the nested running child,
-        // so the sub-agent view never shows a stuck "running" card.
+        // so the sub-agent view never shows a stuck "running" step.
         assert!(task.cancel_tool_step("task_1"));
         assert_eq!(task.tool_step_status(), Some(ToolStepStatus::Cancelled));
         let children = task.subagent_children().expect("has children");

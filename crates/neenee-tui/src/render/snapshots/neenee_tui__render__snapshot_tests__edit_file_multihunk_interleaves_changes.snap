@@ -4,7 +4,6 @@ expression: "render_grid(&m, 80, 40)"
 ---
   - Edit a.rs +2 -2
 
-    Diff
      1   fn one() {
      2 -     return 1;
      2 +     return 10;
@@ -16,17 +15,16 @@ expression: "render_grid(&m, 80, 40)"
      7   }
 
 backgrounds:
-.=reset  B=#151716  C=#111312  D=#3A2626  E=#283A2D
+.=reset  B=#070808  C=#111312  D=#3A2626  E=#283A2D
 0: .2 B76
-1: .2 C76
+1: .2 B76
 2: .2 C76
-3: .2 C76
-4: .2 C18 D2 C56
-5: .2 C18 E3 C55
+3: .2 C18 D2 C56
+4: .2 C18 E3 C55
+5: .2 C76
 6: .2 C76
 7: .2 C76
-8: .2 C76
-9: .2 C18 D2 C56
-10: .2 C18 E3 C55
-11: .2 C76
-12: .2 C76
+8: .2 C18 D2 C56
+9: .2 C18 E3 C55
+10: .2 C76
+11: .2 B76

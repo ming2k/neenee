@@ -4,21 +4,20 @@ expression: "render_grid(&m, 80, 40)"
 ---
   - Run cargo test
 
-    Arguments  cargo test
-    Result
-      running 3 tests
-      .
-      .
-      .
-      test result: ok. 3 passed
-      STDOUT:
-      built ok
-      Exit 0
+    $ cargo test
+    running 3 tests
+    .
+    .
+    .
+    test result: ok. 3 passed
+    STDOUT:
+    built ok
+    Exit 0
 
 backgrounds:
-.=reset  B=#151716  C=#111312
+.=reset  B=#070808  C=#111312
 0: .2 B76
-1: .2 C76
+1: .2 B76
 2: .2 C76
 3: .2 C76
 4: .2 C76
@@ -28,5 +27,4 @@ backgrounds:
 8: .2 C76
 9: .2 C76
 10: .2 C76
-11: .2 C76
-12: .2 C76
+11: .2 B76

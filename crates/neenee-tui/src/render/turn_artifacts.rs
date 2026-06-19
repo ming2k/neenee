@@ -1,8 +1,7 @@
-//! Expandable card renderers: tool-step, thinking, child tool step, sub-agent
-//! task, and bash preview, plus their per-tool content renderers (code,
-//! listing, grep, bash) and shared header / section helpers. Also produces
-//! the sticky pinned-card header that [`super::draw_transcript`] overlays while a
-//! card body is scrolled into view.
+//! Expandable step renderers: tool-step, thinking, child tool step, sub-agent
+//! task, plus their per-tool content renderers (code, listing, grep, bash) and
+//! shared header helpers. Also produces the sticky pinned-step header that
+//! [`super::draw_transcript`] overlays while a step body is scrolled into view.
 
 use ratatui::{
     layout::Rect,
@@ -25,12 +24,12 @@ use super::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
     WrappedLine,
 };
-use super::tools::{ArgLayout, DiffLine, DiffOp, PreviewLine, PreviewTone, ResultKind, ToolStatus};
+use super::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use super::{
-    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, CARD_MIN_WIDTH,
-    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS,
-    TOOL_CARD_CHILDREN_GAP_ROWS, TOOL_CARD_SECTION_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
+    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, STEP_MIN_WIDTH,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
     TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 
@@ -143,9 +142,9 @@ fn nonempty_wrapped(wrapped: Vec<WrappedLine>) -> Vec<WrappedLine> {
     }
 }
 
-/// Tracked info for an expanded card, used to render a sticky header pinned
-/// under the HUD bar while the card's body is scrolled into view.
-pub(super) struct StickyCard {
+/// Tracked info for an expanded step, used to render a sticky header pinned
+/// under the HUD bar while the step's body is scrolled into view.
+pub(super) struct StickyStep {
     message_idx: usize,
     header: String,
     color: Color,
@@ -156,11 +155,9 @@ pub(super) struct StickyCard {
     body_end_line: usize,
 }
 
-/// Build the header band of an expandable card: a solid background region
-/// (no border lines) reading `+ {header}` when collapsed or `- {header}` when
-/// expanded, padded to the full width so it reads as a colored band. The body
-/// content is expected to start at column 2 so it left-aligns with the header
-/// text.
+/// Build the header line of an expandable step: the `+`/`-` marker plus the
+/// summary, padded to the full width. The body content is expected to start at
+/// column 2 so it left-aligns with the header text.
 ///
 /// Run state is conveyed purely by `header_color` (breathing accent while
 /// running, error red on failure, muted when cancelled, neutral on success) —
@@ -195,15 +192,15 @@ fn tool_header_line(
     Line::from(spans)
 }
 
-/// Render the shared header band of an expandable card and record its rect in
-/// the layout map so clicks / `Enter` on it can toggle the card. Returns the
+/// Render the shared header of an expandable step and record its rect in the
+/// layout map so clicks / `Enter` on it can toggle the step. Returns the
 /// content-line index of the header (used for sticky-pin tracking).
 ///
 /// `block_idx` is the sentinel recorded in [`BlockRegion`] so the click handler
-/// can tell card/trace kinds apart: `usize::MAX` for tool-step cards and
+/// can tell step/trace kinds apart: `usize::MAX` for tool steps and
 /// `usize::MAX - 1` for reasoning traces.
 #[allow(clippy::too_many_arguments)]
-fn draw_expandable_card_header(
+fn draw_expandable_step_header(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
@@ -239,128 +236,10 @@ fn draw_blank_rows(ctx: &mut RenderCtx<'_, '_>, style: Style, rows: usize) {
     }
 }
 
-/// Draw a section label line (" Tool", " Arguments", " Result") inside an
-/// expanded card body. The label sits at column 1 (one-space prefix) in
-/// `label_style`; the rest of the band is filled with `pad_style`'s
-/// background so it reads as a solid colored row.
-fn draw_section_label(
-    ctx: &mut RenderCtx<'_, '_>,
-    label: &str,
-    pad_style: Style,
-    label_style: Style,
-) {
-    let indent = 2usize;
-    let used = indent + label.len();
-    let line = Line::from(vec![
-        Span::styled(" ".repeat(indent), pad_style),
-        Span::styled(label.to_string(), label_style),
-        Span::styled(padded_tail(ctx.full_width, used), pad_style),
-    ]);
-    let _ = ctx.paint(line);
-}
-
-/// Render a shell command line inside an expanded bash tool card. Long
-/// commands wrap under the prompt so the expanded view stays compact without
-/// losing the actual command that ran.
-fn draw_meta_value_row_wrapped(
-    ctx: &mut RenderCtx<'_, '_>,
-    label: &str,
-    value: &str,
-    pad_style: Style,
-    label_style: Style,
-    value_style: Style,
-    label_width: usize,
-    inner_w: usize,
-) {
-    let value = value.trim_end();
-    if value.is_empty() {
-        return;
-    }
-
-    let indent = 2usize;
-    let gap = 2usize;
-    let value_indent = indent + label_width + gap;
-    let wrap_w = inner_w.max(1);
-    let wrapped = nonempty_wrapped(wrap_text(value, wrap_w));
-
-    for (idx, wl) in wrapped.iter().enumerate() {
-        let mut spans = vec![Span::styled(" ".repeat(indent), pad_style)];
-        if idx == 0 {
-            spans.push(Span::styled(
-                format!("{:<width$}", label, width = label_width),
-                label_style,
-            ));
-            spans.push(Span::styled(" ".repeat(gap), pad_style));
-        } else {
-            spans.push(Span::styled(" ".repeat(label_width + gap), pad_style));
-        }
-        spans.push(Span::styled(wl.text.clone(), value_style));
-        let used = value_indent + wl.text.width();
-        spans.push(Span::styled(padded_tail(ctx.full_width, used), pad_style));
-        let _ = ctx.paint(Line::from(spans));
-    }
-}
-
-/// Render one labelled section (Arguments / a plain Result fallback) inside
-/// an expanded tool-step card body. Handles scroll-skip, wrapping, semantic
-/// selection layout recording, and an optional blank separator above the
-/// label. Result rendering for known tools is handled by
-/// [`draw_tool_result_section`] instead.
-#[allow(clippy::too_many_arguments)]
-fn draw_tool_body_section(
-    ctx: &mut RenderCtx<'_, '_>,
-    mi: usize,
-    block_idx: usize,
-    label: &str,
-    content: &str,
-    content_style: Style,
-    pad_style: Style,
-    label_style: Style,
-    indent: usize,
-    inner_w: usize,
-    separator: bool,
-    code_mode: bool,
-    selection: &SelectionState,
-) {
-    if separator {
-        draw_blank_rows(ctx, pad_style, TOOL_CARD_SECTION_GAP_ROWS);
-    }
-
-    draw_section_label(ctx, label, pad_style, label_style);
-
-    // Content lines.
-    let sel_range = block_selection_range(selection, mi, block_idx);
-    if code_mode {
-        draw_code_content(ctx, mi, block_idx, content, selection, indent, inner_w);
-    } else {
-        // Plain-text rendering: simple indent + wrap.
-        let wrapped = nonempty_wrapped(wrap_text(content, inner_w));
-        for wl in &wrapped {
-            let block_wl = WrappedLine {
-                text: wl.text.clone(),
-                start_byte: wl.start_byte,
-                end_byte: wl.end_byte,
-            };
-            let mut line = line_spans(
-                &" ".repeat(indent),
-                pad_style,
-                &wl.text,
-                line_selection(sel_range, &block_wl),
-                content_style,
-                ctx.theme.selected(),
-            );
-            let used = indent + wl.text.width();
-            line.spans
-                .push(Span::styled(padded_tail(ctx.full_width, used), pad_style));
-            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
-        }
-    }
-}
-
 /// Render text content as a code block with a line-number gutter on
 /// `code_bg`. Used for `read_file` / `edit_file` results and as the
 /// fallback for unrecognized tools. The gutter starts at column `indent`
-/// so the code aligns with the rest of the card body.
+/// so the code aligns with the rest of the step body.
 fn draw_code_content(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
@@ -370,7 +249,7 @@ fn draw_code_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.body();
+    let code_bg = ctx.theme.code_bg;
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split('\n') {
@@ -429,7 +308,7 @@ fn draw_listing_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.body();
+    let code_bg = ctx.theme.code_bg;
     let pad = Style::default().bg(code_bg);
     let dir_fg = ctx.theme.info();
     let file_fg = ctx.theme.code_text();
@@ -572,7 +451,7 @@ fn draw_grep_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.body();
+    let code_bg = ctx.theme.code_bg;
     let pad = Style::default().bg(code_bg);
     let header_style = Style::default()
         .bg(code_bg)
@@ -685,22 +564,25 @@ fn draw_grep_content(
     }
 }
 
-/// Render a `bash` result: plain wrapped rows on `code_bg` with no
-/// line-number gutter (command output rows have no meaningful line index).
-/// Section markers emitted by the tool (`Exit N`, `STDOUT:`, `STDERR:`,
-/// `(success, stderr):`, `[Output truncated`, `[Output was large`) are
-/// highlighted in `warning` so they stand out from the output itself.
+/// Render a `bash` step as a terminal-like `code_bg` block: a `$ command`
+/// prompt line first, then stdout / stderr (in `error_fg`) / an exit or
+/// truncation footer. Output rows have no line-number gutter. Legacy section
+/// markers (`Exit N`, `STDOUT:`, …) are highlighted in `warning` for sessions
+/// restored without a structured payload. The command line is not selectable
+/// (it's derived from the call, not the output stream); output rows are.
+#[allow(clippy::too_many_arguments)]
 fn draw_bash_content(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
     structured: Option<&neenee_core::ToolOutput>,
+    command: &str,
     selection: &SelectionState,
     indent: usize,
     inner_w: usize,
 ) {
-    let result_bg = ctx.theme.body();
+    let result_bg = ctx.theme.code_bg;
     let pad = Style::default().bg(result_bg);
     let base = Style::default().bg(result_bg).fg(ctx.theme.code_text());
     let stderr_style = Style::default().bg(result_bg).fg(ctx.theme.err());
@@ -710,6 +592,36 @@ fn draw_bash_content(
         .add_modifier(Modifier::BOLD);
     let sel_range = block_selection_range(selection, mi, block_idx);
     let wrap_w = inner_w.saturating_sub(indent).max(1);
+
+    // `$ command` prompt line(s) — the command may span multiple lines; only
+    // the first rendered row carries the `$ ` prompt.
+    if !command.is_empty() {
+        let cmd_style = Style::default().bg(result_bg).fg(ctx.theme.fg());
+        let mut rows = command.split('\n');
+        if let Some(first) = rows.next() {
+            let prompt = format!("$ {}", first);
+            for wl in nonempty_wrapped(wrap_text(&prompt, wrap_w)) {
+                let used = indent + wl.text.width();
+                let line = Line::from(vec![
+                    Span::styled(" ".repeat(indent), pad),
+                    Span::styled(wl.text.clone(), cmd_style),
+                    Span::styled(padded_tail(ctx.full_width, used), pad),
+                ]);
+                let _ = ctx.paint(line);
+            }
+        }
+        for cont in rows {
+            for wl in nonempty_wrapped(wrap_text(cont, wrap_w)) {
+                let used = indent + wl.text.width();
+                let line = Line::from(vec![
+                    Span::styled(" ".repeat(indent), pad),
+                    Span::styled(wl.text.clone(), cmd_style),
+                    Span::styled(padded_tail(ctx.full_width, used), pad),
+                ]);
+                let _ = ctx.paint(line);
+            }
+        }
+    }
 
     if let Some(neenee_core::ToolOutput::Shell {
         stdout,
@@ -821,14 +733,14 @@ fn emit_bash_lines(
     byte_offset
 }
 
-/// Render the "Result" section of an expanded tool-step card. Draws the
-/// blank separator and `Result` label on the surrounding body background
-/// (so the label aligns with `Tool` / `Arguments`), then dispatches the
-/// content rendering based on the tool name. Known tools with structured
-/// output get a specialized renderer; everything else falls back to a
-/// line-numbered code block via [`draw_code_content`].
+/// Render an expanded tool step's content — no `Result`/`Diff` label, no
+/// separator; just the tool-specific block dispatched by `result_kind`. Known
+/// tools with structured output get a specialized renderer; everything else
+/// falls back to a line-numbered code block via [`draw_code_content`]. `bash`
+/// additionally prefixes the block with a `$ command` line so the whole step
+/// reads like a terminal session.
 #[allow(clippy::too_many_arguments)]
-fn draw_tool_result_section(
+fn draw_tool_result(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     name: &str,
@@ -838,22 +750,8 @@ fn draw_tool_result_section(
     selection: &SelectionState,
     indent: usize,
     inner_w: usize,
-    separator: bool,
-    body_pad: Style,
-    body_label: Style,
 ) {
-    if separator {
-        draw_blank_rows(ctx, body_pad, TOOL_CARD_SECTION_GAP_ROWS);
-    }
     let kind = super::tools::presenter_for(name).result_kind();
-    // Diff steps relabel the section so it reads as a change, not raw output.
-    let label = if kind == ResultKind::Diff {
-        "Diff"
-    } else {
-        "Result"
-    };
-    draw_section_label(ctx, label, body_pad, body_label);
-
     let block_idx = 1usize;
     match kind {
         ResultKind::Listing => draw_listing_content(
@@ -874,16 +772,20 @@ fn draw_tool_result_section(
             indent,
             inner_w,
         ),
-        ResultKind::Bash => draw_bash_content(
-            ctx,
-            mi,
-            block_idx,
-            output,
-            structured,
-            selection,
-            indent + 2,
-            inner_w.saturating_sub(2),
-        ),
+        ResultKind::Bash => {
+            let command = bash_command_for(structured, arguments);
+            draw_bash_content(
+                ctx,
+                mi,
+                block_idx,
+                output,
+                structured,
+                &command,
+                selection,
+                indent,
+                inner_w,
+            );
+        }
         ResultKind::Code => draw_code_content(
             ctx,
             mi,
@@ -907,7 +809,27 @@ fn draw_tool_result_section(
     }
 }
 
-/// Render a red/green line diff inside an expanded edit/write card body. Each
+/// Resolve the shell command for a `bash` step: prefer the structured
+/// [`ToolOutput::Shell`] payload (set as soon as the call starts, so it is
+/// available even while streaming), falling back to parsing the JSON arguments
+/// for legacy / restored sessions without a structured payload.
+fn bash_command_for(
+    structured: Option<&neenee_core::ToolOutput>,
+    arguments: &str,
+) -> String {
+    if let Some(neenee_core::ToolOutput::Shell { command, .. }) = structured {
+        if !command.is_empty() {
+            return command.clone();
+        }
+    }
+    crate::document::parse_arguments_kv(arguments)
+        .iter()
+        .find(|(k, _)| k == "command")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// Render a red/green line diff inside an expanded edit/write step. Each
 /// [`DiffLine`] is a row in the `code_bg` block: a colored `+`/`-`/` ` sign
 /// gutter then the (wrapped) line text. The diff is a derived view of the
 /// tool's arguments, so rows aren't registered for text selection.
@@ -917,7 +839,7 @@ fn draw_diff_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let bg = ctx.theme.body();
+    let bg = ctx.theme.code_bg;
     let pad = Style::default().bg(bg);
     let gutter_fg = ctx.theme.dim();
     // Gutter width from the widest 1-based line number, min 2 so single-digit
@@ -1001,13 +923,13 @@ fn draw_diff_content(
     }
 }
 
-/// Render a sub-agent `task` tool step as a compact, non-expandable card.
+/// Render a sub-agent `task` tool step as a compact, non-expandable step.
 /// Activating it (click / Enter) navigates into a dedicated sub-agent view
-/// rather than expanding a body inline. The card shows a one-line header
+/// rather than expanding a body inline. The step shows a one-line header
 /// (the task description + duration) and a live status line summarizing the
 /// sub-agent's progress.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_subagent_inline_card(
+pub(super) fn draw_subagent_inline_step(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -1030,18 +952,18 @@ pub(super) fn draw_subagent_inline_card(
 
     let transcript_area = transcript_band_rect(transcript_area);
     let full_width = transcript_area.width as usize;
-    if full_width < CARD_MIN_WIDTH {
+    if full_width < STEP_MIN_WIDTH {
         return;
     }
 
-    let bg = theme.raised();
+    let bg = theme.surface();
 
-    // Header band: just the summary text, registered as a tool-step card
-    // header (block_idx = usize::MAX) so the existing click/Enter handling
-    // recognizes it; the app decides to navigate rather than toggle for `task`
-    // steps. No expand marker or status glyph — the card navigates, and run
-    // state reads from the header color (this card has no spinner phase, so a
-    // running step is a steady accent rather than a breathing one).
+    // Header: just the summary text, registered as a tool-step header
+    // (block_idx = usize::MAX) so the existing click/Enter handling recognizes
+    // it; the app decides to navigate rather than toggle for `task` steps. No
+    // expand marker or status glyph — the step navigates, and run state reads
+    // from the header color (this step has no spinner phase, so a running step
+    // is a steady accent rather than a breathing one).
     let header_color = match status {
         ToolStatus::Failed => theme.error_fg,
         ToolStatus::Cancelled => theme.text_muted,
@@ -1084,7 +1006,7 @@ pub(super) fn draw_subagent_inline_card(
                 Span::styled(padded_tail(ctx.full_width, used), bg_style),
             ]);
             // Make the whole status line part of the same clickable header so
-            // clicking anywhere on the card enters the sub-agent view.
+            // clicking anywhere on the step enters the sub-agent view.
             if let Some(rect) = ctx.paint(line) {
                 ctx.layout_map.push(BlockRegion {
                     message_idx: mi,
@@ -1111,7 +1033,7 @@ pub(super) fn draw_subagent_bar(
 ) {
     let band = transcript_band_rect(rect);
     let full_width = band.width as usize;
-    if full_width < CARD_MIN_WIDTH {
+    if full_width < STEP_MIN_WIDTH {
         return;
     }
     let bg = theme.body();
@@ -1150,11 +1072,11 @@ pub(super) fn draw_subagent_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), band);
 }
 
-/// Render a tool-step message as a card with a summary header,
-/// expandable body, and per-line scroll handling so tall cards scroll like
+/// Render a tool-step message as an expandable step with a summary header,
+/// a body, and per-line scroll handling so tall steps scroll like
 /// normal messages.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_tool_step_card(
+pub(super) fn draw_tool_step(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -1165,7 +1087,7 @@ pub(super) fn draw_tool_step_card(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
-    sticky_cards: &mut Vec<StickyCard>,
+    sticky_steps: &mut Vec<StickyStep>,
     spinner_phase: usize,
     focused: bool,
 ) {
@@ -1183,7 +1105,9 @@ pub(super) fn draw_tool_step_card(
         .tool_step_status()
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
-    let header_bg = theme.raised();
+    // Tool steps render flat on the app background (no band) — like
+    // reasoning traces, only the optional content block carries a `code_bg`.
+    let header_bg = theme.surface();
     let status_color = match status {
         // Breathing accent: luminance sweeps between the header bg and the
         // status color so a running step reads as "alive" without a spinner.
@@ -1196,15 +1120,15 @@ pub(super) fn draw_tool_step_card(
     };
 
     let expanded = msg.tool_step_expanded() == Some(true);
-    // Render into the inset band so the `element_bg`/`menu_bg`/`code_bg` bands
-    // never touch the terminal frame — they sit inside the uniform 2-cell
-    // `app_bg` gutters shared with user panels and code blocks. All helpers
-    // below (header, body sections, child tool steps) read `transcript_area.x` /
-    // `transcript_area.width` directly, so shrinking here propagates everywhere.
+    // Render into the inset band so content never touches the terminal frame —
+    // it sits inside the uniform 2-cell `app_bg` gutters shared with prose and
+    // code blocks. All helpers below (header, body, child tool steps) read
+    // `transcript_area.x` / `transcript_area.width` directly, so shrinking here
+    // propagates everywhere.
     let transcript_area = transcript_band_rect(transcript_area);
     let full_width = transcript_area.width as usize;
-    if full_width < CARD_MIN_WIDTH {
-        // Too narrow to draw a card; fall back to plain block rendering.
+    if full_width < STEP_MIN_WIDTH {
+        // Too narrow to draw; fall back to plain block rendering.
         draw_message_body(
             frame,
             transcript_area,
@@ -1233,7 +1157,7 @@ pub(super) fn draw_tool_step_card(
             current_y,
             content_lines,
         );
-        let idx = draw_expandable_card_header(
+        draw_expandable_step_header(
             &mut ctx,
             mi,
             usize::MAX,
@@ -1241,64 +1165,20 @@ pub(super) fn draw_tool_step_card(
             &header,
             header_color,
             header_bg,
-        );
-
-        // Collapsed preview: under the header, lift a few lines of key content
-        // (the `$ command` + output excerpt for bash, the first matches for
-        // grep, …) so the user can see what a step did without expanding. While
-        // a streaming tool is still running, the partial structured stdout is
-        // used so a long bash command shows live output instead of freezing.
-        if !expanded {
-            let preview_output: Option<&str> = match &msg.kind {
-                crate::document::MessageKind::ToolStep {
-                    output: Some(output),
-                    ..
-                } => Some(output),
-                crate::document::MessageKind::ToolStep {
-                    name,
-                    structured: Some(neenee_core::ToolOutput::Shell { stdout, .. }),
-                    status: crate::document::ToolStepStatus::Running,
-                    ..
-                } if !stdout.is_empty() && name == "bash" => Some(stdout.as_str()),
-                _ => None,
-            };
-            if let Some(output) = preview_output {
-                let (name, arguments) = match &msg.kind {
-                    crate::document::MessageKind::ToolStep { name, arguments, .. } => {
-                        (name.as_str(), arguments.as_str())
-                    }
-                    _ => ("", ""),
-                };
-                let preview = super::tools::collapsed_preview_for(name, arguments, output);
-                if !preview.is_empty() {
-                    draw_tool_preview(&mut ctx, mi, &preview);
-                }
-            }
-        }
-        idx
+        )
     };
 
-    // Body region (only when expanded; collapsed cards show just the header band).
-    // Body content is indented 2 cols so it left-aligns with the header text in
-    // `+ {header}` (the `+` sits at col 0, the header text at col 2). A blank
-    // `menu_bg` row separates the header from the body and every pair of
-    // sections (Tool / Arguments / Result / children) so each part breathes.
+    // Body region (only when expanded). Tool steps are flat — no band, no
+    // Tool/Arguments/Result labels — so an expanded step reads like a log entry:
+    // the tool-specific content directly under the header (bash → `$ cmd` +
+    // output; list/grep → entries; edit/write → diff; read → code), indented to
+    // align with prose. Only content blocks carry a `code_bg`; everything else
+    // sits on the app background.
     if expanded {
-        let body_bg = theme.body();
-        let pad = Style::default().bg(body_bg);
-        let label_style = Style::default()
-            .bg(body_bg)
-            .fg(theme.muted())
-            .add_modifier(Modifier::BOLD);
-        let arg_style = Style::default().bg(body_bg).fg(theme.muted());
+        let surface = theme.surface();
+        let pad = Style::default().bg(surface);
         let indent = 2usize;
         let inner_w = inner_width.saturating_sub(indent);
-        let meta_label_width = 9usize;
-        let meta_label_style = Style::default()
-            .bg(body_bg)
-            .fg(theme.muted())
-            .add_modifier(Modifier::BOLD);
-        let command_style = Style::default().bg(body_bg).fg(theme.fg());
 
         {
             let mut ctx = RenderCtx::from_cursor(
@@ -1311,7 +1191,7 @@ pub(super) fn draw_tool_step_card(
                 current_y,
                 content_lines,
             );
-            draw_blank_rows(&mut ctx, pad, TOOL_CARD_BODY_TOP_GAP_ROWS);
+            draw_blank_rows(&mut ctx, pad, TOOL_STEP_BODY_TOP_GAP_ROWS);
 
             if let crate::document::MessageKind::ToolStep {
                 name,
@@ -1321,82 +1201,58 @@ pub(super) fn draw_tool_step_card(
                 ..
             } = &msg.kind
             {
-                // ── Arguments ── (only when the layout adds detail beyond the
-                // header summary). No redundant `Tool` row — the header band
-                // already identifies the tool via its summary.
-                match super::tools::presenter_for(name).arg_layout() {
-                    ArgLayout::None => {}
-                    ArgLayout::Command => {
-                        let kv = crate::document::parse_arguments_kv(arguments);
-                        let command = kv
-                            .iter()
-                            .find(|(k, _)| k == "command")
-                            .map(|(_, v)| v.as_str())
-                            .unwrap_or_default();
-                        draw_meta_value_row_wrapped(
-                            &mut ctx,
-                            "Arguments",
-                            command,
-                            pad,
-                            meta_label_style,
-                            command_style,
-                            meta_label_width,
-                            full_width.saturating_sub(indent + meta_label_width + 2),
-                        );
-                    }
-                    ArgLayout::KeyValue => {
-                        let display_args: String = crate::document::parse_arguments_kv(arguments)
-                            .iter()
-                            .map(|(k, v)| format!("{}: {}", k, v))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !display_args.is_empty() {
-                            draw_tool_body_section(
-                                &mut ctx,
-                                mi,
-                                0,
-                                "Arguments",
-                                &display_args,
-                                arg_style,
-                                pad,
-                                label_style,
-                                indent,
-                                inner_w,
-                                false,
-                                false,
-                                selection,
-                            );
+                // Unknown / MCP tools spell out their arguments as `key: value`
+                // rows (the header only carries the primary one). No label — the
+                // key names are self-describing, and the result block below
+                // carries its own `code_bg` so the two stay visually distinct.
+                if matches!(
+                    super::tools::presenter_for(name).arg_layout(),
+                    ArgLayout::KeyValue
+                ) {
+                    let kv = crate::document::parse_arguments_kv(arguments);
+                    if !kv.is_empty() {
+                        let kv_style = Style::default().bg(surface).fg(theme.muted());
+                        let wrap_w = inner_w.max(1);
+                        for (k, v) in &kv {
+                            let row = format!("{}: {}", k, v);
+                            for wl in nonempty_wrapped(wrap_text(&row, wrap_w)) {
+                                let used = indent + wl.text.width();
+                                let line = Line::from(vec![
+                                    Span::styled(" ".repeat(indent), pad),
+                                    Span::styled(wl.text.clone(), kv_style),
+                                    Span::styled(padded_tail(ctx.full_width, used), pad),
+                                ]);
+                                let _ = ctx.paint(line);
+                            }
                         }
                     }
                 }
 
-                // ── Result / Diff ── (only when output exists). The renderer is
-                // chosen by the tool's `result_kind`: listings, grep matches,
-                // command output, an edit/write diff, or a line-numbered code
-                // fallback. The label sits on the body background; only the
-                // content uses `code_bg`.
-                if let Some(output_str) = output {
-                    if !output_str.is_empty() {
-                        draw_tool_result_section(
-                            &mut ctx,
-                            mi,
-                            name,
-                            arguments,
-                            output_str,
-                            structured.as_ref(),
-                            selection,
-                            indent,
-                            inner_w,
-                            false,
-                            pad,
-                            label_style,
-                        );
-                    }
+                // Tool-specific content (label-free). bash renders `$ cmd` +
+                // output; others their block. A streaming bash step may have no
+                // composed output yet but a partial structured stdout.
+                let has_output = output.as_deref().is_some_and(|s| !s.is_empty());
+                let bash_streaming = matches!(
+                    structured,
+                    Some(neenee_core::ToolOutput::Shell { stdout, .. }) if !stdout.is_empty()
+                );
+                if has_output || bash_streaming {
+                    draw_tool_result(
+                        &mut ctx,
+                        mi,
+                        name,
+                        arguments,
+                        output.as_deref().unwrap_or(""),
+                        structured.as_ref(),
+                        selection,
+                        indent,
+                        inner_w,
+                    );
                 }
             }
         }
 
-        // ── Nested sub-agent children ── (blank-separated from Result).
+        // ── Nested sub-agent children ──.
         if let crate::document::MessageKind::ToolStep { children, .. } = &msg.kind {
             if !children.is_empty() {
                 let mut ctx = RenderCtx::from_cursor(
@@ -1409,7 +1265,7 @@ pub(super) fn draw_tool_step_card(
                     current_y,
                     content_lines,
                 );
-                draw_blank_rows(&mut ctx, pad, TOOL_CARD_CHILDREN_GAP_ROWS);
+                draw_blank_rows(&mut ctx, pad, TOOL_STEP_CHILDREN_GAP_ROWS);
             }
             for child in children {
                 if child.is_tool_step() {
@@ -1463,16 +1319,16 @@ pub(super) fn draw_tool_step_card(
                 current_y,
                 content_lines,
             );
-            draw_blank_rows(&mut ctx, pad, TOOL_CARD_BODY_BOTTOM_GAP_ROWS);
+            draw_blank_rows(&mut ctx, pad, TOOL_STEP_BODY_BOTTOM_GAP_ROWS);
         }
     }
 
     if expanded {
-        sticky_cards.push(StickyCard {
+        sticky_steps.push(StickyStep {
             message_idx: mi,
             header,
             color: status_color,
-            background: Some(theme.raised()),
+            background: Some(theme.surface()),
             block_idx: usize::MAX,
             header_line: header_line_idx,
             body_end_line: *content_lines,
@@ -1490,10 +1346,10 @@ fn draw_child_tool_step(
     let Some(header) = child.tool_step_header() else {
         return;
     };
-    let body_bg = ctx.theme.body();
+    let surface = ctx.theme.surface();
     let full_width = ctx.full_width;
     let indent = 6usize;
-    let bg_style = Style::default().bg(body_bg);
+    let bg_style = Style::default().bg(surface);
 
     let header_text = header.to_string();
     let header_lines = wrap_text(&header_text, full_width.saturating_sub(indent));
@@ -1603,7 +1459,7 @@ fn draw_reasoning_trace_header(
 
 /// Render a reasoning trace as expandable prose. It keeps the thinking
 /// message model for stream semantics, but presents it as body-aligned text
-/// instead of a colored card.
+/// instead of a colored step.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_reasoning_trace(
     frame: &mut Frame,
@@ -1616,7 +1472,7 @@ pub(super) fn draw_reasoning_trace(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
-    sticky_cards: &mut Vec<StickyCard>,
+    sticky_steps: &mut Vec<StickyStep>,
     _spinner_phase: usize,
     hovered: bool,
 ) {
@@ -1732,17 +1588,14 @@ pub(super) fn draw_reasoning_trace(
                 }
             }
         }
-        advance_plain_blank_rows(
-            transcript_area,
-            REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
-            skip_rows,
-            current_y,
-            content_lines,
-        );
+        // No trailing bottom gap here: the message-level separator
+        // (`MESSAGE_GAP_ROWS`) already provides a single blank row between
+        // this trace and the next component. Adding another would double the
+        // gap when expanded, diverging from the collapsed layout.
     }
 
     if expanded {
-        sticky_cards.push(StickyCard {
+        sticky_steps.push(StickyStep {
             message_idx: mi,
             header,
             color: theme.muted(),
@@ -1754,104 +1607,47 @@ pub(super) fn draw_reasoning_trace(
     }
 }
 
-/// Maximum number of output lines shown in the collapsed bash preview before
-/// the `…` truncation marker kicks in.
-/// Render a tool's collapsed-state preview (see [`super::tools::ToolPresenter::collapsed_preview`])
-/// under the card header: each [`PreviewLine`] becomes one row in the body
-/// background, hard-truncated to the inner width and colored by its tone. Rows
-/// are registered with `block_idx = usize::MAX` so clicking anywhere on the
-/// preview toggles the card open, matching the expandable-card interaction.
-#[allow(clippy::too_many_arguments)]
-fn draw_tool_preview(
-    ctx: &mut RenderCtx<'_, '_>,
-    mi: usize,
-    lines: &[PreviewLine],
-) {
-    let body_bg = ctx.theme.body();
-    let pad = Style::default().bg(body_bg);
-    let indent = 2usize;
-    let inner_w = ctx.full_width.saturating_sub(indent).max(1);
-
-    for line in lines {
-        let fg = match line.tone {
-            PreviewTone::Primary => ctx.theme.fg(),
-            PreviewTone::Muted => ctx.theme.muted(),
-            PreviewTone::Faint => ctx.theme.dim(),
-        };
-        // Hard-truncate to the inner width (no per-line ellipsis) so the preview
-        // height stays predictable; a trailing `…` row already signals "more".
-        let text: String = line.text.chars().take(inner_w).collect();
-        let used = indent + text.width();
-        let row = Line::from(vec![
-            Span::styled(" ".repeat(indent), pad),
-            Span::styled(text, Style::default().bg(body_bg).fg(fg)),
-            Span::styled(padded_tail(ctx.full_width, used), pad),
-        ]);
-        // Preview breaks on clip (preserved verbatim from the pre-ctx loop).
-        *ctx.content_lines += 1;
-        if *ctx.skip_rows > 0 {
-            *ctx.skip_rows = ctx.skip_rows.saturating_sub(1);
-            continue;
-        }
-        if *ctx.y >= ctx.area.y + ctx.area.height {
-            break;
-        }
-        let line_rect = Rect::new(ctx.area.x, *ctx.y, ctx.area.width, 1);
-        ctx.frame.render_widget(Paragraph::new(row), line_rect);
-        ctx.layout_map.push(BlockRegion {
-            message_idx: mi,
-            block_idx: usize::MAX,
-            start_byte: 0,
-            end_byte: 0,
-            text: String::new(),
-            prefix_cols: 0,
-            rect: line_rect,
-        });
-        *ctx.y += 1;
-    }
-}
-
-/// If any expanded card's body covers the top of the viewport, render its
+/// If any expanded step's body covers the top of the viewport, render its
 /// header pinned there as a sticky overlay and return its layout info so the
 /// app can route clicks to it. Returns `None` when no sticky header is
 /// needed.
 pub(super) fn draw_sticky_header_if_needed(
     frame: &mut Frame,
     transcript_area: Rect,
-    sticky_cards: &[StickyCard],
+    sticky_steps: &[StickyStep],
     scroll: u16,
     hovered_reasoning: Option<usize>,
     focused_target: Option<InteractiveTarget>,
     theme: &Theme,
 ) -> Option<StickyInfo> {
     let first_visible = scroll as usize;
-    let card = sticky_cards
+    let step = sticky_steps
         .iter()
         .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)?;
     // Reasoning sticky headers brighten on hover (dark→bright affordance),
     // matching the inline reasoning-trace header.
     let reasoning_hovered =
-        card.background.is_none() && hovered_reasoning == Some(card.message_idx);
+        step.background.is_none() && hovered_reasoning == Some(step.message_idx);
     let focused = focused_target.is_some_and(|target| {
-        target.message_idx == card.message_idx
+        target.message_idx == step.message_idx
             && match target.kind {
                 crate::layout::InteractiveTargetKind::ToolStep => {
-                    card.block_idx == TOOL_STEP_BLOCK_IDX
+                    step.block_idx == TOOL_STEP_BLOCK_IDX
                 }
                 crate::layout::InteractiveTargetKind::Thinking => {
-                    card.block_idx == THINKING_BLOCK_IDX
+                    step.block_idx == THINKING_BLOCK_IDX
                 }
             }
     });
-    let line_rect = if let Some(bg) = card.background {
-        // Pin inside the same inset band the cards render into so the sticky
+    let line_rect = if let Some(bg) = step.background {
+        // Pin inside the same inset band the steps render into so the sticky
         // header aligns exactly with the (possibly scrolled-away) real header.
         let band = transcript_band_rect(transcript_area);
         let line_rect = Rect::new(band.x, transcript_area.y, band.width, 1);
         frame.render_widget(
             Paragraph::new(tool_header_line(
                 "-",
-                &card.header,
+                &step.header,
                 if focused {
                     theme.fg()
                 } else {
@@ -1878,8 +1674,8 @@ pub(super) fn draw_sticky_header_if_needed(
         frame.render_widget(
             Paragraph::new(reasoning_trace_header_line(
                 "-",
-                &card.header,
-                card.color,
+                &step.header,
+                step.color,
                 header_color,
                 transcript_area.width as usize,
             )),
@@ -1888,11 +1684,11 @@ pub(super) fn draw_sticky_header_if_needed(
         line_rect
     };
     Some(StickyInfo {
-        message_idx: card.message_idx,
-        header: card.header.clone(),
-        color: card.color,
-        block_idx: card.block_idx,
+        message_idx: step.message_idx,
+        header: step.header.clone(),
+        color: step.color,
+        block_idx: step.block_idx,
         rect: line_rect,
-        header_line: card.header_line,
+        header_line: step.header_line,
     })
 }

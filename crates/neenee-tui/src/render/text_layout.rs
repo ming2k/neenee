@@ -16,37 +16,6 @@ pub(super) fn padded_tail(full_width: usize, used: usize) -> String {
     " ".repeat(full_width.saturating_sub(used))
 }
 
-/// Strip ANSI CSI escape sequences (color/style codes) from a string. Command
-/// output often carries terminal color codes that would render as garbage in
-/// the TUI, so the bash preview runs output through this before truncating.
-/// Handles the common `\x1b[...m` color sequences; other escape types are
-/// rare in command output and left untouched.
-pub(super) fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    for c2 in chars.by_ref() {
-                        if c2.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// The byte range of a block covered by the selection.
 /// `(start, None)` means "from start to the end of the block".
 pub(super) fn block_selection_range(

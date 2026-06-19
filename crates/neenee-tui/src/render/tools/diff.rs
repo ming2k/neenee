@@ -9,7 +9,7 @@
 use similar::{ChangeTag, TextDiff};
 
 /// `(added, removed)` line counts for the change from `old` to `new`. Used for
-/// the `+N -M` summary suffix in the card header. Computed from the real diff
+/// the `+N -M` summary suffix in the step header. Computed from the real diff
 /// so the count always matches what the body renders.
 pub fn line_diff_counts(old: &str, new: &str) -> (usize, usize) {
     let diff = TextDiff::from_lines(old, new);

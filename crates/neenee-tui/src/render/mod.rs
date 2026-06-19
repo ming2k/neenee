@@ -24,12 +24,12 @@ pub use chrome::{draw_hint_bar, HintBarLayout, HintBarView};
 pub use chrome::{draw_completion_menu, draw_status_bar};
 pub use composer::{draw_composer, INPUT_MSG_IDX};
 use design::{
-    CARD_MIN_WIDTH, COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
+    STEP_MIN_WIDTH, COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
-    MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_BOTTOM_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, STATUS_BAR_ROWS, SUBAGENT_BAR_ROWS,
-    TOOL_CARD_BODY_BOTTOM_GAP_ROWS, TOOL_CARD_BODY_TOP_GAP_ROWS, TOOL_CARD_CHILDREN_GAP_ROWS,
-    TOOL_CARD_SECTION_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
+    MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
+    STATUS_BAR_ROWS, SUBAGENT_BAR_ROWS,
+    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
+    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
     TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
@@ -51,7 +51,7 @@ use text_layout::{
 pub use theme::Theme;
 use turn_artifacts::{
     draw_reasoning_trace, draw_sticky_header_if_needed, draw_subagent_bar,
-    draw_subagent_inline_card, draw_tool_step_card, StickyCard,
+    draw_subagent_inline_step, draw_tool_step, StickyStep,
 };
 
 use ratatui::{
@@ -72,7 +72,7 @@ use std::collections::HashMap;
 
 /// Inner rect of a transcript-area region after reserving the uniform
 /// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. Use this as the render target
-/// for any solid-background band (card headers/bodies, child tool steps) so
+/// for any solid-background band (step headers/bodies, child tool steps) so
 /// the band sits inside the gutters rather than spanning edge to edge. The
 /// surrounding cells keep `app_bg` from the global frame fill.
 pub(super) fn transcript_band_rect(area: Rect) -> Rect {
@@ -136,13 +136,13 @@ pub struct TranscriptRender {
     pub content_lines: usize,
     /// Height of the transcript viewport.
     pub view_height: u16,
-    /// The expanded card whose body is currently scrolled into view, so the app
+    /// The expanded step whose body is currently scrolled into view, so the app
     /// can render/click a sticky header pinned under the HUD bar. `None` when no
-    /// expanded card body covers the top of the viewport.
+    /// expanded step body covers the top of the viewport.
     pub sticky: Option<StickyInfo>,
 }
 
-/// A sticky pinned card header (returned to the app for click handling).
+/// A sticky pinned step header (returned to the app for click handling).
 pub struct StickyInfo {
     pub message_idx: usize,
     pub header: String,
@@ -151,7 +151,7 @@ pub struct StickyInfo {
     pub rect: Rect,
     /// The content-line index of the real header inside the stream. The app
     /// uses this to re-anchor the scroll offset when the user collapses the
-    /// pinned card, so the real header takes the sticky's place at the top of
+    /// pinned step, so the real header takes the sticky's place at the top of
     /// the viewport instead of jumping to unrelated content.
     pub header_line: usize,
 }
@@ -247,8 +247,8 @@ pub fn draw_transcript(
     // Total stream height, counted independently of the viewport clip so the
     // app loop can follow the bottom.
     let mut content_lines: usize = 0;
-    // Expanded cards collected during the pass, for the sticky pinned header.
-    let mut sticky_cards: Vec<StickyCard> = Vec::new();
+    // Expanded steps collected during the pass, for the sticky pinned header.
+    let mut sticky_steps: Vec<StickyStep> = Vec::new();
     // The last model attribution badge drawn into the stream. A badge is shown
     // once at the start of an assistant turn and again only when the producing
     // model changes, so a session that mixes providers stays traceable without
@@ -258,7 +258,7 @@ pub fn draw_transcript(
     for (mi, msg) in messages.iter().enumerate() {
         // Model attribution badge: shown above the first assistant-side
         // message of a turn (reasoning, text, or tool step) and whenever the
-        // producing provider/model changes. Tool results and tool cards share
+        // producing provider/model changes. Tool results and tool steps share
         // the turn's model, so a single badge per model-run keeps the
         // transcript clean while remaining fully traceable.
         let is_assistant_side =
@@ -282,7 +282,7 @@ pub fn draw_transcript(
 
         // Render blocks
         if msg.is_subagent_task() {
-            draw_subagent_inline_card(
+            draw_subagent_inline_step(
                 frame,
                 transcript_area,
                 msg,
@@ -297,7 +297,7 @@ pub fn draw_transcript(
                 }),
             );
         } else if msg.is_tool_step() {
-            draw_tool_step_card(
+            draw_tool_step(
                 frame,
                 transcript_area,
                 msg,
@@ -308,7 +308,7 @@ pub fn draw_transcript(
                 &mut skip_rows,
                 &mut current_y,
                 &mut content_lines,
-                &mut sticky_cards,
+                &mut sticky_steps,
                 spinner_phase,
                 focused_target.is_some_and(|target| {
                     target.message_idx == mi && target.block_idx == TOOL_STEP_BLOCK_IDX
@@ -326,7 +326,7 @@ pub fn draw_transcript(
                 &mut skip_rows,
                 &mut current_y,
                 &mut content_lines,
-                &mut sticky_cards,
+                &mut sticky_steps,
                 spinner_phase,
                 hovered_reasoning == Some(mi)
                     || focused_target.is_some_and(|target| {
@@ -353,15 +353,14 @@ pub fn draw_transcript(
         // bottom transition row (▀) that separates it from the next message, so
         // the extra blank line is omitted there to keep the gap to a single row
         // (otherwise the sent message sits two rows above the following body).
-        // The exception is when the next message is a card (thinking or tool
-        // step): cards have their own solid background band, and a blank row
-        // between the user panel's transition and the card header keeps the two
-        // visually distinct. This matches the spacing produced by live reasoning
-        // streams and restored history.
-        let next_is_card = messages.get(mi + 1).is_some_and(|next| {
+        // The exception is when the next message is a step (thinking or tool
+        // step): a blank row between the user panel's transition and the step
+        // header keeps the two visually distinct. This matches the spacing
+        // produced by live reasoning streams and restored history.
+        let next_is_step = messages.get(mi + 1).is_some_and(|next| {
             next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
         });
-        if msg.role != neenee_core::Role::User || next_is_card {
+        if msg.role != neenee_core::Role::User || next_is_step {
             content_lines += MESSAGE_GAP_ROWS;
             if skip_rows > 0 {
                 skip_rows = skip_rows.saturating_sub(1);
@@ -422,13 +421,13 @@ pub fn draw_transcript(
         Rect::new(0, 0, 0, 0)
     };
 
-    // Sticky pinned header: if an expanded card's body covers the top of the
+    // Sticky pinned header: if an expanded step's body covers the top of the
     // viewport (its header is scrolled out of view), pin its header to the line
     // directly under the HUD bar so the user can always collapse it.
     let sticky_info = draw_sticky_header_if_needed(
         frame,
         transcript_area,
-        &sticky_cards,
+        &sticky_steps,
         scroll,
         hovered_reasoning,
         focused_target,
@@ -654,10 +653,10 @@ mod tests {
             .unwrap();
     }
 
-    /// Render both the compact sub-agent card (root view) and the zoomed-in
+    /// Render both the compact sub-agent step (root view) and the zoomed-in
     /// sub-agent view with its navigation bar, ensuring no layout panics.
     #[test]
-    fn subagent_card_and_view_render_without_panicking() {
+    fn subagent_step_and_view_render_without_panicking() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -665,7 +664,7 @@ mod tests {
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        // Root view: a completed sub-agent task renders as a compact card.
+        // Root view: a completed sub-agent task renders as a compact step.
         let mut task = TranscriptMessage::tool_step(
             "task_1",
             "task",
@@ -875,6 +874,45 @@ mod tests {
         );
         // ...but never more than half the terminal.
         assert!(tall.height <= 12);
+    }
+
+    /// An empty composer must still record a layout-map region for its single
+    /// text row. Without it a click inside the empty box can't resolve to a
+    /// cursor, so the click handler never switches keyboard focus back to the
+    /// Compose zone (it stays stuck in Browse). See `draw_composer` /
+    /// `composer_wrapped`.
+    #[test]
+    fn draw_composer_records_region_for_empty_input() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut layout_map = LayoutMap::new();
+        let input_rect = Rect::new(0, 0, 30, 3);
+        terminal
+            .draw(|f| {
+                draw_composer(
+                    f,
+                    input_rect,
+                    "",
+                    0,
+                    true,
+                    &theme,
+                    &mut layout_map,
+                    true,
+                    &mut 0,
+                );
+            })
+            .unwrap();
+
+        // The empty text row sits one line below the box's top edge.
+        let cursor = layout_map
+            .hit_test(input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16, input_rect.y + 1)
+            .expect("click inside empty input box must resolve to a cursor");
+        assert_eq!(cursor.message_idx, INPUT_MSG_IDX);
+        assert_eq!(cursor.byte_offset, 0);
     }
 
     /// `draw_composer` must not panic for tricky inputs and should place the caret

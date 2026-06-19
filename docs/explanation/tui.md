@@ -189,7 +189,7 @@ to communicate that the agent is busy:
   (`responding`, `thinking`, `retry 2/4 in 3s`, `awaiting permission`).
 - `follow_bottom` keeps the newest content in view while streaming and
   yields to manual control the moment the user scrolls.
-- Sticky headers pin an expanded card's header to the top of the
+- Sticky headers pin an expanded step's header to the top of the
   viewport, and transient toasts report outcomes (`copied`,
   `press Ctrl+C again to exit`).
 
@@ -213,7 +213,7 @@ freeze it:
 The TUI is a pure projection of harness state. The background listener
 maps each `AgentResponse` variant onto document changes — streaming text
 grows the live assistant message, tool calls become collapsible
-`ToolStep` cards, reasoning becomes `Thinking` cards, and permission
+`ToolStep` steps, reasoning becomes `Thinking` steps, and permission
 requests open a modal that resolves a harness waiter. Streaming itself
 stays inside the harness; see [Harness architecture](harness.md).
 

@@ -135,10 +135,10 @@ Then exercise the provider end-to-end:
 
 1. Set the API key env var and start the agent with
    `default_provider = "acme"` in `config.toml`.
-2. Send a prompt that should trigger a tool call. Confirm the tool-step
-   card renders with the right arguments and result.
+2. Send a prompt that should trigger a tool call. Confirm the tool step
+   renders with the right arguments and result.
 3. If the model advertises reasoning support (for example an
-   `acme-reasoner` variant), switch to it and confirm a thinking card
+   `acme-reasoner` variant), switch to it and confirm a thinking step
    appears.
 4. Run `/provider switch acme <model>` from inside the TUI and confirm the
    header updates and the new model is used.
@@ -164,5 +164,5 @@ Update these surfaces in the same change:
 - [Providers](../reference/providers.md) — existing provider matrix
 - [Provider capabilities](../explanation/provider-capabilities.md) —
   capability layering and why providers differ
-- [Tool lifecycle](../explanation/tool-lifecycle.md) — what the registry path
+- [Tool rounds](../explanation/tool-rounds.md) — what the registry path
   inherits

@@ -1,9 +1,6 @@
 //! Presenters for the search/listing family: `grep`, `glob`, `list_dir`.
 
-use super::{truncate, PreviewLine, PreviewTone, ResultKind, ToolPresenter, ToolView};
-
-/// Max match lines lifted into the collapsed grep preview before a `…` marker.
-const GREP_PREVIEW_LINES: usize = 3;
+use super::{truncate, ResultKind, ToolPresenter, ToolView};
 
 pub struct GrepPresenter;
 
@@ -16,33 +13,6 @@ impl ToolPresenter for GrepPresenter {
 
     fn result_kind(&self) -> ResultKind {
         ResultKind::Grep
-    }
-
-    /// Collapsed preview: the first few match lines so the user can judge the
-    /// hits without expanding, with a `… +N more` tail when there are more.
-    fn collapsed_preview(&self, view: &ToolView) -> Vec<PreviewLine> {
-        let Some(output) = view.output else {
-            return Vec::new();
-        };
-        let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        if lines.is_empty() {
-            return Vec::new();
-        }
-        let mut rows: Vec<PreviewLine> = lines
-            .iter()
-            .take(GREP_PREVIEW_LINES)
-            .map(|l| PreviewLine {
-                text: (*l).to_string(),
-                tone: PreviewTone::Muted,
-            })
-            .collect();
-        if lines.len() > GREP_PREVIEW_LINES {
-            rows.push(PreviewLine {
-                text: format!("… +{} more", lines.len() - GREP_PREVIEW_LINES),
-                tone: PreviewTone::Faint,
-            });
-        }
-        rows
     }
 }
 

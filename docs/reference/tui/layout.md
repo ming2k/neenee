@@ -95,8 +95,8 @@ per-component detail.
 
 Every transcript-area component is inset by `TRANSCRIPT_H_INSET = 2` cols on each side so
 no band, bar, or text touches the terminal frame. The two gutters stay
-`app_bg` via the global frame fill. Solid-background bands (card headers and
-bodies, child tool steps) render into `transcript_band_rect` (`render/mod.rs`), which
+`app_bg` via the global frame fill. Solid-background regions (code blocks,
+child tool steps) render into `transcript_band_rect` (`render/mod.rs`), which
 is the transcript area minus both gutters; user panels and code blocks render their
 own equivalent gutters; markdown text wraps with `TRANSCRIPT_H_INSET` cells of slack
 on the right.
@@ -109,7 +109,7 @@ on the right.
 │          app_bg |    transcript band              | app_bg   │
 │                                                              │
 │          ..  .. +-------------------------------+ ..  ..     │
-│          ..  .. |  card header / body / text    | ..  ..     │
+│          ..  .. |  step header / body / text     | ..  ..     │
 │          ..  .. +-------------------------------+ ..  ..     │
 │                                                              │
 │          <- INSET=2 ->|<-- usable width -->|<- INSET=2 ->    │
@@ -150,13 +150,13 @@ Modal types that keep chrome: None, ApiKey, Endpoint, ModelName, HistorySearch.
 
 | Measurement | Value | Where |
 |------------|-------|-------|
-| Left/right gutter (all transcript content) | 2 cols `app_bg` | `TRANSCRIPT_H_INSET`, applied via `transcript_band_rect` (cards) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
+| Left/right gutter (all transcript content) | 2 cols `app_bg` | `TRANSCRIPT_H_INSET`, applied via `transcript_band_rect` (steps) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
 | `┃` bar column | 2 (after 2-col gutter) | User messages, code blocks, input |
 | Assistant text indent | 4 cols (left) + 2-col right gutter | `line_spans("    ", ...)`; wraps at `area.width - 6` |
 | Code block indent | 2 cols (inside band) + `┃` + space | `code_gutter_line(left_indent=2)` |
-| Card marker column | 2 (inside `TRANSCRIPT_H_INSET` band) | `+` / `-` at band col 0 in `card_header_line` |
-| Card header text column | 4 (2 gutter + 2 after `+ `) | After `+ ` prefix |
-| Card body indent | 4 cols from transcript edge (2 inside band) | `draw_tool_body_section`, `draw_reasoning_trace` |
+| Step marker column | 2 (inside `TRANSCRIPT_H_INSET` band) | `+` / `-` at col 0 of the inset region in `tool_header_line` |
+| Step header text column | 4 (2 gutter + 2 after `+ `) | After `+ ` prefix |
+| Step body indent | 4 cols from transcript edge | `draw_tool_step`, `draw_reasoning_trace` |
 | Line-number gutter min width | 2 chars | `.max(2)` |
 | Mouse scroll step | 4 rows | `ScrollUp/Down` handler |
 | PageUp/PageDown step | `view_height - 1` | One line of overlap |

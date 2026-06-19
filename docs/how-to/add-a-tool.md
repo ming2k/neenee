@@ -3,7 +3,7 @@
 This guide walks through implementing a new tool that the agent can call. It
 assumes familiarity with the `Tool` trait. For the existing tool catalog,
 see [Built-in tools](../reference/tools.md). For the protocol the model uses
-to call tools, see [Tool lifecycle](../explanation/tool-lifecycle.md).
+to call tools, see [Tool rounds](../explanation/tool-rounds.md).
 
 All production tools live in the `neenee-core` crate. Pick the module that
 matches the tool's domain: filesystem tools go in
@@ -173,7 +173,7 @@ Then exercise the tool manually:
 1. Start the agent with a provider that supports native function calling
    (see [Providers](../reference/providers.md)).
 2. Ask the model to perform a task that should trigger the new tool.
-3. Confirm the tool-step card renders with the right name, arguments, and
+3. Confirm the tool step renders with the right name, arguments, and
    result.
 4. Switch to `GeminiProvider` or `LlamaServerProvider` and repeat. The
    model should emit the universal fallback JSON and the tool should still
@@ -196,7 +196,7 @@ Update these surfaces in the same change:
 ## See also
 
 - [Built-in tools](../reference/tools.md) — existing tool catalog
-- [Tool lifecycle](../explanation/tool-lifecycle.md) — schema injection and
+- [Tool rounds](../explanation/tool-rounds.md) — schema injection and
   fallback mechanics
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   tool support varies across providers

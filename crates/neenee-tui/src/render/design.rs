@@ -13,8 +13,8 @@ pub(super) const TRANSCRIPT_BODY_PREFIX_COLS: u16 =
 /// Right-side slack reserved when wrapping prose-like content.
 pub(super) const TRANSCRIPT_BODY_RIGHT_INSET: u16 = TRANSCRIPT_H_INSET;
 
-/// Minimum readable width for compact expandable card bands.
-pub(super) const CARD_MIN_WIDTH: usize = 8;
+/// Minimum readable width for compact expandable step header rows.
+pub(super) const STEP_MIN_WIDTH: usize = 8;
 
 /// One blank row inserted between transcript items unless a component already
 /// provides its own separator.
@@ -24,17 +24,19 @@ pub(super) const MESSAGE_GAP_ROWS: usize = 1;
 /// row and one bottom transition row.
 pub(super) const USER_MESSAGE_TRANSITION_ROWS: usize = 1;
 
-/// Breathing room inside expanded tool-step cards.
-pub(super) const TOOL_CARD_BODY_TOP_GAP_ROWS: usize = 1;
-pub(super) const TOOL_CARD_SECTION_GAP_ROWS: usize = 1;
-pub(super) const TOOL_CARD_CHILDREN_GAP_ROWS: usize = TOOL_CARD_SECTION_GAP_ROWS;
-pub(super) const TOOL_CARD_BODY_BOTTOM_GAP_ROWS: usize = 1;
+/// Breathing room inside expanded tool steps.
+pub(super) const TOOL_STEP_BODY_TOP_GAP_ROWS: usize = 1;
+pub(super) const TOOL_STEP_SECTION_GAP_ROWS: usize = 1;
+pub(super) const TOOL_STEP_CHILDREN_GAP_ROWS: usize = TOOL_STEP_SECTION_GAP_ROWS;
+pub(super) const TOOL_STEP_BODY_BOTTOM_GAP_ROWS: usize = 1;
 
 /// Breathing room inside expanded reasoning traces. These stay independent
-/// from tool-card spacing because reasoning is prose-like, not a panel.
+/// from tool-step spacing because reasoning is prose-like, not a panel.
+/// There is no bottom-gap token: the message-level separator
+/// (`MESSAGE_GAP_ROWS`) already supplies the single blank row between a trace
+/// and the next component, so an extra trailing gap would double it.
 pub(super) const REASONING_TRACE_BODY_TOP_GAP_ROWS: usize = 1;
 pub(super) const REASONING_TRACE_BLOCK_GAP_ROWS: usize = 1;
-pub(super) const REASONING_TRACE_BODY_BOTTOM_GAP_ROWS: usize = 1;
 
 /// Hint bar: a single-line status strip pinned directly below the input box
 /// that surfaces workspace + model + goal + MCP + context-usage info that the

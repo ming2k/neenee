@@ -33,7 +33,7 @@ fn display_width_u16(s: &str) -> u16 {
 
 /// Render the blocks of a single message inside the given area.
 ///
-/// This is extracted so that normal messages and tool-step cards can share
+/// This is extracted so that normal messages and tool steps can share
 /// the same block-rendering logic while using different containing rects.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_message_body(
@@ -405,7 +405,7 @@ pub(super) fn draw_message_body(
                             }
                         }
                         // Data lines also carry a region so non-table hit
-                        // tests (e.g. card headers) keep working; border rules
+                        // tests (e.g. step headers) keep working; border rules
                         // remain dead zones.
                         if !is_border {
                             layout_map.push(BlockRegion {

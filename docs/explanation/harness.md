@@ -14,7 +14,7 @@ Every CLI turn uses `Agent::run_streaming_with_events()`:
 5. Stop on a final assistant message or a harness safety bound.
 
 Streaming remains inside the harness. Text fallback JSON is withdrawn from the
-visible transcript before its tool card is emitted.
+visible transcript before its tool step is emitted.
 
 Provider adapters must preserve the harness system context. OpenAI-compatible
 providers use system messages; Gemini maps them to `systemInstruction` and
@@ -31,7 +31,7 @@ The harness distinguishes two model capability surfaces. Tools are declared
 to the provider on every request; reasoning is observed from the provider
 when the model emits it. For the capability model and wire-level protocol,
 see [Provider capabilities](provider-capabilities.md) and
-[Tool lifecycle](tool-lifecycle.md).
+[Tool rounds](tool-rounds.md).
 
 ### Declared: tools
 
@@ -94,7 +94,7 @@ extracts `{"tool": "<name>", "arguments": {…}}` from assistant text.
 preceding assistant message as a native `tool_calls` entry so
 OpenAI-compatible `tool_call_id` pairing stays valid on the next round.
 
-Fallback text is withdrawn from the visible transcript before the tool card
+Fallback text is withdrawn from the visible transcript before the tool step
 is emitted, matching the native streaming path. The same registry, permission
 broker, and result-message format apply to native and fallback calls.
 

@@ -405,7 +405,7 @@ pub struct SessionOverview {
 ///
 /// These are forwarded from the child agent back to the parent harness so that
 /// the TUI can render nested tool steps and streaming output inside the parent
-/// tool card.
+/// tool step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubTaskEvent {
     /// The sub-agent started a new response stream.
@@ -1200,7 +1200,7 @@ impl Agent {
     /// `cancel` makes tool execution cooperative: if the turn is interrupted
     /// mid-flight, every already-announced [`AgentEvent::ToolCall`] is paired
     /// with a terminal [`AgentEvent::ToolCancelled`] before this returns
-    /// `Err(HarnessError::Interrupted)`, so no card is left "running".
+    /// `Err(HarnessError::Interrupted)`, so no step is left "running".
     async fn dispatch_tool_calls<F>(
         &self,
         response: &Message,

@@ -87,7 +87,7 @@ impl Theme {
     pub fn surface(&self) -> Color {
         self.app_bg
     }
-    /// Card body / content surface.
+    /// Step body / content surface.
     pub fn body(&self) -> Color {
         self.menu_bg
     }

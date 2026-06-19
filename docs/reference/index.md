@@ -27,8 +27,8 @@ Lookup-oriented documentation — tables, lists, and exact values.
 | Input box | [input-box.md](tui/input-box.md) |
 | Assistant text | [assistant-text.md](tui/assistant-text.md) |
 | Code block | [code-block.md](tui/code-block.md) |
-| Tool-step card | [tool-step-card.md](tui/tool-step-card.md) |
-| Thinking card | [thinking-card.md](tui/thinking-card.md) |
+| Tool step | [tool-step.md](tui/tool-step.md) |
+| Thinking step | [thinking-step.md](tui/thinking-step.md) |
 | Status bar | [status-bar.md](tui/status-bar.md) |
 | Hint line | [hint-line.md](tui/hint-line.md) |
 | Modals | [modals.md](tui/modals.md) |

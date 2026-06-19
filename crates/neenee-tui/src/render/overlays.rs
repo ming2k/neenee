@@ -1,5 +1,5 @@
 //! Overlay modal renderers: model picker, sessions, history search, the
-//! permission sheet, API-key / endpoint / model-name prompts, the help card,
+//! permission sheet, API-key / endpoint / model-name prompts, the help overlay,
 //! and the copy / armed toasts. Plus the relative-time formatter used by the
 //! sessions list.
 
@@ -748,10 +748,10 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
             "[BROWSE] so you always know where the next key lands.",
         )),
         row("tab", "toggle compose ↔ browse"),
-        row("shift+tab", "toggle (browse: last card)"),
-        row("↑ / ↓", "compose: history · browse: cycle cards"),
+        row("shift+tab", "toggle (browse: last step)"),
+        row("↑ / ↓", "compose: history · browse: cycle steps"),
         row("esc / any key", "browse → compose"),
-        row("enter / ␠", "browse: activate focused card"),
+        row("enter / ␠", "browse: activate focused step"),
         Line::from(""),
         Line::from(section("Views & tools")),
         row("ctrl+h", "this help"),

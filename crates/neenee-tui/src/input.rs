@@ -16,7 +16,7 @@ use crate::selection::SelectionDrag;
 ///   accepts a slash suggestion (when one is open) or toggles into Browse.
 ///   This is the default.
 /// - [`FocusZone::Browse`] — the conversation stream owns the keys. `↑` / `↓`
-///   cycle the keyboard-focused card, `Enter` / `Space` activate it, `Tab`
+///   cycle the keyboard-focused step, `Enter` / `Space` activate it, `Tab`
 ///   toggles back to Compose, and any other printable character drops back
 ///   into [`FocusZone::Compose`] and inserts itself.
 ///
@@ -53,7 +53,7 @@ pub struct InputContext {
     pub permission_confirm_always: bool,
     /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
     pub in_subagent_view: bool,
-    /// Whether a keyboard-focusable card or action target is active.
+    /// Whether a keyboard-focusable step or action target is active.
     pub has_focused_target: bool,
     /// Which surface (input box vs conversation stream) owns keyboard focus.
     pub focus_zone: FocusZone,
@@ -117,7 +117,7 @@ pub enum InputAction {
     ActivateFocusedTarget,
     /// Switch the keyboard focus zone to the conversation stream (Browse).
     /// One half of the Tab toggle: `backward` is `true` for Shift+Tab (lands
-    /// on the last card) and `false` for Tab (lands on the first card).
+    /// on the last step) and `false` for Tab (lands on the first step).
     EnterBrowseZone { backward: bool },
     /// Switch the keyboard focus zone back to the input box (Compose).
     ReturnToComposeZone,
@@ -465,7 +465,7 @@ pub fn process_event(
                         InputAction::ReturnToComposeZone
                     } else {
                         // Compose → Browse: hand the keyboard over to the
-                        // conversation stream and focus the first card.
+                        // conversation stream and focus the first step.
                         // Works with or without text in the prompt (the draft
                         // is preserved in the buffer).
                         InputAction::EnterBrowseZone { backward: false }
@@ -478,7 +478,7 @@ pub fn process_event(
                         // Browse → Compose: Shift+Tab mirrors Tab's toggle.
                         InputAction::ReturnToComposeZone
                     } else {
-                        // Compose → Browse, focusing the last card.
+                        // Compose → Browse, focusing the last step.
                         InputAction::EnterBrowseZone { backward: true }
                     }
                 }
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn tab_toggles_between_compose_and_browse() {
         // Compose + Tab hands focus to the conversation stream (forward =
-        // first card). Tab is a pure zone toggle, so it fires whether or not
+        // first step). Tab is a pure zone toggle, so it fires whether or not
         // the prompt has text — the draft stays in the buffer.
         let mut input = String::new();
         assert_eq!(
@@ -1052,7 +1052,7 @@ mod tests {
             key_in_view(KeyCode::Tab, false, &mut input),
             InputAction::EnterBrowseZone { backward: false }
         );
-        // Shift+Tab enters Browse as well, but lands on the last card.
+        // Shift+Tab enters Browse as well, but lands on the last step.
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::BackTab, false, &mut input),
@@ -1139,7 +1139,7 @@ mod tests {
     fn q_in_browse_inserts_instead_of_quitting() {
         // 'q' is only a quit shortcut in Compose. In Browse it behaves like
         // any other printable character so the user does not accidentally
-        // exit the program while navigating cards.
+        // exit the program while navigating steps.
         let mut input = String::new();
         let mut cursor = 0;
         let mut drag = SelectionDrag::default();

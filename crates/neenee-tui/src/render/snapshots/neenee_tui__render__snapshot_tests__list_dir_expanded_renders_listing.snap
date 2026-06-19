@@ -4,19 +4,17 @@ expression: "render_grid(&m, 80, 30)"
 ---
   - List .
 
-    Result
     src/
     tests/
     Cargo.toml
     README.md
 
 backgrounds:
-.=reset  B=#151716  C=#111312
+.=reset  B=#070808  C=#111312
 0: .2 B76
-1: .2 C76
+1: .2 B76
 2: .2 C76
 3: .2 C76
 4: .2 C76
 5: .2 C76
-6: .2 C76
-7: .2 C76
+6: .2 B76
