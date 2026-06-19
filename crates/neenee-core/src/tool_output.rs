@@ -40,6 +40,24 @@ pub enum ToolOutput {
         exit: Option<i32>,
         truncated: bool,
     },
+    /// Source code / file contents, with an optional language hint (file
+    /// extension) so a future renderer can syntax-highlight. `text` is the
+    /// (possibly truncation-prefixed) content, identical to what the legacy
+    /// string output carried.
+    Code {
+        lang: Option<String>,
+        text: String,
+    },
+    /// A directory / glob listing, as raw entry strings.
+    Listing {
+        entries: Vec<String>,
+    },
+    /// Ripgrep-style search matches, as raw `path:line:content` lines plus the
+    /// pattern, so a future renderer can group/highlight without re-parsing.
+    Matches {
+        pattern: String,
+        lines: Vec<String>,
+    },
 }
 
 impl ToolOutput {
@@ -67,6 +85,9 @@ impl ToolOutput {
                 exit,
                 truncated,
             } => shell_to_text(stdout, stderr, *exit, *truncated),
+            ToolOutput::Code { text, .. } => text.clone(),
+            ToolOutput::Listing { entries } => entries.join("\n"),
+            ToolOutput::Matches { lines, .. } => lines.join("\n"),
         }
     }
 
@@ -78,7 +99,10 @@ impl ToolOutput {
         match self {
             ToolOutput::Error { .. } => true,
             ToolOutput::Shell { exit, .. } => !matches!(*exit, Some(0)),
-            ToolOutput::Text(_) => false,
+            ToolOutput::Text(_)
+            | ToolOutput::Code { .. }
+            | ToolOutput::Listing { .. }
+            | ToolOutput::Matches { .. } => false,
         }
     }
 }
@@ -238,5 +262,32 @@ mod tests {
         let text = o.to_text();
         assert!(text.starts_with("[Output truncated: 9000 chars total]\n"));
         assert!(text.ends_with("[Output was large — use grep or read_file if you need specific parts]"));
+    }
+
+    #[test]
+    fn code_to_text_is_the_text() {
+        let o = ToolOutput::Code {
+            lang: Some("rs".into()),
+            text: "fn main() {}".into(),
+        };
+        assert_eq!(o.to_text(), "fn main() {}");
+        assert!(!o.is_error());
+    }
+
+    #[test]
+    fn listing_to_text_joins_entries() {
+        let o = ToolOutput::Listing {
+            entries: vec!["src/".into(), "Cargo.toml".into()],
+        };
+        assert_eq!(o.to_text(), "src/\nCargo.toml");
+    }
+
+    #[test]
+    fn matches_to_text_joins_lines() {
+        let o = ToolOutput::Matches {
+            pattern: "foo".into(),
+            lines: vec!["a.rs:1:foo".into(), "b.rs:3:foo".into()],
+        };
+        assert_eq!(o.to_text(), "a.rs:1:foo\nb.rs:3:foo");
     }
 }

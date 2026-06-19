@@ -35,6 +35,10 @@ impl Tool for ReadFileTool {
         ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
+        self.call_structured(arguments).await.map(|o| o.to_text())
+    }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -53,22 +57,30 @@ impl Tool for ReadFileTool {
             lines.len()
         };
 
+        let lang = std::path::Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string());
         if start >= lines.len() {
-            return Ok(String::new());
+            return Ok(crate::ToolOutput::Code {
+                lang,
+                text: String::new(),
+            });
         }
         let slice = &lines[start..end];
         let result = slice.join("\n");
 
         // Offload very large outputs
-        if result.len() > 8000 {
-            return Ok(format!(
+        let text = if result.len() > 8000 {
+            format!(
                 "[Output truncated: {} lines, {} chars total]\n{}\n\n[Use offset/limit or read_file to see more]",
                 lines.len(),
                 content.len(),
                 truncate_utf8(&result, 4000)
-            ));
-        }
-        Ok(result)
+            )
+        } else {
+            result
+        };
+        Ok(crate::ToolOutput::Code { lang, text })
     }
 }
 
@@ -373,6 +385,18 @@ impl Tool for GrepTool {
         }
         Ok(stdout)
     }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+        let out = self.call(arguments).await?;
+        let pattern = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|a| a["pattern"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        Ok(crate::ToolOutput::Matches {
+            pattern,
+            lines: out.split('\n').map(str::to_string).collect(),
+        })
+    }
 }
 
 /// List directory contents.
@@ -478,6 +502,13 @@ impl Tool for ListDirTool {
         } else {
             Ok(results.join("\n"))
         }
+    }
+
+    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+        let out = self.call(arguments).await?;
+        Ok(crate::ToolOutput::Listing {
+            entries: out.split('\n').map(str::to_string).collect(),
+        })
     }
 }
 
