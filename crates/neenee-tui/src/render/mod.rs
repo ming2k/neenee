@@ -648,7 +648,8 @@ mod tests {
                     arguments: r#"{"command":"ls"}"#.to_string(),
                     scope: "*".to_string(),
                 };
-                let _ = draw_permission_sheet(f, &request, 0, false, 0, &theme);
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 3);
+                let _ = draw_permission_sheet(f, &request, 0, false, false, 0, rect, &theme);
             })
             .unwrap();
     }

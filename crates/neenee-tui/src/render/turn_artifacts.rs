@@ -707,6 +707,13 @@ fn emit_bash_lines(
     style: Style,
     mut byte_offset: usize,
 ) -> usize {
+    // Shell capture appends a `\n` after every emitted line, so a payload like
+    // `date`'s stdout (`"Fri … 2026\n"`) would otherwise split into
+    // `["Fri … 2026", ""]` and paint a phantom trailing blank row (padded with
+    // spaces). Trim trailing newlines first; internal blank lines are
+    // preserved. This is a no-op for the single-line marker/legacy callers,
+    // whose strings never carry a trailing newline.
+    let text = text.trim_end_matches(&['\r', '\n'][..]);
     for logical_line in text.split('\n') {
         let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_w));
         for wl in &wrapped {
@@ -839,9 +846,8 @@ fn draw_diff_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let bg = ctx.theme.code_bg;
-    let pad = Style::default().bg(bg);
-    let gutter_fg = ctx.theme.dim();
+    let code_bg = ctx.theme.code_bg;
+    let gutter_fg = ctx.theme.muted();
     // Gutter width from the widest 1-based line number, min 2 so single-digit
     // files still align with a leading space.
     let max_no = diff
@@ -852,17 +858,22 @@ fn draw_diff_content(
     let gutter_w = max_no.to_string().len().max(2);
     let sign_w = 2usize; // "+ " / "- " / "  "
     let text_w = inner_w.saturating_sub(gutter_w + 1 + sign_w).max(1);
-    // Tinted backgrounds for the changed word spans (low-chroma, Zen-palette
-    // derived) so the exact edit reads without repainting whole lines.
-    let add_hi_bg = Color::Rgb(40, 58, 45);
-    let del_hi_bg = Color::Rgb(58, 38, 38);
+    // opencode-style banding: the whole row carries a low-chroma tint so
+    // added/removed blocks read at a glance, and the exact edited word sits
+    // on a brighter tint on top of the row band. Context rows stay on the
+    // neutral code surface so they recede.
+    let add_row_bg = Color::Rgb(18, 31, 22);
+    let del_row_bg = Color::Rgb(32, 20, 20);
+    let add_hi_bg = Color::Rgb(42, 64, 48);
+    let del_hi_bg = Color::Rgb(64, 40, 40);
 
     for line in diff {
-        let (sign, base_fg, hi_bg) = match line.op {
-            DiffOp::Add => ('+', ctx.theme.ok(), add_hi_bg),
-            DiffOp::Remove => ('-', ctx.theme.err(), del_hi_bg),
-            DiffOp::Context => (' ', ctx.theme.dim(), bg),
+        let (sign, row_bg, base_fg, hi_bg) = match line.op {
+            DiffOp::Add => ('+', add_row_bg, ctx.theme.ok(), add_hi_bg),
+            DiffOp::Remove => ('-', del_row_bg, ctx.theme.err(), del_hi_bg),
+            DiffOp::Context => (' ', code_bg, ctx.theme.muted(), code_bg),
         };
+        let pad = Style::default().bg(row_bg);
         let no = line.old_no.or(line.new_no).unwrap_or(0);
         let gutter = format!("{:>width$} ", no, width = gutter_w);
 
@@ -875,14 +886,19 @@ fn draw_diff_content(
         for (i, wl) in wrapped.iter().enumerate() {
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(" ".repeat(indent), pad),
-                Span::styled(gutter.clone(), Style::default().bg(bg).fg(gutter_fg)),
+                Span::styled(gutter.clone(), Style::default().bg(row_bg).fg(gutter_fg)),
                 Span::styled(
                     if i == 0 {
                         format!("{} ", sign)
                     } else {
                         "  ".to_string()
                     },
-                    Style::default().bg(bg).fg(base_fg),
+                    // The +/- sign carries the row's accent color and weight so
+                    // the op reads from the gutter even without the row tint.
+                    Style::default()
+                        .bg(row_bg)
+                        .fg(base_fg)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ];
             if highlight_frags && i == 0 {
@@ -893,14 +909,14 @@ fn draw_diff_content(
                             .fg(base_fg)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().bg(bg).fg(base_fg)
+                        Style::default().bg(row_bg).fg(base_fg)
                     };
                     spans.push(Span::styled(frag.text.clone(), style));
                 }
             } else {
                 spans.push(Span::styled(
                     wl.text.clone(),
-                    Style::default().bg(bg).fg(base_fg),
+                    Style::default().bg(row_bg).fg(base_fg),
                 ));
             }
             let used = indent + gutter_w + 1 + sign_w + wl.text.width();
@@ -966,6 +982,7 @@ pub(super) fn draw_subagent_inline_step(
     // is a steady accent rather than a breathing one).
     let header_color = match status {
         ToolStatus::Failed => theme.error_fg,
+        ToolStatus::Denied => theme.warn(),
         ToolStatus::Cancelled => theme.text_muted,
         ToolStatus::Ok => if focused { theme.text } else { theme.text_muted },
         ToolStatus::Running => theme.info,

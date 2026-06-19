@@ -15,7 +15,13 @@
 //! type grows with real callers rather than speculatively.
 
 /// Typed result of a tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Neither `PartialEq` nor `Eq` is derived: the [`ToolOutput::Subagent`]
+/// variant carries `Vec<Message>` and `Message` does not implement either
+/// trait (its `Vec<ImagePart>` base64 payloads make structural equality
+/// expensive and uninteresting). Compare via [`ToolOutput::to_text`] or by
+/// pattern-matching on the variant in tests.
+#[derive(Debug, Clone)]
 pub enum ToolOutput {
     /// Plain text or markdown prose. The back-compat variant produced by the
     /// default [`Tool::call_structured`](crate::Tool::call_structured) for any
@@ -29,6 +35,10 @@ pub enum ToolOutput {
         message: String,
         detail: Option<String>,
     },
+    /// The user explicitly denied permission for this tool call. Distinct from
+    /// [`ToolOutput::Error`] because the action was aborted by the user rather
+    /// than failing on its own, and it signals the agent turn to stop.
+    PermissionDenied { tool: String },
     /// A shell command execution. Carries stdout/stderr/exit separately so the
     /// UI never has to string-sniff for `Exit N` / `STDOUT:` / `STDERR:`
     /// markers. `truncated` records whether the composed output exceeded the
@@ -67,6 +77,16 @@ pub enum ToolOutput {
         old: String,
         new: String,
     },
+    /// A read-only sub-agent run (produced by the `task` tool). Carries the
+    /// sub-agent's full internal transcript so it can be persisted on the
+    /// parent session and replayed on resume, plus the actual token usage so
+    /// parent-side goal accounting no longer under-counts by 100x. `summary`
+    /// is the short text the parent model sees as the tool result.
+    Subagent {
+        summary: String,
+        messages: Vec<crate::Message>,
+        usage: crate::TokenUsage,
+    },
 }
 
 /// Kind of file change in a [`ToolOutput::Patch`].
@@ -98,6 +118,10 @@ impl ToolOutput {
                 Some(d) if !d.is_empty() => format!("Error: {}\n{}", message, d),
                 _ => format!("Error: {}", message),
             },
+            ToolOutput::PermissionDenied { tool } => format!(
+                "Permission denied for tool '{}'. Do not retry the same call.",
+                tool
+            ),
             ToolOutput::Shell {
                 command: _,
                 stdout,
@@ -113,6 +137,10 @@ impl ToolOutput {
                 PatchOp::Edit => format!("Edited '{}' successfully", path),
                 PatchOp::Delete => format!("Deleted '{}'", path),
             },
+            // The parent model sees the sub-agent's textual summary only; the
+            // structured transcript travels out-of-band via the parent harness
+            // attaching `messages` to the Tool-role message's `children`.
+            ToolOutput::Subagent { summary, .. } => summary.clone(),
         }
     }
 
@@ -123,12 +151,30 @@ impl ToolOutput {
     pub fn is_error(&self) -> bool {
         match self {
             ToolOutput::Error { .. } => true,
+            ToolOutput::PermissionDenied { .. } => true,
             ToolOutput::Shell { exit, .. } => !matches!(*exit, Some(0)),
+            // Sub-agent failure is signalled by the `summary` starting with
+            // `Error:` (mirrors the legacy `Text` convention). We do not add
+            // an explicit `error` field because the failure surface is just
+            // "the agent didn't produce a useful final answer" — the partial
+            // transcript is still valuable and travels alongside.
+            ToolOutput::Subagent { summary, .. } => summary.starts_with("Error"),
             ToolOutput::Text(_)
             | ToolOutput::Code { .. }
             | ToolOutput::Listing { .. }
             | ToolOutput::Matches { .. }
             | ToolOutput::Patch { .. } => false,
+        }
+    }
+
+    /// If this output is a [`ToolOutput::Subagent`], return its nested
+    /// transcript and token usage so the harness can attach `children` to the
+    /// parent's tool-result message and accumulate real cost into the parent
+    /// turn's accounting. Returns `None` for every other variant.
+    pub fn subagent_payload(&self) -> Option<(&[crate::Message], crate::TokenUsage)> {
+        match self {
+            ToolOutput::Subagent { messages, usage, .. } => Some((messages, *usage)),
+            _ => None,
         }
     }
 }
@@ -200,7 +246,8 @@ mod tests {
     #[test]
     fn text_round_trips() {
         assert_eq!(ToolOutput::text("hi").to_text(), "hi");
-        assert_eq!(ToolOutput::from("x".to_string()), ToolOutput::Text("x".into()));
+        let v = ToolOutput::from("x".to_string());
+        assert!(matches!(v, ToolOutput::Text(s) if s == "x"));
     }
 
     #[test]
@@ -315,5 +362,52 @@ mod tests {
             lines: vec!["a.rs:1:foo".into(), "b.rs:3:foo".into()],
         };
         assert_eq!(o.to_text(), "a.rs:1:foo\nb.rs:3:foo");
+    }
+
+    #[test]
+    fn subagent_to_text_returns_summary_only() {
+        // The parent model only sees the summary; the structured transcript
+        // travels out-of-band. This is the contract that lets us persist the
+        // sub-agent transcript without polluting the parent's context window.
+        let usage = crate::TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+            total_tokens: 1200,
+        };
+        let messages = vec![crate::Message::new(crate::Role::Assistant, "internal")];
+        let o = ToolOutput::Subagent {
+            summary: "external summary".into(),
+            messages,
+            usage,
+        };
+        assert_eq!(o.to_text(), "external summary");
+        assert!(!o.is_error());
+    }
+
+    #[test]
+    fn subagent_payload_returns_messages_and_usage() {
+        let usage = crate::TokenUsage {
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            total_tokens: 60,
+        };
+        let messages = vec![
+            crate::Message::new(crate::Role::System, "sys"),
+            crate::Message::new(crate::Role::Assistant, "answer"),
+        ];
+        let o = ToolOutput::Subagent {
+            summary: "s".into(),
+            messages: messages.clone(),
+            usage,
+        };
+        let (got_messages, got_usage) = o.subagent_payload().expect("subagent payload");
+        assert_eq!(got_messages.len(), 2);
+        assert_eq!(got_usage, usage);
+    }
+
+    #[test]
+    fn non_subagent_payload_returns_none() {
+        let o = ToolOutput::text("plain");
+        assert!(o.subagent_payload().is_none());
     }
 }

@@ -17,8 +17,10 @@ pub enum ToolStepStatus {
     Running,
     /// Finished with a non-error output.
     Ok,
-    /// Finished with an output beginning with `Error` (core convention).
+    /// Finished with an explicit error output.
     Failed,
+    /// Aborted because the user denied permission for the call.
+    Denied,
     /// Aborted mid-flight (e.g. the user interrupted the turn). Terminal, just
     /// like `Ok`/`Failed`: a later result or cancel event is ignored.
     Cancelled,
@@ -31,7 +33,7 @@ impl ToolStepStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum MessageKind {
     Text,
     ToolStep {
@@ -167,7 +169,7 @@ pub fn estimate_context_tokens(messages: &[TranscriptMessage]) -> usize {
 }
 
 /// A structured transcript message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TranscriptMessage {
     pub role: Role,
     pub blocks: Vec<Block>,
@@ -268,13 +270,16 @@ impl TranscriptMessage {
         }
         let output = output.into();
         // Classify from the structured result first (data-level: a non-zero
-        // shell exit, an explicit `ToolOutput::Error`). The `starts_with`
-        // text fallback is kept so unmigrated tools that still embed
-        // `"Error: …"` in a `Text` result keep classifying as failed — and so
-        // this fixes the latent bug where a bash failure (`Exit N …`, which
-        // does NOT start with "Error") was misclassified as `Ok`.
-        let failed = structured.is_error() || output.starts_with("Error");
-        *status = if failed {
+        // shell exit, an explicit `ToolOutput::Error`). Permission denial gets
+        // its own status so the UI can show it distinctly from a runtime error.
+        // The `starts_with` text fallback is kept so unmigrated tools that still
+        // embed `"Error: …"` in a `Text` result keep classifying as failed.
+        *status = if matches!(
+            structured,
+            neenee_core::ToolOutput::PermissionDenied { .. }
+        ) {
+            ToolStepStatus::Denied
+        } else if structured.is_error() || output.starts_with("Error") {
             ToolStepStatus::Failed
         } else {
             ToolStepStatus::Ok
@@ -543,6 +548,24 @@ impl TranscriptMessage {
         }
     }
 
+    /// Replace a sub-agent task step's children with the supplied transcript.
+    /// Used by the resume path to rebuild the nested view from persisted
+    /// `Message::children`. Live updates still go through `push_subtask_event`
+    /// — this is purely for restoring from disk. No-op for non-tool-step
+    /// messages or steps that already have children (the live event stream
+    /// always wins over the snapshot to avoid clobbering in-progress runs).
+    pub fn attach_subagent_children(&mut self, children: Vec<TranscriptMessage>) {
+        if let MessageKind::ToolStep {
+            children: existing,
+            ..
+        } = &mut self.kind
+        {
+            if existing.is_empty() {
+                *existing = children;
+            }
+        }
+    }
+
     /// Short label for the sub-agent (its task description), shown in the
     /// sub-agent view's navigation bar.
     pub fn subagent_label(&self) -> String {
@@ -578,6 +601,7 @@ impl TranscriptMessage {
         let tool_calls = children.iter().filter(|child| child.is_tool_step()).count();
         let line = match status {
             ToolStepStatus::Failed => format!("↳ Failed · {} tool calls", tool_calls),
+            ToolStepStatus::Denied => format!("↳ Denied · {} tool calls", tool_calls),
             ToolStepStatus::Cancelled => format!("↳ Cancelled · {} tool calls", tool_calls),
             ToolStepStatus::Ok => format!(
                 "↳ Completed · {} tool calls · {}",
@@ -701,6 +725,9 @@ impl TranscriptMessage {
             ToolStepStatus::Failed => {
                 format!("{} · failed {}", summary, duration_text(*duration_ms))
             }
+            ToolStepStatus::Denied => {
+                format!("{} · denied {}", summary, duration_text(*duration_ms))
+            }
             ToolStepStatus::Cancelled => {
                 format!("{} · cancelled {}", summary, duration_text(*duration_ms))
             }
@@ -752,6 +779,7 @@ impl TranscriptMessage {
                 ToolStepStatus::Running => String::new(),
                 ToolStepStatus::Ok => format!(" · {}", duration_text(*duration_ms)),
                 ToolStepStatus::Failed => format!(" · failed {}", duration_text(*duration_ms)),
+                ToolStepStatus::Denied => format!(" · denied {}", duration_text(*duration_ms)),
                 ToolStepStatus::Cancelled => format!(" · cancelled {}", duration_text(*duration_ms)),
             };
             self.raw = format!("{}{}", summary, suffix);

@@ -1,4 +1,5 @@
 pub mod clipboard;
+pub mod config;
 pub mod document;
 pub mod fuzzy;
 pub mod input;
@@ -529,6 +530,10 @@ pub struct App {
     /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
     pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
+    /// Whether the inline permission sheet is expanded to show the full
+    /// description + arguments. Collapsed by default so the prompt stays
+    /// brief; "Details" toggles this.
+    pub permission_show_details: bool,
     pub permission_scroll: usize,
     pub permission_max_scroll: usize,
     pub input_history: Vec<String>,
@@ -549,6 +554,10 @@ pub struct App {
     /// Global tool-step density (false = Compact default, true = Comfortable:
     /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
+    /// TUI display config (`[tui]` table of `config.toml`): per-step-kind
+    /// default expand state. Shared with the response listener so live and
+    /// restored steps both honor it.
+    pub tui_config: Arc<config::TuiConfig>,
     /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
     /// overlay. `None` when the overlay is closed.
     pub tool_detail_message_idx: Option<usize>,
@@ -1097,6 +1106,7 @@ pub async fn run_tui(
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
+    tui_config: config::TuiConfig,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
@@ -1118,7 +1128,8 @@ pub async fn run_tui(
     // so any later SIGTERM/SIGINT/SIGHUP restores it instead of stranding it.
     spawn_signal_guard();
 
-    let restored = transcript_messages_from_core(initial_messages);
+    let tui_config = Arc::new(tui_config);
+    let restored = transcript_messages_from_core(initial_messages, &tui_config);
     let messages = Arc::new(Mutex::new(restored));
     let messages_clone = messages.clone();
     let should_quit = Arc::new(AtomicBool::new(false));
@@ -1154,6 +1165,9 @@ pub async fn run_tui(
     // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
     let tool_density = Arc::new(AtomicBool::new(false));
     let tool_density_clone = tool_density.clone();
+    // TUI display config shared with the response listener so live tool steps
+    // and reasoning traces honor the per-step-kind default expand state.
+    let tui_config_clone = tui_config.clone();
 
     // Spawn response listener
     tokio::spawn(async move {
@@ -1230,9 +1244,14 @@ pub async fn run_tui(
                             msgs.pop();
                         }
                         let (provider, model) = attribution(&cp_clone, &cm_clone).await;
-                        msgs.push(
-                            TranscriptMessage::thinking(delta).with_attribution(provider, model),
-                        );
+                        let mut thinking =
+                            TranscriptMessage::thinking(delta).with_attribution(provider, model);
+                        // Honor the configured default expand state for
+                        // reasoning traces (`[tui.default_expanded] thinking`).
+                        if tui_config_clone.thinking_default_expanded() {
+                            thinking.set_thinking_expanded(true);
+                        }
+                        msgs.push(thinking);
                         reasoning_start = Some(std::time::Instant::now());
                     }
                 }
@@ -1281,12 +1300,17 @@ pub async fn run_tui(
                     *activity_clone.lock().await = tool_activity_status(&name).to_string();
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    let mut message =
-                        TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
                     // Respect the global density: in Comfortable mode new tool
                     // steps spawn expanded so mid-turn calls match the user's
-                    // last Ctrl+T choice.
-                    if tool_density_clone.load(Ordering::SeqCst) {
+                    // last Ctrl+T choice. Some tools (e.g. edit_file) default
+                    // to expanded even in Compact mode so their diff is shown
+                    // without an extra toggle; the `[tui]` config can override
+                    // this per tool.
+                    let expanded = tool_density_clone.load(Ordering::SeqCst)
+                        || tui_config_clone.tool_default_expanded(&name);
+                    let mut message =
+                        TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
+                    if expanded {
                         message.set_tool_step_expanded(true);
                     }
                     msgs.push(message);
@@ -1365,7 +1389,8 @@ pub async fn run_tui(
                     messages_clone.lock().await.clear();
                 }
                 AgentResponse::ConversationReplaced(messages) => {
-                    *messages_clone.lock().await = transcript_messages_from_core(messages);
+                    *messages_clone.lock().await =
+                        transcript_messages_from_core(messages, &tui_config_clone);
                 }
                 AgentResponse::SessionsOverview(sessions) => {
                     *sessions_overview_clone.lock().await = sessions;
@@ -1474,6 +1499,7 @@ pub async fn run_tui(
         pending_permission: None,
         sessions_overview: Vec::new(),
         permission_confirm_always: false,
+        permission_show_details: false,
         permission_scroll: 0,
         permission_max_scroll: 0,
         input_history,
@@ -1484,6 +1510,7 @@ pub async fn run_tui(
         layout_map: LayoutMap::new(),
         hovered_reasoning: None,
         tool_density: tool_density.clone(),
+        tui_config: tui_config.clone(),
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,
@@ -1609,12 +1636,17 @@ async fn run_app_loop<B: Backend>(
                 app.active_modal = Modal::Permission;
                 app.modal_index = 0;
                 app.permission_scroll = 0;
+                app.permission_show_details = false;
+                // A permission prompt is urgent: hand keyboard focus to the
+                // sheet so the next keypress decides it, not the transcript.
+                app.focus_zone = input::FocusZone::Compose;
             } else if app.pending_permission.is_none() && app.active_modal == Modal::Permission {
                 app.active_modal = Modal::None;
                 app.modal_index = 0;
                 app.permission_confirm_always = false;
                 app.permission_scroll = 0;
                 app.permission_max_scroll = 0;
+                app.permission_show_details = false;
             }
             // Sessions picker: refresh rows and open the modal on request.
             app.sessions_overview = runtime.sessions_overview.lock().await.clone();
@@ -1689,8 +1721,10 @@ async fn run_app_loop<B: Backend>(
                 app.input.clone()
             };
 
-            // Overlay modals (Models, Sessions, Help, Permission) replace the
-            // entire chrome. Modals that type into the input line keep it.
+            // Overlay modals (Models, Sessions, Help) replace the entire
+            // chrome. Modals that type into the input line keep it. The
+            // permission sheet replaces only the input box, so the transcript
+            // stays visible and scrollable — it keeps the chrome too.
             let chrome_hidden = !matches!(
                 app.active_modal,
                 Modal::None
@@ -1698,6 +1732,7 @@ async fn run_app_loop<B: Backend>(
                     | Modal::Endpoint
                     | Modal::ModelName
                     | Modal::HistorySearch
+                    | Modal::Permission
             );
 
             // When zoomed into a sub-agent, render its child messages and show
@@ -1719,6 +1754,12 @@ async fn run_app_loop<B: Backend>(
                 })
             });
 
+            // Suppress the hover affordance whenever a full-overlay modal is
+            // open so no stale highlight bleeds through. The permission sheet
+            // keeps the transcript interactive, so it is exempted.
+            let chrome_interactive =
+                matches!(app.active_modal, Modal::None | Modal::Permission);
+
             let transcript_render = render::draw_transcript(
                 f,
                 &mut layout_map,
@@ -1732,12 +1773,10 @@ async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    // Suppress the hover affordance whenever a modal is open so
-                    // no stale highlight bleeds through an overlay.
-                    hovered_reasoning: (app.active_modal == Modal::None)
+                    hovered_reasoning: chrome_interactive
                         .then_some(app.hovered_reasoning)
                         .flatten(),
-                    focused_target: (app.active_modal == Modal::None)
+                    focused_target: chrome_interactive
                         .then_some(app.focused_target)
                         .flatten(),
                     theme: &app.theme,
@@ -1779,20 +1818,39 @@ async fn run_app_loop<B: Backend>(
             // `focused` flag drops the panel to its dim "blurred" palette and
             // hides the caret whenever keyboard focus is on the conversation
             // stream (Browse zone), so the user can see at a glance which
-            // surface the next keypress will land on.
+            // surface the next keypress will land on. A pending permission
+            // request replaces the composer with the inline permission sheet.
             if !chrome_hidden {
-                let compose_focused = app.focus_zone.is_compose();
-                render::draw_composer(
-                    f,
-                    input_rect,
-                    &masked_input,
-                    app.byte_cursor(),
-                    compose_focused,
-                    &app.theme,
-                    &mut layout_map,
-                    app.active_modal != Modal::ApiKey,
-                    &mut app.input_scroll,
-                );
+                if app.active_modal == Modal::Permission {
+                    if let Some(request) = app.pending_permission.as_ref() {
+                        let max_scroll = render::draw_permission_sheet(
+                            f,
+                            request,
+                            app.modal_index,
+                            app.permission_confirm_always,
+                            app.permission_show_details,
+                            app.permission_scroll,
+                            input_rect,
+                            &app.theme,
+                        );
+                        app.permission_max_scroll = max_scroll;
+                        app.permission_scroll =
+                            app.permission_scroll.min(app.permission_max_scroll);
+                    }
+                } else {
+                    let compose_focused = app.focus_zone.is_compose();
+                    render::draw_composer(
+                        f,
+                        input_rect,
+                        &masked_input,
+                        app.byte_cursor(),
+                        compose_focused,
+                        &app.theme,
+                        &mut layout_map,
+                        app.active_modal != Modal::ApiKey,
+                        &mut app.input_scroll,
+                    );
+                }
             }
 
             // Now that `view_messages` is no longer borrowed, persist the
@@ -1854,21 +1912,7 @@ async fn run_app_loop<B: Backend>(
                         &app.theme,
                     );
                 }
-                Modal::Permission => {
-                    if let Some(request) = app.pending_permission.as_ref() {
-                        let max_scroll = render::draw_permission_sheet(
-                            f,
-                            request,
-                            app.modal_index,
-                            app.permission_confirm_always,
-                            app.permission_scroll,
-                            &app.theme,
-                        );
-                        app.permission_max_scroll = max_scroll;
-                        app.permission_scroll =
-                            app.permission_scroll.min(app.permission_max_scroll);
-                    }
-                }
+                Modal::Permission => {}
                 Modal::ApiKey => {
                     let solution = app
                         .setup_solution
@@ -2032,6 +2076,7 @@ async fn run_app_loop<B: Backend>(
                     has_exact_suggestion,
                     suggestion_index: app.suggestion_index,
                     permission_confirm_always: app.permission_confirm_always,
+                    permission_show_details: app.permission_show_details,
                     in_subagent_view,
                     has_focused_target: app.focused_target.is_some(),
                     focus_zone: app.focus_zone,
@@ -2268,9 +2313,10 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::ScrollUp => {
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_sub(1);
-                    } else if app.active_modal == Modal::Permission {
-                        app.permission_scroll = app.permission_scroll.saturating_sub(4);
                     } else {
+                        // While a permission sheet is open the transcript stays
+                        // scrollable, so the wheel / page keys drive the
+                        // conversation behind it, not the sheet's own body.
                         app.follow_bottom = false;
                         app.pin_header_line = None;
                         // Mouse wheel tick = 4 lines, not 1, so scrolling feels fast
@@ -2281,11 +2327,6 @@ async fn run_app_loop<B: Backend>(
                 input::InputAction::ScrollDown => {
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
-                    } else if app.active_modal == Modal::Permission {
-                        app.permission_scroll = app
-                            .permission_scroll
-                            .saturating_add(4)
-                            .min(app.permission_max_scroll);
                     } else {
                         app.pin_header_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -2295,50 +2336,38 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::ScrollPageUp => {
-                    if app.active_modal == Modal::Permission {
-                        let step = app.view_height.saturating_sub(1).max(1) as usize;
-                        app.permission_scroll = app.permission_scroll.saturating_sub(step);
-                    } else {
-                        app.follow_bottom = false;
-                        app.pin_header_line = None;
-                        // Leave one line of overlap so the reader keeps context.
-                        let step = app.view_height.saturating_sub(1).max(1);
-                        app.scroll = app.scroll.saturating_sub(step);
-                    }
+                    app.follow_bottom = false;
+                    app.pin_header_line = None;
+                    // Leave one line of overlap so the reader keeps context.
+                    let step = app.view_height.saturating_sub(1).max(1);
+                    app.scroll = app.scroll.saturating_sub(step);
                 }
                 input::InputAction::ScrollPageDown => {
-                    if app.active_modal == Modal::Permission {
-                        let step = app.view_height.saturating_sub(1).max(1) as usize;
-                        app.permission_scroll = app
-                            .permission_scroll
-                            .saturating_add(step)
-                            .min(app.permission_max_scroll);
-                    } else {
-                        app.pin_header_line = None;
-                        let step = app.view_height.saturating_sub(1).max(1);
-                        app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
-                        if app.scroll >= app.max_scroll {
-                            app.follow_bottom = true;
-                        }
+                    app.pin_header_line = None;
+                    let step = app.view_height.saturating_sub(1).max(1);
+                    app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
+                    if app.scroll >= app.max_scroll {
+                        app.follow_bottom = true;
                     }
                 }
                 input::InputAction::ScrollTop => {
-                    if app.active_modal == Modal::Permission {
-                        app.permission_scroll = 0;
-                    } else {
-                        app.follow_bottom = false;
-                        app.pin_header_line = None;
-                        app.scroll = 0;
-                    }
+                    app.follow_bottom = false;
+                    app.pin_header_line = None;
+                    app.scroll = 0;
                 }
                 input::InputAction::ScrollBottom => {
-                    if app.active_modal == Modal::Permission {
-                        app.permission_scroll = app.permission_max_scroll;
-                    } else {
-                        app.pin_header_line = None;
-                        app.scroll = app.max_scroll;
-                        app.follow_bottom = true;
-                    }
+                    app.pin_header_line = None;
+                    app.scroll = app.max_scroll;
+                    app.follow_bottom = true;
+                }
+                input::InputAction::PermissionDetailsUp => {
+                    app.permission_scroll = app.permission_scroll.saturating_sub(1);
+                }
+                input::InputAction::PermissionDetailsDown => {
+                    app.permission_scroll = app
+                        .permission_scroll
+                        .saturating_add(1)
+                        .min(app.permission_max_scroll);
                 }
                 input::InputAction::CopySelection => {
                     if let Some(text) = extract_selection_text(
@@ -2624,7 +2653,7 @@ async fn run_app_loop<B: Backend>(
                         };
                     }
                     Modal::Permission => {
-                        let count = if app.permission_confirm_always { 2 } else { 3 };
+                        let count = if app.permission_confirm_always { 2 } else { 4 };
                         app.modal_index = if app.modal_index == 0 {
                             count - 1
                         } else {
@@ -2657,7 +2686,7 @@ async fn run_app_loop<B: Backend>(
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::Permission => {
-                        let count = if app.permission_confirm_always { 2 } else { 3 };
+                        let count = if app.permission_confirm_always { 2 } else { 4 };
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::Sessions => {
@@ -2673,20 +2702,34 @@ async fn run_app_loop<B: Backend>(
                 },
                 input::InputAction::PermissionSubmit => {
                     if app.permission_confirm_always {
+                        // Confirm-always sub-step: index 0 = Confirm, 1 = Cancel.
                         if app.modal_index == 1 {
                             app.permission_confirm_always = false;
                             app.modal_index = 1;
                             break 'event_batch;
                         }
-                    } else if app.modal_index == 1 {
-                        app.permission_confirm_always = true;
-                        app.modal_index = 0;
-                        break 'event_batch;
+                        // index 0: fall through to send Always.
+                    } else {
+                        // "Details" (index 3): expand/collapse the body without
+                        // deciding, so the user can review before acting.
+                        if app.modal_index == 3 {
+                            app.permission_show_details = !app.permission_show_details;
+                            app.permission_scroll = 0;
+                            break 'event_batch;
+                        }
+                        // "Always allow" (index 1): gate behind a confirm step.
+                        if app.modal_index == 1 {
+                            app.permission_confirm_always = true;
+                            app.permission_show_details = false;
+                            app.modal_index = 0;
+                            break 'event_batch;
+                        }
                     }
                     if let Some(request) = app.pending_permission.take() {
                         let decision = if app.permission_confirm_always {
                             PermissionDecision::Always
                         } else {
+                            // index 0 = Allow once, index 2 = Reject.
                             match app.modal_index {
                                 0 => PermissionDecision::Once,
                                 _ => PermissionDecision::Reject,
@@ -2696,6 +2739,7 @@ async fn run_app_loop<B: Backend>(
                         app.active_modal = Modal::None;
                         app.modal_index = 0;
                         app.permission_confirm_always = false;
+                        app.permission_show_details = false;
                         let _ = app.tx.send(AgentRequest::PermissionReply {
                             request_id: request.id,
                             decision,
@@ -2708,6 +2752,7 @@ async fn run_app_loop<B: Backend>(
                         app.active_modal = Modal::None;
                         app.modal_index = 0;
                         app.permission_confirm_always = false;
+                        app.permission_show_details = false;
                         let _ = app.tx.send(AgentRequest::PermissionReply {
                             request_id: request.id,
                             decision: PermissionDecision::Reject,
@@ -2830,6 +2875,23 @@ async fn run_app_loop<B: Backend>(
                         app.focused_target = None;
                         app.drag.cancel();
                     }
+                }
+                input::InputAction::RightClick { x, y } => {
+                    // Right-click on a tool-step header opens the full-output
+                    // detail overlay. For permission-denied steps this is the
+                    // fastest way to surface the "Permission denied" message
+                    // and the terminated-turn feedback.
+                    if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
+                        if cursor.block_idx == TOOL_STEP_BLOCK_IDX {
+                            let mi = cursor.message_idx;
+                            app.focused_target = Some(InteractiveTarget::tool_step(mi));
+                            app.tool_detail_message_idx = Some(mi);
+                            app.tool_detail_scroll = 0;
+                            app.active_modal = Modal::ToolStepDetail;
+                        }
+                    }
+                    app.selection = SelectionState::None;
+                    app.drag.cancel();
                 }
                 input::InputAction::SelectionUpdate { x, y } => {
                     // Keep a cell-confined drag from leaking past `│` borders.
@@ -3193,6 +3255,7 @@ pub async fn start_tui(
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
+    tui_config: config::TuiConfig,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     run_tui(
         tx,
@@ -3203,6 +3266,7 @@ pub async fn start_tui(
         initial_messages,
         custom_commands,
         mcp_statuses,
+        tui_config,
     )
     .await
 }
@@ -3236,7 +3300,10 @@ fn transcript_message_from_core(message: Message) -> Option<TranscriptMessage> {
     }
 }
 
-fn transcript_messages_from_core(messages: Vec<Message>) -> Vec<TranscriptMessage> {
+fn transcript_messages_from_core(
+    messages: Vec<Message>,
+    config: &config::TuiConfig,
+) -> Vec<TranscriptMessage> {
     let mut restored = Vec::new();
     for mut message in messages {
         if message.hidden || message.role == Role::System {
@@ -3252,13 +3319,24 @@ fn transcript_messages_from_core(messages: Vec<Message>) -> Vec<TranscriptMessag
                 thinking.provider = provider.clone();
                 thinking.model = model.clone();
                 thinking.set_thinking_duration(0);
+                // Honor the configured default expand state for reasoning
+                // traces so resumed sessions match live behavior.
+                if config.thinking_default_expanded() {
+                    thinking.set_thinking_expanded(true);
+                }
                 restored.push(thinking);
             }
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
                     // Historical results match by tool name, so use it as the id.
+                    let expanded = config.tool_default_expanded(&call.name);
                     let mut step =
                         TranscriptMessage::tool_step(call.name.clone(), call.name, call.arguments);
+                    // Apply the per-tool default expand so restored steps match
+                    // live behavior (see the ToolCall handler).
+                    if expanded {
+                        step.set_tool_step_expanded(true);
+                    }
                     step.provider = provider.clone();
                     step.model = model.clone();
                     restored.push(step);
@@ -3357,6 +3435,7 @@ mod tests {
         let message = Message {
             role: Role::Assistant,
             content: String::new(),
+            content_blob: None,
             display_content: None,
             reasoning_content: Some("step-by-step reasoning".to_string()),
             tool_calls: None,
@@ -3365,9 +3444,11 @@ mod tests {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         };
 
-        let restored = transcript_messages_from_core(vec![message]);
+        let restored = transcript_messages_from_core(vec![message], &config::TuiConfig::default());
         assert_eq!(restored.len(), 1);
         let thinking = &restored[0];
         assert!(thinking.is_thinking());
@@ -3384,6 +3465,7 @@ mod tests {
         let message = Message {
             role: Role::Assistant,
             content: String::new(),
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
@@ -3396,6 +3478,8 @@ mod tests {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         };
 
         let restored = transcript_message_from_core(message).unwrap();
@@ -3408,7 +3492,8 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: String::new(),
-                display_content: None,
+                content_blob: None,
+            display_content: None,
                 reasoning_content: None,
                 tool_calls: Some(vec![
                     ToolCall {
@@ -3427,6 +3512,8 @@ mod tests {
                 provider: None,
                 model: None,
                 hidden: false,
+                children: None,
+                subagent_meta: None,
             },
             Message::tool_result(
                 &ToolCall {
@@ -3446,7 +3533,7 @@ mod tests {
             ),
         ];
 
-        let mut restored = transcript_messages_from_core(messages);
+        let mut restored = transcript_messages_from_core(messages, &config::TuiConfig::default());
         assert_eq!(restored.len(), 2);
         restored[0].set_tool_step_expanded(true);
         restored[1].set_tool_step_expanded(true);
@@ -3722,6 +3809,7 @@ mod tests {
             pending_permission: None,
             sessions_overview: Vec::new(),
             permission_confirm_always: false,
+            permission_show_details: false,
             permission_scroll: 0,
             permission_max_scroll: 0,
             input_history: Vec::new(),
@@ -3732,6 +3820,7 @@ mod tests {
             layout_map: LayoutMap::new(),
             hovered_reasoning: None,
             tool_density: Arc::new(AtomicBool::new(false)),
+            tui_config: Arc::new(config::TuiConfig::default()),
             tool_detail_message_idx: None,
             tool_detail_scroll: 0,
             focused_target: None,

@@ -40,6 +40,17 @@ fn composer_wrapped(input: &str, text_width: usize, byte_cursor: usize) -> Vec<W
             end_byte: byte_cursor.max(last_end),
         });
     }
+    // Always keep at least one row so an empty input box still records a
+    // layout-map region: without it a click inside the empty box can't
+    // resolve to a cursor and the click handler never switches keyboard
+    // focus back to Compose (it stays stuck in Browse).
+    if wrapped.is_empty() {
+        wrapped.push(WrappedLine {
+            text: String::new(),
+            start_byte: 0,
+            end_byte: 0,
+        });
+    }
     wrapped
 }
 

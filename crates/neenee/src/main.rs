@@ -89,14 +89,22 @@ impl Provider for ProxyProvider {
     }
 }
 
+mod blobs;
 mod config;
+mod embedding;
+mod events;
+mod fsutil;
+mod lock;
+mod paths;
+mod search_tool;
 mod session;
 use config::Config;
 use session::{
-    discard_trailing_loop_prompts, estimate_chars, goals_db_path, run_compaction,
-    CompactionCheckpoint, CompactionDecision, CompactionHooks, CompactionResult,
-    LoopCheckpoint, SessionStore,
+    discard_trailing_loop_prompts, estimate_chars, run_compaction, CompactionCheckpoint,
+    CompactionDecision, CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
 };
+use embedding::EmbeddingStore;
+use search_tool::SearchHistoryTool;
 
 /// Compaction-related settings threaded through every turn.
 #[derive(Clone)]
@@ -1028,21 +1036,37 @@ enum StartupMode {
     Fresh,
     Resume(Option<String>),
     Picker,
+    Doctor,
 }
 
-fn parse_args(args: Vec<String>) -> StartupMode {
-    match args.as_slice() {
+fn parse_args(args: Vec<String>) -> (StartupMode, Option<std::path::PathBuf>) {
+    let mut iter = args.into_iter().peekable();
+    let mut project: Option<std::path::PathBuf> = None;
+    let mut rest = Vec::new();
+    while let Some(arg) = iter.next() {
+        if arg == "--project" {
+            project = iter.next().map(std::path::PathBuf::from);
+        } else if let Some(value) = arg.strip_prefix("--project=") {
+            project = Some(std::path::PathBuf::from(value));
+        } else {
+            rest.push(arg);
+        }
+    }
+
+    let mode = match rest.as_slice() {
         [] => StartupMode::Fresh,
         [cmd] if cmd == "resume" => StartupMode::Picker,
         [cmd, id] if cmd == "resume" => StartupMode::Resume(Some(id.clone())),
+        [cmd, ..] if cmd == "doctor" => StartupMode::Doctor,
         [cmd, ..] => {
             eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)",
+                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity",
                 cmd
             );
             std::process::exit(2);
         }
-    }
+    };
+    (mode, project)
 }
 
 async fn build_sessions_overview(session: &SessionStore) -> Vec<SessionOverview> {
@@ -1116,7 +1140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut config = Config::load();
-    let goal_store = GoalStore::open(goals_db_path()).await?;
+    let goal_store = GoalStore::open(paths::get().goals_db()).await?;
     let goal_service = GoalService::new(goal_store);
 
     // Initialize Agent logic
@@ -1216,6 +1240,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mcp = load_mcp_tools(&config.mcp).await;
     let mcp_statuses = mcp.statuses;
 
+    // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
+    // `neenee doctor` -> verify stored session integrity.
+    let (startup, project_override) = parse_args(std::env::args().skip(1).collect());
+    let project_root = project_override.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
+    // C9: per-project advisory lock. Doctor intentionally skips it so it can
+    // inspect stores while another instance is running.
+    let _lock = if matches!(startup, StartupMode::Doctor) {
+        None
+    } else {
+        Some(lock::ProcessLock::acquire(
+            &paths::get().project_lock_file(&project_root),
+        )?)
+    };
+
+    if matches!(startup, StartupMode::Doctor) {
+        session::run_doctor(project_override.as_deref()).await?;
+        return Ok(());
+    }
+
+    // Session loading honors the startup mode. The previous active session is
+    // archived and remains available through /resume or /session resume.
+    let session = Arc::new(SessionStore::load_for_project(project_root.clone()));
+    let open_picker_on_start = match &startup {
+        StartupMode::Fresh => {
+            session.reset().await.map_err(std::io::Error::other)?;
+            false
+        }
+        StartupMode::Picker => {
+            session.reset().await.map_err(std::io::Error::other)?;
+            true
+        }
+        StartupMode::Resume(id) => {
+            if let Err(error) = session.resume(id.as_deref()).await {
+                eprintln!("resume failed: {error}; starting a fresh session.");
+                session.reset().await.map_err(std::io::Error::other)?;
+            }
+            false
+        }
+        StartupMode::Doctor => unreachable!("doctor returns before this match"),
+    };
+
+    // C12: lightweight semantic-search index for this project. The provider is
+    // a deterministic mock; swap it for a local model or cloud API to get real
+    // semantic similarity.
+    let embedding_store: Arc<AsyncRwLock<EmbeddingStore>> = Arc::new(AsyncRwLock::new(
+        EmbeddingStore::open(
+            paths::get().project_embeddings(&project_root),
+            Arc::new(embedding::MockEmbeddingProvider::new(384)),
+        )
+        .await?,
+    ));
+
     let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
         Arc::new(BashTool),
         Arc::new(ReadFileTool),
@@ -1244,6 +1323,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sub-agents cannot recurse and inherit the live provider.
     let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone()));
     tools.push(task_tool);
+    tools.push(Arc::new(SearchHistoryTool::new(
+        embedding_store.clone(),
+        session.clone(),
+    )));
     let agent = Arc::new(Agent::new(
         agent_provider,
         tools,
@@ -1252,29 +1335,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (*skills_registry).clone(),
     ));
 
-    // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session.
-    let startup: StartupMode = parse_args(std::env::args().skip(1).collect());
-
-    // Session loading honors the startup mode. The previous active session is
-    // archived and remains available through /resume or /session resume.
-    let session = Arc::new(SessionStore::load());
-    let open_picker_on_start = match &startup {
-        StartupMode::Fresh => {
-            session.reset().await.map_err(std::io::Error::other)?;
-            false
-        }
-        StartupMode::Picker => {
-            session.reset().await.map_err(std::io::Error::other)?;
-            true
-        }
-        StartupMode::Resume(id) => {
-            if let Err(error) = session.resume(id.as_deref()).await {
-                eprintln!("resume failed: {error}; starting a fresh session.");
-                session.reset().await.map_err(std::io::Error::other)?;
-            }
-            false
-        }
-    };
     let active_messages = session.messages().await;
     let restored_messages = session.transcript().await;
     let history = Arc::new(tokio::sync::Mutex::new(active_messages));
@@ -1313,6 +1373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctt_clone = current_task_token.clone();
     let generation_clone = task_generation.clone();
     let commands_for_task = Arc::new(custom_commands);
+    let embedding_store_for_commands = embedding_store.clone();
 
     // Initial values for TUI
     let initial_p_name = config.default_provider.clone();
@@ -1346,6 +1407,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn Agent Background Task
     let mcp_statuses_for_tui = mcp_statuses.clone();
     let skills_registry_for_commands = skills_registry.clone();
+    // The agent background task takes ownership of `config`; pull the TUI
+    // presentation config out first so it can be handed to the TUI later.
+    let tui_config = config.tui.clone();
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
@@ -1545,6 +1609,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     format!("Always-allowed tools:\n- {}", allowed.join("\n- "))
                                 };
                                 let _ = resp_tx.send(AgentResponse::Text(message));
+                            }
+                        }
+                        "/search" => {
+                            let query = cmd.strip_prefix("/search").unwrap_or("").trim();
+                            if query.is_empty() {
+                                let _ = resp_tx.send(AgentResponse::Text(
+                                    "Usage: /search <query>".to_string(),
+                                ));
+                            } else {
+                                let messages = session.transcript().await;
+                                {
+                                    let mut store = embedding_store_for_commands.write().await;
+                                    let session_id = session.id().await;
+                                    if let Err(error) = store.index(&messages, &session_id).await {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                        continue;
+                                    }
+                                }
+                                match embedding_store_for_commands.read().await.search(query, 5).await {
+                                    Ok(results) => {
+                                        if results.is_empty() {
+                                            let _ = resp_tx.send(AgentResponse::Text(
+                                                "No relevant history found.".to_string(),
+                                            ));
+                                        } else {
+                                            let mut lines = vec![
+                                                "Relevant history (most similar first):"
+                                                    .to_string(),
+                                            ];
+                                            for (i, (text, score)) in
+                                                results.iter().enumerate()
+                                            {
+                                                lines.push(format!(
+                                                    "{}. [score={:.3}]\n{}",
+                                                    i + 1,
+                                                    score,
+                                                    text
+                                                ));
+                                            }
+                                            let _ = resp_tx
+                                                .send(AgentResponse::Text(lines.join("\n\n")));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                    }
+                                }
                             }
                         }
                         "/resume" => {
@@ -1858,7 +1969,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             agent.set_goal(goal.clone());
                                             {
                                                 let mut messages = history.lock().await;
-                                                agent.inject_objective_updated(&mut *messages);
+                                                agent.inject_objective_updated(&mut messages);
                                                 let updated = messages.clone();
                                                 drop(messages);
                                                 let _ = session.replace_messages(updated).await;
@@ -2234,7 +2345,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /mcp      — Show configured MCP server status\n\
                                 /compact  — Compact older complete turns now\n\
                                 /clear    — Clear the conversation history\n\
-                                /permissions [clear] — Show or clear always-allowed tool rules\n\
+                                                                /permissions [clear] — Show or clear always-allowed tool rules
+                                /search <query> — Semantic search over the project's session history
+\n\
                                 /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
                                 /sessions — Browse past sessions\n\
                                 /resume [id] — Resume the most recent or selected session\n\
@@ -2322,6 +2435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         restored_messages,
         custom_command_suggestions,
         mcp_statuses_for_tui,
+        tui_config,
     )
     .await
     {

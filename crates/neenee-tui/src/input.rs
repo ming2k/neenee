@@ -51,6 +51,10 @@ pub struct InputContext {
     pub has_exact_suggestion: bool,
     pub suggestion_index: Option<usize>,
     pub permission_confirm_always: bool,
+    /// Whether the inline permission sheet is expanded to "Details". Drives
+    /// whether ↑/↓ in the compose zone scroll the details body or the
+    /// transcript behind it.
+    pub permission_show_details: bool,
     /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
     pub in_subagent_view: bool,
     /// Whether a keyboard-focusable step or action target is active.
@@ -157,6 +161,10 @@ pub enum InputAction {
     PermissionReject,
     /// Return from the always-allow confirmation step.
     PermissionBack,
+    /// Scroll the expanded "Details" body of the permission sheet up a row.
+    PermissionDetailsUp,
+    /// Scroll the expanded "Details" body of the permission sheet down a row.
+    PermissionDetailsDown,
     /// Start selection at screen coordinates.
     SelectionStart { x: u16, y: u16 },
     /// Update selection to screen coordinates.
@@ -165,6 +173,9 @@ pub enum InputAction {
     SelectionEnd,
     /// Select entire block at coordinates (e.g. triple-click).
     SelectBlock { x: u16, y: u16 },
+    /// Right-click at screen coordinates. Opens a context/detail view for the
+    /// interactive element under the cursor (e.g. a tool step's full output).
+    RightClick { x: u16, y: u16 },
     /// Mouse pointer moved to screen coordinates (hover tracking). Used to
     /// drive hover affordances on clickable elements like reasoning-trace
     /// headers. Suppressed while an overlay modal is open.
@@ -300,6 +311,19 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    // Right-click opens detail/feedback for interactive
+                    // transcript elements. Allowed during a permission prompt
+                    // because the transcript stays interactive.
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) {
+                        InputAction::RightClick { x, y }
+                    } else {
+                        InputAction::None
+                    }
+                }
                 // Mouse motion (reported because `EnableMouseCapture` requests
                 // mode 1003 "all motion"). Only forwarded on the main view so
                 // hover affordances don't fire behind an overlay modal.
@@ -338,6 +362,11 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         if context.permission_confirm_always {
                             InputAction::PermissionBack
+                        } else if context.focus_zone.is_browse() {
+                            // While browsing the transcript behind a permission
+                            // sheet, Esc returns focus to the sheet rather than
+                            // rejecting outright — a second Esc decides it.
+                            InputAction::ReturnToComposeZone
                         } else {
                             InputAction::PermissionReject
                         }
@@ -458,7 +487,9 @@ pub fn process_event(
                             None => 0,
                         };
                         InputAction::AcceptSuggestion(next.to_string())
-                    } else if context.active_modal != super::Modal::None {
+                    } else if context.active_modal != super::Modal::None
+                        && context.active_modal != super::Modal::Permission
+                    {
                         InputAction::None
                     } else if context.focus_zone.is_browse() {
                         // Browse → Compose: Tab is a symmetric zone toggle.
@@ -472,7 +503,9 @@ pub fn process_event(
                     }
                 }
                 KeyCode::BackTab => {
-                    if context.active_modal != super::Modal::None {
+                    if context.active_modal != super::Modal::None
+                        && context.active_modal != super::Modal::Permission
+                    {
                         InputAction::None
                     } else if context.focus_zone.is_browse() {
                         // Browse → Compose: Shift+Tab mirrors Tab's toggle.
@@ -651,7 +684,19 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
-                    super::Modal::Permission => InputAction::ScrollUp,
+                    super::Modal::Permission => {
+                        // Browse zone: walk transcript targets. Compose zone:
+                        // scroll the expanded details, otherwise fall through
+                        // to a transcript scroll so the history stays readable
+                        // even while a prompt is pending.
+                        if context.focus_zone.is_browse() {
+                            InputAction::FocusPrevTarget
+                        } else if context.permission_show_details {
+                            InputAction::PermissionDetailsUp
+                        } else {
+                            InputAction::ScrollUp
+                        }
+                    }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::ApiKey
                     | super::Modal::Endpoint
@@ -673,7 +718,15 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
-                    super::Modal::Permission => InputAction::ScrollDown,
+                    super::Modal::Permission => {
+                        if context.focus_zone.is_browse() {
+                            InputAction::FocusNextTarget
+                        } else if context.permission_show_details {
+                            InputAction::PermissionDetailsDown
+                        } else {
+                            InputAction::ScrollDown
+                        }
+                    }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::ApiKey
                     | super::Modal::Endpoint
@@ -797,6 +850,7 @@ mod tests {
                 has_exact_suggestion: exact,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -845,6 +899,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: true,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -871,6 +926,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -897,6 +953,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -926,6 +983,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -948,6 +1006,7 @@ mod tests {
             has_exact_suggestion: false,
             suggestion_index: None,
             permission_confirm_always: false,
+            permission_show_details: false,
             in_subagent_view: false,
             has_focused_target: false,
             focus_zone: FocusZone::Compose,
@@ -981,6 +1040,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -1005,6 +1065,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -1029,6 +1090,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
@@ -1124,6 +1186,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
@@ -1158,6 +1221,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
@@ -1235,6 +1299,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: zone,
@@ -1511,6 +1576,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -1597,6 +1663,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
@@ -1622,6 +1689,7 @@ mod tests {
                 has_exact_suggestion: false,
                 suggestion_index: None,
                 permission_confirm_always: false,
+                permission_show_details: false,
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,

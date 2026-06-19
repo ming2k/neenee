@@ -10,4 +10,4 @@ Conceptual background and design rationale.
 | [Request flow](request-flow.md) | HTTP transaction shape, SSE streaming, and the ReAct loop's message evolution |
 | [Provider capabilities](provider-capabilities.md) | Where tool calling and reasoning actually live across model weights, serving runtime, and client |
 | [Guided decoding](guided-decoding.md) | Constrained decoding, FSM compilation, and chat templates — the layer that guarantees valid tool calls |
-| [Tool lifecycle](tool-lifecycle.md) | End-to-end tool round trip: schema declaration, model interaction, dispatch, execution, and result handling |
+| [Tool rounds](tool-rounds.md) | The round trip of a tool call as a design concept: declaration, gating, execution, and how outcomes re-enter the conversation |

@@ -98,7 +98,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 }
 
 fn message_chars(message: &Message) -> usize {
-    message.content.len()
+    let own = message.content.len()
         + message
             .reasoning_content
             .as_ref()
@@ -113,7 +113,19 @@ fn message_chars(message: &Message) -> usize {
                     .map(|c| c.name.len() + c.arguments.len())
                     .sum::<usize>()
             })
-            .unwrap_or(0)
+            .unwrap_or(0);
+    // Recursively count nested sub-agent transcripts. A `task` tool result
+    // carries the sub-agent's full conversation as `children`, and that
+    // conversation is real context weight the parent model is effectively
+    // paying for (it sees the summary, but the children live in the same
+    // session.json and survive resume — both the context-pressure meter and
+    // the compaction budget must see them).
+    let nested = message
+        .children
+        .as_ref()
+        .map(|children| children.iter().map(message_chars).sum::<usize>())
+        .unwrap_or(0);
+    own + nested
 }
 
 /// Placeholder written into a tool-result message whose content has been
@@ -186,8 +198,57 @@ pub fn prune_tool_results(
         outcome.originals.push(original);
         messages[index].content = PRUNED_TOOL_PLACEHOLDER.to_string();
         messages[index].reasoning_content = None;
+        // Recursively clear old tool results inside any nested sub-agent
+        // transcript. The sub-agent's `Tool`-role children hold the same kind
+        // of bulky old outputs the top-level pruner is trying to reclaim;
+        // leaving them intact would defeat pruning for any session that made
+        // heavy use of `task`. The parent `Tool` message itself stays (the
+        // OpenAI tool_call_id chain must remain intact) — only its nested
+        // grandchildren are pruned, mirroring the top-level policy.
+        if let Some(children) = messages[index].children.as_mut() {
+            prune_tool_results_inner(children, protect_recent_chars);
+        }
     }
     Some(outcome)
+}
+
+/// Inner recursive worker for [`prune_tool_results`]. Used to descend into a
+/// sub-agent's nested transcript and prune its old `Tool`-role messages using
+/// the same `protect_recent_chars` budget. Unlike the public entry point this
+/// always prunes every eligible old result (no `min_reclaim_chars` gate) and
+/// returns nothing — the durable archival already happened when the sub-agent
+/// finished; here we are only relieving in-memory context pressure on resume.
+fn prune_tool_results_inner(messages: &mut [Message], protect_recent_chars: usize) {
+    let tools: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            message.role == Role::Tool && message.content != PRUNED_TOOL_PLACEHOLDER
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if tools.is_empty() {
+        return;
+    }
+    let mut protected_chars = 0usize;
+    let mut protected_count = 0usize;
+    for &index in tools.iter().rev() {
+        if protected_chars >= protect_recent_chars {
+            break;
+        }
+        protected_chars += message_chars(&messages[index]);
+        protected_count += 1;
+    }
+    let prunable_count = tools.len().saturating_sub(protected_count);
+    for &index in tools.iter().take(prunable_count) {
+        messages[index].content = PRUNED_TOOL_PLACEHOLDER.to_string();
+        messages[index].reasoning_content = None;
+        // Recurse one more level for sub-sub-agents (bounded by the schema's
+        // tool-filter rule that prevents `task` from spawning `task`).
+        if let Some(children) = messages[index].children.as_mut() {
+            prune_tool_results_inner(children, protect_recent_chars);
+        }
+    }
 }
 
 /// Mid-turn context-relief hook. After each tool round, when context pressure
@@ -431,7 +492,7 @@ pub enum SubTaskEvent {
     Activity(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     ModelRequestStarted {
         tool_round: usize,
@@ -915,21 +976,77 @@ impl Agent {
     }
 
     /// Parse a tool call from assistant response text.
-    /// Supports JSON format: {"tool": "name", "arguments": {...}}
-    fn parse_tool_call(&self, text: &str) -> Option<ToolCall> {
-        // Try to find a JSON object with "tool" key
-        let trimmed = text.trim();
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(tool_name) = json.get("tool").and_then(|v| v.as_str()) {
-                let args = json
-                    .get("arguments")
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "{}".to_string());
-                return Some(ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    name: tool_name.to_string(),
-                    arguments: args,
-                });
+    ///
+    /// Supports JSON tool calls emitted as plain text by providers without
+    /// native function calling. Robust to surrounding prose, markdown code
+    /// fences, and ChatML/Hermes-style special tokens (e.g.
+    /// `<|tool_calls_section_end|>`, `<tool_call>`): the first balanced
+    /// `{ ... }` object carrying a recognised tool identifier is used, so any
+    /// text around the JSON is ignored. Both the `"tool"` key and the
+    /// OpenAI/MCP `"name"` key are accepted as the tool identifier.
+    fn parse_text_tool_call(text: &str) -> Option<ToolCall> {
+        let mut start = 0;
+        while let Some(offset) = text[start..].find('{') {
+            let brace_at = start + offset;
+            if let Some(end) = Self::find_balanced_json_object(text, brace_at) {
+                let candidate = &text[brace_at..=end];
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(candidate) {
+                    let tool_name = json
+                        .get("tool")
+                        .or_else(|| json.get("name"))
+                        .and_then(|v| v.as_str());
+                    if let Some(tool_name) = tool_name {
+                        let args = match json.get("arguments") {
+                            Some(serde_json::Value::String(s)) => s.clone(),
+                            Some(v) => v.to_string(),
+                            None => "{}".to_string(),
+                        };
+                        return Some(ToolCall {
+                            id: format!("call_{}", uuid::Uuid::new_v4()),
+                            name: tool_name.to_string(),
+                            arguments: args,
+                        });
+                    }
+                }
+                // Skip past this object and keep searching; a later object
+                // in the text may carry the tool identifier.
+                start = end + 1;
+            } else {
+                // Unbalanced `{` with no matching close: nothing later can
+                // form a complete object either, so stop.
+                break;
+            }
+        }
+        None
+    }
+
+    /// Given the byte index of an opening `{` in `text`, return the byte
+    /// index of the matching closing `}` at the same nesting depth. String
+    /// literals and escapes are respected, so braces inside strings do not
+    /// affect nesting. Returns `None` if the braces never balance.
+    fn find_balanced_json_object(text: &str, start: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escape = false;
+        for (i, &b) in bytes.iter().enumerate().skip(start) {
+            if in_str {
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if b == b'"' {
+                in_str = true;
+            } else if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
         }
         None
@@ -1140,7 +1257,8 @@ impl Agent {
             let response = Message {
                 role: Role::Assistant,
                 content,
-                display_content: None,
+                content_blob: None,
+            display_content: None,
                 reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 tool_calls: (!calls.is_empty()).then_some(calls),
                 tool_call_id: None,
@@ -1151,6 +1269,8 @@ impl Agent {
                 provider: Some(self.provider.provider_id()),
                 model: Some(self.provider.model()),
                 hidden: false,
+                children: None,
+                subagent_meta: None,
             };
             if !valid_assistant_response(&response) {
                 return Err(HarnessError::Other(
@@ -1248,15 +1368,21 @@ impl Agent {
             let results = self
                 .execute_tools_concurrent(tool_calls, &call_ids, cancel, on_event)
                 .await?;
+            let denied = results
+                .iter()
+                .any(|(result, _)| matches!(result, ToolOutput::PermissionDenied { .. }));
             for ((call, id), (result, duration_ms)) in tool_calls.iter().zip(&call_ids).zip(results)
             {
                 self.record_tool_result(call, id, &result, duration_ms, messages, state, on_event);
             }
-            return Ok(true);
+            // If the user denied permission for any call, stop the turn here
+            // instead of feeding the (possibly partial) results back to the
+            // model and asking it to continue.
+            return Ok(!denied);
         }
 
         // Text-based fallback: any provider may emit a JSON tool call as text.
-        if let Some(call) = self.parse_tool_call(&response.content) {
+        if let Some(call) = Self::parse_text_tool_call(&response.content) {
             if streamed_text {
                 on_event(AgentEvent::AssistantDiscard);
             }
@@ -1272,6 +1398,7 @@ impl Agent {
             let result = self
                 .execute_tool_evented(&call, &call_id, cancel, on_event)
                 .await?;
+            let denied = matches!(result, ToolOutput::PermissionDenied { .. });
             let duration_ms = std::time::Instant::now().elapsed().as_millis() as u64;
             self.record_tool_result(
                 &call,
@@ -1282,7 +1409,7 @@ impl Agent {
                 state,
                 on_event,
             );
-            return Ok(true);
+            return Ok(!denied);
         }
 
         Ok(false)
@@ -1305,7 +1432,23 @@ impl Agent {
         F: FnMut(AgentEvent) + Send,
     {
         let text = result.to_text();
-        state.token_usage.total_tokens += estimate_string_tokens(&text);
+        // Cost attribution: a sub-agent's true token consumption can be 100x
+        // the byte-estimate of its final summary, so accumulate the real
+        // `TokenUsage` it reported. For every other tool the byte-estimate
+        // remains the only signal we have.
+        match result.subagent_payload() {
+            Some((_sub_messages, sub_usage)) => {
+                state.token_usage.total_tokens += sub_usage.total_tokens;
+                state.token_usage.prompt_tokens += sub_usage.prompt_tokens;
+                state.token_usage.completion_tokens += sub_usage.completion_tokens;
+                // Still count the summary bytes that the parent model will
+                // actually re-read on the next round.
+                state.token_usage.total_tokens += estimate_string_tokens(&text);
+            }
+            None => {
+                state.token_usage.total_tokens += estimate_string_tokens(&text);
+            }
+        }
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
@@ -1316,10 +1459,31 @@ impl Agent {
             structured: result.clone(),
             duration_ms,
         });
-        messages.push(Message::tool_result(
-            call,
-            format!("[{} result]:\n{}", call.name, text),
-        ));
+        // For sub-agent results, attach the nested transcript as `children` on
+        // the persisted Tool-role message so resume can rebuild the sub-agent
+        // view without a live event stream. The nested `Message`s already
+        // self-contain their own tool_calls / tool_call_id / children, so
+        // arbitrarily deep sub-agent trees round-trip through session.json.
+        // Sidecar `subagent_meta` captures what the live event stream knew but
+        // the bare transcript cannot reconstruct on resume: duration, the
+        // task description, the toolset size, and an explicit failure flag.
+        let tool_message = match result.subagent_payload() {
+            Some((sub_messages, _)) => {
+                let meta = crate::message::SubagentMeta {
+                    duration_ms: Some(duration_ms),
+                    failed: result.is_error(),
+                    ..Default::default()
+                };
+                Message::tool_result(
+                    call,
+                    format!("[{} result]:\n{}", call.name, text),
+                )
+                .with_children(sub_messages.to_vec())
+                .with_subagent_meta(meta)
+            }
+            None => Message::tool_result(call, format!("[{} result]:\n{}", call.name, text)),
+        };
+        messages.push(tool_message);
     }
 
     fn guard_repeated_call(
@@ -1429,10 +1593,9 @@ impl Agent {
                     }
                     PermissionDecision::Reject => {
                         tracing::warn!(tool = %tool.name(), "permission denied");
-                        return ToolOutput::Text(format!(
-                            "Permission denied for tool '{}'. Do not retry the same call.",
-                            tool.name()
-                        ));
+                        return ToolOutput::PermissionDenied {
+                            tool: tool.name().to_string(),
+                        };
                     }
                 }
             }
@@ -1650,7 +1813,8 @@ mod tests {
                 Ok(Message {
                     role: Role::Assistant,
                     content: String::new(),
-                    display_content: None,
+                    content_blob: None,
+            display_content: None,
                     reasoning_content: None,
                     tool_calls: Some(vec![ToolCall {
                         id: "call".to_string(),
@@ -1662,6 +1826,8 @@ mod tests {
                     provider: None,
                     model: None,
                     hidden: false,
+                    children: None,
+                    subagent_meta: None,
                 })
             } else {
                 Ok(Message::new(Role::Assistant, "done"))
@@ -2183,7 +2349,9 @@ mod tests {
 
         let outcome = agent.run(&mut messages).await.unwrap();
 
-        assert_eq!(outcome.message.content, "done");
+        // Permission rejection now terminates the turn instead of letting the
+        // model continue, so the final assistant message is empty.
+        assert!(outcome.message.content.is_empty());
         assert!(messages
             .iter()
             .any(|message| message.content.contains("Permission denied")));
@@ -2447,6 +2615,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_text_tool_call_accepts_bare_json() {
+        let call = Agent::parse_text_tool_call("{\"tool\":\"alpha\",\"arguments\":{\"k\":1}}")
+            .expect("bare json");
+        assert_eq!(call.name, "alpha");
+        assert_eq!(call.arguments, "{\"k\":1}");
+    }
+
+    #[test]
+    fn parse_text_tool_call_ignores_trailing_special_tokens() {
+        let call = Agent::parse_text_tool_call(
+            "{\"tool\":\"read_file\",\"arguments\":{\"path\":\"x\"}}<|tool_calls_section_end|>",
+        )
+        .expect("trailing special token must not break parsing");
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.arguments, "{\"path\":\"x\"}");
+    }
+
+    #[test]
+    fn parse_text_tool_call_ignores_prose_and_code_fences() {
+        let call = Agent::parse_text_tool_call(
+            "I'll read it now.\n```json\n{\"name\":\"read\",\"arguments\":{}}\n```",
+        )
+        .expect("prose + fence should still be found");
+        assert_eq!(call.name, "read");
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn parse_text_tool_call_accepts_name_key() {
+        let call =
+            Agent::parse_text_tool_call("{\"name\":\"alpha\"}").expect("name key is accepted");
+        assert_eq!(call.name, "alpha");
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn parse_text_tool_call_passes_through_string_arguments() {
+        // Pre-serialised string arguments are forwarded verbatim, not
+        // double-encoded by Value::to_string().
+        let call = Agent::parse_text_tool_call("{\"tool\":\"alpha\",\"arguments\":\"{\\\"k\\\":1}\"}")
+            .expect("string arguments");
+        assert_eq!(call.arguments, "{\"k\":1}");
+    }
+
+    #[test]
+    fn parse_text_tool_call_returns_none_for_plain_prose() {
+        assert!(Agent::parse_text_tool_call("just some text, no tool call here").is_none());
+    }
+
+    #[test]
+    fn parse_text_tool_call_skips_non_tool_json_objects() {
+        // A JSON object without a tool/name key is skipped; a later object
+        // carrying the identifier is still recognised.
+        let call = Agent::parse_text_tool_call(
+            "{\"note\":\"thinking\"}{\"tool\":\"alpha\",\"arguments\":{}}",
+        )
+        .expect("later object has the tool key");
+        assert_eq!(call.name, "alpha");
+    }
+
     #[tokio::test]
     async fn golden_repeated_identical_tool_calls_abort_the_turn() {
         let tool = RecordingTool::read("alpha", "A-out");
@@ -2481,7 +2710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn golden_rejected_write_tool_is_gated_and_loop_continues() {
+    async fn golden_rejected_write_tool_terminates_turn() {
         let tool = RecordingTool::write("writer", "WROTE");
         let calls = tool.calls_handle();
         let agent = Agent::new(
@@ -2497,7 +2726,9 @@ mod tests {
 
         let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
 
-        assert_eq!(outcome.unwrap().message.content, "stopped");
+        // The turn ends immediately after the denied permission; the second
+        // model round ("stopped") is never reached.
+        assert_eq!(outcome.unwrap().message.content, "");
         assert!(
             calls.lock().unwrap().is_empty(),
             "rejected write tool must not execute"

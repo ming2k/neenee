@@ -67,6 +67,7 @@ impl Provider for MockProvider {
         Ok(Message {
             role: Role::Assistant,
             content: "Hello! I am a mock AI. How can I help you today?".to_string(),
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: None,
@@ -75,6 +76,8 @@ impl Provider for MockProvider {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         })
     }
 
@@ -345,6 +348,7 @@ impl Provider for OpenAiCompatProvider {
         Ok(Message {
             role: Role::Assistant,
             content,
+            content_blob: None,
             display_content: None,
             reasoning_content,
             tool_calls,
@@ -353,6 +357,8 @@ impl Provider for OpenAiCompatProvider {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         })
     }
 
@@ -583,6 +589,7 @@ impl Provider for GeminiProvider {
         Ok(Message {
             role: Role::Assistant,
             content: content_text,
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: None,
@@ -591,6 +598,8 @@ impl Provider for GeminiProvider {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         })
     }
 
@@ -719,6 +728,7 @@ impl Provider for LlamaServerProvider {
         Ok(Message {
             role: Role::Assistant,
             content,
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: None,
@@ -727,6 +737,8 @@ impl Provider for LlamaServerProvider {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         })
     }
 
@@ -1009,6 +1021,7 @@ mod tests {
         let assistant_with_call = Message {
             role: Role::Assistant,
             content: String::new(),
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: Some(vec![matched.clone()]),
@@ -1017,10 +1030,13 @@ mod tests {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         };
         let good_result = Message {
             role: Role::Tool,
             content: "ok".to_string(),
+            content_blob: None,
             display_content: None,
             reasoning_content: None,
             tool_calls: None,
@@ -1029,6 +1045,8 @@ mod tests {
             provider: None,
             model: None,
             hidden: false,
+            children: None,
+            subagent_meta: None,
         };
         let orphan_result = Message {
             tool_call_id: Some("call_orphan".to_string()),

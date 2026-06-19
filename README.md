@@ -1,7 +1,7 @@
 # neenee
 
 <p align="center">
-  <b>A Rust-based interactive AI coding agent with a semantic TUI, native and fallback tool use, on-demand skills, and a bounded autonomous goal harness.</b>
+  <b>A Rust-based AI coding agent with semantic TUI, tool use, on-demand skills, and bounded autonomous goals.</b>
 </p>
 
 <p align="center">
@@ -37,12 +37,12 @@
 
 ## Features
 
-- **Semantic TUI** — Ratatui-based interface with semantic document selection and live harness status.
-- **Native & Fallback Tool Use** — Full tool-capable ReAct path; OpenAI-compatible tool-call delta reconstruction.
-- **Bounded Autonomy** — Goal checklist with autonomous loops, cancellable retries, and side-effect-aware replay protection.
-- **Context-Aware Controls** — `Ctrl+C` intelligently copies, interrupts, closes modals, or exits; `Ctrl+T` toggles tool expansion.
+- **Semantic TUI** — Ratatui-based interface with semantic selection and live status.
+- **Native & Fallback Tool Use** — Full tool-capable ReAct path; OpenAI-compatible delta reconstruction.
+- **Bounded Autonomy** — Goal checklists, autonomous loops, cancellable retries, and replay protection.
+- **Context-Aware Controls** — `Ctrl+C` copies, interrupts, or exits contextually; `Ctrl+T` toggles tool expansion.
 - **MCP Support** — Discover and use local stdio MCP servers alongside native tools.
-- **Durable Sessions** — Atomic session persistence with compaction, resume, and fork support.
+- **Durable Sessions** — Atomic persistence with compaction, resume, and fork support.
 
 ---
 
@@ -51,10 +51,10 @@
 | Crate | Responsibility |
 |-------|----------------|
 | `neenee-core` | Agent harness, providers, tools, goals, and skills. |
-| `neenee-tui` | Ratatui UI with semantic document selection and live harness status. |
+| `neenee-tui` | Ratatui UI with semantic selection and live status. |
 | `neenee` | Provider wiring, slash commands, cancellation, and autonomous loops. |
 
-Provider streaming stays inside the harness, including reconstruction of OpenAI-compatible tool-call deltas before permission checks and execution.
+Provider streaming and tool-call delta reconstruction stay inside the harness, before execution.
 
 ---
 
@@ -67,16 +67,10 @@ Provider streaming stays inside the harness, including reconstruction of OpenAI-
 ## Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/yourusername/neenee.git
 cd neenee
-
-# Build and run in development mode
 cargo run
-
-# Or build the release binary
-cargo build --release
-# The binary will be at ./target/release/neenee
+cargo build --release  # binary at ./target/release/neenee
 ```
 
 ---
@@ -84,13 +78,8 @@ cargo build --release
 ## Getting Started
 
 ```bash
-# Start a fresh session
 cargo run
-
-# Resume the most recent session
 cargo run -- resume
-
-# Resume a specific session by ID
 cargo run -- resume <id>
 ```
 
@@ -123,7 +112,7 @@ cargo run -- resume <id>
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+T` | Expand / collapse full tool arguments and output. |
+| `Ctrl+T` | Expand / collapse tool arguments and output. |
 | `Ctrl+M` | Open the model selection modal. |
 | `Ctrl+C` | Context-aware: copy selection → interrupt response → close modal → clear input → exit (double press). |
 | `/exit` or `q` (empty prompt) | Quit the program. |

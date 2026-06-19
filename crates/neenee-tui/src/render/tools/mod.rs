@@ -45,6 +45,8 @@ pub enum ToolStatus {
     /// Output present and starting with `Error` (matches the convention used
     /// by `core` tools, which return `Err(String)` rendered as `Error: …`).
     Failed,
+    /// The user explicitly denied permission for this call.
+    Denied,
     /// The call was aborted before producing a result (e.g. user interrupt).
     Cancelled,
 }
@@ -57,6 +59,7 @@ impl ToolStatus {
             ToolStepStatus::Running => ToolStatus::Running,
             ToolStepStatus::Ok => ToolStatus::Ok,
             ToolStepStatus::Failed => ToolStatus::Failed,
+            ToolStepStatus::Denied => ToolStatus::Denied,
             ToolStepStatus::Cancelled => ToolStatus::Cancelled,
         }
     }
@@ -69,6 +72,8 @@ impl ToolStatus {
             ToolStatus::Running => theme.info(),
             ToolStatus::Ok => theme.ok(),
             ToolStatus::Failed => theme.err(),
+            // Warn color distinguishes a user denial from a runtime failure.
+            ToolStatus::Denied => theme.warn(),
             // No dedicated cancelled accent: reuse the muted tone so a
             // cancelled step reads as inert rather than as a fresh failure.
             ToolStatus::Cancelled => theme.muted(),
@@ -141,6 +146,13 @@ pub trait ToolPresenter {
     /// How the expanded body renders this tool's arguments.
     fn arg_layout(&self) -> ArgLayout {
         ArgLayout::None
+    }
+
+    /// Whether a freshly created (or restored) step of this tool spawns
+    /// expanded. The global Ctrl+T density still overrides this when the user
+    /// has toggled it; this is only the per-tool default for compact mode.
+    fn default_expanded(&self) -> bool {
+        false
     }
 }
 

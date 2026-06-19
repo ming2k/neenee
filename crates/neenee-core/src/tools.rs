@@ -1185,20 +1185,51 @@ impl Tool for TaskTool {
         on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
         _on_stream: &mut (dyn FnMut(crate::ToolStream) + Send + 'a),
     ) -> Result<crate::ToolOutput, String> {
-        // Preserve sub-agent event streaming; the result is a textual summary.
-        // Task output is not streamed byte-by-byte.
-        self.call_with_events(call_id, arguments, on_event)
-            .await
-            .map(crate::ToolOutput::text)
+        let _ = call_id;
+        // Run the sub-agent, streaming its lifecycle as SubTaskEvents to the
+        // parent harness (so the live TUI builds the nested view in real
+        // time), then return a structured payload carrying the full transcript
+        // + real token usage so the parent can persist children and account
+        // cost truthfully.
+        //
+        // Failure path: a sub-agent that hit the 32-round limit, repeated-call
+        // guard, or a provider error returns a Subagent payload too — its
+        // `summary` is prefixed with `Error:` (so the existing failure
+        // classification catches it) and the partial transcript is preserved
+        // so the user can resume into the half-finished work and so the actual
+        // token cost is accounted. Only input-validation errors (bad JSON,
+        // missing fields) propagate as `Err`, because they have no partial
+        // transcript worth keeping.
+        let outcome = self.run_sub_agent_outcome(arguments, on_event).await?;
+        let summary = if outcome.final_content.trim().is_empty() {
+            "(sub-agent returned no answer)".to_string()
+        } else {
+            outcome.final_content.trim().to_string()
+        };
+        Ok(crate::ToolOutput::Subagent {
+            summary,
+            messages: outcome.messages,
+            usage: outcome.token_usage,
+        })
     }
 }
 
+/// Internal result of running a sub-agent. Bundles everything the parent
+/// harness needs to persist the nested transcript and account for real cost.
+struct SubAgentOutcome {
+    messages: Vec<crate::Message>,
+    token_usage: crate::TokenUsage,
+    /// Final assistant content, mirrored for convenience so the parent doesn't
+    /// have to scan `messages` for the last Assistant turn.
+    final_content: String,
+}
+
 impl TaskTool {
-    async fn run_sub_agent<'a>(
+    async fn run_sub_agent_outcome<'a>(
         &self,
         arguments: &str,
         mut on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
-    ) -> Result<String, String> {
+    ) -> Result<SubAgentOutcome, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let description = args["description"]
@@ -1250,15 +1281,49 @@ impl TaskTool {
         // and emits a `ToolCancelled` for the `task` call id; the TUI then
         // recursively cancels the nested tool steps, so the sub-agent does not
         // need a token linked to the parent.
-        let result = sub_agent
+        //
+        // On failure we surface the partial transcript anyway — both so the
+        // parent's tool-result message carries the sub-agent's work-in-progress
+        // `children` and so the real token cost (which can be substantial for a
+        // 32-round burnout) reaches the parent goal accounting. The
+        // `final_content` is prefixed `Error: …` so the existing failure
+        // classifier (`starts_with("Error")`) and the TUI's red Failed badge
+        // both trigger.
+        match sub_agent
             .run_streaming_with_events(
                 &mut messages,
                 &tokio_util::sync::CancellationToken::new(),
                 |event| Self::forward_event(event, &mut on_event),
             )
             .await
-            .map_err(|error| error.to_string())?;
-        let content = result.message.content.trim().to_string();
+        {
+            Ok(result) => {
+                let final_content = result.message.content.clone();
+                Ok(SubAgentOutcome {
+                    messages,
+                    token_usage: result.token_usage,
+                    final_content,
+                })
+            }
+            Err(error) => {
+                let error_string = error.to_string();
+                tracing::warn!(error = %error_string, "sub-agent failed; preserving partial transcript");
+                Ok(SubAgentOutcome {
+                    messages,
+                    token_usage: crate::TokenUsage::default(),
+                    final_content: format!("Error: {error_string}"),
+                })
+            }
+        }
+    }
+
+    async fn run_sub_agent<'a>(
+        &self,
+        arguments: &str,
+        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+    ) -> Result<String, String> {
+        let outcome = self.run_sub_agent_outcome(arguments, on_event).await?;
+        let content = outcome.final_content.trim().to_string();
         if content.is_empty() {
             Ok("(sub-agent returned no answer)".to_string())
         } else {

@@ -1,7 +1,9 @@
-use directories::ProjectDirs;
+use crate::fsutil;
+use crate::paths;
 use neenee_core::mcp::McpServerConfig;
 use neenee_core::skills::SkillsConfig;
 use neenee_core::tools::WebSearchConfig;
+use neenee_tui::config::TuiConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -64,6 +66,9 @@ pub struct Config {
     /// Web tool configuration ([websearch] table): search backend, proxy, timeout.
     #[serde(default)]
     pub websearch: WebSearchConfig,
+    /// TUI presentation ([tui] table): per-step-kind default expand state.
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 impl Default for Config {
@@ -102,6 +107,7 @@ impl Default for Config {
             volcengine_model: Some("deepseek-v3-250324".to_string()),
             skills: SkillsConfig::default(),
             websearch: WebSearchConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }
@@ -118,24 +124,17 @@ impl Config {
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let config_path = Self::config_file_path();
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = toml::to_string_pretty(self)?;
-        fs::write(config_path, content)?;
+        let bytes = toml::to_string_pretty(self)?.into_bytes();
+        fsutil::atomic_write_bytes(&config_path, &bytes)?;
         Ok(())
     }
 
     pub fn config_file_path() -> PathBuf {
-        let proj_dirs = ProjectDirs::from("ai", "neenee", "neenee")
-            .expect("Could not determine config directory");
-        proj_dirs.config_dir().join("config.toml")
+        paths::get().config_file()
     }
 
     pub fn history_file_path() -> PathBuf {
-        let proj_dirs = ProjectDirs::from("ai", "neenee", "neenee")
-            .expect("Could not determine config directory");
-        proj_dirs.config_dir().join("history.json")
+        paths::get().history_file()
     }
 
     pub fn load_history() -> Vec<String> {
@@ -149,11 +148,9 @@ impl Config {
 
     pub fn save_history(history: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::history_file_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(history)?;
-        fs::write(path, content)?;
+        fsutil::atomic_write_json(&path, history).map_err(|e| {
+            Box::<dyn std::error::Error>::from(e)
+        })?;
         Ok(())
     }
 }

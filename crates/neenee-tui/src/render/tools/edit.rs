@@ -24,6 +24,10 @@ impl ToolPresenter for EditPresenter {
     fn result_kind(&self) -> ResultKind {
         ResultKind::Diff
     }
+
+    fn default_expanded(&self) -> bool {
+        true
+    }
 }
 
 pub struct WritePresenter;

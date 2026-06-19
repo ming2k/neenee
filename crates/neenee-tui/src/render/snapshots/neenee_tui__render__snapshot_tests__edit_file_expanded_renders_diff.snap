@@ -8,9 +8,9 @@ expression: "render_grid(&m, 80, 30)"
      1 + let x = 2;
 
 backgrounds:
-.=reset  B=#070808  C=#111312  D=#3A2626  E=#283A2D
+.=reset  B=#070808  C=#201414  D=#402828  E=#121F16  F=#2A4030
 0: .2 B76
 1: .2 B76
 2: .2 C15 D2 C59
-3: .2 C15 E2 C59
+3: .2 E15 F2 E59
 4: .2 B76

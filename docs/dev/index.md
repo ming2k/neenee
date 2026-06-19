@@ -6,8 +6,8 @@
 
 ## Architecture
 
-- [Harness architecture](../explanation/harness.md) — control plane around provider calls, goal state, autonomous loop, safety bounds
-- [Request flow](../explanation/request-flow.md) — HTTP transaction shape, SSE streaming, and the ReAct loop's message evolution
-- [Provider capabilities](../explanation/provider-capabilities.md) — where tool calling and reasoning live across model weights, serving runtime, and client
-- [Guided decoding](../explanation/guided-decoding.md) — constrained decoding, FSM compilation, and chat templates
-- [Tool lifecycle](../explanation/tool-lifecycle.md) — end-to-end tool round trip: schema declaration, model interaction, dispatch, execution, and result handling
+- [Harness architecture](../explanation/harness.md) — control plane, provider calls, goal state, autonomous loop
+- [Request flow](../explanation/request-flow.md) — HTTP transactions, SSE streaming, ReAct loop
+- [Provider capabilities](../explanation/provider-capabilities.md) — tool calling and reasoning across model weights, runtime, and client
+- [Guided decoding](../explanation/guided-decoding.md) — constrained decoding, FSM compilation, chat templates
+- [Tool rounds](../explanation/tool-rounds.md) — tool call lifecycle: declaration, gating, execution, and re-entry

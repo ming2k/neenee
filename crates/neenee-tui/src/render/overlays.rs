@@ -20,16 +20,19 @@ use neenee_core::PermissionRequest;
 use super::primitives::{
     centered_rect, contrast_fg, draw_dim_backdrop, panel_block, viewport_rect,
 };
-use super::{Theme, TRANSCRIPT_H_INSET};
+use super::Theme;
 
-const PERMISSION_SHEET_MAX_WIDTH: u16 = 118;
-const PERMISSION_SHEET_MIN_WIDTH: u16 = 64;
-const PERMISSION_SHEET_WIDTH_PERCENT: u16 = 72;
-const PERMISSION_SHEET_H_PADDING: u16 = 3;
-const PERMISSION_SHEET_TOP_PADDING: u16 = 1;
-const PERMISSION_SHEET_BOTTOM_PADDING: u16 = 1;
-const PERMISSION_SHEET_INPUT_GAP: u16 = 1;
-const PERMISSION_SHEET_MAX_HEIGHT: u16 = 18;
+// The permission sheet renders inline, replacing the composer (input box)
+// area. Collapsed it shows a one-line summary plus the action footer;
+// expanding "Details" grows the body upward into the transcript.
+const PERMISSION_H_PADDING: u16 = 2;
+const PERMISSION_TOP_PADDING: u16 = 1;
+const PERMISSION_FOOTER_HEIGHT: u16 = 1;
+const PERMISSION_BODY_FOOTER_GAP: u16 = 1;
+/// Max body rows in the collapsed (summary-only) state.
+const PERMISSION_COLLAPSED_BODY_CAP: u16 = 2;
+/// Max body rows when "Details" is expanded; the rest is scrollable.
+const PERMISSION_MAX_BODY_ROWS: u16 = 14;
 
 /// Draw the models modal. `key_status` maps lowercase provider names to
 /// whether a usable API key is available (env or config).
@@ -409,94 +412,88 @@ pub fn draw_history_modal(
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Draw a blocking tool permission request as a bottom-anchored sheet
-/// (opencode-style): dimmed backdrop above, a panel with a warning-colored
-/// left bar, the tool/scope/arguments detail, and a footer bar of inline
-/// options where the selected one is highlighted.
+/// Draw a blocking tool permission request inline, replacing the composer
+/// (input box) area. The transcript above stays visible and scrollable.
+///
+/// Collapsed (the default) the sheet is a one-line summary — the tool name
+/// plus its scope (the specific path/command being touched) — followed by a
+/// footer of inline actions. Selecting "Details" expands the body upward to
+/// reveal the full description and arguments without leaving the prompt.
 pub fn draw_permission_sheet(
     frame: &mut Frame,
     request: &PermissionRequest,
     selected: usize,
     confirm_always: bool,
+    show_details: bool,
     scroll: usize,
+    input_rect: Rect,
     theme: &Theme,
 ) -> usize {
-    let size = viewport_rect(frame);
-    let bottom = size.height;
+    let area_bottom = input_rect.y + input_rect.height;
 
     let arguments = serde_json::from_str::<serde_json::Value>(&request.arguments)
         .ok()
         .and_then(|value| serde_json::to_string_pretty(&value).ok())
         .unwrap_or_else(|| request.arguments.clone());
-    let arg_lines: Vec<Line> = arguments.lines().map(Line::from).collect();
+    let scope_meaningful = !request.scope.is_empty() && request.scope != "*";
 
-    let labels: &[&str] = if confirm_always {
-        &["Confirm always", "Cancel"]
-    } else {
-        &["Allow once", "Always allow", "Reject"]
-    };
-
-    let mut body_lines: Vec<Line> = Vec::new();
-    body_lines.push(Line::from(vec![
+    // Header line: icon + tool, plus the concrete scope (path/command) when
+    // it adds information. The scope is the single most useful detail, so it
+    // earns a spot in the collapsed summary; everything else hides behind
+    // "Details".
+    let mut header = vec![
         Span::styled("△ ", Style::default().fg(theme.warn())),
-        Span::styled(
-            "Permission required",
-            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    body_lines.push(Line::from(""));
-    body_lines.push(Line::from(vec![
-        Span::styled("Tool ", Style::default().fg(theme.muted())),
         Span::styled(
             request.tool.clone(),
             Style::default()
                 .fg(theme.warn())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  Scope ", Style::default().fg(theme.muted())),
-        Span::styled(request.scope.clone(), Style::default().fg(theme.info())),
-    ]));
-    body_lines.push(Line::from(Span::styled(
-        request.description.clone(),
-        Style::default().fg(theme.fg()),
-    )));
-    body_lines.push(Line::from(""));
-    body_lines.push(Line::from(Span::styled(
-        "Arguments",
-        Style::default().fg(theme.info()).add_modifier(Modifier::BOLD),
-    )));
-    body_lines.extend(
-        arg_lines
-            .into_iter()
-            .map(|line| line.style(Style::default().fg(theme.code_text()))),
-    );
+    ];
     if confirm_always {
-        body_lines.push(Line::from(""));
-        body_lines.push(Line::from(Span::styled(
-            "This permits the tool until neenee exits.",
-            Style::default().fg(theme.warn()),
-        )));
+        header.push(Span::styled(
+            " — always allow until exit?",
+            Style::default().fg(theme.fg()),
+        ));
+    } else if scope_meaningful {
+        header.push(Span::styled("  ", Style::default()));
+        header.push(Span::styled(
+            request.scope.clone(),
+            Style::default().fg(theme.info()),
+        ));
     }
 
-    let available_width = size.width.saturating_sub(2 * TRANSCRIPT_H_INSET).max(1);
-    let preferred_width = available_width.saturating_mul(PERMISSION_SHEET_WIDTH_PERCENT) / 100;
-    let min_width = PERMISSION_SHEET_MIN_WIDTH.min(available_width);
-    let sheet_width = preferred_width
-        .max(min_width)
-        .min(PERMISSION_SHEET_MAX_WIDTH)
-        .min(available_width)
-        .max(1);
-    let sheet_x = size.x + size.width.saturating_sub(sheet_width) / 2;
+    let mut body_lines: Vec<Line> = Vec::new();
+    body_lines.push(Line::from(header));
 
-    let input_gap = PERMISSION_SHEET_INPUT_GAP.min(bottom);
-    let sheet_bottom = bottom.saturating_sub(input_gap);
-    let footer_height: u16 = 1;
-    let footer_gap: u16 = 1;
-    let fixed_height =
-        PERMISSION_SHEET_TOP_PADDING + footer_gap + footer_height + PERMISSION_SHEET_BOTTOM_PADDING;
-    let max_h = PERMISSION_SHEET_MAX_HEIGHT.min(sheet_bottom).max(1);
-    let content_w = sheet_width
-        .saturating_sub(1 + 2 * PERMISSION_SHEET_H_PADDING)
+    if confirm_always {
+        body_lines.push(Line::from(Span::styled(
+            "Grants this tool until neenee exits.",
+            Style::default().fg(theme.muted()),
+        )));
+    } else if show_details {
+        body_lines.push(Line::from(""));
+        body_lines.push(Line::from(Span::styled(
+            request.description.clone(),
+            Style::default().fg(theme.fg()),
+        )));
+        body_lines.push(Line::from(""));
+        body_lines.push(Line::from(Span::styled(
+            "Arguments",
+            Style::default()
+                .fg(theme.info())
+                .add_modifier(Modifier::BOLD),
+        )));
+        body_lines.extend(arguments.lines().map(|line| {
+            Line::from(line).style(Style::default().fg(theme.code_text()))
+        }));
+    }
+
+    let fixed =
+        PERMISSION_TOP_PADDING + PERMISSION_BODY_FOOTER_GAP + PERMISSION_FOOTER_HEIGHT;
+    let content_w = input_rect
+        .width
+        .saturating_sub(1 + 2 * PERMISSION_H_PADDING)
         .max(1);
     let body_total_rows: usize = body_lines
         .iter()
@@ -505,23 +502,38 @@ pub fn draw_permission_sheet(
             width.max(1).div_ceil(content_w as usize)
         })
         .sum();
-    let body_capacity = max_h.saturating_sub(fixed_height).max(1);
-    let body_h = (body_total_rows as u16).min(body_capacity);
+
+    // How tall the body may grow. Collapsed stays compact; expanded climbs
+    // into the transcript but never past the top of the viewport.
+    let body_cap: u16 = if confirm_always {
+        body_total_rows.min(2).min(u16::MAX as usize) as u16
+    } else if show_details {
+        let room = area_bottom.saturating_sub(fixed).max(1);
+        PERMISSION_MAX_BODY_ROWS.min(room)
+    } else {
+        PERMISSION_COLLAPSED_BODY_CAP
+    };
+    let body_h = (body_total_rows as u16).min(body_cap);
     let max_scroll = body_total_rows.saturating_sub(body_h as usize);
     let body_scroll = scroll.min(max_scroll);
-    let sheet_h = (fixed_height + body_h).min(sheet_bottom).max(1);
-    let sheet_top = sheet_bottom.saturating_sub(sheet_h);
 
-    draw_dim_backdrop(frame, size, theme.backdrop());
+    let desired_h = fixed + body_h;
+    // Fill the composer slot when collapsed (so it reads as a drop-in
+    // replacement for the input box); grow above it when expanded.
+    let sheet_h = desired_h
+        .max(input_rect.height)
+        .min(area_bottom)
+        .max(1);
+    let sheet_top = area_bottom.saturating_sub(sheet_h);
+    let area = Rect::new(input_rect.x, sheet_top, input_rect.width, sheet_h);
 
-    let area = Rect::new(sheet_x, size.y + sheet_top, sheet_width, sheet_h);
     frame.render_widget(Clear, area);
     frame.render_widget(panel_block(theme.warn(), theme.panel()), area);
 
-    let content_x = area.x + 1 + PERMISSION_SHEET_H_PADDING;
+    let content_x = area.x + 1 + PERMISSION_H_PADDING;
     let body_area = Rect::new(
         content_x,
-        area.y + PERMISSION_SHEET_TOP_PADDING,
+        area.y + PERMISSION_TOP_PADDING,
         content_w,
         body_h,
     );
@@ -535,19 +547,32 @@ pub fn draw_permission_sheet(
     let footer_y = area
         .y
         .saturating_add(sheet_h)
-        .saturating_sub(PERMISSION_SHEET_BOTTOM_PADDING + footer_height);
-    let footer_band = Rect::new(area.x + 1, footer_y, area.width.saturating_sub(1), 1);
+        .saturating_sub(PERMISSION_FOOTER_HEIGHT);
+    let footer_band = Rect::new(
+        area.x + 1,
+        footer_y,
+        area.width.saturating_sub(1),
+        PERMISSION_FOOTER_HEIGHT,
+    );
     frame.render_widget(
         RtBlock::default().style(Style::default().bg(theme.raised())),
         footer_band,
     );
 
+    let details_label = if show_details { "Hide" } else { "Details" };
+    let labels: Vec<&str> = if confirm_always {
+        vec!["Confirm always", "Cancel"]
+    } else {
+        vec!["Allow once", "Always allow", "Reject", details_label]
+    };
+
     let mut footer_spans: Vec<Span> = Vec::new();
     for (index, label) in labels.iter().enumerate() {
+        let is_cancel = confirm_always && index == 1;
         let is_reject = !confirm_always && index == 2;
         let is_selected = index == selected;
         let bg = if is_selected {
-            if is_reject {
+            if is_reject || is_cancel {
                 theme.err()
             } else {
                 theme.warn()
@@ -568,10 +593,12 @@ pub fn draw_permission_sheet(
             Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
         ));
     }
-    let hint = if max_scroll > 0 {
-        " ↑↓/PgUp/PgDn scroll · ←→ select · Enter confirm · Esc reject "
+    let hint = if confirm_always {
+        " ←→ select · Enter confirm · Esc back "
+    } else if max_scroll > 0 {
+        " ↑↓ scroll details · ←→ select · Enter · Esc reject "
     } else {
-        " ←→ select · Enter confirm · Esc reject "
+        " ←→ select · Enter · Esc reject "
     };
     let hint_width = hint.width();
     let footer_width = content_w as usize;
@@ -594,7 +621,7 @@ pub fn draw_permission_sheet(
 
     frame.render_widget(
         Paragraph::new(Line::from(footer_spans)),
-        Rect::new(content_x, footer_y, content_w, 1),
+        Rect::new(content_x, footer_y, content_w, PERMISSION_FOOTER_HEIGHT),
     );
     max_scroll
 }
@@ -655,11 +682,11 @@ pub fn draw_tool_step_detail_overlay(
                     Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
                 )));
             }
-            for line in stdout.split('\n') {
+            for line in stdout.trim_end_matches(&['\r', '\n'][..]).split('\n') {
                 lines.push(Line::from(Span::styled(line.to_string(), body_style)));
             }
             if !stderr.is_empty() {
-                for line in stderr.split('\n') {
+                for line in stderr.trim_end_matches(&['\r', '\n'][..]).split('\n') {
                     lines.push(Line::from(Span::styled(line.to_string(), stderr_style)));
                 }
             }
