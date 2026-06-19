@@ -58,6 +58,33 @@ through `Tool::to_openai_function()`; no tool overrides that
 default. Keep the schema strict: set `additionalProperties: false` and list
 every required field so the model cannot invent extra keys.
 
+## Return structured output (`ToolOutput`)
+
+Implement `call()` for the model-facing string result, then override
+`call_structured()` (`crates/neenee-core/src/lib.rs`) to return a typed
+[`ToolOutput`](../adr/0001-tool-rendering-redesign.md) so the UI renders from
+data instead of a sniffed string. The default `call_structured()` just wraps
+`call()`'s string as `ToolOutput::Text`, so this is optional but recommended
+for any tool whose result has structure (a shell exit code, a file listing, a
+diff, …). `call()` should delegate back through `to_text()` so both paths stay
+consistent:
+
+```rust
+async fn call(&self, arguments: &str) -> Result<String, String> {
+    self.call_structured(arguments).await.map(|o| o.to_text())
+}
+
+async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    // …do the work…
+    Ok(crate::ToolOutput::Code { lang: Some("rs".into()), text })
+}
+```
+
+The variants (`Text`, `Error`, `Shell`, `Code`, `Listing`, `Matches`) live in
+`crates/neenee-core/src/tool_output.rs`. `bash` is the reference example — it
+also overrides `call_structured_with_events` to stream stdout live via
+`ToolStream`.
+
 ## Choose a `ToolAccess`
 
 Override `access()` (`crates/neenee-core/src/lib.rs`) only when the
