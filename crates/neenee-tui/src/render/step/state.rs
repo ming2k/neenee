@@ -77,11 +77,7 @@ impl Interaction {
 /// - A **collapsed** step under the pointer lights up to the intermediate hover
 ///   tone as a click affordance.
 /// - Otherwise (collapsed + idle, or collapsed + focused) it stays muted.
-pub fn summary_weight(
-    disclosure: Disclosure,
-    interaction: Interaction,
-    theme: &Theme,
-) -> Color {
+pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &Theme) -> Color {
     match (disclosure, interaction) {
         (Disclosure::Expanded, _) => theme.fg(),
         (Disclosure::Collapsed, Interaction::Hovered) => theme.hover(),
@@ -192,12 +188,7 @@ mod tests {
             theme.fg()
         );
         assert_eq!(
-            summary_text_color(
-                None,
-                Disclosure::Collapsed,
-                Interaction::Hovered,
-                &theme
-            ),
+            summary_text_color(None, Disclosure::Collapsed, Interaction::Hovered, &theme),
             theme.hover()
         );
         assert_eq!(

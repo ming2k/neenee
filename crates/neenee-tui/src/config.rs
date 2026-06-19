@@ -48,7 +48,10 @@ impl TuiConfig {
     /// Effective default-expand state for a reasoning trace. Defaults to
     /// collapsed (`false`) when not configured.
     pub fn thinking_default_expanded(&self) -> bool {
-        self.default_expanded.get(THINKING_KEY).copied().unwrap_or(false)
+        self.default_expanded
+            .get(THINKING_KEY)
+            .copied()
+            .unwrap_or(false)
     }
 }
 

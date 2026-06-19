@@ -108,10 +108,19 @@ fn word_diff_pair<'a>(old: &'a str, new: &'a str) -> (Vec<DiffFrag>, Vec<DiffFra
                         text: text.clone(),
                         changed: false,
                     });
-                    new_frags.push(DiffFrag { text, changed: false });
+                    new_frags.push(DiffFrag {
+                        text,
+                        changed: false,
+                    });
                 }
-                ChangeTag::Delete => old_frags.push(DiffFrag { text, changed: true }),
-                ChangeTag::Insert => new_frags.push(DiffFrag { text, changed: true }),
+                ChangeTag::Delete => old_frags.push(DiffFrag {
+                    text,
+                    changed: true,
+                }),
+                ChangeTag::Insert => new_frags.push(DiffFrag {
+                    text,
+                    changed: true,
+                }),
             }
         }
     }
@@ -129,36 +138,35 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let mut pending_ins: Vec<(usize, &str)> = Vec::new();
     let mut out: Vec<DiffLine> = Vec::new();
 
-    let flush = |del: &mut Vec<(usize, &str)>,
-                 ins: &mut Vec<(usize, &str)>,
-                 out: &mut Vec<DiffLine>| {
-        let pair = del.len().min(ins.len());
-        for i in 0..pair {
-            let (old_no, old_text) = del[i];
-            let (new_no, new_text) = ins[i];
-            let (old_frags, new_frags) = word_diff_pair(old_text, new_text);
-            out.push(DiffLine {
-                op: DiffOp::Remove,
-                old_no: Some(old_no + 1),
-                new_no: None,
-                frags: old_frags,
-            });
-            out.push(DiffLine {
-                op: DiffOp::Add,
-                old_no: None,
-                new_no: Some(new_no + 1),
-                frags: new_frags,
-            });
-        }
-        for &(old_no, old_text) in del.iter().skip(pair) {
-            out.push(DiffLine::plain(DiffOp::Remove, old_text, old_no + 1));
-        }
-        for &(new_no, new_text) in ins.iter().skip(pair) {
-            out.push(DiffLine::plain(DiffOp::Add, new_text, new_no + 1));
-        }
-        del.clear();
-        ins.clear();
-    };
+    let flush =
+        |del: &mut Vec<(usize, &str)>, ins: &mut Vec<(usize, &str)>, out: &mut Vec<DiffLine>| {
+            let pair = del.len().min(ins.len());
+            for i in 0..pair {
+                let (old_no, old_text) = del[i];
+                let (new_no, new_text) = ins[i];
+                let (old_frags, new_frags) = word_diff_pair(old_text, new_text);
+                out.push(DiffLine {
+                    op: DiffOp::Remove,
+                    old_no: Some(old_no + 1),
+                    new_no: None,
+                    frags: old_frags,
+                });
+                out.push(DiffLine {
+                    op: DiffOp::Add,
+                    old_no: None,
+                    new_no: Some(new_no + 1),
+                    frags: new_frags,
+                });
+            }
+            for &(old_no, old_text) in del.iter().skip(pair) {
+                out.push(DiffLine::plain(DiffOp::Remove, old_text, old_no + 1));
+            }
+            for &(new_no, new_text) in ins.iter().skip(pair) {
+                out.push(DiffLine::plain(DiffOp::Add, new_text, new_no + 1));
+            }
+            del.clear();
+            ins.clear();
+        };
 
     for op in diff.ops() {
         for change in diff.iter_changes(op) {

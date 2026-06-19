@@ -14,9 +14,7 @@
 
 use crate::config::TuiConfig;
 use crate::document::ToolStepStatus;
-use crate::layout::{
-    InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
-};
+use crate::layout::{InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX};
 
 /// Which kind of step a pointer hit resolved to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,10 +134,7 @@ mod tests {
 
     #[test]
     fn hovered_summary_returns_index() {
-        assert_eq!(
-            hovered_summary(&cursor(TOOL_STEP_BLOCK_IDX, 4)),
-            Some(4)
-        );
+        assert_eq!(hovered_summary(&cursor(TOOL_STEP_BLOCK_IDX, 4)), Some(4));
     }
 
     fn config(defaults: &[(&str, bool)]) -> TuiConfig {

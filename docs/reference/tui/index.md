@@ -52,7 +52,9 @@ measurements table.
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop`, color helpers |
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |
 | `render/message_body.rs` | `draw_message_body` (markdown text, user panels, code blocks) |
-| `render/turn_artifacts.rs` | Tool-step, thinking, and sub-agent steps; sticky header; sub-agent bar |
+| `render/step/mod.rs` | Step module: draw orchestration, shared header rendering, sticky-pin tracking |
+| `render/step/renderers.rs` | Tool-step (`draw_tool_step`), thinking (`draw_reasoning_trace`), and sub-agent step renderers |
+| `render/step/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
 | `render/chrome.rs` | `draw_status_bar`, `draw_hint`, `draw_suggestions`, `spinner_frame` |
 | `render/overlays.rs` | Modals: models, sessions, history, permission, API key, help, solution |

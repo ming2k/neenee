@@ -54,20 +54,12 @@ pub enum ToolOutput {
     /// extension) so a future renderer can syntax-highlight. `text` is the
     /// (possibly truncation-prefixed) content, identical to what the legacy
     /// string output carried.
-    Code {
-        lang: Option<String>,
-        text: String,
-    },
+    Code { lang: Option<String>, text: String },
     /// A directory / glob listing, as raw entry strings.
-    Listing {
-        entries: Vec<String>,
-    },
+    Listing { entries: Vec<String> },
     /// Ripgrep-style search matches, as raw `path:line:content` lines plus the
     /// pattern, so a future renderer can group/highlight without re-parsing.
-    Matches {
-        pattern: String,
-        lines: Vec<String>,
-    },
+    Matches { pattern: String, lines: Vec<String> },
     /// A file change. The renderer derives the diff from `old` / `new`
     /// (edit) or from `""` / `new` (create) so the change view comes from
     /// the result payload, not from re-parsing the tool arguments.
@@ -173,7 +165,9 @@ impl ToolOutput {
     /// turn's accounting. Returns `None` for every other variant.
     pub fn subagent_payload(&self) -> Option<(&[crate::Message], crate::TokenUsage)> {
         match self {
-            ToolOutput::Subagent { messages, usage, .. } => Some((messages, *usage)),
+            ToolOutput::Subagent {
+                messages, usage, ..
+            } => Some((messages, *usage)),
             _ => None,
         }
     }
@@ -334,7 +328,9 @@ mod tests {
         };
         let text = o.to_text();
         assert!(text.starts_with("[Output truncated: 9000 chars total]\n"));
-        assert!(text.ends_with("[Output was large — use grep or read_file if you need specific parts]"));
+        assert!(
+            text.ends_with("[Output was large — use grep or read_file if you need specific parts]")
+        );
     }
 
     #[test]

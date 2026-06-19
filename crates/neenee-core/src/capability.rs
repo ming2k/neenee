@@ -58,7 +58,7 @@ pub trait Provider: Send + Sync {
     fn provider_id(&self) -> String {
         String::new()
     }
-    /// The model identifier this provider targets (e.g. `"kimi-for-coding"`).
+    /// The model identifier this provider targets (e.g. `"kimi-code"`).
     /// Companion to [`Provider::provider_id`]; defaults to an empty string.
     fn model(&self) -> String {
         String::new()

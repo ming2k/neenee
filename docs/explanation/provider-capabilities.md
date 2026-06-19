@@ -95,8 +95,8 @@ tool-call deltas even when the underlying service might support them.
 neenee's provider adapters encode an opinionated mapping between the three
 layers:
 
-- **OpenAI-compatible registry presets** (`kimi-code`, `kimi`, `deepseek`,
-  `qwen`, `glm`, `volcengine`, plus the bespoke `openai` and `custom`
+- **OpenAI-compatible registry presets** (`kimi-code`, `deepseek-flash`,
+  `deepseek-pro`, `qwen`, `glm`, plus the bespoke `openai`
   entries, all backed by `OpenAiCompatProvider`) assume a runtime that fully
   implements the OpenAI Chat Completions contract including `tools`,
   `tool_choice`, `reasoning_content`, and SSE tool-call deltas. The

@@ -19,11 +19,16 @@ use crate::document::{MessageKind, TranscriptMessage};
 use crate::layout::LayoutMap;
 use crate::selection::SelectionState;
 
-use super::Theme;
 use super::step::draw_tool_step;
+use super::Theme;
 
 /// Build a finished tool-step message with optional output and expand state.
-fn tool_step(name: &str, arguments: &str, output: Option<&str>, expanded: bool) -> TranscriptMessage {
+fn tool_step(
+    name: &str,
+    arguments: &str,
+    output: Option<&str>,
+    expanded: bool,
+) -> TranscriptMessage {
     let mut m = TranscriptMessage::tool_step("call_test", name, arguments);
     if let MessageKind::ToolStep {
         output: out,
@@ -163,7 +168,10 @@ fn background_map(buf: &ratatui::buffer::Buffer) -> (String, String) {
         if is_default(bg) {
             '.'
         } else {
-            let i = order.iter().position(|x| is_default(*x) == is_default(bg) && x == &bg).unwrap_or(0);
+            let i = order
+                .iter()
+                .position(|x| is_default(*x) == is_default(bg) && x == &bg)
+                .unwrap_or(0);
             (b'A' + i as u8) as char
         }
     };
@@ -223,9 +231,7 @@ fn bash_expanded_renders_markers_and_output() {
     let m = tool_step(
         "bash",
         r#"{"command":"cargo test"}"#,
-        Some(
-            "running 3 tests\n.\n.\n.\ntest result: ok. 3 passed\nSTDOUT:\nbuilt ok\nExit 0\n",
-        ),
+        Some("running 3 tests\n.\n.\n.\ntest result: ok. 3 passed\nSTDOUT:\nbuilt ok\nExit 0\n"),
         true,
     );
     insta::assert_snapshot!(render_grid(&m, 80, 40));

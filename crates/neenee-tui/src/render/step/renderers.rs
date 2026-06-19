@@ -30,10 +30,9 @@ use crate::render::text_layout::{
 };
 use crate::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::render::{
-    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, STEP_MIN_WIDTH,
-    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
-    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
+    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_BOTTOM_GAP_ROWS,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
     TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 
@@ -130,7 +129,6 @@ impl<'a, 'f: 'a> RenderCtx<'a, 'f> {
     }
 }
 
-
 /// `WrappedLine::empty()`-on-empty fallback used by every content renderer so
 /// a blank logical line still occupies one rendered row (matching the
 /// original inline `if wrapped.is_empty() { vec![empty] } else { wrapped }`).
@@ -181,10 +179,7 @@ fn tool_summary_line(
     if !expand.is_empty() {
         let s = format!("{} ", expand);
         used += s.width();
-        spans.push(Span::styled(
-            s,
-            base.fg(fg).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(s, base.fg(fg).add_modifier(Modifier::BOLD)));
     }
 
     used += summary.width();
@@ -236,7 +231,10 @@ fn draw_step_summary(
 /// count is supplied by component spacing tokens in `design.rs`.
 fn draw_blank_rows(ctx: &mut RenderCtx<'_, '_>, style: Style, rows: usize) {
     for _ in 0..rows {
-        let _ = ctx.paint(Line::from(Span::styled(padded_tail(ctx.full_width, 0), style)));
+        let _ = ctx.paint(Line::from(Span::styled(
+            padded_tail(ctx.full_width, 0),
+            style,
+        )));
     }
 }
 
@@ -641,25 +639,58 @@ fn draw_bash_content(
         let mut byte_offset = 0usize;
         if !stdout.is_empty() {
             byte_offset = emit_bash_lines(
-                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, stdout, base, byte_offset,
+                ctx,
+                mi,
+                block_idx,
+                indent,
+                wrap_w,
+                pad,
+                sel_range,
+                stdout,
+                base,
+                byte_offset,
             );
         }
         if !stderr.is_empty() {
             byte_offset = emit_bash_lines(
-                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, stderr, stderr_style,
+                ctx,
+                mi,
+                block_idx,
+                indent,
+                wrap_w,
+                pad,
+                sel_range,
+                stderr,
+                stderr_style,
                 byte_offset,
             );
         }
         if *truncated {
             byte_offset = emit_bash_lines(
-                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, "[output truncated]",
-                marker_style, byte_offset,
+                ctx,
+                mi,
+                block_idx,
+                indent,
+                wrap_w,
+                pad,
+                sel_range,
+                "[output truncated]",
+                marker_style,
+                byte_offset,
             );
         }
         if matches!(exit, Some(c) if *c != 0) {
             let m = format!("exit {}", exit.unwrap());
             let _ = emit_bash_lines(
-                ctx, mi, block_idx, indent, wrap_w, pad, sel_range, &m, marker_style,
+                ctx,
+                mi,
+                block_idx,
+                indent,
+                wrap_w,
+                pad,
+                sel_range,
+                &m,
+                marker_style,
                 byte_offset,
             );
         }
@@ -689,7 +720,15 @@ fn draw_bash_content(
             || trimmed.starts_with("[Output was large");
         let style = if is_marker { marker_style } else { base };
         let _ = emit_bash_lines(
-            ctx, mi, block_idx, indent, wrap_w, pad, sel_range, logical_line, style,
+            ctx,
+            mi,
+            block_idx,
+            indent,
+            wrap_w,
+            pad,
+            sel_range,
+            logical_line,
+            style,
             *line_start_byte,
         );
     }
@@ -765,47 +804,21 @@ fn draw_tool_result(
     let kind = crate::render::tools::presenter_for(name).result_kind();
     let block_idx = 1usize;
     match kind {
-        ResultKind::Listing => draw_listing_content(
-            ctx,
-            mi,
-            block_idx,
-            output,
-            selection,
-            indent,
-            inner_w,
-        ),
-        ResultKind::Grep => draw_grep_content(
-            ctx,
-            mi,
-            block_idx,
-            output,
-            selection,
-            indent,
-            inner_w,
-        ),
+        ResultKind::Listing => {
+            draw_listing_content(ctx, mi, block_idx, output, selection, indent, inner_w)
+        }
+        ResultKind::Grep => {
+            draw_grep_content(ctx, mi, block_idx, output, selection, indent, inner_w)
+        }
         ResultKind::Bash => {
             let command = bash_command_for(structured, arguments);
             draw_bash_content(
-                ctx,
-                mi,
-                block_idx,
-                output,
-                structured,
-                &command,
-                selection,
-                indent,
-                inner_w,
+                ctx, mi, block_idx, output, structured, &command, selection, indent, inner_w,
             );
         }
-        ResultKind::Code => draw_code_content(
-            ctx,
-            mi,
-            block_idx,
-            output,
-            selection,
-            indent,
-            inner_w,
-        ),
+        ResultKind::Code => {
+            draw_code_content(ctx, mi, block_idx, output, selection, indent, inner_w)
+        }
         ResultKind::Diff => {
             // Prefer the structured Patch payload (old/new from the result);
             // fall back to parsing the arguments for legacy/restored steps.
@@ -824,10 +837,7 @@ fn draw_tool_result(
 /// [`ToolOutput::Shell`] payload (set as soon as the call starts, so it is
 /// available even while streaming), falling back to parsing the JSON arguments
 /// for legacy / restored sessions without a structured payload.
-fn bash_command_for(
-    structured: Option<&neenee_core::ToolOutput>,
-    arguments: &str,
-) -> String {
+fn bash_command_for(structured: Option<&neenee_core::ToolOutput>, arguments: &str) -> String {
     if let Some(neenee_core::ToolOutput::Shell { command, .. }) = structured {
         if !command.is_empty() {
             return command.clone();
@@ -1056,12 +1066,7 @@ pub fn draw_subagent_inline_step(
 /// Render the sub-agent navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full transcript width inside the app_bg gutters.
-pub fn draw_subagent_bar(
-    frame: &mut Frame,
-    rect: Rect,
-    bar: &SubagentBarInfo,
-    theme: &Theme,
-) {
+pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, theme: &Theme) {
     let band = transcript_band_rect(rect);
     let full_width = band.width as usize;
     if full_width < STEP_MIN_WIDTH {
@@ -1642,8 +1647,10 @@ pub fn draw_reasoning_trace(
                     );
                     let used = (TRANSCRIPT_BODY_PREFIX_COLS as usize) + wl.text.width();
                     let mut line = line;
-                    line.spans
-                        .push(Span::styled(padded_tail(ctx.full_width, used), Style::default()));
+                    line.spans.push(Span::styled(
+                        padded_tail(ctx.full_width, used),
+                        Style::default(),
+                    ));
                     ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_PREFIX_COLS);
                 }
             }

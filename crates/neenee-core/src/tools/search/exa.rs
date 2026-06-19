@@ -20,11 +20,7 @@ impl SearchProvider for ExaProvider {
         "Exa"
     }
 
-    async fn search(
-        &self,
-        client: &reqwest::Client,
-        query: &str,
-    ) -> Result<String, String> {
+    async fn search(&self, client: &reqwest::Client, query: &str) -> Result<String, String> {
         let url = endpoint_with_key(self.api_key.as_deref());
         let text = mcp_tools_call(
             client,

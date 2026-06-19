@@ -44,6 +44,10 @@ pub struct Dirs {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,
+    /// `$XDG_CACHE_HOME/neenee`. Currently written only lazily (remote-skill
+    /// cache) and read by `remote_skills_cache` / `ensure`, which are themselves
+    /// not yet wired into the production startup — kept as structural XDG state.
+    #[allow(dead_code)]
     pub cache_dir: PathBuf,
     /// `$XDG_RUNTIME_DIR/neenee` when set, otherwise `None` (callers fall back
     /// to `state_dir` for portability and to avoid surprising tmpfs use).
@@ -80,6 +84,7 @@ impl Dirs {
 
     /// Marker written once the legacy `~/.config/neenee` data files have been
     /// migrated to the XDG-split layout. Prevents re-running the migration.
+    #[allow(dead_code)]
     pub fn migration_marker(&self) -> PathBuf {
         self.config_dir.join(".migrated-v2")
     }
@@ -118,11 +123,13 @@ impl Dirs {
 
     /// Locally installed skills (per-project skills still live under the
     /// project's working directory and are not stored here).
+    #[allow(dead_code)]
     pub fn local_skills_dir(&self) -> PathBuf {
         self.data_dir.join("skills").join("local")
     }
 
     /// Cached remote skills (safe to delete).
+    #[allow(dead_code)]
     pub fn remote_skills_cache(&self) -> PathBuf {
         self.cache_dir.join("skills").join("remote")
     }
@@ -140,6 +147,14 @@ impl Dirs {
     /// Slash-command input history. Rebuildable.
     pub fn history_file(&self) -> PathBuf {
         self.state_dir.join("history.json")
+    }
+
+    /// Per-model usage telemetry (`last_used`, use count) driving recency
+    /// ordering in the model picker (ADR-0002). Rebuildable: loss affects sort
+    /// order only, never configuration. Sits next to [`history_file`] under
+    /// `$XDG_STATE_HOME` since it is the same kind of program-generated signal.
+    pub fn model_usage_file(&self) -> PathBuf {
+        self.state_dir.join("model_usage.json")
     }
 
     /// Cross-process advisory lock file. Lives under runtime when available,
@@ -169,6 +184,7 @@ impl Dirs {
     }
 
     /// Structured log directory with rolling appender output.
+    #[allow(dead_code)]
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("log")
     }
@@ -176,7 +192,9 @@ impl Dirs {
     // ---- helpers -----------------------------------------------------------
 
     /// Best-effort initial creation of every directory neenee may write to.
-    /// Idempotent. Errors are surfaced as a single aggregate `String`.
+    /// Idempotent. Errors are surfaced as a single aggregate `String`. Used by
+    /// tests; production creates directories lazily via `fsutil` on first write.
+    #[allow(dead_code)]
     pub fn ensure(&self) -> Result<(), String> {
         for path in [
             &self.config_dir,
@@ -189,9 +207,8 @@ impl Dirs {
             &self.remote_skills_cache(),
             &self.log_dir(),
         ] {
-            std::fs::create_dir_all(path).map_err(|e| {
-                format!("could not create directory {}: {e}", path.display())
-            })?;
+            std::fs::create_dir_all(path)
+                .map_err(|e| format!("could not create directory {}: {e}", path.display()))?;
         }
         if let Some(runtime) = &self.runtime_dir {
             // Best-effort: the runtime directory is ephemeral and may not be
@@ -222,6 +239,10 @@ static TEST_OVERRIDE: RwLock<Option<Dirs>> = RwLock::new(None);
 /// process are no-ops (the first value wins), matching production semantics.
 /// Returns `Ok(None)` on first install or `Ok(Some(previous))` if a value was
 /// already set (the new value is NOT stored in that case).
+///
+/// Not currently called in production (`get` falls back to `Dirs::system`),
+/// but retained as the intended installation hook for future explicit startup.
+#[allow(dead_code)]
 pub fn set_default(dirs: Dirs) -> Result<Option<Dirs>, Dirs> {
     match DEFAULT.set(dirs) {
         Ok(()) => Ok(None),
@@ -307,7 +328,11 @@ impl Kind {
     }
 }
 
-fn resolve_kind(kind: Kind, override_path: Option<PathBuf>, project: Option<&ProjectDirs>) -> PathBuf {
+fn resolve_kind(
+    kind: Kind,
+    override_path: Option<PathBuf>,
+    project: Option<&ProjectDirs>,
+) -> PathBuf {
     // 1. CLI flag
     if let Some(p) = override_path {
         return app_dir_from_root(p);
@@ -438,7 +463,10 @@ mod tests {
             std::env::set_var("NEENEE_DATA_DIR", "/tmp/neenee-paths-test-data");
             std::env::set_var("XDG_DATA_HOME", "/tmp/should-not-be-used");
             let dirs = Dirs::resolve(&PathsOverride::default());
-            assert_eq!(dirs.data_dir, PathBuf::from("/tmp/neenee-paths-test-data/neenee"));
+            assert_eq!(
+                dirs.data_dir,
+                PathBuf::from("/tmp/neenee-paths-test-data/neenee")
+            );
             std::env::remove_var("NEENEE_DATA_DIR");
             std::env::remove_var("XDG_DATA_HOME");
         });
@@ -488,7 +516,10 @@ mod tests {
         env_locked!({
             std::env::set_var("XDG_RUNTIME_DIR", "/run/user/12345");
             let dirs = Dirs::resolve(&PathsOverride::default());
-            assert_eq!(dirs.lock_file(), PathBuf::from("/run/user/12345/neenee/neenee.lock"));
+            assert_eq!(
+                dirs.lock_file(),
+                PathBuf::from("/run/user/12345/neenee/neenee.lock")
+            );
             std::env::remove_var("XDG_RUNTIME_DIR");
         });
     }

@@ -44,7 +44,7 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Model identifier that produced this assistant message (e.g.
-    /// `"kimi-for-coding"`). Companion to [`Message::provider`].
+    /// `"kimi-code"`). Companion to [`Message::provider`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default)]
@@ -232,7 +232,10 @@ mod tests {
         // JSON keep working.
         let m = Message::new(Role::User, "hi");
         let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("children"), "json should omit children: {json}");
+        assert!(
+            !json.contains("children"),
+            "json should omit children: {json}"
+        );
     }
 
     #[test]
@@ -259,9 +262,8 @@ mod tests {
             name: "grep".to_string(),
             arguments: r#"{"pattern":"foo"}"#.to_string(),
         };
-        let inner_child = Message::new(Role::Tool, "match at a.rs:1").with_children(vec![
-            Message::new(Role::Assistant, "deeply nested note"),
-        ]);
+        let inner_child = Message::new(Role::Tool, "match at a.rs:1")
+            .with_children(vec![Message::new(Role::Assistant, "deeply nested note")]);
         let subagent_transcript = vec![
             Message::new(Role::System, "subagent system"),
             Message::new(Role::User, "subagent task"),
@@ -296,7 +298,10 @@ mod tests {
         // The inner Tool message kept its own nested children (sub-sub-agent).
         let inner = &children[3];
         assert_eq!(inner.role, Role::Tool);
-        assert!(inner.children.is_some(), "sub-sub-agent children must survive");
+        assert!(
+            inner.children.is_some(),
+            "sub-sub-agent children must survive"
+        );
         assert_eq!(inner.children.as_ref().unwrap().len(), 1);
     }
 
@@ -308,7 +313,10 @@ mod tests {
             arguments: "{}".to_string(),
         };
         let m = Message::tool_result(&call, "x").with_children(Vec::new());
-        assert!(m.children.is_none(), "empty children should collapse to None");
+        assert!(
+            m.children.is_none(),
+            "empty children should collapse to None"
+        );
     }
 }
 

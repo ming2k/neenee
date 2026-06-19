@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-const NEENEE_USER_AGENT: &str = concat!("neenee/", env!("CARGO_PKG_VERSION"));
+pub const NEENEE_USER_AGENT: &str = concat!("neenee/", env!("CARGO_PKG_VERSION"));
 
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     if let Some(milliseconds) = headers
@@ -310,8 +310,27 @@ const TOOL_CALL_SENTINELS: &[&str] = &[
 /// surrounding whitespace). Everything else passes through unchanged; sentinel
 /// tokens split across deltas are still recognised.
 struct ToolCallEchoFilter {
+    /// Unclassified text: may still be the prefix of a sentinel token or an
+    /// incomplete JSON object.
     pending: String,
+    /// Text classified as a tool-call echo, held until the stream ends. Whether
+    /// it is dropped depends on whether native `tool_calls` also arrived: with
+    /// them it is a redundant mirror (drop); without them it is a real
+    /// text-emitted tool call the harness must still parse (emit).
+    held: String,
+    /// In hold mode: every subsequent delta appends to `held`.
     echo: bool,
+    /// Set when the stream produced at least one native `ToolCallDelta` — the
+    /// decision input for [`ToolCallEchoFilter::finish`].
+    had_native_tool_calls: bool,
+    /// Diagnostics accumulated across the stream: chars fed vs emitted (their
+    /// difference is what the filter suppressed), plus reasoning/tool-call
+    /// traffic. Logged once at stream end so an "empty assistant response" can
+    /// be traced to its cause (genuine empty vs filter suppression vs parser).
+    fed_chars: usize,
+    emitted_chars: usize,
+    reasoning_chars: usize,
+    tool_call_deltas: usize,
 }
 
 /// Maximum bytes of `{`-prefixed content to buffer while deciding whether it is
@@ -324,26 +343,34 @@ impl ToolCallEchoFilter {
     fn new() -> Self {
         Self {
             pending: String::new(),
+            held: String::new(),
             echo: false,
+            had_native_tool_calls: false,
+            fed_chars: 0,
+            emitted_chars: 0,
+            reasoning_chars: 0,
+            tool_call_deltas: 0,
         }
     }
 
-    /// Feed a content delta; returns the text safe to emit now. Echo content is
-    /// held back until classified, then dropped.
+    /// Feed a content delta; returns the text safe to emit now. Tool-call-shaped
+    /// content is *held* (not dropped) until [`finish`](Self::finish) resolves
+    /// it against whether native tool calls arrived.
     fn feed(&mut self, delta: &str) -> String {
+        self.fed_chars += delta.len();
         if self.echo {
+            self.held.push_str(delta);
             return String::new();
         }
         self.pending.push_str(delta);
 
-        // A sentinel token anywhere means the whole content is a tool-call
-        // section — drop the buffer and suppress the rest of the stream.
+        // A sentinel token anywhere means the content is a tool-call section —
+        // hold it for the stream-end decision.
         if TOOL_CALL_SENTINELS
             .iter()
             .any(|token| self.pending.contains(token))
         {
-            self.echo = true;
-            self.pending.clear();
+            self.enter_hold();
             return String::new();
         }
 
@@ -360,18 +387,36 @@ impl ToolCallEchoFilter {
         if emit > 0 {
             let out = self.pending[..emit].to_string();
             self.pending = self.pending[emit..].to_string();
+            self.emitted_chars += out.len();
             return out;
         }
         String::new()
     }
 
-    /// Flush whatever remains once the stream ends (safe, non-echo text).
+    /// Move `pending` into `held` and enter hold mode.
+    fn enter_hold(&mut self) {
+        self.held.push_str(&self.pending);
+        self.pending.clear();
+        self.echo = true;
+    }
+
+    /// Flush whatever remains once the stream ends. Held echo text is dropped
+    /// only when native tool calls were also produced (it was a redundant
+    /// mirror); otherwise it is emitted so the harness can parse a text
+    /// tool-call fallback.
     fn finish(&mut self) -> String {
         if self.echo {
-            self.pending.clear();
-            return String::new();
+            if self.had_native_tool_calls {
+                self.held.clear();
+                return String::new();
+            }
+            let out = std::mem::take(&mut self.held);
+            self.emitted_chars += out.len();
+            return out;
         }
-        std::mem::take(&mut self.pending)
+        let out = std::mem::take(&mut self.pending);
+        self.emitted_chars += out.len();
+        out
     }
 
     /// `self.pending[brace..]` begins with `{`. If the object is complete,
@@ -391,25 +436,22 @@ impl ToolCallEchoFilter {
                     })
                     .unwrap_or(false);
                 if is_tool_call {
-                    let rest = self.pending[end + 1..].to_string();
-                    self.pending.clear();
-                    // Only whitespace (or nothing) after the tool-call object:
-                    // the whole content was an echo.
-                    if rest.trim().is_empty() {
-                        self.echo = true;
-                        return String::new();
-                    }
-                    // More content follows — it may be another echoed call, a
-                    // trailing sentinel, or (rarely) real prose. Recurse.
-                    self.feed(&rest)
+                    // Hold everything; the stream-end decision resolves mirror
+                    // vs real text tool call.
+                    self.enter_hold();
+                    String::new()
                 } else {
                     // Valid JSON but not a tool call — ordinary content.
-                    std::mem::take(&mut self.pending)
+                    let out = std::mem::take(&mut self.pending);
+                    self.emitted_chars += out.len();
+                    out
                 }
             }
             None => {
                 if self.pending.len() > MAX_ECHO_BUFFER {
-                    std::mem::take(&mut self.pending)
+                    let out = std::mem::take(&mut self.pending);
+                    self.emitted_chars += out.len();
+                    out
                 } else {
                     String::new()
                 }
@@ -421,7 +463,11 @@ impl ToolCallEchoFilter {
 /// Largest prefix length of `pending` that is safe to emit now, retaining any
 /// trailing suffix that could be the start of a sentinel token.
 fn prose_emit_len(pending: &str) -> usize {
-    let max_sentinel = TOOL_CALL_SENTINELS.iter().map(|token| token.len()).max().unwrap_or(0);
+    let max_sentinel = TOOL_CALL_SENTINELS
+        .iter()
+        .map(|token| token.len())
+        .max()
+        .unwrap_or(0);
     let scan_from = pending.len().saturating_sub(max_sentinel);
     let bytes = pending.as_bytes();
     let mut cursor = scan_from;
@@ -438,16 +484,6 @@ fn prose_emit_len(pending: &str) -> usize {
         cursor += 1;
     }
     bytes.len()
-}
-
-/// Run a complete content string through an echo filter and return whatever
-/// survives (empty for a pure echo). Used by the non-streaming path so it
-/// matches the streaming behaviour exactly.
-fn filter_content_echo(content: &str) -> String {
-    let mut filter = ToolCallEchoFilter::new();
-    let mut out = filter.feed(content);
-    out.push_str(&filter.finish());
-    out
 }
 
 #[async_trait]
@@ -489,13 +525,12 @@ impl Provider for OpenAiCompatProvider {
         }
 
         let choice = &response_json["choices"][0]["message"];
-        let content = filter_content_echo(choice["content"].as_str().unwrap_or(""));
         let reasoning_content = choice["reasoning_content"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(str::to_string);
 
-        let tool_calls = choice.get("tool_calls").and_then(|tc| {
+        let tool_calls: Option<Vec<ToolCall>> = choice.get("tool_calls").and_then(|tc| {
             tc.as_array().map(|arr| {
                 arr.iter()
                     .map(|t| ToolCall {
@@ -513,6 +548,28 @@ impl Provider for OpenAiCompatProvider {
                     .collect()
             })
         });
+
+        // Strip a tool-call mirror from `content` only when native `tool_calls`
+        // are also present; otherwise the text is a real fallback tool call (or
+        // ordinary prose) the harness must see.
+        let content = {
+            let mut filter = ToolCallEchoFilter::new();
+            let _ = filter.feed(choice["content"].as_str().unwrap_or(""));
+            filter.had_native_tool_calls =
+                tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
+            let content = filter.finish();
+            tracing::debug!(
+                target: "neenee_core::provider",
+                provider = %self.id,
+                model = %self.model,
+                content_fed_chars = filter.fed_chars,
+                content_emitted_chars = filter.emitted_chars,
+                echo_suppressed_chars = filter.fed_chars.saturating_sub(filter.emitted_chars),
+                native_tool_calls = filter.had_native_tool_calls,
+                "openai chat summary",
+            );
+            content
+        };
 
         Ok(Message {
             role: Role::Assistant,
@@ -616,23 +673,56 @@ impl Provider for OpenAiCompatProvider {
                 .expect("tool-call echo filter mutex poisoned");
             let mut events: Vec<Result<ProviderStreamEvent, String>> = Vec::new();
             for event in parsed {
-                if let ProviderStreamEvent::TextDelta(text) = event {
-                    let emitted = filter.feed(&text);
-                    if !emitted.is_empty() {
-                        events.push(Ok(ProviderStreamEvent::TextDelta(emitted)));
+                match event {
+                    ProviderStreamEvent::TextDelta(text) => {
+                        let emitted = filter.feed(&text);
+                        if !emitted.is_empty() {
+                            events.push(Ok(ProviderStreamEvent::TextDelta(emitted)));
+                        }
                     }
-                } else {
-                    events.push(Ok(event));
+                    ProviderStreamEvent::ReasoningDelta(delta) => {
+                        filter.reasoning_chars += delta.len();
+                        events.push(Ok(ProviderStreamEvent::ReasoningDelta(delta)));
+                    }
+                    ProviderStreamEvent::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        arguments,
+                    } => {
+                        filter.tool_call_deltas += 1;
+                        filter.had_native_tool_calls = true;
+                        events.push(Ok(ProviderStreamEvent::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments,
+                        }));
+                    }
                 }
             }
             Ok::<_, String>(events)
         });
-        // Flush any buffered non-echo text once the byte stream ends.
+        // Flush any buffered non-echo text once the byte stream ends, and log a
+        // per-turn stream summary so empty responses are diagnosable.
+        let provider_id = self.id.clone();
+        let model = self.model.clone();
         let tail = futures::stream::once(async move {
-            let emitted = echo_filter
+            let mut filter = echo_filter
                 .lock()
-                .expect("tool-call echo filter mutex poisoned")
-                .finish();
+                .expect("tool-call echo filter mutex poisoned");
+            let emitted = filter.finish();
+            tracing::debug!(
+                target: "neenee_core::provider",
+                provider = %provider_id,
+                model = %model,
+                content_fed_chars = filter.fed_chars,
+                content_emitted_chars = filter.emitted_chars,
+                echo_suppressed_chars = filter.fed_chars.saturating_sub(filter.emitted_chars),
+                reasoning_chars = filter.reasoning_chars,
+                tool_call_deltas = filter.tool_call_deltas,
+                "openai stream summary",
+            );
             let events: Vec<Result<ProviderStreamEvent, String>> = if emitted.is_empty() {
                 Vec::new()
             } else {
@@ -1049,29 +1139,29 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
     OpenAiProviderSpec {
         id: "kimi-code",
         base_url: "https://api.kimi.com/coding/v1/chat/completions",
-        default_model: "kimi-for-coding",
+        default_model: "kimi-code",
         env_api_key: "KIMI_CODE_API_KEY",
         env_model: "KIMI_CODE_MODEL",
-        fixed_model: Some("kimi-for-coding"),
+        fixed_model: Some("kimi-code"),
         default_user_agent: Some(KIMI_CODE_USER_AGENT),
     },
-    // Kimi Open Platform (Moonshot AI). Models: moonshot-v1-{8k,32k,128k}.
+    // DeepSeek Flash — fast V3 chat model.
     OpenAiProviderSpec {
-        id: "kimi",
-        base_url: "https://api.moonshot.cn/v1/chat/completions",
-        default_model: "moonshot-v1-8k",
-        env_api_key: "KIMI_API_KEY",
-        env_model: "KIMI_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
-    },
-    // DeepSeek. Models: deepseek-chat, deepseek-reasoner (returns reasoning_content).
-    OpenAiProviderSpec {
-        id: "deepseek",
+        id: "deepseek-flash",
         base_url: "https://api.deepseek.com/v1/chat/completions",
         default_model: "deepseek-chat",
         env_api_key: "DEEPSEEK_API_KEY",
-        env_model: "DEEPSEEK_MODEL",
+        env_model: "DEEPSEEK_FLASH_MODEL",
+        fixed_model: None,
+        default_user_agent: None,
+    },
+    // DeepSeek Pro — R1 reasoning model (returns reasoning_content).
+    OpenAiProviderSpec {
+        id: "deepseek-pro",
+        base_url: "https://api.deepseek.com/v1/chat/completions",
+        default_model: "deepseek-reasoner",
+        env_api_key: "DEEPSEEK_API_KEY",
+        env_model: "DEEPSEEK_PRO_MODEL",
         fixed_model: None,
         default_user_agent: None,
     },
@@ -1095,20 +1185,17 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
         fixed_model: None,
         default_user_agent: None,
     },
-    // Volcengine (火山引擎 / ByteDance Ark). Models: deepseek-v3-250324, doubao-pro-256k.
-    OpenAiProviderSpec {
-        id: "volcengine",
-        base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-        default_model: "deepseek-v3-250324",
-        env_api_key: "VOLCENGINE_API_KEY",
-        env_model: "VOLCENGINE_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
-    },
 ];
 
 /// Look up an OpenAI-compatible provider spec by its identifier.
+///
+/// The legacy `"deepseek"` id transparently resolves to `"deepseek-flash"` so
+/// existing configs keep working after the split into Flash / Pro presets.
 pub fn openai_provider_spec(id: &str) -> Option<&'static OpenAiProviderSpec> {
+    let id = match id {
+        "deepseek" => "deepseek-flash",
+        other => other,
+    };
     OPENAI_PROVIDER_SPECS.iter().find(|spec| spec.id == id)
 }
 
@@ -1197,43 +1284,51 @@ mod tests {
 
     /// Drive a sequence of content deltas through an echo filter and return
     /// `(surviving_text, echo_flag)` — mirroring how `stream_chat_events`
-    /// feeds deltas and then flushes at stream end.
-    fn run_echo_filter(deltas: &[&str]) -> (String, bool) {
+    /// feeds deltas and then resolves at stream end given whether native
+    /// `tool_calls` also arrived.
+    fn run_echo_filter(deltas: &[&str], native_tool_calls: bool) -> (String, bool) {
         let mut filter = ToolCallEchoFilter::new();
         let mut out = String::new();
         for delta in deltas {
             out.push_str(&filter.feed(delta));
         }
+        filter.had_native_tool_calls = native_tool_calls;
         out.push_str(&filter.finish());
         (out, filter.echo)
     }
 
     #[test]
-    fn echo_filter_suppresses_json_wrapped_in_sentinel() {
-        // The exact GLM leak from the bug report: a tool call mirrored as text
-        // and wrapped in `<|tool_calls_section_end|>` must never reach the UI.
-        let (out, echo) = run_echo_filter(&[
-            "{\"tool\":\"bash\",\"arguments\":{\"command\":\"git show 493588a\"}}",
-            "<|tool_calls_section_end|>",
-        ]);
+    fn echo_filter_drops_mirror_when_native_tool_calls_present() {
+        // The GLM leak: a tool call mirrored as text alongside a native call.
+        // The mirror is redundant — drop it so raw JSON never reaches the UI.
+        let (out, echo) = run_echo_filter(
+            &[
+                "{\"tool\":\"bash\",\"arguments\":{\"command\":\"git show 493588a\"}}",
+                "<|tool_calls_section_end|>",
+            ],
+            true,
+        );
         assert!(echo, "should be classified as an echo");
-        assert!(out.is_empty(), "nothing should be emitted: got {out:?}");
+        assert!(out.is_empty(), "mirror must be dropped: got {out:?}");
     }
 
     #[test]
-    fn echo_filter_suppresses_multi_argument_tool_call() {
+    fn echo_filter_drops_multi_argument_tool_call_mirror() {
         // edit_file with special chars (colons, hyphens) inside string values.
-        let (out, echo) = run_echo_filter(&[
-            "{\"tool\":\"edit_file\",\"arguments\":{\"path\":\"docs/adr/0001-tool-rendering-redesign.md\",\"old_string\":\"- Status: Accepted\",\"new_string\":\"- Status: Implemented\"}}",
-            "<|tool_calls_section_end|>",
-        ]);
+        let (out, echo) = run_echo_filter(
+            &[
+                "{\"tool\":\"edit_file\",\"arguments\":{\"path\":\"docs/adr/0001-tool-rendering-redesign.md\",\"old_string\":\"- Status: Accepted\",\"new_string\":\"- Status: Implemented\"}}",
+                "<|tool_calls_section_end|>",
+            ],
+            true,
+        );
         assert!(echo);
         assert!(out.is_empty(), "got {out:?}");
     }
 
     #[test]
-    fn echo_filter_suppresses_bare_json_without_sentinel() {
-        let (out, echo) = run_echo_filter(&["{\"name\":\"read_file\",\"arguments\":{}}"]);
+    fn echo_filter_drops_bare_json_mirror_when_native_calls_present() {
+        let (out, echo) = run_echo_filter(&["{\"name\":\"read_file\",\"arguments\":{}}"], true);
         assert!(echo);
         assert!(out.is_empty(), "got {out:?}");
     }
@@ -1242,54 +1337,75 @@ mod tests {
     fn echo_filter_buffers_until_json_completes_no_flicker() {
         // The JSON arrives in fragments. Until it is complete and classified,
         // nothing is emitted — so the body never flickers on screen.
-        let (out, echo) = run_echo_filter(&["{\"too", "l\":\"bash\",\"arguments\":{}}"]);
+        let (out, echo) = run_echo_filter(&["{\"too", "l\":\"bash\",\"arguments\":{}}"], true);
         assert!(echo);
         assert!(out.is_empty(), "got {out:?}");
     }
 
     #[test]
     fn echo_filter_recognises_sentinel_split_across_deltas() {
-        let (out, echo) = run_echo_filter(&[
-            "<|tool_calls_secti",
-            "on_end|>",
-            "{\"tool\":\"bash\",\"arguments\":{}}",
-        ]);
+        let (out, echo) = run_echo_filter(
+            &[
+                "<|tool_calls_secti",
+                "on_end|>",
+                "{\"tool\":\"bash\",\"arguments\":{}}",
+            ],
+            true,
+        );
         assert!(echo);
         assert!(out.is_empty(), "got {out:?}");
     }
 
     #[test]
+    fn echo_filter_restores_text_fallback_when_no_native_calls() {
+        // A provider that emits the tool call ONLY as text (no native
+        // function calling) must NOT have it stripped — the harness parses it
+        // via the text-fallback path. This is the empty-response guard.
+        let (out, echo) = run_echo_filter(
+            &["{\"tool\":\"bash\",\"arguments\":{\"command\":\"ls\"}}<|tool_calls_section_end|>"],
+            false,
+        );
+        assert!(echo, "still classified as tool-call-shaped");
+        assert!(
+            !out.is_empty() && out.contains("\"tool\":\"bash\""),
+            "text tool call must be restored when no native calls: got {out:?}"
+        );
+    }
+
+    #[test]
     fn echo_filter_passes_through_plain_prose() {
-        let (out, echo) = run_echo_filter(&["Let me read that file ", "for you."]);
+        let (out, echo) = run_echo_filter(&["Let me read that file ", "for you."], false);
         assert!(!echo);
         assert_eq!(out, "Let me read that file for you.");
     }
 
     #[test]
     fn echo_filter_keeps_prose_with_embedded_non_tool_json() {
-        let (out, echo) = run_echo_filter(&["Here is data: {\"key\":42} done"]);
+        let (out, echo) = run_echo_filter(&["Here is data: {\"key\":42} done"], false);
         assert!(!echo);
         assert_eq!(out, "Here is data: {\"key\":42} done");
     }
 
     #[test]
-    fn echo_filter_drops_tool_call_json_keeps_trailing_prose() {
-        // A tool-call object followed by real prose: the echo is dropped, the
-        // prose survives.
-        let (out, echo) =
-            run_echo_filter(&["{\"tool\":\"bash\",\"arguments\":{}} now running it"]);
-        assert!(!echo, "trailing prose means the stream is not a pure echo");
-        assert_eq!(out, " now running it");
-    }
+    fn echo_filter_holds_everything_once_a_tool_call_is_seen() {
+        // A tool-call object followed by more text is held as a unit and
+        // resolved at stream end: dropped with native calls, restored without.
+        let (out, echo) = run_echo_filter(
+            &["{\"tool\":\"bash\",\"arguments\":{}} now running it"],
+            true,
+        );
+        assert!(echo);
+        assert!(
+            out.is_empty(),
+            "held content is dropped when native calls arrive: got {out:?}"
+        );
 
-    #[test]
-    fn filter_content_echo_matches_streaming_classification() {
-        // Non-streaming helper agrees with the streaming filter.
-        assert!(filter_content_echo(
-            "{\"tool\":\"bash\",\"arguments\":{\"command\":\"ls\"}}<|tool_calls_section_end|>"
-        )
-        .is_empty());
-        assert_eq!(filter_content_echo("plain assistant text"), "plain assistant text");
+        let (out, echo) = run_echo_filter(
+            &["{\"tool\":\"bash\",\"arguments\":{}} now running it"],
+            false,
+        );
+        assert!(echo);
+        assert_eq!(out, "{\"tool\":\"bash\",\"arguments\":{}} now running it");
     }
 
     #[test]
@@ -1377,25 +1493,22 @@ mod tests {
     fn kimi_code_uses_fixed_coding_endpoint_and_model() {
         let spec = openai_provider_spec("kimi-code").expect("kimi-code spec");
         // A pinned model ignores any caller override.
-        assert_eq!(
-            spec.resolve_model(Some("ignored".to_string())),
-            "kimi-for-coding"
-        );
+        assert_eq!(spec.resolve_model(Some("ignored".to_string())), "kimi-code");
 
         let provider = spec.build("test-key".to_string(), None, None);
         assert_eq!(provider.base_url, spec.base_url);
-        assert_eq!(provider.model, "kimi-for-coding");
+        assert_eq!(provider.model, "kimi-code");
         assert_eq!(provider.user_agent, KIMI_CODE_USER_AGENT);
         // The registry stamps the preset id onto the concrete provider so
         // assistant responses can be attributed to "kimi-code".
         assert_eq!(provider.id, "kimi-code");
         assert_eq!(provider.provider_id(), "kimi-code");
-        assert_eq!(provider.model(), "kimi-for-coding");
+        assert_eq!(provider.model(), "kimi-code");
     }
 
     #[test]
     fn openai_compat_spec_resolves_model_override_and_default() {
-        let spec = openai_provider_spec("deepseek").expect("deepseek spec");
+        let spec = openai_provider_spec("deepseek-flash").expect("deepseek-flash spec");
         assert_eq!(spec.resolve_model(None), "deepseek-chat");
         assert_eq!(
             spec.resolve_model(Some("deepseek-reasoner".to_string())),
@@ -1404,6 +1517,25 @@ mod tests {
         // Non-coding providers fall back to the shared neenee user agent.
         let provider = spec.build("k".to_string(), None, None);
         assert_eq!(provider.user_agent, NEENEE_USER_AGENT);
+    }
+
+    #[test]
+    fn deepseek_pro_defaults_to_reasoner() {
+        let spec = openai_provider_spec("deepseek-pro").expect("deepseek-pro spec");
+        assert_eq!(spec.resolve_model(None), "deepseek-reasoner");
+        assert_eq!(
+            spec.base_url,
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn legacy_deepseek_id_resolves_to_flash() {
+        // A pre-split config with default_provider = "deepseek" must keep
+        // resolving instead of silently falling back to the mock provider.
+        let spec = openai_provider_spec("deepseek").expect("legacy deepseek alias");
+        assert_eq!(spec.id, "deepseek-flash");
+        assert_eq!(spec.default_model, "deepseek-chat");
     }
 
     #[test]

@@ -17,11 +17,26 @@ pub enum AgentRequest {
         request_id: String,
         decision: PermissionDecision,
     },
+    UserQuestionReply {
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    },
     SwitchProvider {
         provider_type: String,
         model: String,
         api_key: Option<String>,
         base_url: Option<String>,
+    },
+    /// Toggle the favorite flag on a model in the picker. The id is
+    /// canonicalized by the harness before it touches config.
+    ToggleFavorite {
+        id: String,
+    },
+    /// Make `id` the default model and activate it. Equivalent to selecting it
+    /// in the picker and pressing `d`: it both sets the persisted default and
+    /// switches the live provider.
+    SetDefaultModel {
+        id: String,
     },
     /// Delete a session (active or archived) by id or short id prefix.
     DeleteSession {
@@ -55,8 +70,13 @@ pub enum AgentResponse {
     },
     PermissionRequest(PermissionRequest),
     PermissionsCleared,
+    UserQuestionRequest(UserQuestionRequest),
     /// Lowercase provider name → whether a usable API key is configured.
     ProviderKeys(Vec<(String, bool)>),
+    /// Full model-picker state (default id + one row per model) for the
+    /// `/models` picker. Supersedes `ProviderKeys` for the picker's needs;
+    /// `ProviderKeys` is retained for the header key-readiness summary.
+    ModelPicker(ModelPickerSnapshot),
     ConversationCleared,
     ConversationReplaced(Vec<Message>),
     /// Replace the sessions picker contents (and open the picker).
@@ -119,6 +139,31 @@ pub struct SessionOverview {
     pub updated_at: u64,
     pub message_count: usize,
     pub active: bool,
+}
+
+/// One row of model-picker state sent from the harness to the TUI. Carries the
+/// dynamic per-model signals the picker needs — key readiness, favorite flag,
+/// and last-used timestamp — keyed by canonical model id. The TUI joins this
+/// with its own static display metadata (`SOLUTIONS`). See ADR-0002.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPickerRow {
+    pub id: String,
+    pub key_ready: bool,
+    pub favorite: bool,
+    /// Unix epoch milliseconds of the last activation. `None` if the model has
+    /// never been activated, which the picker sorts as "oldest".
+    pub last_used_ms: Option<u64>,
+}
+
+/// Full snapshot of model-picker state: which model is the current default plus
+/// one row per known model. Sent on startup and after any mutation (favorite
+/// toggle, default change, provider switch) so the TUI always renders from a
+/// fresh, consistent picture rather than merging incremental updates.
+#[derive(Debug, Clone, Default)]
+pub struct ModelPickerSnapshot {
+    /// Canonical id of the active/default model. Matches `config.default_provider`.
+    pub default_id: String,
+    pub rows: Vec<ModelPickerRow>,
 }
 
 /// Events emitted by a sub-agent spawned through the `task` tool.
@@ -193,6 +238,7 @@ pub enum AgentEvent {
     /// uses this to refresh its mode indicator live, mid-turn.
     ModeChanged(AgentMode),
     PermissionRequest(PermissionRequest),
+    UserQuestionRequest(UserQuestionRequest),
     /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.
     SubTask {
         parent_call_id: String,
@@ -214,4 +260,42 @@ pub struct PermissionRequest {
     pub description: String,
     pub arguments: String,
     pub scope: String,
+}
+
+/// One option offered to the user inside an `ask_user` question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserQuestionOption {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A single question inside an `ask_user` tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserQuestion {
+    /// Short label shown as a chip/tag above the question (optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The full question text.
+    pub question: String,
+    /// Available choices. Must contain at least one option.
+    pub options: Vec<UserQuestionOption>,
+    /// Whether the user may select more than one option.
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// Request sent from the agent to the TUI when the model calls `ask_user`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserQuestionRequest {
+    pub id: String,
+    pub questions: Vec<UserQuestion>,
+}
+
+/// Reply sent from the TUI back to the agent after the user answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserQuestionReply {
+    pub request_id: String,
+    /// One array of selected option labels per question.
+    pub answers: Vec<Vec<String>>,
 }

@@ -2,7 +2,7 @@
 //! Keyless and fully under the operator's control, making it the recommended
 //! backend for users behind censored networks or who want query privacy.
 
-use super::{format_results, MOZILLA_UA, SearchProvider, SearchResult};
+use super::{format_results, SearchProvider, SearchResult, MOZILLA_UA};
 use async_trait::async_trait;
 
 pub(crate) struct SearxngProvider {
@@ -46,8 +46,8 @@ impl SearchProvider for SearxngProvider {
             .text()
             .await
             .map_err(|e| format!("Failed to read SearXNG response: {e}"))?;
-        let json: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| format!("SearXNG returned invalid JSON: {e}"))?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("SearXNG returned invalid JSON: {e}"))?;
         let results = json
             .get("results")
             .and_then(|v| v.as_array())
@@ -75,5 +75,9 @@ fn parse_item(item: &serde_json::Value) -> Option<SearchResult> {
     if url.is_empty() || title.trim().is_empty() {
         return None;
     }
-    Some(SearchResult { title, url, snippet })
+    Some(SearchResult {
+        title,
+        url,
+        snippet,
+    })
 }

@@ -31,13 +31,9 @@ pub enum SessionEvent {
     },
     /// The active message list was replaced (e.g. after a turn, on open, or
     /// after tool-result pruning).
-    MessagesReplaced {
-        messages: Vec<Message>,
-    },
+    MessagesReplaced { messages: Vec<Message> },
     /// The autonomous-loop checkpoint changed.
-    CheckpointSet {
-        checkpoint: Option<LoopCheckpoint>,
-    },
+    CheckpointSet { checkpoint: Option<LoopCheckpoint> },
     /// A compaction archived older turns and replaced the active window.
     CompactionCommitted {
         archived: Vec<Message>,
@@ -45,20 +41,13 @@ pub enum SessionEvent {
         checkpoint: CompactionCheckpoint,
     },
     /// Messages were moved into the archived list without a compaction.
-    Archived {
-        messages: Vec<Message>,
-    },
+    Archived { messages: Vec<Message> },
     /// The active session was reset to a fresh empty session.
-    Reset {
-        id: String,
-    },
+    Reset { id: String },
     /// The current session was forked: the active id changed and a parent link
     /// was recorded. Any archived messages are preserved by a preceding
     /// `Archived` event.
-    Forked {
-        id: String,
-        parent_id: String,
-    },
+    Forked { id: String, parent_id: String },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and
@@ -117,11 +106,7 @@ impl EventLog {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let next_seq = self
-            .load()?
-            .last()
-            .map(|e| e.seq + 1)
-            .unwrap_or(0);
+        let next_seq = self.load()?.last().map(|e| e.seq + 1).unwrap_or(0);
         let envelope = EventEnvelope {
             seq: next_seq,
             timestamp: crate::session::unix_timestamp(),
@@ -164,8 +149,7 @@ mod tests {
 
     #[test]
     fn event_log_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "neenee-events-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("neenee-events-test-{}", uuid::Uuid::new_v4()));
         let log = EventLog::new(dir.join("events.jsonl"));
 
         log.append(SessionEvent::Reset {
@@ -186,8 +170,8 @@ mod tests {
 
     #[test]
     fn event_log_skips_malformed_lines() {
-        let dir = std::env::temp_dir().join(format!(
-            "neenee-events-corrupt-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("neenee-events-corrupt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("events.jsonl");
         std::fs::write(

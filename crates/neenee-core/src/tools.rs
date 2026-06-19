@@ -12,6 +12,95 @@ use search::SearchProvider;
 /// Read a file from disk.
 pub struct ReadFileTool;
 
+/// Ask the user one or more multiple-choice questions mid-task.
+///
+/// The actual blocking user interaction is handled by the agent harness (see
+/// `Agent::execute_tool`). The tool implementation itself only provides the
+/// schema and description exposed to the model.
+pub struct AskUserTool;
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn name(&self) -> &str {
+        "ask_user"
+    }
+
+    fn description(&self) -> &str {
+        "Ask the user one or more multiple-choice questions to clarify preferences, resolve ambiguity, or decide between trade-offs. \
+         Use this when the request is vague, when multiple valid approaches exist, or before a risky/destructive action. \
+         Provide 2-4 labeled options per question; put the recommended option first and suffix its label with '(Recommended)'. \
+         The user can always choose 'Other' and type a free-form answer."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "description": "Questions to ask the user. Each question is presented in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "header": {
+                                "type": "string",
+                                "description": "Very short label displayed as a chip/tag for the question (optional)."
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "The complete question to ask the user."
+                            },
+                            "options": {
+                                "type": "array",
+                                "description": "Available choices. Provide 2-4 options. Put the recommended option first and suffix its label with '(Recommended)'.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {
+                                            "type": "string",
+                                            "description": "Short choice label returned to you if selected."
+                                        },
+                                        "description": {
+                                            "type": "string",
+                                            "description": "Optional longer explanation of the choice."
+                                        }
+                                    },
+                                    "required": ["label"]
+                                },
+                                "minItems": 1
+                            },
+                            "multi_select": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Whether the user may select more than one option."
+                            }
+                        },
+                        "required": ["question", "options"]
+                    },
+                    "minItems": 1,
+                    "maxItems": 5
+                }
+            },
+            "required": ["questions"]
+        })
+    }
+
+    fn access(&self) -> ToolAccess {
+        ToolAccess::Read
+    }
+
+    fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
+        true
+    }
+
+    async fn call(&self, _arguments: &str) -> Result<String, String> {
+        Err(
+            "ask_user is handled by the agent harness and should not be called directly"
+                .to_string(),
+        )
+    }
+}
+
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
@@ -1519,7 +1608,10 @@ mod tests {
         assert_eq!(cfg.fallback, "");
         assert_eq!(cfg.proxy.as_deref(), Some("socks5h://127.0.0.1:1080"));
         assert_eq!(cfg.timeout_secs, 8);
-        assert_eq!(cfg.searxng_url.as_deref(), Some("http://localhost:8080/search"));
+        assert_eq!(
+            cfg.searxng_url.as_deref(),
+            Some("http://localhost:8080/search")
+        );
     }
 
     #[test]

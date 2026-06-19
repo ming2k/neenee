@@ -50,6 +50,7 @@ impl BlobStore {
     }
 
     /// True if the blob exists locally.
+    #[allow(dead_code)]
     pub fn exists(&self, hash: &str) -> bool {
         self.path(hash).exists()
     }
@@ -60,6 +61,7 @@ impl BlobStore {
         self.root.join(prefix).join(hash)
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }

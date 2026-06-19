@@ -12,6 +12,11 @@ struct PermissionState {
     pending: HashMap<String, oneshot::Sender<PermissionDecision>>,
 }
 
+#[derive(Default)]
+struct AskUserState {
+    pending: HashMap<String, oneshot::Sender<Option<UserQuestionReply>>>,
+}
+
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<Arc<dyn Tool>>,
@@ -19,6 +24,7 @@ pub struct Agent {
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
+    ask_user: std::sync::Mutex<AskUserState>,
     pub(crate) skills_registry: skills::SkillRegistry,
     goal_service: GoalService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
@@ -87,6 +93,7 @@ impl Agent {
             mode,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
+            ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
             goal_service,
             thread_id,
@@ -264,6 +271,36 @@ impl Agent {
         }
     }
 
+    pub fn reply_user_question(&self, request_id: &str, answers: Vec<Vec<String>>) -> bool {
+        let sender = self
+            .ask_user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(request_id);
+        sender.is_some_and(|sender| {
+            sender
+                .send(Some(UserQuestionReply {
+                    request_id: request_id.to_string(),
+                    answers,
+                }))
+                .is_ok()
+        })
+    }
+
+    pub fn reject_pending_user_questions(&self) {
+        let pending = std::mem::take(
+            &mut self
+                .ask_user
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending,
+        );
+        for (_, sender) in pending {
+            let _ = sender.send(None);
+        }
+    }
+
     pub fn allowed_tools(&self) -> Vec<String> {
         let mut tools = self
             .permissions
@@ -287,10 +324,14 @@ impl Agent {
 
     pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
         // Non-interactive convenience path: not cancellable from the outside.
-        self.run_with_events(messages, &CancellationToken::new(), |event| {
-            if let AgentEvent::PermissionRequest(request) = event {
+        self.run_with_events(messages, &CancellationToken::new(), |event| match event {
+            AgentEvent::PermissionRequest(request) => {
                 self.reply_permission(&request.id, PermissionDecision::Reject);
             }
+            AgentEvent::UserQuestionRequest(request) => {
+                self.reply_user_question(&request.id, Vec::new());
+            }
+            _ => {}
         })
         .await
     }
@@ -327,9 +368,7 @@ impl Agent {
 
             let response = self.provider.chat(messages.clone()).await?;
             if !valid_assistant_response(&response) {
-                return Err(HarnessError::Other(
-                    "Provider returned an empty assistant response.".to_string(),
-                ));
+                return Err(empty_response_error(&response));
             }
             state.token_usage.total_tokens += pressure::estimate_message_tokens(&response);
             messages.push(response.clone());
@@ -477,7 +516,7 @@ impl Agent {
                 role: Role::Assistant,
                 content,
                 content_blob: None,
-            display_content: None,
+                display_content: None,
                 reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 tool_calls: (!calls.is_empty()).then_some(calls),
                 tool_call_id: None,
@@ -492,9 +531,7 @@ impl Agent {
                 subagent_meta: None,
             };
             if !valid_assistant_response(&response) {
-                return Err(HarnessError::Other(
-                    "Provider returned an empty assistant response.".to_string(),
-                ));
+                return Err(empty_response_error(&response));
             }
             state.token_usage.total_tokens += pressure::estimate_message_tokens(&response);
             messages.push(response.clone());
@@ -693,12 +730,9 @@ impl Agent {
                     failed: result.is_error(),
                     ..Default::default()
                 };
-                Message::tool_result(
-                    call,
-                    format!("[{} result]:\n{}", call.name, text),
-                )
-                .with_children(sub_messages.to_vec())
-                .with_subagent_meta(meta)
+                Message::tool_result(call, format!("[{} result]:\n{}", call.name, text))
+                    .with_children(sub_messages.to_vec())
+                    .with_subagent_meta(meta)
             }
             None => Message::tool_result(call, format!("[{} result]:\n{}", call.name, text)),
         };
@@ -751,6 +785,65 @@ impl Agent {
         }
     }
 
+    async fn execute_ask_user(
+        &self,
+        call: &ToolCall,
+        _call_id: &str,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> ToolOutput {
+        let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutput::Text(format!("Invalid ask_user arguments: {}", e));
+            }
+        };
+        let questions: Vec<UserQuestion> = match serde_json::from_value(
+            args.get("questions")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        ) {
+            Ok(q) => q,
+            Err(e) => {
+                return ToolOutput::Text(format!("Invalid ask_user questions: {}", e));
+            }
+        };
+        if questions.is_empty() {
+            return ToolOutput::Text("ask_user requires at least one question.".to_string());
+        }
+        for (i, q) in questions.iter().enumerate() {
+            if q.options.is_empty() {
+                return ToolOutput::Text(format!("ask_user question {} has no options.", i + 1));
+            }
+        }
+
+        let request = UserQuestionRequest {
+            id: format!("ask_user_{}", uuid::Uuid::new_v4()),
+            questions,
+        };
+        let (sender, receiver) = oneshot::channel();
+        self.ask_user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .insert(request.id.clone(), sender);
+        tracing::info!(questions = request.questions.len(), "asking user");
+        let _ = event_tx.send(AgentEvent::UserQuestionRequest(request.clone()));
+
+        match receiver.await.unwrap_or(None) {
+            Some(reply) => {
+                let output = serde_json::to_string_pretty(&reply.answers)
+                    .unwrap_or_else(|_| format!("{:?}", reply.answers));
+                ToolOutput::Text(format!(
+                    "User answered the question(s). Selected option labels:\n{}",
+                    output
+                ))
+            }
+            None => {
+                ToolOutput::Text("User cancelled the question; no answer was provided.".to_string())
+            }
+        }
+    }
+
     async fn execute_tool(
         &self,
         call: &ToolCall,
@@ -768,6 +861,10 @@ impl Agent {
                 "[Plan mode] Tool '{}' is blocked. Switch to Build mode to execute it.",
                 call.name
             ));
+        }
+
+        if call.name == "ask_user" {
+            return self.execute_ask_user(call, call_id, event_tx).await;
         }
 
         if tool.access() == ToolAccess::Write {
@@ -975,6 +1072,30 @@ fn valid_assistant_response(message: &Message) -> bool {
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
+}
+
+/// Build the "empty assistant response" error, after logging enough state to
+/// diagnose why: whether reasoning came through, whether any tool calls were
+/// parsed, and which provider/model was responsible. The matching per-turn
+/// stream summary (chars fed vs emitted, reasoning/tool-call traffic) is logged
+/// by the provider at `neenee_core::provider=debug`.
+fn empty_response_error(response: &Message) -> HarnessError {
+    tracing::warn!(
+        target: "neenee_core::agent",
+        provider = ?response.provider,
+        model = ?response.model,
+        content_chars = response.content.len(),
+        reasoning_chars = response
+            .reasoning_content
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0),
+        tool_calls = response.tool_calls.as_ref().map(|c| c.len()).unwrap_or(0),
+        "empty assistant response: provider returned no content and no tool calls",
+    );
+    HarnessError::Other(
+        "Provider returned an empty assistant response (no content, no tool calls).".to_string(),
+    )
 }
 
 fn remove_empty_assistant_messages(messages: &mut Vec<Message>) {

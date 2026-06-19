@@ -15,6 +15,7 @@
 //! owns the per-tool decisions). `document.rs` and `step/renderers.rs` call the
 //! `*_for` entry points below instead of matching on tool names.
 
+mod ask_user;
 mod bash;
 mod diff;
 mod edit;
@@ -24,14 +25,14 @@ mod meta;
 mod read;
 mod web;
 
-pub use diff::{DiffLine, DiffOp};
 pub(crate) use diff::line_diff;
+pub use diff::{DiffLine, DiffOp};
 
 use ratatui::style::Color;
 use serde_json::Value;
 
-use crate::document::ToolStepStatus;
 use super::Theme;
+use crate::document::ToolStepStatus;
 
 /// Resolved run state of a tool step. The model-side source of truth is
 /// [`ToolStepStatus`]; this is its presentation classification. Kept separate
@@ -160,6 +161,7 @@ pub trait ToolPresenter {
 /// for unknown / MCP tools.
 pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
     match name {
+        "ask_user" => &ask_user::AskUserPresenter,
         "read_file" => &read::ReadPresenter,
         "edit_file" => &edit::EditPresenter,
         "write_file" => &edit::WritePresenter,

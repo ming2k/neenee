@@ -134,11 +134,13 @@ Open the solution modal with `/models` or `Ctrl+M`. Presets include:
 
 | Preset | Notes |
 |--------|-------|
-| **Kimi Code** | Uses the official `kimi-for-coding` model ID. Defaults to the approved OpenCode-compatible identity `opencode/1.17.4`. |
+| **Kimi Code** | Uses the official `kimi-code` model ID. Defaults to the approved OpenCode-compatible identity `opencode/1.17.4`. |
 | **OpenAI** | Standard OpenAI-compatible endpoint. |
-| **Gemini** | Google's Gemini models. |
-| **Kimi Open Platform** | Kimi API platform endpoint. |
-| **Custom Relay** | Prompts for a full OpenAI-compatible endpoint, model ID, and API key. |
+| **Gemini 2.5 Flash** | Google's Gemini 2.5 Flash model. |
+| **DeepSeek Flash (V3)** | DeepSeek V3 chat via the official `deepseek-chat` model. |
+| **DeepSeek Pro (R1)** | DeepSeek R1 reasoning via the official `deepseek-reasoner` model. |
+| **Qwen** | Alibaba DashScope. |
+| **GLM** | Zhipu AI. |
 
 Each preset shows whether a usable key is configured:
 - `✓ ready` — key present
@@ -150,8 +152,9 @@ Values are saved to `~/.config/neenee/config.toml`. Environment variables take p
 |----------|-------------|
 | `KIMI_CODE_API_KEY` | API key for Kimi Code. |
 | `KIMI_CODE_USER_AGENT` | Custom user agent for Kimi Code. |
-| `CUSTOM_BASE_URL` | Base URL for the Custom relay preset. |
-| `CUSTOM_MODEL` | Model ID for the Custom relay preset. |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | API key / model override for Gemini (default `gemini-2.5-flash`). |
+| `DEEPSEEK_API_KEY` | Shared API key for DeepSeek Flash (V3) and Pro (R1). |
+| `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` | Model override for DeepSeek Flash / Pro. |
 
 ### MCP Servers
 

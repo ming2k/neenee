@@ -39,6 +39,7 @@ from `crates/neenee-core/src/goals/tools.rs` and plan tools from
 |-----------|--------|------------------|--------|
 | `bash` | `Write` | `command` argument | `crates/neenee-core/src/tools.rs` |
 | `read_file` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `ask_user` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
 | `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
 | `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
 | `grep` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
@@ -83,6 +84,15 @@ wraps `Tool::parameters()`.
 | `path` | string | yes | — | File path |
 | `offset` | integer | no | — | 1-based start line |
 | `limit` | integer | no | — | Max lines |
+
+### `ask_user`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `questions` | array | yes | 1–5 questions |
+
+Each question: `{ "header"?: string, "question": string, "options": Option[], "multi_select"?: boolean }`.
+Each option: `{ "label": string, "description"?: string }`. The model should put the recommended option first and suffix its label with `(Recommended)`. The TUI always appends an "Other" free-text option so the user is not forced into the model's choices.
 
 ### `write_file`
 

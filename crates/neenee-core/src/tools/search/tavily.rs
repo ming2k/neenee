@@ -50,8 +50,8 @@ impl SearchProvider for TavilyProvider {
             .text()
             .await
             .map_err(|e| format!("Failed to read Tavily response: {e}"))?;
-        let json: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| format!("Tavily returned invalid JSON: {e}"))?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| format!("Tavily returned invalid JSON: {e}"))?;
         let results = json
             .get("results")
             .and_then(|v| v.as_array())
@@ -79,5 +79,9 @@ fn parse_item(item: &serde_json::Value) -> Option<SearchResult> {
     if url.is_empty() || title.trim().is_empty() {
         return None;
     }
-    Some(SearchResult { title, url, snippet })
+    Some(SearchResult {
+        title,
+        url,
+        snippet,
+    })
 }

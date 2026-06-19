@@ -79,7 +79,9 @@ pub fn draw_status_bar(
         Span::raw(" "),
         Span::styled(
             spinner,
-            Style::default().fg(spinner_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(spinner_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -174,31 +176,31 @@ pub fn draw_completion_menu(
             } else {
                 Style::default().fg(theme.fg())
             };
-        let cmd_style = if is_selected {
-            style.add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
-        };
-        // Build the row spans. When the description is empty (e.g. the
-        // `@path` menu), drop the `· desc` suffix entirely so the row is just
-        // the candidate — matches the "candidate + description" plain style
-        // without forcing every row to carry a `·` ornament.
-        let mut spans = vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(format!("{:<width$}", c.label, width = max_cmd), cmd_style),
-        ];
-        if any_desc {
-            spans.push(Span::styled("· ", Style::default().fg(theme.muted())));
-            spans.push(Span::styled(
-                format!("{:<width$}", c.description, width = max_desc),
-                if is_selected {
-                    style
-                } else {
-                    Style::default().fg(theme.muted())
-                },
-            ));
-        }
-        Line::from(spans)
+            let cmd_style = if is_selected {
+                style.add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+            };
+            // Build the row spans. When the description is empty (e.g. the
+            // `@path` menu), drop the `· desc` suffix entirely so the row is just
+            // the candidate — matches the "candidate + description" plain style
+            // without forcing every row to carry a `·` ornament.
+            let mut spans = vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{:<width$}", c.label, width = max_cmd), cmd_style),
+            ];
+            if any_desc {
+                spans.push(Span::styled("· ", Style::default().fg(theme.muted())));
+                spans.push(Span::styled(
+                    format!("{:<width$}", c.description, width = max_desc),
+                    if is_selected {
+                        style
+                    } else {
+                        Style::default().fg(theme.muted())
+                    },
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
 
@@ -616,18 +618,12 @@ fn context_usage_spans(
         // already separates it from the previous one, and an extra space would
         // make the gap look wider than the gaps between other right-cluster
         // segments.
-        spans.push(Span::styled(
-            "[",
-            Style::default().fg(theme.muted()).bg(bg),
-        ));
+        spans.push(Span::styled("[", Style::default().fg(theme.muted()).bg(bg)));
         for i in 0..cells {
             if i < filled {
                 spans.push(Span::styled("█", Style::default().fg(color).bg(bg)));
             } else {
-                spans.push(Span::styled(
-                    "░",
-                    Style::default().fg(theme.muted()).bg(bg),
-                ));
+                spans.push(Span::styled("░", Style::default().fg(theme.muted()).bg(bg)));
             }
         }
         spans.push(Span::styled(

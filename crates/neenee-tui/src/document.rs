@@ -281,10 +281,7 @@ impl TranscriptMessage {
         // its own status so the UI can show it distinctly from a runtime error.
         // The `starts_with` text fallback is kept so unmigrated tools that still
         // embed `"Error: …"` in a `Text` result keep classifying as failed.
-        *status = if matches!(
-            structured,
-            neenee_core::ToolOutput::PermissionDenied { .. }
-        ) {
+        *status = if matches!(structured, neenee_core::ToolOutput::PermissionDenied { .. }) {
             ToolStepStatus::Denied
         } else if structured.is_error() || output.starts_with("Error") {
             ToolStepStatus::Failed
@@ -588,8 +585,7 @@ impl TranscriptMessage {
     /// always wins over the snapshot to avoid clobbering in-progress runs).
     pub fn attach_subagent_children(&mut self, children: Vec<TranscriptMessage>) {
         if let MessageKind::ToolStep {
-            children: existing,
-            ..
+            children: existing, ..
         } = &mut self.kind
         {
             if existing.is_empty() {
@@ -834,7 +830,9 @@ impl TranscriptMessage {
                 ToolStepStatus::Ok => format!(" · {}", duration_text(*duration_ms)),
                 ToolStepStatus::Failed => format!(" · failed {}", duration_text(*duration_ms)),
                 ToolStepStatus::Denied => format!(" · denied {}", duration_text(*duration_ms)),
-                ToolStepStatus::Cancelled => format!(" · cancelled {}", duration_text(*duration_ms)),
+                ToolStepStatus::Cancelled => {
+                    format!(" · cancelled {}", duration_text(*duration_ms))
+                }
             };
             self.raw = format!("{}{}", summary, suffix);
             self.blocks = parse_blocks(&self.raw);
@@ -1558,7 +1556,12 @@ mod tests {
         assert!(message.raw.contains("Read README.md"));
         assert!(!message.raw.contains("read_file"));
 
-        assert!(message.finish_tool_step("call_1", "contents", neenee_core::ToolOutput::text("contents"), 1234));
+        assert!(message.finish_tool_step(
+            "call_1",
+            "contents",
+            neenee_core::ToolOutput::text("contents"),
+            1234
+        ));
         // Collapsed completed: summary + duration suffix.
         assert!(message.raw.contains("Read README.md"));
         assert!(message.raw.contains("1.2s"));
@@ -1614,7 +1617,12 @@ mod tests {
         assert!(running.contains("Grep"), "got: {running}");
 
         // Completing the parent summarizes tool-call count + duration.
-        assert!(task.finish_tool_step("call_9", "final answer", neenee_core::ToolOutput::text("final answer"), 1500));
+        assert!(task.finish_tool_step(
+            "call_9",
+            "final answer",
+            neenee_core::ToolOutput::text("final answer"),
+            1500
+        ));
         let done = task.subagent_status_line().expect("done status");
         assert!(done.starts_with("↳ Completed"), "got: {done}");
         assert!(done.contains("1 tool calls"), "got: {done}");
@@ -1633,7 +1641,12 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
         });
-        assert!(task.finish_tool_step("c", "Error: boom", neenee_core::ToolOutput::text("Error: boom"), 100));
+        assert!(task.finish_tool_step(
+            "c",
+            "Error: boom",
+            neenee_core::ToolOutput::text("Error: boom"),
+            100
+        ));
         let status = task.subagent_status_line().unwrap();
         assert!(status.starts_with("↳ Failed"), "got: {status}");
     }
@@ -1653,7 +1666,10 @@ mod tests {
             truncated: false,
         };
         let text = structured.to_text();
-        assert!(!text.starts_with("Error"), "precondition: text is not Error-prefixed");
+        assert!(
+            !text.starts_with("Error"),
+            "precondition: text is not Error-prefixed"
+        );
         assert!(step.finish_tool_step("c", text, structured, 50));
         assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Failed));
     }
@@ -1688,7 +1704,12 @@ mod tests {
         assert!(step.raw.contains("cancelled"), "got: {}", step.raw);
 
         // Cancelled is terminal: a late result or another cancel is ignored.
-        assert!(!step.finish_tool_step("call_1", "late result", neenee_core::ToolOutput::text("late result"), 10));
+        assert!(!step.finish_tool_step(
+            "call_1",
+            "late result",
+            neenee_core::ToolOutput::text("late result"),
+            10
+        ));
         assert!(!step.cancel_tool_step("call_1"));
         assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Cancelled));
     }
@@ -1712,7 +1733,10 @@ mod tests {
             arguments: r#"{"pattern":"foo"}"#.into(),
         });
         let children = task.subagent_children().expect("has children");
-        assert_eq!(children[0].tool_step_status(), Some(ToolStepStatus::Running));
+        assert_eq!(
+            children[0].tool_step_status(),
+            Some(ToolStepStatus::Running)
+        );
 
         // Interrupting the parent task cancels it AND the nested running child,
         // so the sub-agent view never shows a stuck "running" step.
@@ -1734,7 +1758,12 @@ mod tests {
         let mut a = TranscriptMessage::tool_step("a", "read_file", "{}");
         let mut b = TranscriptMessage::tool_step("b", "read_file", "{}");
         // `b` already finished successfully; the sweep must not clobber it.
-        assert!(b.finish_tool_step("b", "contents", neenee_core::ToolOutput::text("contents"), 5));
+        assert!(b.finish_tool_step(
+            "b",
+            "contents",
+            neenee_core::ToolOutput::text("contents"),
+            5
+        ));
         assert_eq!(b.tool_step_status(), Some(ToolStepStatus::Ok));
 
         // The sweep cancels a running step and is then a no-op on it.

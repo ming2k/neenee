@@ -8,6 +8,7 @@ mod markdown_table;
 mod message_body;
 mod overlays;
 mod primitives;
+mod step;
 mod text_layout;
 mod theme;
 /// Per-tool presentation registry: each tool's icon, collapsed summary,
@@ -15,33 +16,35 @@ mod theme;
 /// `step/renderers.rs` dispatch through its `*_for` entry points instead of
 /// matching on tool names (see tools/mod.rs).
 pub(crate) mod tools;
-mod step;
 
 #[cfg(test)]
 mod snapshot_tests;
 
-pub use chrome::{draw_hint_bar, HintBarLayout, HintBarView};
 pub use chrome::{draw_completion_menu, draw_status_bar};
+pub use chrome::{draw_hint_bar, HintBarLayout, HintBarView};
 pub use composer::{draw_composer, INPUT_MSG_IDX};
 use design::{
-    STEP_MIN_WIDTH, COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
+    COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
     MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    STATUS_BAR_ROWS, SUBAGENT_BAR_ROWS,
-    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
-    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
-    TRANSCRIPT_H_INSET,
+    STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_BOTTOM_GAP_ROWS,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
+    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::draw_message_body;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
-    draw_api_key_modal, draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
-    draw_permission_sheet, draw_sessions_modal, draw_solution_input_modal,
-    draw_tool_step_detail_overlay, relative_time,
+    draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal, draw_model_editor,
+    draw_permission_sheet, draw_question_modal, draw_sessions_modal, draw_tool_step_detail_overlay,
+    relative_time,
 };
 use primitives::viewport_rect;
+use step::{
+    draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
+    draw_subagent_inline_step, draw_tool_step, StickyStep,
+};
 #[cfg(test)]
 use text_layout::WrappedLine;
 #[cfg(test)]
@@ -49,10 +52,6 @@ use text_layout::{
     block_selection_range, line_selection, prohibited_line_end, prohibited_line_start,
 };
 pub use theme::Theme;
-use step::{
-    draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
-    draw_subagent_inline_step, draw_tool_step, StickyStep,
-};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -66,7 +65,7 @@ use crate::document::TranscriptMessage;
 use crate::layout::{InteractiveTarget, LayoutMap};
 use crate::selection::SelectionState;
 #[cfg(test)]
-use neenee_core::PermissionRequest;
+use neenee_core::{ModelPickerSnapshot, PermissionRequest, UserQuestionRequest};
 #[cfg(test)]
 use std::collections::HashMap;
 
@@ -419,13 +418,8 @@ pub fn draw_transcript(
     // Sticky pinned summary: if an expanded step's body covers the top of the
     // viewport (its summary is scrolled out of view), pin its summary to the
     // line directly under the HUD bar so the user can always collapse it.
-    let sticky_info = draw_sticky_summary_if_needed(
-        frame,
-        transcript_area,
-        &sticky_steps,
-        scroll,
-        theme,
-    );
+    let sticky_info =
+        draw_sticky_summary_if_needed(frame, transcript_area, &sticky_steps, scroll, theme);
 
     TranscriptRender {
         input_rect,
@@ -589,6 +583,9 @@ mod tests {
                     "mock",
                     0,
                     &HashMap::new(),
+                    &ModelPickerSnapshot::default(),
+                    "",
+                    0,
                     &theme,
                 );
                 let history_roster: Vec<String> = vec!["a".to_string()];
@@ -599,12 +596,21 @@ mod tests {
                     &mut LayoutMap::new(),
                     &history_roster,
                     "",
+                    0,
                     &ranked,
                     0,
                     &theme,
                 );
-                draw_api_key_modal(f, "openai", "sk-•••", &theme);
-                draw_solution_input_modal(f, " Endpoint", "url", "https://x", false, &theme);
+                draw_model_editor(
+                    f,
+                    "OpenAI",
+                    0,
+                    "",
+                    "gpt-4o",
+                    "",
+                    0,
+                    &theme,
+                );
                 draw_help_modal(f, &theme);
                 draw_sessions_modal(
                     f,
@@ -629,6 +635,25 @@ mod tests {
                     0,
                     &theme,
                 );
+                let question_request = UserQuestionRequest {
+                    id: "q1".to_string(),
+                    questions: vec![neenee_core::UserQuestion {
+                        header: Some("Style".to_string()),
+                        question: "Which error handling crate?".to_string(),
+                        options: vec![
+                            neenee_core::UserQuestionOption {
+                                label: "anyhow (Recommended)".to_string(),
+                                description: Some("Simple".to_string()),
+                            },
+                            neenee_core::UserQuestionOption {
+                                label: "thiserror".to_string(),
+                                description: Some("Structured".to_string()),
+                            },
+                        ],
+                        multi_select: false,
+                    }],
+                };
+                draw_question_modal(f, &question_request, 0, &[vec![1]], &[String::new()], 1, &theme);
             })
             .unwrap();
 
@@ -669,7 +694,12 @@ mod tests {
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
         });
-        task.finish_tool_step("task_1", "found 3 matches", neenee_core::ToolOutput::text("found 3 matches"), 1200);
+        task.finish_tool_step(
+            "task_1",
+            "found 3 matches",
+            neenee_core::ToolOutput::text("found 3 matches"),
+            1200,
+        );
         let root_messages = vec![
             TranscriptMessage::new(neenee_core::Role::User, "explore please"),
             task,
@@ -903,7 +933,10 @@ mod tests {
 
         // The empty text row sits one line below the box's top edge.
         let cursor = layout_map
-            .hit_test(input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16, input_rect.y + 1)
+            .hit_test(
+                input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16,
+                input_rect.y + 1,
+            )
             .expect("click inside empty input box must resolve to a cursor");
         assert_eq!(cursor.message_idx, INPUT_MSG_IDX);
         assert_eq!(cursor.byte_offset, 0);
@@ -1240,6 +1273,7 @@ mod tests {
                         &mut LayoutMap::new(),
                         &history,
                         query,
+                        query.chars().count(),
                         &ranked,
                         0,
                         &theme,
@@ -1256,7 +1290,7 @@ mod tests {
         let ranked: Vec<(usize, crate::fuzzy::FuzzyMatch)> = crate::fuzzy::rank(&empty, "");
         terminal
             .draw(|f| {
-                draw_history_modal(f, &mut LayoutMap::new(), &empty, "", &ranked, 0, &theme);
+                draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);
             })
             .expect("empty-history draw must not panic");
     }

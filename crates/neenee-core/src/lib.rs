@@ -28,22 +28,25 @@ pub mod tool_output;
 pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 pub mod capability;
+pub mod catalog;
 pub mod commands;
 pub mod events;
 pub mod mcp;
 pub mod plan;
 pub mod pressure;
 pub mod project;
-pub mod providers;
 mod prompt;
+pub mod providers;
 pub mod skills;
 mod tool_call;
 pub mod tools;
 
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
+pub use catalog::{Catalog, Channel, ModelEntry, Transport};
 pub use events::{
-    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, PermissionDecision,
-    PermissionRequest, SessionOverview, SubTaskEvent,
+    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, ModelPickerRow,
+    ModelPickerSnapshot, PermissionDecision, PermissionRequest, SessionOverview, SubTaskEvent,
+    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
 pub use pressure::{
     estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,

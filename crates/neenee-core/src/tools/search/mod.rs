@@ -41,11 +41,7 @@ pub(crate) trait SearchProvider: Send + Sync {
     fn name(&self) -> &'static str;
     /// Run the search and return formatted text, or an error describing what
     /// went wrong (surfaced verbatim to the model/user).
-    async fn search(
-        &self,
-        client: &reqwest::Client,
-        query: &str,
-    ) -> Result<String, String>;
+    async fn search(&self, client: &reqwest::Client, query: &str) -> Result<String, String>;
 }
 
 /// Build a provider by its config name. Unknown names fall back to Exa (the
@@ -107,9 +103,7 @@ pub(super) fn cap_output(text: &str) -> String {
         return text.to_string();
     }
     let truncated: String = text.chars().take(max_chars).collect();
-    format!(
-        "{truncated}\n\n[... output truncated at {max_chars} characters ...]"
-    )
+    format!("{truncated}\n\n[... output truncated at {max_chars} characters ...]")
 }
 
 /// Invoke a hosted MCP-style search endpoint via JSON-RPC `tools/call` and

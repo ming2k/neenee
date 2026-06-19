@@ -75,7 +75,10 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"name\": \"ok\""));
         assert!(text.contains("\"n\": 7"));
-        assert!(!dir.join("payload.tmp").exists(), "temp file must be cleaned up");
+        assert!(
+            !dir.join("payload.tmp").exists(),
+            "temp file must be cleaned up"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

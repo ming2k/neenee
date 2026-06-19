@@ -233,10 +233,7 @@ fn load_message_blobs(message: &mut Message, blob_store: &BlobStore) -> Result<(
 /// Emit a [`SessionEvent::Started`] event if the log is currently empty.
 /// Every session must begin with this event so replay reconstructs the id,
 /// parent link, and timestamps.
-fn ensure_event_log_started(
-    event_log: &EventLog,
-    data: &SessionData,
-) -> Result<(), String> {
+fn ensure_event_log_started(event_log: &EventLog, data: &SessionData) -> Result<(), String> {
     if event_log.load()?.is_empty() {
         event_log.append(SessionEvent::Started {
             id: data.id.clone(),
@@ -674,8 +671,9 @@ impl SessionStore {
             *data = SessionData::default();
             data.project_root = project_root;
             data.schema_version = schema_version;
-            self.event_log
-                .append(SessionEvent::Reset { id: data.id.clone() })?;
+            self.event_log.append(SessionEvent::Reset {
+                id: data.id.clone(),
+            })?;
             self.persist(&data)
         } else {
             let path = self.archive_path(&resolved);
@@ -1021,7 +1019,11 @@ pub fn compact_messages(
     let before_chars = estimate_chars(messages);
     let selection = select_compaction(messages, preserve_turns)?;
     let budget = summary_budget(max_chars);
-    let summary = build_excerpt_summary(&selection.archived, budget, selection.previous_summary.as_deref());
+    let summary = build_excerpt_summary(
+        &selection.archived,
+        budget,
+        selection.previous_summary.as_deref(),
+    );
     Some(build_compaction_result(before_chars, selection, summary))
 }
 
@@ -1110,7 +1112,8 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
         // blowing the budget on a single sub-agent that ran for 30 tool rounds.
         if let Some(children) = &message.children {
             if !children.is_empty() {
-                let nested = serialize_subagent_transcript_for_summary(children, SUMMARY_SUBAGENT_CAP);
+                let nested =
+                    serialize_subagent_transcript_for_summary(children, SUMMARY_SUBAGENT_CAP);
                 if !nested.is_empty() {
                     body.push_str("\n[sub-agent transcript]\n");
                     body.push_str(&nested);
@@ -1175,10 +1178,8 @@ fn serialize_subagent_transcript_for_summary(children: &[Message], budget: usize
         // than ~25% of the parent sub-agent's budget on a single sub-sub-agent.
         if let Some(nested) = &message.children {
             if !nested.is_empty() {
-                let inner = serialize_subagent_transcript_for_summary(
-                    nested,
-                    (budget / 4).max(500),
-                );
+                let inner =
+                    serialize_subagent_transcript_for_summary(nested, (budget / 4).max(500));
                 if !inner.is_empty() {
                     body.push_str("\n[sub-sub-agent transcript]\n");
                     body.push_str(&inner);
@@ -1210,10 +1211,8 @@ fn build_summarization_user_prompt(
              follows. Preserve still-true details, remove stale details, and merge in \
              new facts.\n<previous-summary>\n{previous}\n</previous-summary>"
         )),
-        None => parts.push(
-            "Create a new anchored summary from the conversation history below."
-                .to_string(),
-        ),
+        None => parts
+            .push("Create a new anchored summary from the conversation history below.".to_string()),
     }
     parts.push(SUMMARY_TEMPLATE.to_string());
     for context in extra_context {
@@ -1267,7 +1266,6 @@ impl CompactionDecision {
             proceed: true,
             extra_context: Vec::new(),
         }
-
     }
 
     #[allow(dead_code)]
@@ -1417,17 +1415,16 @@ pub fn migrate_flat_sessions_to_project_buckets(
         return Ok(());
     }
 
-    let route = |raw: &str,
-                 fallback_root: &std::path::Path|
-     -> Option<(std::path::PathBuf, SessionData)> {
-        let data: SessionData = serde_json::from_str(raw).ok()?;
-        let root = if data.project_root.as_os_str().is_empty() {
-            fallback_root.to_path_buf()
-        } else {
-            data.project_root.clone()
+    let route =
+        |raw: &str, fallback_root: &std::path::Path| -> Option<(std::path::PathBuf, SessionData)> {
+            let data: SessionData = serde_json::from_str(raw).ok()?;
+            let root = if data.project_root.as_os_str().is_empty() {
+                fallback_root.to_path_buf()
+            } else {
+                data.project_root.clone()
+            };
+            Some((dirs.project_dir(&root), data))
         };
-        Some((dirs.project_dir(&root), data))
-    };
 
     let mut migrated = 0usize;
 
@@ -1505,11 +1502,7 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
     }
 
     impl Report {
-        fn record(
-            &mut self,
-            path: &std::path::Path,
-            result: Result<&SessionData, String>,
-        ) {
+        fn record(&mut self, path: &std::path::Path, result: Result<&SessionData, String>) {
             self.examined += 1;
             match result {
                 Ok(data) => {
@@ -1518,7 +1511,9 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
                         "ok       {} (schema {}, checksum={}, {} messages)",
                         path.display(),
                         data.schema_version,
-                        data.checksum.map(|c| format!("{:#010x}", c)).unwrap_or_else(|| "none".to_string()),
+                        data.checksum
+                            .map(|c| format!("{:#010x}", c))
+                            .unwrap_or_else(|| "none".to_string()),
                         message_count
                     );
                 }
@@ -1708,7 +1703,10 @@ mod tests {
         )
         .unwrap();
         assert!(data.checksum.is_none());
-        assert!(verify_checksum(&data).is_ok(), "missing checksum is allowed");
+        assert!(
+            verify_checksum(&data).is_ok(),
+            "missing checksum is allowed"
+        );
     }
 
     #[tokio::test]
@@ -1719,8 +1717,8 @@ mod tests {
         // production resume path) restores the children intact. Before Phase 3
         // children were silently dropped because `Message::children` did not
         // exist and the harness only persisted the textual summary.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-subagent-persist-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-subagent-persist-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore {
             project_root: directory.clone(),
@@ -1737,7 +1735,7 @@ mod tests {
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")
-            .with_attribution("kimi-code", "kimi-for-coding");
+            .with_attribution("kimi-code", "kimi-code");
         let assistant = Message {
             tool_calls: Some(vec![call.clone()]),
             ..assistant
@@ -1750,7 +1748,11 @@ mod tests {
         let tool = Message::tool_result(&call, "[task result]:\nfoo is at src/foo.rs")
             .with_children(subagent_transcript);
         store
-            .replace_messages(vec![Message::new(neenee_core::Role::User, "where is foo?"), assistant, tool])
+            .replace_messages(vec![
+                Message::new(neenee_core::Role::User, "where is foo?"),
+                assistant,
+                tool,
+            ])
             .await
             .unwrap();
 
@@ -1793,8 +1795,8 @@ mod tests {
     #[tokio::test]
     async fn load_for_project_isolates_sessions_per_cwd() {
         locked!({
-            let root = std::env::temp_dir()
-                .join(format!("neenee-proj-iso-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("neenee-proj-iso-{}", uuid::Uuid::new_v4()));
             let dirs = paths::Dirs::resolve(&paths::PathsOverride {
                 data_dir: Some(root.join("data")),
                 state_dir: Some(root.join("state")),
@@ -1819,8 +1821,14 @@ mod tests {
             let bucket_a = crate::paths::project_bucket_name(&PathBuf::from("/projects/alpha"));
             let bucket_b = crate::paths::project_bucket_name(&PathBuf::from("/projects/beta"));
             assert_ne!(bucket_a, bucket_b);
-            assert!(dirs.project_dir(&PathBuf::from("/projects/alpha")).join("session.json").exists());
-            assert!(dirs.project_dir(&PathBuf::from("/projects/beta")).join("session.json").exists());
+            assert!(dirs
+                .project_dir(&PathBuf::from("/projects/alpha"))
+                .join("session.json")
+                .exists());
+            assert!(dirs
+                .project_dir(&PathBuf::from("/projects/beta"))
+                .join("session.json")
+                .exists());
 
             // Reloading alpha does not see beta's messages.
             let reloaded_a = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
@@ -1842,8 +1850,8 @@ mod tests {
     #[test]
     fn migrate_flat_sessions_buckets_by_project_root() {
         locked!({
-            let root = std::env::temp_dir()
-                .join(format!("neenee-flat-migrate-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("neenee-flat-migrate-{}", uuid::Uuid::new_v4()));
             let dirs = paths::Dirs::resolve(&paths::PathsOverride {
                 data_dir: Some(root.join("data")),
                 state_dir: Some(root.join("state")),
@@ -1891,8 +1899,12 @@ mod tests {
                 .join("sessions")
                 .join(format!("{}.json", beta_archive.id))
                 .exists());
-            assert!(!legacy_dir.join(format!("{}.json", alpha_archive.id)).exists());
-            assert!(!legacy_dir.join(format!("{}.json", beta_archive.id)).exists());
+            assert!(!legacy_dir
+                .join(format!("{}.json", alpha_archive.id))
+                .exists());
+            assert!(!legacy_dir
+                .join(format!("{}.json", beta_archive.id))
+                .exists());
             assert!(dirs.data_dir.join(".migrated-v3").exists());
 
             paths::set_test_default(None);
@@ -1972,8 +1984,8 @@ mod tests {
 
     #[tokio::test]
     async fn event_log_is_authoritative_on_reload() {
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-events-reload-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-events-reload-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store
@@ -1983,10 +1995,8 @@ mod tests {
         let first_id = store.id().await;
 
         // Corrupt the snapshot cache: the event log must still restore state.
-        let mut corrupted: SessionData = serde_json::from_str(
-            &fs::read_to_string(&path).unwrap(),
-        )
-        .unwrap();
+        let mut corrupted: SessionData =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         corrupted.messages[0].content = "tampered".to_string();
         let test_blobs = BlobStore::new(directory.join("blobs"));
         write_session_file(&path, &corrupted, &test_blobs).unwrap();
@@ -2042,8 +2052,8 @@ mod tests {
 
     #[tokio::test]
     async fn large_message_content_is_offloaded_to_blob_store() {
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-blob-session-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-blob-session-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         let big = "x".repeat(8_192);
@@ -2054,14 +2064,23 @@ mod tests {
 
         // Snapshot on disk should reference the blob.
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("content_blob"), "large content should be offloaded");
-        assert!(!raw.contains(&big), "raw content should not appear in snapshot");
+        assert!(
+            raw.contains("content_blob"),
+            "large content should be offloaded"
+        );
+        assert!(
+            !raw.contains(&big),
+            "raw content should not appear in snapshot"
+        );
 
         // Replaying the event log rehydrates content from the blob store.
         let reloaded = SessionStore::for_path(path.clone());
         let messages = reloaded.messages().await;
         assert_eq!(messages[0].content, big);
-        assert!(messages[0].content_blob.is_none(), "memory uses inline content");
+        assert!(
+            messages[0].content_blob.is_none(),
+            "memory uses inline content"
+        );
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2183,14 +2202,15 @@ mod tests {
         ];
 
         let selection = select_compaction(&messages, 1).unwrap();
-        assert_eq!(selection.previous_summary.as_deref(), Some("prev summary body"));
+        assert_eq!(
+            selection.previous_summary.as_deref(),
+            Some("prev summary body")
+        );
         // The prior checkpoint lands in the archived head, not the tail.
         assert!(selection
             .archived
             .iter()
-            .any(|message| message
-                .content
-                .starts_with("[Conversation checkpoint]")));
+            .any(|message| message.content.starts_with("[Conversation checkpoint]")));
         assert_eq!(selection.tail.last().unwrap().content, "a2");
     }
 
@@ -2207,10 +2227,16 @@ mod tests {
         ];
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
 
-        let result = run_compaction(&mut history, 10_000, 1, Some(provider), &NoopCompactionHooks)
-            .await
-            .unwrap()
-            .unwrap();
+        let result = run_compaction(
+            &mut history,
+            10_000,
+            1,
+            Some(provider),
+            &NoopCompactionHooks,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         // The mock provider's canned reply becomes the checkpoint summary.
         assert!(result.active[0].content.contains("mock AI"));
@@ -2268,7 +2294,8 @@ mod tests {
             async fn stream_chat(
                 &self,
                 _messages: Vec<Message>,
-            ) -> Result<futures::stream::BoxStream<'static, Result<String, String>>, String> {
+            ) -> Result<futures::stream::BoxStream<'static, Result<String, String>>, String>
+            {
                 Err("boom".to_string())
             }
         }
@@ -2281,10 +2308,16 @@ mod tests {
         ];
         let provider: Arc<dyn Provider> = Arc::new(FailingProvider);
 
-        let result = run_compaction(&mut history, 10_000, 1, Some(provider), &NoopCompactionHooks)
-            .await
-            .unwrap()
-            .unwrap();
+        let result = run_compaction(
+            &mut history,
+            10_000,
+            1,
+            Some(provider),
+            &NoopCompactionHooks,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         // Fallback excerpt summary references the old question.
         assert!(result.active[0].content.contains("old question"));

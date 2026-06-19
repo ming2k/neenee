@@ -18,7 +18,8 @@ use crossterm::{
 };
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal, HarnessSnapshot,
-    ImagePart, Message, PermissionDecision, PermissionRequest, Role, SessionOverview,
+    ImagePart, Message, ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest,
+    Role, SessionOverview, UserQuestionRequest,
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -340,7 +341,6 @@ pub(crate) struct ModelSolution {
     pub name: &'static str,
     pub model: &'static str,
     pub description: &'static str,
-    pub custom_endpoint: bool,
     /// Model context window in tokens, used by the header context-usage
     /// indicator. `0` means "unknown" (custom / local / mock), which hides the
     /// indicator rather than showing a meaningless fill level.
@@ -361,9 +361,8 @@ const SOLUTIONS: &[ModelSolution] = &[
     ModelSolution {
         id: "kimi-code",
         name: "Kimi Code",
-        model: "kimi-for-coding",
+        model: "kimi-code",
         description: "Kimi coding subscription (auto-updated model)",
-        custom_endpoint: false,
         context_window: 128_000,
     },
     ModelSolution {
@@ -371,31 +370,27 @@ const SOLUTIONS: &[ModelSolution] = &[
         name: "OpenAI",
         model: "gpt-4o",
         description: "OpenAI API",
-        custom_endpoint: false,
         context_window: 128_000,
     },
     ModelSolution {
         id: "gemini",
-        name: "Gemini",
-        model: "gemini-1.5-flash",
-        description: "Google Gemini",
-        custom_endpoint: false,
+        name: "Gemini 2.5 Flash",
+        model: "gemini-2.5-flash",
+        description: "Google Gemini 2.5 Flash",
         context_window: 1_000_000,
     },
     ModelSolution {
-        id: "kimi",
-        name: "Kimi Platform",
-        model: "moonshot-v1-8k",
-        description: "Moonshot pay-as-you-go API",
-        custom_endpoint: false,
-        context_window: 8_000,
+        id: "deepseek-flash",
+        name: "DeepSeek Flash (V3)",
+        model: "deepseek-chat",
+        description: "DeepSeek V3 chat",
+        context_window: 64_000,
     },
     ModelSolution {
-        id: "deepseek",
-        name: "DeepSeek",
-        model: "deepseek-chat",
-        description: "DeepSeek AI",
-        custom_endpoint: false,
+        id: "deepseek-pro",
+        name: "DeepSeek Pro (R1)",
+        model: "deepseek-reasoner",
+        description: "DeepSeek R1 reasoning",
         context_window: 64_000,
     },
     ModelSolution {
@@ -403,7 +398,6 @@ const SOLUTIONS: &[ModelSolution] = &[
         name: "Qwen",
         model: "qwen-plus",
         description: "Alibaba DashScope",
-        custom_endpoint: false,
         context_window: 131_072,
     },
     ModelSolution {
@@ -411,31 +405,13 @@ const SOLUTIONS: &[ModelSolution] = &[
         name: "GLM",
         model: "glm-4-plus",
         description: "Zhipu AI",
-        custom_endpoint: false,
         context_window: 128_000,
-    },
-    ModelSolution {
-        id: "volcengine",
-        name: "Volcengine",
-        model: "deepseek-v3-250324",
-        description: "ByteDance Ark",
-        custom_endpoint: false,
-        context_window: 64_000,
     },
     ModelSolution {
         id: "llama",
         name: "Llama",
         model: "local-model",
         description: "Local Llama server",
-        custom_endpoint: false,
-        context_window: 0,
-    },
-    ModelSolution {
-        id: "custom",
-        name: "Custom relay",
-        model: "custom-model",
-        description: "OpenAI-compatible endpoint",
-        custom_endpoint: true,
         context_window: 0,
     },
     ModelSolution {
@@ -443,7 +419,6 @@ const SOLUTIONS: &[ModelSolution] = &[
         name: "Mock",
         model: "mock-model",
         description: "Test provider",
-        custom_endpoint: false,
         context_window: 0,
     },
 ];
@@ -454,9 +429,12 @@ pub enum Modal {
     Models,
     HistorySearch,
     Permission,
-    ApiKey,
-    Endpoint,
-    ModelName,
+    Question,
+    /// Unified model editor (ADR-0002 phase 4): edit the API key and model-id
+    /// of a catalog entry in one place. Reached via `e` in the picker or
+    /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
+    /// ModelName modal chain.
+    ModelEditor,
     Help,
     Sessions,
     /// Full-output detail overlay for a focused tool step. The step is
@@ -526,6 +504,14 @@ pub struct App {
     pub loop_status: String,
     pub activity_status: String,
     pub pending_permission: Option<PermissionRequest>,
+    pub pending_question: Option<UserQuestionRequest>,
+    /// Selected option indices per question. Outer vec parallels
+    /// `pending_question.questions`; inner vec holds selected option indices.
+    pub question_selected: Vec<Vec<usize>>,
+    /// Free-text input per question when the "Other" option is highlighted.
+    pub question_other_text: Vec<String>,
+    /// Keyboard focus within the question modal: which question is active.
+    pub question_current: usize,
     /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
     pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
@@ -590,12 +576,21 @@ pub struct App {
     pub spinner_tick: usize,
     /// Input stashed while the API-key modal borrows the input line.
     pub stashed_input: String,
-    /// Solution index currently being configured.
-    pub setup_solution: Option<usize>,
-    pub setup_endpoint: Option<String>,
-    pub setup_model: Option<String>,
+    /// Target `SOLUTIONS` index for the unified model editor.
+    pub editor_target: Option<usize>,
+    /// Which editor field is focused: `0` = API key, `1` = model id.
+    pub editor_field: u8,
+    /// API-key buffer for the editor (the input line is borrowed for the
+    /// focused field; this holds the key while the model-id field is focused).
+    pub editor_key: String,
+    /// Model-id buffer for the editor.
+    pub editor_model: String,
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
+    /// Live model-picker snapshot (default id + per-model favorite / key-ready
+    /// / last-used). Drives the `/models` picker's rendering and sort order
+    /// (ADR-0002 phase 3). Refreshed from the response listener each frame.
+    pub model_picker: ModelPickerSnapshot,
     /// Theme.
     pub theme: Theme,
     /// MCP server statuses loaded at startup. Mirrored into the header as a
@@ -609,9 +604,12 @@ struct UiRuntime {
     harness: Arc<Mutex<HarnessSnapshot>>,
     activity_status: Arc<Mutex<String>>,
     pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
+    pending_question: Arc<Mutex<VecDeque<UserQuestionRequest>>>,
     is_responding: Arc<AtomicBool>,
     messages: Arc<Mutex<Vec<TranscriptMessage>>>,
     key_status: Arc<Mutex<HashMap<String, bool>>>,
+    /// Model-picker snapshot shared with the response listener.
+    model_picker: Arc<Mutex<ModelPickerSnapshot>>,
     /// Sessions picker rows + a one-shot request to open the picker modal.
     sessions_overview: Arc<Mutex<Vec<SessionOverview>>>,
     open_sessions: Arc<AtomicBool>,
@@ -1043,6 +1041,54 @@ impl App {
         fuzzy::sort_by_score(&mut ranked);
         ranked
     }
+
+    /// Compute the filtered, sorted model rows for the `/models` picker.
+    /// Delegates to [`models_filtered_from`] so the input handler and the
+    /// renderer share one filter+sort implementation.
+    pub fn models_filtered(&self) -> Vec<(usize, &ModelPickerRow)> {
+        models_filtered_from(SOLUTIONS, &self.model_picker, self.input.trim())
+    }
+}
+
+/// Filter and sort the model picker rows (ADR-0002 phase 3). Joins the TUI's
+/// static `SOLUTIONS` (display metadata) with the live picker snapshot
+/// (favorite / key-ready / last-used), fuzzy-filters by `query`, and sorts by
+/// **favorite first → last-used descending → name ascending**.
+///
+/// The fuzzy query is a *filter*, not a sort key: once a row passes the filter,
+/// its position is set by the user's preference and usage signals, not by match
+/// quality, so a favorite always wins over a slightly-better-matching
+/// non-favorite. Returns `(SOLUTIONS index, picker row)` pairs.
+pub(crate) fn models_filtered_from<'a>(
+    solutions: &'a [ModelSolution],
+    picker: &'a ModelPickerSnapshot,
+    query: &str,
+) -> Vec<(usize, &'a ModelPickerRow)> {
+    let mut rows: Vec<(usize, &ModelPickerRow)> = solutions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, solution)| {
+            let row = picker.rows.iter().find(|r| r.id == solution.id)?;
+            Some((i, row))
+        })
+        .filter(|(i, _)| {
+            if query.is_empty() {
+                return true;
+            }
+            let solution = &solutions[*i];
+            fuzzy::fuzzy_match(solution.name, query).is_some()
+                || fuzzy::fuzzy_match(solution.id, query).is_some()
+        })
+        .collect();
+    rows.sort_by(|(ia, ra), (ib, rb)| {
+        let name_a = &solutions[*ia].name;
+        let name_b = &solutions[*ib].name;
+        rb.favorite
+            .cmp(&ra.favorite)
+            .then_with(|| rb.last_used_ms.cmp(&ra.last_used_ms))
+            .then_with(|| name_a.cmp(name_b))
+    });
+    rows
 }
 
 /// Undo raw mode, leave the alternate screen, and turn off mouse tracking.
@@ -1154,8 +1200,12 @@ pub async fn run_tui(
     let activity_clone = activity_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
     let pending_permission_clone = pending_permission.clone();
+    let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
+    let pending_question_clone = pending_question.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
+    let model_picker = Arc::new(Mutex::new(ModelPickerSnapshot::default()));
+    let model_picker_clone = model_picker.clone();
     let sessions_overview = Arc::new(Mutex::new(Vec::<SessionOverview>::new()));
     let sessions_overview_clone = sessions_overview.clone();
     let open_sessions = Arc::new(AtomicBool::new(false));
@@ -1307,8 +1357,8 @@ pub async fn run_tui(
                     // yet. The lifecycle-aware default (see `step_interaction`)
                     // expands it on completion — Ok follows per-tool density,
                     // Failed/Denied force-expand to surface the error.
-                    let message =
-                        TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
+                    let message = TranscriptMessage::tool_step(id, name, arguments)
+                        .with_attribution(provider, model);
                     msgs.push(message);
                     ir_clone.store(true, Ordering::SeqCst);
                 }
@@ -1387,8 +1437,7 @@ pub async fn run_tui(
                         // The ToolCall event may have been dropped with the
                         // aborted turn; synthesize a minimal cancelled step so
                         // the user still sees the call was abandoned.
-                        let mut message =
-                            TranscriptMessage::tool_step(id.clone(), "tool", "{}");
+                        let mut message = TranscriptMessage::tool_step(id.clone(), "tool", "{}");
                         message.cancel_tool_step(&id);
                         message.set_tool_step_expanded(false);
                         msgs.push(message);
@@ -1399,7 +1448,10 @@ pub async fn run_tui(
                     // stdout). Accumulate into the running step so it updates
                     // in place instead of freezing on a spinner.
                     let mut msgs = messages_clone.lock().await;
-                    if !msgs.iter_mut().any(|message| message.push_tool_stream(&id, &stream)) {
+                    if !msgs
+                        .iter_mut()
+                        .any(|message| message.push_tool_stream(&id, &stream))
+                    {
                         // Unknown id: drop silently — the matching ToolCall may
                         // have been dropped with an aborted turn.
                     }
@@ -1429,8 +1481,16 @@ pub async fn run_tui(
                     pending_permission_clone.lock().await.clear();
                     activity_clone.lock().await.clear();
                 }
+                AgentResponse::UserQuestionRequest(request) => {
+                    pending_question_clone.lock().await.push_back(request);
+                    *activity_clone.lock().await = "awaiting user input".to_string();
+                    ir_clone.store(true, Ordering::SeqCst);
+                }
                 AgentResponse::ProviderKeys(status) => {
                     *key_status_clone.lock().await = status.into_iter().collect();
+                }
+                AgentResponse::ModelPicker(snapshot) => {
+                    *model_picker_clone.lock().await = snapshot;
                 }
                 AgentResponse::ConversationCleared => {
                     messages_clone.lock().await.clear();
@@ -1544,6 +1604,10 @@ pub async fn run_tui(
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         pending_permission: None,
+        pending_question: None,
+        question_selected: Vec::new(),
+        question_other_text: Vec::new(),
+        question_current: 0,
         sessions_overview: Vec::new(),
         permission_confirm_always: false,
         permission_show_details: false,
@@ -1570,10 +1634,12 @@ pub async fn run_tui(
         esc_armed_ticks: 0,
         spinner_tick: 0,
         stashed_input: String::new(),
-        setup_solution: None,
-        setup_endpoint: None,
-        setup_model: None,
+        editor_target: None,
+        editor_field: 0,
+        editor_key: String::new(),
+        editor_model: String::new(),
         key_status: HashMap::new(),
+        model_picker: ModelPickerSnapshot::default(),
         theme: Theme::default(),
         mcp_statuses,
     };
@@ -1588,9 +1654,11 @@ pub async fn run_tui(
             harness,
             activity_status,
             pending_permission,
+            pending_question,
             is_responding,
             messages: messages_for_loop,
             key_status,
+            model_picker,
             sessions_overview,
             open_sessions,
         },
@@ -1678,7 +1746,9 @@ async fn run_app_loop<B: Backend>(
             app.loop_status = harness.loop_status;
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
+            app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
+            app.model_picker = runtime.model_picker.lock().await.clone();
             if app.pending_permission.is_some() && app.active_modal == Modal::None {
                 app.active_modal = Modal::Permission;
                 app.modal_index = 0;
@@ -1694,6 +1764,28 @@ async fn run_app_loop<B: Backend>(
                 app.permission_scroll = 0;
                 app.permission_max_scroll = 0;
                 app.permission_show_details = false;
+            }
+            if app.pending_question.is_some() && app.active_modal == Modal::None {
+                app.active_modal = Modal::Question;
+                app.modal_index = 0;
+                app.question_current = 0;
+                // Default selection: empty for multi-select, first option for single-select.
+                if let Some(ref request) = app.pending_question {
+                    app.question_selected = request
+                        .questions
+                        .iter()
+                        .map(|q| if q.multi_select { Vec::new() } else { vec![0] })
+                        .collect();
+                    app.question_other_text =
+                        request.questions.iter().map(|_| String::new()).collect();
+                }
+                app.focus_zone = input::FocusZone::Compose;
+            } else if app.pending_question.is_none() && app.active_modal == Modal::Question {
+                app.active_modal = Modal::None;
+                app.modal_index = 0;
+                app.question_current = 0;
+                app.question_selected.clear();
+                app.question_other_text.clear();
             }
             // Sessions picker: refresh rows and open the modal on request.
             app.sessions_overview = runtime.sessions_overview.lock().await.clone();
@@ -1762,7 +1854,11 @@ async fn run_app_loop<B: Backend>(
 
             // Compute the displayed input text first so the transcript layout can
             // reserve the right height for a wrapping, growing input box.
-            let masked_input = if app.active_modal == Modal::ApiKey {
+            let masked_input = if app.active_modal == Modal::ModelEditor
+                && app.editor_field == 0
+            {
+                // Mask the API key everywhere it could be rendered (the editor
+                // field itself, and any layout pass that inspects the input).
                 "•".repeat(app.input.chars().count())
             } else {
                 app.input.clone()
@@ -1774,12 +1870,7 @@ async fn run_app_loop<B: Backend>(
             // stays visible and scrollable — it keeps the chrome too.
             let chrome_hidden = !matches!(
                 app.active_modal,
-                Modal::None
-                    | Modal::ApiKey
-                    | Modal::Endpoint
-                    | Modal::ModelName
-                    | Modal::HistorySearch
-                    | Modal::Permission
+                Modal::None | Modal::HistorySearch | Modal::Permission
             );
 
             // When zoomed into a sub-agent, render its child messages and show
@@ -1804,8 +1895,7 @@ async fn run_app_loop<B: Backend>(
             // Suppress the hover affordance whenever a full-overlay modal is
             // open so no stale highlight bleeds through. The permission sheet
             // keeps the transcript interactive, so it is exempted.
-            let chrome_interactive =
-                matches!(app.active_modal, Modal::None | Modal::Permission);
+            let chrome_interactive = matches!(app.active_modal, Modal::None | Modal::Permission);
 
             let transcript_render = render::draw_transcript(
                 f,
@@ -1820,12 +1910,8 @@ async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    hovered_step: chrome_interactive
-                        .then_some(app.hovered_step)
-                        .flatten(),
-                    focused_target: chrome_interactive
-                        .then_some(app.focused_target)
-                        .flatten(),
+                    hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
+                    focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     theme: &app.theme,
                 },
             );
@@ -1841,7 +1927,12 @@ async fn run_app_loop<B: Backend>(
             // drawn before the composer because it borrows `view_messages`
             // (an immutable borrow of `app`) while `draw_composer` needs a
             // mutable borrow of `app.input_scroll`.
-            let hint_goal_rect = if !chrome_hidden && hint_rect.height > 0 {
+            // The permission sheet takes over the hint line as well as the
+            // input box, so suppress the hint bar while it is open.
+            let hint_goal_rect = if !chrome_hidden
+                && hint_rect.height > 0
+                && app.active_modal != Modal::Permission
+            {
                 render::draw_hint_bar(
                     f,
                     hint_rect,
@@ -1870,6 +1961,14 @@ async fn run_app_loop<B: Backend>(
             if !chrome_hidden {
                 if app.active_modal == Modal::Permission {
                     if let Some(request) = app.pending_permission.as_ref() {
+                        // Extend the slot down by the hint-line height so the
+                        // sheet also covers (replaces) the hint bar.
+                        let permission_rect = ratatui::layout::Rect::new(
+                            input_rect.x,
+                            input_rect.y,
+                            input_rect.width,
+                            input_rect.height + hint_rect.height,
+                        );
                         let max_scroll = render::draw_permission_sheet(
                             f,
                             request,
@@ -1877,24 +1976,35 @@ async fn run_app_loop<B: Backend>(
                             app.permission_confirm_always,
                             app.permission_show_details,
                             app.permission_scroll,
-                            input_rect,
+                            permission_rect,
                             &app.theme,
                         );
                         app.permission_max_scroll = max_scroll;
                         app.permission_scroll =
                             app.permission_scroll.min(app.permission_max_scroll);
                     }
+                } else if matches!(
+                    app.active_modal,
+                    Modal::ModelEditor | Modal::HistorySearch
+                ) {
+                    // These modals render their own live input field over a
+                    // dimmed backdrop, so the composer underneath would only
+                    // (a) bleed its panel background out around the centered
+                    // modal and (b) duplicate the same `app.input` the modal
+                    // already shows, making it look like focus is split. For
+                    // the editor's key field it would also panic: the masked
+                    // key's byte cursor is computed against the unmasked string.
                 } else {
                     let compose_focused = app.focus_zone.is_compose();
                     render::draw_composer(
                         f,
                         input_rect,
-                        &masked_input,
+                        &app.input,
                         app.byte_cursor(),
                         compose_focused,
                         &app.theme,
                         &mut layout_map,
-                        app.active_modal != Modal::ApiKey,
+                        true,
                         &mut app.input_scroll,
                     );
                 }
@@ -1944,6 +2054,9 @@ async fn run_app_loop<B: Backend>(
                         &app.current_provider,
                         app.modal_index,
                         &app.key_status,
+                        &app.model_picker,
+                        &app.input,
+                        app.cursor_position,
                         &app.theme,
                     );
                 }
@@ -1954,36 +2067,43 @@ async fn run_app_loop<B: Backend>(
                         &mut layout_map,
                         &app.input_history,
                         &app.input,
+                        app.cursor_position,
                         &ranked,
                         app.modal_index,
                         &app.theme,
                     );
                 }
                 Modal::Permission => {}
-                Modal::ApiKey => {
-                    let solution = app
-                        .setup_solution
-                        .and_then(|idx| SOLUTIONS.get(idx))
-                        .map(|solution| solution.name)
-                        .unwrap_or("provider");
-                    render::draw_api_key_modal(f, solution, &masked_input, &app.theme);
+                Modal::Question => {
+                    if let Some(ref request) = app.pending_question {
+                        render::draw_question_modal(
+                            f,
+                            request,
+                            app.question_current,
+                            &app.question_selected,
+                            &app.question_other_text,
+                            app.modal_index,
+                            &app.theme,
+                        );
+                    }
                 }
-                Modal::Endpoint => render::draw_solution_input_modal(
-                    f,
-                    " Relay endpoint",
-                    "Full OpenAI-compatible chat completions URL",
-                    &app.input,
-                    false,
-                    &app.theme,
-                ),
-                Modal::ModelName => render::draw_solution_input_modal(
-                    f,
-                    " Model ID",
-                    "Model name sent in the request body",
-                    &app.input,
-                    false,
-                    &app.theme,
-                ),
+                Modal::ModelEditor => {
+                    let title = app
+                        .editor_target
+                        .and_then(|idx| SOLUTIONS.get(idx))
+                        .map(|s| s.name)
+                        .unwrap_or("model");
+                    render::draw_model_editor(
+                        f,
+                        title,
+                        app.editor_field,
+                        &app.editor_key,
+                        &app.editor_model,
+                        &app.input,
+                        app.cursor_position,
+                        &app.theme,
+                    );
+                }
                 Modal::Help => render::draw_help_modal(f, &app.theme),
                 Modal::ToolStepDetail => {
                     if let Some(msg) = app
@@ -2033,8 +2153,7 @@ async fn run_app_loop<B: Backend>(
         // Browse zone the input box is blurred so the caret is hidden too.
         // Toggled only when the desired state changes to avoid spamming the
         // terminal with redundant escape codes every frame.
-        let cursor_should_hide = app.active_modal == Modal::None
-            && app.focus_zone.is_browse();
+        let cursor_should_hide = app.active_modal == Modal::None && app.focus_zone.is_browse();
         if cursor_should_hide != app.cursor_hidden {
             if cursor_should_hide {
                 let _ = terminal.hide_cursor();
@@ -2102,9 +2221,9 @@ async fn run_app_loop<B: Backend>(
             // should expand to the unique command rather than send `/go` as a
             // (rejected) command. Path mentions are accepted only via Tab so
             // plain Enter still ships the message as the user typed it.
-            let has_exact_suggestion = completions
-                .iter()
-                .any(|c| c.replace_start == 0 && c.replace_end == app.input.len() && c.label == app.input);
+            let has_exact_suggestion = completions.iter().any(|c| {
+                c.replace_start == 0 && c.replace_end == app.input.len() && c.label == app.input
+            });
             let completion_kind = if suppress_completions {
                 crate::CompletionKind::None
             } else {
@@ -2216,29 +2335,147 @@ async fn run_app_loop<B: Backend>(
                     app.history_index = None;
                     let _ = app.tx.send(AgentRequest::SlashCommand(cmd));
                 }
-                input::InputAction::SwitchProvider { .. } => {
+                input::InputAction::ModelPickerActivate => {
                     if app.active_modal == Modal::Models {
-                        let solution = SOLUTIONS[app.modal_index];
-                        if solution.custom_endpoint {
-                            app.setup_solution = Some(app.modal_index);
-                            app.setup_endpoint = None;
-                            app.setup_model = None;
-                            app.stashed_input = std::mem::take(&mut app.input);
-                            app.cursor_position = 0;
-                            app.active_modal = Modal::Endpoint;
-                        } else if app.key_status.get(solution.id).copied().unwrap_or(true) {
-                            let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                provider_type: solution.id.to_string(),
-                                model: solution.model.to_string(),
-                                api_key: None,
-                                base_url: None,
-                            });
-                            app.active_modal = Modal::None;
+                        // Default fast path: an unfiltered picker activates the
+                        // default model with one keystroke. Otherwise activate
+                        // the highlighted row of the filtered list.
+                        let filtered = app.models_filtered();
+                        let target_id = if app.input.trim().is_empty() {
+                            Some(app.model_picker.default_id.clone())
                         } else {
-                            app.setup_solution = Some(app.modal_index);
-                            app.stashed_input = std::mem::take(&mut app.input);
+                            filtered
+                                .get(app.modal_index)
+                                .or_else(|| filtered.first())
+                                .map(|(i, _)| SOLUTIONS[*i].id.to_string())
+                        };
+                        if let Some(id) = target_id {
+                            if let Some((sol_idx, _)) = filtered
+                                .iter()
+                                .find(|(i, _)| SOLUTIONS[*i].id == id)
+                                .copied()
+                            {
+                                let solution = SOLUTIONS[sol_idx];
+                                if app.key_status.get(solution.id).copied().unwrap_or(true) {
+                                    let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                        provider_type: solution.id.to_string(),
+                                        model: solution.model.to_string(),
+                                        api_key: None,
+                                        base_url: None,
+                                    });
+                                    // The input box was borrowed as the filter;
+                                    // restore the stashed draft and close.
+                                    app.input = std::mem::take(&mut app.stashed_input);
+                                    app.cursor_position = app.input.chars().count();
+                                    app.active_modal = Modal::None;
+                                } else {
+                                    // No key configured: open the unified
+                                    // editor so the user can enter a key (and
+                                    // optionally override the model id) before
+                                    // activating. The picker filter in `input`
+                                    // is discarded — it is a transient search;
+                                    // the original draft stays in stashed_input.
+                                    app.editor_target = Some(sol_idx);
+                                    app.editor_field = 0;
+                                    app.editor_key.clear();
+                                    app.editor_model = solution.model.to_string();
+                                    app.input.clear();
+                                    app.cursor_position = 0;
+                                    app.active_modal = Modal::ModelEditor;
+                                }
+                            }
+                        }
+                    }
+                }
+                input::InputAction::ModelPickerToggleFavorite => {
+                    if app.active_modal == Modal::Models {
+                        // Toggle the favorite on the highlighted filtered row
+                        // (or the default when the filter is empty). Sending the
+                        // request is enough; the backend pushes a fresh
+                        // snapshot that flips the ★ next frame.
+                        let filtered = app.models_filtered();
+                        let target = if app.input.trim().is_empty() {
+                            Some(app.model_picker.default_id.clone())
+                        } else {
+                            filtered
+                                .get(app.modal_index)
+                                .or_else(|| filtered.first())
+                                .map(|(i, _)| SOLUTIONS[*i].id.to_string())
+                        };
+                        if let Some(id) = target {
+                            let _ = app.tx.send(AgentRequest::ToggleFavorite { id });
+                        }
+                    }
+                }
+                input::InputAction::OpenModelEditor => {
+                    // `e` in the picker: open the unified editor for the
+                    // highlighted filtered row. The picker filter is discarded
+                    // (transient search); the original chat draft stays stashed.
+                    if app.active_modal == Modal::Models {
+                        let filtered = app.models_filtered();
+                        if let Some(&(idx, _)) =
+                            filtered.get(app.modal_index).or_else(|| filtered.first())
+                        {
+                            app.editor_target = Some(idx);
+                            app.editor_field = 0;
+                            app.editor_key.clear();
+                            app.editor_model =
+                                SOLUTIONS.get(idx).map(|s| s.model.to_string()).unwrap_or_default();
+                            app.input.clear();
                             app.cursor_position = 0;
-                            app.active_modal = Modal::ApiKey;
+                            app.active_modal = Modal::ModelEditor;
+                        }
+                    }
+                }
+                input::InputAction::ModelEditorNextField => {
+                    // Tab: save the focused field's buffer, swap input to the
+                    // other field. The composer input line is borrowed for the
+                    // focused field; the unfocused one lives in its buf.
+                    if app.active_modal == Modal::ModelEditor {
+                        if app.editor_field == 0 {
+                            app.editor_key = std::mem::take(&mut app.input);
+                            app.input = std::mem::take(&mut app.editor_model);
+                            app.editor_field = 1;
+                        } else {
+                            app.editor_model = std::mem::take(&mut app.input);
+                            app.input = std::mem::take(&mut app.editor_key);
+                            app.editor_field = 0;
+                        }
+                        app.cursor_position = app.input.chars().count();
+                    }
+                }
+                input::InputAction::SubmitModelEditor => {
+                    if app.active_modal == Modal::ModelEditor {
+                        if let Some(idx) = app.editor_target {
+                            // Commit the focused field's input to its buffer first.
+                            if app.editor_field == 0 {
+                                app.editor_key = app.input.clone();
+                            } else {
+                                app.editor_model = app.input.clone();
+                            }
+                            if let Some(solution) = SOLUTIONS.get(idx) {
+                                let key = app.editor_key.trim();
+                                let model = if app.editor_model.trim().is_empty() {
+                                    solution.model.to_string()
+                                } else {
+                                    app.editor_model.trim().to_string()
+                                };
+                                let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                    provider_type: solution.id.to_string(),
+                                    model,
+                                    api_key: if key.is_empty() {
+                                        None
+                                    } else {
+                                        Some(key.to_string())
+                                    },
+                                    base_url: None,
+                                });
+                            }
+                            // Close to chat: restore the original draft.
+                            app.input = std::mem::take(&mut app.stashed_input);
+                            app.cursor_position = app.input.chars().count();
+                            app.editor_target = None;
+                            app.active_modal = Modal::None;
                         }
                     }
                 }
@@ -2254,13 +2491,14 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::OpenModels => {
+                    // Stash whatever the user was composing so Esc restores it;
+                    // the input box is reused as the fuzzy filter while the
+                    // picker is open (same pattern as HistorySearch).
+                    app.stashed_input = std::mem::take(&mut app.input);
+                    app.cursor_position = 0;
+                    app.input_scroll = 0;
                     app.active_modal = Modal::Models;
-                    if let Some(idx) = SOLUTIONS
-                        .iter()
-                        .position(|solution| solution.id == app.current_provider)
-                    {
-                        app.modal_index = idx;
-                    }
+                    app.modal_index = 0;
                     app.suggestion_index = None;
                 }
                 input::InputAction::OpenHistory => {
@@ -2333,16 +2571,7 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::CloseModal => {
-                    if matches!(
-                        app.active_modal,
-                        Modal::ApiKey | Modal::Endpoint | Modal::ModelName
-                    ) {
-                        app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
-                        app.setup_solution = None;
-                        app.setup_endpoint = None;
-                        app.setup_model = None;
-                    } else if app.active_modal == Modal::HistorySearch {
+                    if app.active_modal == Modal::HistorySearch {
                         // The input box was borrowed as the fuzzy query; hand
                         // the in-progress draft back so Esc is a true cancel.
                         app.input = std::mem::take(&mut app.stashed_input);
@@ -2350,6 +2579,23 @@ async fn run_app_loop<B: Backend>(
                         app.input_scroll = 0;
                         app.suggestion_index = None;
                         app.modal_index = 0;
+                    } else if app.active_modal == Modal::Models {
+                        // The input box was borrowed as the fuzzy filter; hand
+                        // the in-progress draft back so Esc cancels cleanly.
+                        app.input = std::mem::take(&mut app.stashed_input);
+                        app.cursor_position = app.input.chars().count();
+                        app.input_scroll = 0;
+                        app.suggestion_index = None;
+                        app.modal_index = 0;
+                    } else if app.active_modal == Modal::ModelEditor {
+                        // Cancel the editor: discard its fields and return to
+                        // the picker with a fresh (empty) filter. The original
+                        // chat draft stays in stashed_input for when the picker
+                        // itself closes.
+                        app.editor_target = None;
+                        app.input.clear();
+                        app.cursor_position = 0;
+                        app.active_modal = Modal::Models;
                     }
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_message_idx = None;
@@ -2434,16 +2680,6 @@ async fn run_app_loop<B: Backend>(
                         &app.layout_map,
                     ) {
                         spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
-                    } else if matches!(
-                        app.active_modal,
-                        Modal::ApiKey | Modal::Endpoint | Modal::ModelName
-                    ) {
-                        app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
-                        app.setup_solution = None;
-                        app.setup_endpoint = None;
-                        app.setup_model = None;
-                        app.active_modal = Modal::None;
                     } else if app.active_modal == Modal::HistorySearch {
                         // Cancel the fuzzy query: restore the in-progress draft
                         // the user was composing before Ctrl+R.
@@ -2682,8 +2918,14 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::ModalUp => match app.active_modal {
                     Modal::Models => {
-                        app.modal_index = if app.modal_index == 0 {
-                            SOLUTIONS.len() - 1
+                        // Walk the fuzzy-filtered list, not the raw catalog, so
+                        // the cursor never lands on a hidden row (same rule as
+                        // the history-search modal).
+                        let count = app.models_filtered().len();
+                        app.modal_index = if count == 0 {
+                            0
+                        } else if app.modal_index == 0 {
+                            count - 1
                         } else {
                             app.modal_index - 1
                         };
@@ -2719,16 +2961,16 @@ async fn run_app_loop<B: Backend>(
                             app.modal_index - 1
                         };
                     }
-                    Modal::ApiKey
-                    | Modal::Endpoint
-                    | Modal::ModelName
-                    | Modal::Help
+                    Modal::Help
                     | Modal::ToolStepDetail
+                    | Modal::Question
+                    | Modal::ModelEditor
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
                     Modal::Models => {
-                        app.modal_index = (app.modal_index + 1) % SOLUTIONS.len();
+                        let count = app.models_filtered().len().max(1);
+                        app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::HistorySearch => {
                         let count = app.history_filtered().len().max(1);
@@ -2742,13 +2984,180 @@ async fn run_app_loop<B: Backend>(
                         let count = app.sessions_overview.len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
-                    Modal::ApiKey
-                    | Modal::Endpoint
-                    | Modal::ModelName
-                    | Modal::Help
+                    Modal::Help
                     | Modal::ToolStepDetail
+                    | Modal::Question
+                    | Modal::ModelEditor
                     | Modal::None => {}
                 },
+                input::InputAction::QuestionUp => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let current = app.question_current;
+                            let options_count = request.questions[current].options.len() + 1;
+                            app.modal_index = if app.modal_index == 0 {
+                                options_count - 1
+                            } else {
+                                app.modal_index - 1
+                            };
+                        }
+                    }
+                }
+                input::InputAction::QuestionDown => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let current = app.question_current;
+                            let options_count =
+                                (request.questions[current].options.len() + 1).max(1);
+                            app.modal_index = (app.modal_index + 1) % options_count;
+                        }
+                    }
+                }
+                input::InputAction::QuestionToggle => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let q = app.question_current;
+                            let i = app.modal_index;
+                            let multi = request.questions[q].multi_select;
+                            let selected = &mut app.question_selected[q];
+                            if multi {
+                                if let Some(pos) = selected.iter().position(|&x| x == i) {
+                                    selected.remove(pos);
+                                } else {
+                                    selected.push(i);
+                                    selected.sort();
+                                }
+                            } else {
+                                selected.clear();
+                                selected.push(i);
+                            }
+                        }
+                    }
+                }
+                input::InputAction::QuestionSelect(n) => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let q = app.question_current;
+                            let total_options = request.questions[q].options.len() + 1;
+                            if n > 0 && n <= total_options {
+                                app.modal_index = n - 1;
+                                let multi = request.questions[q].multi_select;
+                                let selected = &mut app.question_selected[q];
+                                if multi {
+                                    if let Some(pos) = selected.iter().position(|&x| x == n - 1) {
+                                        selected.remove(pos);
+                                    } else {
+                                        selected.push(n - 1);
+                                        selected.sort();
+                                    }
+                                } else {
+                                    selected.clear();
+                                    selected.push(n - 1);
+                                }
+                            }
+                        }
+                    }
+                }
+                input::InputAction::QuestionSubmit => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(request) = app.pending_question.take() {
+                            let request_id = request.id.clone();
+                            let answers: Vec<Vec<String>> = request
+                                .questions
+                                .iter()
+                                .enumerate()
+                                .map(|(q_idx, q)| {
+                                    let other_index = q.options.len();
+                                    let other_text = app
+                                        .question_other_text
+                                        .get(q_idx)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    app.question_selected
+                                        .get(q_idx)
+                                        .map(|sel| {
+                                            sel.iter()
+                                                .map(|&opt_idx| {
+                                                    if opt_idx == other_index {
+                                                        if other_text.is_empty() {
+                                                            "Other".to_string()
+                                                        } else {
+                                                            other_text.clone()
+                                                        }
+                                                    } else {
+                                                        q.options
+                                                            .get(opt_idx)
+                                                            .map(|o| o.label.clone())
+                                                            .unwrap_or_default()
+                                                    }
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            let _ = app.tx.send(AgentRequest::UserQuestionReply {
+                                request_id: request_id.clone(),
+                                answers,
+                            });
+                            let mut queue = runtime.pending_question.lock().await;
+                            queue.retain(|r| r.id != request_id);
+                            app.pending_question = queue.front().cloned();
+                            if app.pending_question.is_none() {
+                                app.active_modal = Modal::None;
+                            }
+                            app.modal_index = 0;
+                            app.question_current = 0;
+                            app.question_selected.clear();
+                            app.question_other_text.clear();
+                        }
+                    }
+                }
+                input::InputAction::QuestionCancel => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(request) = app.pending_question.take() {
+                            let request_id = request.id;
+                            let _ = app.tx.send(AgentRequest::UserQuestionReply {
+                                request_id: request_id.clone(),
+                                answers: Vec::new(),
+                            });
+                            let mut queue = runtime.pending_question.lock().await;
+                            queue.retain(|r| r.id != request_id);
+                            app.pending_question = queue.front().cloned();
+                            app.active_modal = Modal::None;
+                            app.modal_index = 0;
+                            app.question_current = 0;
+                            app.question_selected.clear();
+                            app.question_other_text.clear();
+                        }
+                    }
+                }
+                input::InputAction::QuestionInsertChar(c) => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let q = app.question_current;
+                            let other_index = request.questions[q].options.len();
+                            if app.modal_index == other_index {
+                                if let Some(text) = app.question_other_text.get_mut(q) {
+                                    text.push(c);
+                                }
+                            }
+                        }
+                    }
+                }
+                input::InputAction::QuestionBackspace => {
+                    if app.active_modal == Modal::Question {
+                        if let Some(ref request) = app.pending_question {
+                            let q = app.question_current;
+                            let other_index = request.questions[q].options.len();
+                            if app.modal_index == other_index {
+                                if let Some(text) = app.question_other_text.get_mut(q) {
+                                    text.pop();
+                                }
+                            }
+                        }
+                    }
+                }
                 input::InputAction::PermissionSubmit => {
                     if app.permission_confirm_always {
                         // Confirm-always sub-step: index 0 = Confirm, 1 = Cancel.
@@ -2904,18 +3313,15 @@ async fn run_app_loop<B: Backend>(
                             let mut messages = runtime.messages.lock().await;
                             match kind {
                                 step_interaction::StepKind::ToolStep => {
-                                    let enter_id = resolve_focused_mut(
-                                        &mut messages,
-                                        &app.focus_stack,
-                                        mi,
-                                    )
-                                    .and_then(|message| {
-                                        if message.is_subagent_task() {
-                                            message.tool_step_call_id().map(String::from)
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                    let enter_id =
+                                        resolve_focused_mut(&mut messages, &app.focus_stack, mi)
+                                            .and_then(|message| {
+                                                if message.is_subagent_task() {
+                                                    message.tool_step_call_id().map(String::from)
+                                                } else {
+                                                    None
+                                                }
+                                            });
                                     if let Some(id) = enter_id {
                                         drop(messages);
                                         app.enter_subagent(id);
@@ -3031,58 +3437,6 @@ async fn run_app_loop<B: Backend>(
                         app.hovered_step = step_interaction::hovered_summary(&cursor);
                     } else {
                         app.hovered_step = None;
-                    }
-                }
-                input::InputAction::ConfigureKey => {
-                    if app.active_modal == Modal::Models {
-                        app.setup_solution = Some(app.modal_index);
-                        app.setup_endpoint = None;
-                        app.setup_model = None;
-                        app.stashed_input = std::mem::take(&mut app.input);
-                        app.cursor_position = 0;
-                        app.active_modal = if SOLUTIONS[app.modal_index].custom_endpoint {
-                            Modal::Endpoint
-                        } else {
-                            Modal::ApiKey
-                        };
-                    }
-                }
-                input::InputAction::SubmitEndpoint => {
-                    let endpoint = std::mem::take(&mut app.input);
-                    if !endpoint.trim().is_empty() {
-                        app.setup_endpoint = Some(endpoint.trim().to_string());
-                        app.cursor_position = 0;
-                        app.active_modal = Modal::ModelName;
-                    }
-                }
-                input::InputAction::SubmitModelName => {
-                    let model = std::mem::take(&mut app.input);
-                    if !model.trim().is_empty() {
-                        app.setup_model = Some(model.trim().to_string());
-                        app.cursor_position = 0;
-                        app.active_modal = Modal::ApiKey;
-                    }
-                }
-                input::InputAction::SubmitApiKey => {
-                    if let Some(idx) = app.setup_solution.take() {
-                        let key = std::mem::take(&mut app.input);
-                        app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
-                        app.active_modal = Modal::None;
-                        if !key.trim().is_empty() {
-                            let solution = SOLUTIONS[idx];
-                            let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                provider_type: solution.id.to_string(),
-                                model: app
-                                    .setup_model
-                                    .take()
-                                    .unwrap_or_else(|| solution.model.to_string()),
-                                api_key: Some(key.trim().to_string()),
-                                base_url: app.setup_endpoint.take(),
-                            });
-                        }
-                    } else {
-                        app.active_modal = Modal::None;
                     }
                 }
             }
@@ -3430,21 +3784,14 @@ fn transcript_messages_from_core(
             if let Some((name, output)) = parse_tool_result(&message.content) {
                 let mut finished = false;
                 for item in restored.iter_mut() {
-                    if item.finish_tool_step(
-                        name,
-                        output,
-                        neenee_core::ToolOutput::text(output),
-                        0,
-                    ) {
+                    if item.finish_tool_step(name, output, neenee_core::ToolOutput::text(output), 0)
+                    {
                         // Apply the lifecycle-aware default disclosure so
                         // restored steps match live (Failed/Denied expand,
                         // Ok follows per-tool config).
                         if let Some(status) = item.tool_step_status() {
                             let default = step_interaction::default_tool_expanded(
-                                status,
-                                name,
-                                config,
-                                false,
+                                status, name, config, false,
                             );
                             item.set_tool_step_expanded(default);
                         }
@@ -3502,13 +3849,13 @@ mod tests {
         // provider/model so a resumed session that mixed models stays
         // traceable in the transcript.
         let message = Message::new(Role::Assistant, "Hello from kimi")
-            .with_attribution("kimi-code", "kimi-for-coding");
+            .with_attribution("kimi-code", "kimi-code");
         let restored = transcript_message_from_core(message).unwrap();
         assert_eq!(restored.provider.as_deref(), Some("kimi-code"));
-        assert_eq!(restored.model.as_deref(), Some("kimi-for-coding"));
+        assert_eq!(restored.model.as_deref(), Some("kimi-code"));
         assert_eq!(
             restored.attribution_label(),
-            Some(("kimi-code".to_string(), "kimi-for-coding".to_string()))
+            Some(("kimi-code".to_string(), "kimi-code".to_string()))
         );
 
         // A plain user message carries no attribution.
@@ -3587,7 +3934,7 @@ mod tests {
                 role: Role::Assistant,
                 content: String::new(),
                 content_blob: None,
-            display_content: None,
+                display_content: None,
                 reasoning_content: None,
                 tool_calls: Some(vec![
                     ToolCall {
@@ -3766,7 +4113,10 @@ mod tests {
         // Byte offset of the cursor at end (after `x`).
         let cursor_byte = s.len();
         let at_byte = s.find('@').unwrap();
-        assert_eq!(mention_range_at(s, cursor_byte), Some((at_byte, cursor_byte)));
+        assert_eq!(
+            mention_range_at(s, cursor_byte),
+            Some((at_byte, cursor_byte))
+        );
     }
 
     #[test]
@@ -3901,6 +4251,10 @@ mod tests {
             loop_status: "idle".to_string(),
             activity_status: String::new(),
             pending_permission: None,
+            pending_question: None,
+            question_selected: Vec::new(),
+            question_other_text: Vec::new(),
+            question_current: 0,
             sessions_overview: Vec::new(),
             permission_confirm_always: false,
             permission_show_details: false,
@@ -3927,10 +4281,12 @@ mod tests {
             esc_armed_ticks: 0,
             spinner_tick: 0,
             stashed_input: String::new(),
-            setup_solution: None,
-            setup_endpoint: None,
-            setup_model: None,
+            editor_target: None,
+            editor_field: 0,
+            editor_key: String::new(),
+            editor_model: String::new(),
             key_status: HashMap::new(),
+            model_picker: ModelPickerSnapshot::default(),
             theme: Theme::default(),
             mcp_statuses: Vec::new(),
         };
@@ -3973,8 +4329,7 @@ mod tests {
     fn completions_path_returns_top_level_for_bare_at() {
         // A bare `@` lists top-level entries only: the file plus the
         // synthesized top-level directory entry.
-        let (mut app, _tmp) =
-            app_in_tempdir(&["Cargo.toml", "src/main.rs", "README.md"], &["src"]);
+        let (mut app, _tmp) = app_in_tempdir(&["Cargo.toml", "src/main.rs", "README.md"], &["src"]);
         app.input = "@".to_string();
         app.cursor_position = 1;
         let completions = app.completions();

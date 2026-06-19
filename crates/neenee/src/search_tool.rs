@@ -50,11 +50,9 @@ impl Tool for SearchHistoryTool {
         ToolAccess::Read
     }
 
-    async fn call(&self,
-        arguments: &str,
-    ) -> Result<String, String> {
-        let args: serde_json::Value = serde_json::from_str(arguments)
-            .map_err(|e| format!("invalid arguments: {e}"))?;
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let query = args["query"]
             .as_str()
             .ok_or_else(|| "missing 'query' argument".to_string())?;
@@ -79,9 +77,7 @@ impl Tool for SearchHistoryTool {
         Ok(lines.join("\n\n"))
     }
 
-    async fn call_structured(&self,
-        arguments: &str,
-    ) -> Result<ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<ToolOutput, String> {
         self.call(arguments).await.map(ToolOutput::text)
     }
 }

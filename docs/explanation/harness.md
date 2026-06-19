@@ -51,10 +51,10 @@ carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
 `OpenAiCompatProvider` declares schemas natively. The OpenAI-compatible registry
-presets (`kimi-code`, `kimi`, `deepseek`, `qwen`, `glm`, `volcengine`) and
-the bespoke `custom` entry all inherit the same path: each is built by
+presets (`kimi-code`, `deepseek-flash`, `deepseek-pro`, `qwen`, `glm`) and
+the bespoke `openai` entry all inherit the same path: each is built by
 `OpenAiProviderSpec::build` (or `OpenAiCompatProvider::with_base_url` for
-`custom`) into an `OpenAiCompatProvider`, so they delegate to its
+`openai`) into an `OpenAiCompatProvider`, so they delegate to its
 `prepare_tools`. `GeminiProvider` and `LlamaServerProvider` do not override
 the default `prepare_tools` and never send a `tools` field; tool calls on
 those providers travel only through the universal fallback below.

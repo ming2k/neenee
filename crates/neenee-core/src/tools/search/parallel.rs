@@ -19,11 +19,7 @@ impl SearchProvider for ParallelProvider {
         "Parallel"
     }
 
-    async fn search(
-        &self,
-        client: &reqwest::Client,
-        query: &str,
-    ) -> Result<String, String> {
+    async fn search(&self, client: &reqwest::Client, query: &str) -> Result<String, String> {
         let mut headers: Vec<(String, String)> =
             vec![("User-Agent".to_string(), "neenee/0.1".to_string())];
         if let Some(key) = self

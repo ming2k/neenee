@@ -78,9 +78,20 @@ impl Agent {
             parts.push(
                 "\nWhen you need to use a tool, output a JSON object in this exact format:\n\
                  {\"tool\": \"tool_name\", \"arguments\": {...}}\n\
-                 Do not ask the user for permission — just call the tool."
+                 Do not ask the user for permission before calling ordinary tools — just call them."
                     .to_string(),
             );
+            if self.tools.iter().any(|t| t.name() == "ask_user") {
+                parts.push(
+                    "\nUse the ask_user tool when you need clarification or a decision from the user: \
+                     vague requirements, ambiguous instructions, trade-offs between approaches, \
+                     or before risky/destructive actions. Provide 2-4 labeled options per question; \
+                     put the recommended option first and suffix its label with '(Recommended)'. \
+                     Do NOT use ask_user to ask 'Is this plan okay?' or 'Should I proceed?' — \
+                     just take the most reasonable action and mention what you did."
+                        .to_string(),
+                );
+            }
         }
 
         // Skills index

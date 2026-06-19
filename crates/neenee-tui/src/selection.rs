@@ -432,7 +432,12 @@ mod tests {
     fn expanded_tool_step_copy_uses_semantic_detail() {
         let mut message =
             TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
-        message.finish_tool_step("call_1", "file contents", neenee_core::ToolOutput::text("file contents"), 42);
+        message.finish_tool_step(
+            "call_1",
+            "file contents",
+            neenee_core::ToolOutput::text("file contents"),
+            42,
+        );
         message.set_tool_step_expanded(true);
         // Block 0 = display arguments (key-value text), block 1 = output.
         let arg_index = message

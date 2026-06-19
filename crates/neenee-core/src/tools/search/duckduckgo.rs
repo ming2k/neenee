@@ -8,7 +8,7 @@
 //! retained as an opt-in fallback for users who want keyless search and have a
 //! clean egress IP, but it is no longer the default.
 
-use super::{format_results, MOZILLA_UA, SearchProvider, SearchResult};
+use super::{format_results, SearchProvider, SearchResult, MOZILLA_UA};
 use async_trait::async_trait;
 
 pub(crate) struct DdgProvider;
@@ -356,7 +356,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].title, "AI News");
         assert_eq!(results[0].url, "https://example.com/news");
-        assert_eq!(results[0].snippet, "Latest artificial intelligence headlines.");
+        assert_eq!(
+            results[0].snippet,
+            "Latest artificial intelligence headlines."
+        );
     }
 
     #[test]

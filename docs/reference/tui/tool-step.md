@@ -106,8 +106,9 @@ one-line header (the summary, colored by run state) with no marker glyph.
 
 ## Source
 
-`draw_tool_step` in `crates/neenee-tui/src/render/turn_artifacts.rs`. Shared
-header via `draw_expandable_step_header`. Expanded content dispatched by
+`draw_tool_step` in `crates/neenee-tui/src/render/step/renderers.rs`. Shared
+header via `draw_expandable_step_header` (from
+`crates/neenee-tui/src/render/step/mod.rs`). Expanded content dispatched by
 `draw_tool_result` to `draw_listing_content`, `draw_grep_content`,
 `draw_bash_content` (which renders the `$ command` line + the structured
 `Shell` payload), `draw_diff_content`, or `draw_code_content`. The bash command

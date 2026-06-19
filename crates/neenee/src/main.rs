@@ -4,13 +4,10 @@ use neenee_core::{
     async_trait,
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
-    providers::{
-        openai_provider_spec, GeminiProvider, LlamaServerProvider, MockProvider,
-        OpenAiCompatProvider, KIMI_CODE_USER_AGENT,
-    },
+    providers::MockProvider,
     tools::{
-        BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, TaskTool,
-        TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
+        AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
+        TaskTool, TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
     },
     Agent, AgentEvent, AgentMode, AgentRequest, AgentResponse, Goal, GoalAccountingResult,
     GoalService, GoalStatus, GoalStore, HarnessError, HarnessSnapshot, ImagePart, Message,
@@ -90,21 +87,23 @@ impl Provider for ProxyProvider {
 }
 
 mod blobs;
+mod catalog;
 mod config;
 mod embedding;
 mod events;
 mod fsutil;
 mod lock;
+mod model_usage;
 mod paths;
 mod search_tool;
 mod session;
 use config::Config;
+use embedding::EmbeddingStore;
+use search_tool::SearchHistoryTool;
 use session::{
     discard_trailing_loop_prompts, estimate_chars, run_compaction, CompactionCheckpoint,
     CompactionDecision, CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
 };
-use embedding::EmbeddingStore;
-use search_tool::SearchHistoryTool;
 
 /// Compaction-related settings threaded through every turn.
 #[derive(Clone)]
@@ -196,70 +195,6 @@ impl CompactionHooks for RelayCompactionHooks {
         let _ = self
             .tx
             .send(AgentResponse::Activity("preparing context".to_string()));
-    }
-}
-
-/// The per-provider API key stored in config (environment variables still take
-/// precedence at the call site). Kept as a single match so config field access
-/// lives in one place rather than scattered across construction sites.
-fn config_api_key(config: &Config, provider_type: &str) -> Option<String> {
-    match provider_type {
-        "openai" => config.openai_api_key.clone(),
-        "gemini" => config.gemini_api_key.clone(),
-        "kimi-code" => config.kimi_code_api_key.clone(),
-        "kimi" => config.kimi_api_key.clone(),
-        "deepseek" => config.deepseek_api_key.clone(),
-        "qwen" => config.qwen_api_key.clone(),
-        "glm" => config.glm_api_key.clone(),
-        "volcengine" => config.volcengine_api_key.clone(),
-        "custom" => config.custom_api_key.clone(),
-        _ => None,
-    }
-}
-
-/// The per-provider model override stored in config.
-fn config_model(config: &Config, provider_type: &str) -> Option<String> {
-    match provider_type {
-        "openai" => config.openai_model.clone(),
-        "gemini" => config.gemini_model.clone(),
-        "llama" => config.llama_model.clone(),
-        "kimi" => config.kimi_model.clone(),
-        "deepseek" => config.deepseek_model.clone(),
-        "qwen" => config.qwen_model.clone(),
-        "glm" => config.glm_model.clone(),
-        "volcengine" => config.volcengine_model.clone(),
-        "custom" => config.custom_model.clone(),
-        _ => None,
-    }
-}
-
-/// Construct a provider from an already-resolved identifier, API key, model and
-/// optional overrides. Centralising the provider-type → concrete-provider
-/// mapping means startup and runtime `/models` switching share one source of
-/// truth: the OpenAI-compatible registry plus the few bespoke providers.
-fn make_provider(
-    provider_type: &str,
-    api_key: String,
-    model: String,
-    base_url: Option<String>,
-    user_agent: Option<String>,
-) -> Arc<dyn Provider> {
-    if let Some(spec) = openai_provider_spec(provider_type) {
-        return Arc::new(spec.build(api_key, Some(model), user_agent));
-    }
-    match provider_type {
-        "gemini" => Arc::new(GeminiProvider::new(api_key, model)),
-        "llama" => Arc::new(LlamaServerProvider::new(
-            base_url.unwrap_or_else(|| "http://localhost:8080".to_string()),
-            model,
-        )),
-        "custom" => Arc::new(OpenAiCompatProvider::with_base_url(
-            api_key,
-            model,
-            &base_url.unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string()),
-        )),
-        "openai" => Arc::new(OpenAiCompatProvider::new(api_key, model)),
-        _ => Arc::new(MockProvider),
     }
 }
 
@@ -745,6 +680,7 @@ fn relay_agent_event(
         AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
+        AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),
         AgentEvent::SubTask {
             parent_call_id,
             event,
@@ -766,9 +702,14 @@ async fn compact_turn_history(
     // Skip the model call entirely when summarization is disabled; the excerpt
     // fallback inside `run_compaction` still produces a checkpoint.
     let provider = if settings.summarize { provider } else { None };
-    let Some(result) =
-        run_compaction(history, settings.max_chars, settings.preserve_turns, provider, hooks)
-            .await?
+    let Some(result) = run_compaction(
+        history,
+        settings.max_chars,
+        settings.preserve_turns,
+        provider,
+        hooks,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -984,51 +925,15 @@ async fn start_goal_loop(
 
 /// Whether each provider has a usable API key (env var or config).
 /// Keyless providers (local llama, mock) always report `true`.
+///
+/// Derived from the model catalog so the readiness signal and the actual
+/// provider construction share one resolution path.
 fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
-    fn has(env: &str, cfg: &Option<String>) -> bool {
-        std::env::var(env)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .is_some()
-            || cfg.as_deref().is_some_and(|v| !v.trim().is_empty())
-    }
-    vec![
-        (
-            "openai".to_string(),
-            has("OPENAI_API_KEY", &config.openai_api_key),
-        ),
-        (
-            "gemini".to_string(),
-            has("GEMINI_API_KEY", &config.gemini_api_key),
-        ),
-        (
-            "kimi-code".to_string(),
-            has("KIMI_CODE_API_KEY", &config.kimi_code_api_key),
-        ),
-        (
-            "kimi".to_string(),
-            has("KIMI_API_KEY", &config.kimi_api_key),
-        ),
-        (
-            "deepseek".to_string(),
-            has("DEEPSEEK_API_KEY", &config.deepseek_api_key),
-        ),
-        (
-            "qwen".to_string(),
-            has("DASHSCOPE_API_KEY", &config.qwen_api_key),
-        ),
-        ("glm".to_string(), has("GLM_API_KEY", &config.glm_api_key)),
-        (
-            "volcengine".to_string(),
-            has("VOLCENGINE_API_KEY", &config.volcengine_api_key),
-        ),
-        ("llama".to_string(), true),
-        (
-            "custom".to_string(),
-            has("CUSTOM_API_KEY", &config.custom_api_key),
-        ),
-        ("mock".to_string(), true),
-    ]
+    catalog::build_catalog(config)
+        .entries
+        .iter()
+        .map(|entry| (entry.id.clone(), entry.key_ready()))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -1143,89 +1048,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let goal_store = GoalStore::open(paths::get().goals_db()).await?;
     let goal_service = GoalService::new(goal_store);
 
-    // Initialize Agent logic
-    let initial_provider: Arc<dyn Provider> = {
-        let provider_type = config.default_provider.clone();
-        if let Some(spec) = openai_provider_spec(&provider_type) {
-            let api_key = std::env::var(spec.env_api_key)
-                .ok()
-                .or_else(|| config_api_key(&config, &provider_type))
-                .unwrap_or_default();
-            let model = std::env::var(spec.env_model)
-                .ok()
-                .or_else(|| config_model(&config, &provider_type))
-                .unwrap_or_else(|| spec.default_model.to_string());
-            let user_agent = (provider_type == "kimi-code").then(|| {
-                std::env::var("KIMI_CODE_USER_AGENT")
-                    .ok()
-                    .or(config.kimi_code_user_agent.clone())
-                    .unwrap_or_else(|| KIMI_CODE_USER_AGENT.to_string())
-            });
-            make_provider(&provider_type, api_key, model, None, user_agent)
-        } else {
-            match provider_type.as_str() {
-                "llama" => make_provider(
-                    "llama",
-                    String::new(),
-                    std::env::var("LLAMA_MODEL")
-                        .ok()
-                        .or(config.llama_model.clone())
-                        .unwrap_or_else(|| "local-model".to_string()),
-                    std::env::var("LLAMA_BASE_URL")
-                        .ok()
-                        .or(config.llama_base_url.clone()),
-                    None,
-                ),
-                "gemini" => make_provider(
-                    "gemini",
-                    std::env::var("GEMINI_API_KEY")
-                        .ok()
-                        .or(config.gemini_api_key.clone())
-                        .unwrap_or_default(),
-                    std::env::var("GEMINI_MODEL")
-                        .ok()
-                        .or(config.gemini_model.clone())
-                        .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
-                    None,
-                    None,
-                ),
-                "openai" => make_provider(
-                    "openai",
-                    std::env::var("OPENAI_API_KEY")
-                        .ok()
-                        .or(config.openai_api_key.clone())
-                        .unwrap_or_default(),
-                    std::env::var("OPENAI_MODEL")
-                        .ok()
-                        .or(config.openai_model.clone())
-                        .unwrap_or_else(|| "gpt-4o".to_string()),
-                    None,
-                    None,
-                ),
-                "custom" => make_provider(
-                    "custom",
-                    std::env::var("CUSTOM_API_KEY")
-                        .ok()
-                        .or(config.custom_api_key.clone())
-                        .unwrap_or_default(),
-                    std::env::var("CUSTOM_MODEL")
-                        .ok()
-                        .or(config.custom_model.clone())
-                        .unwrap_or_else(|| "custom-model".to_string()),
-                    Some(
-                        std::env::var("CUSTOM_BASE_URL")
-                            .ok()
-                            .or(config.custom_base_url.clone())
-                            .unwrap_or_else(|| {
-                                "http://localhost:8080/v1/chat/completions".to_string()
-                            }),
-                    ),
-                    None,
-                ),
-                _ => Arc::new(MockProvider),
-            }
-        }
-    };
+    // Initialize Agent logic. The provider is resolved through the model
+    // catalog (`build_provider_for`), the single source of truth for the
+    // env-var-then-config resolution rules shared with runtime switching. See
+    // `docs/adr/0002-model-channel-abstraction.md`.
+    let initial_provider: Arc<dyn Provider> =
+        catalog::build_provider_for(&config, catalog::default_model_id(&config));
 
     let provider_holder = Arc::new(RwLock::new(initial_provider));
     let provider_for_task = provider_holder.clone();
@@ -1299,6 +1127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(BashTool),
         Arc::new(ReadFileTool),
         Arc::new(WriteFileTool),
+        Arc::new(AskUserTool),
         Arc::new(EditFileTool),
         Arc::new(GrepTool),
         Arc::new(GlobTool),
@@ -1368,6 +1197,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load history
     let input_history = Config::load_history();
 
+    // Load per-model usage telemetry (recency signal for the picker,
+    // ADR-0002 phase 2). Moved into the agent task so both the startup
+    // activation and runtime switches record through one instance.
+    let model_usage = model_usage::ModelUsage::load();
+
     let current_task_token = Arc::new(AsyncRwLock::new(None::<CancellationToken>));
     let task_generation = Arc::new(AtomicU64::new(0));
     let ctt_clone = current_task_token.clone();
@@ -1376,33 +1210,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embedding_store_for_commands = embedding_store.clone();
 
     // Initial values for TUI
-    let initial_p_name = config.default_provider.clone();
-    let initial_m_name = {
-        let pt = initial_p_name.as_str();
-        if let Some(spec) = openai_provider_spec(pt) {
-            spec.resolve_model(config_model(&config, pt))
-        } else {
-            match pt {
-                "openai" => config
-                    .openai_model
-                    .clone()
-                    .unwrap_or_else(|| "gpt-4o".to_string()),
-                "gemini" => config
-                    .gemini_model
-                    .clone()
-                    .unwrap_or_else(|| "gemini-1.5-flash".to_string()),
-                "llama" => config
-                    .llama_model
-                    .clone()
-                    .unwrap_or_else(|| "local-model".to_string()),
-                "custom" => config
-                    .custom_model
-                    .clone()
-                    .unwrap_or_else(|| "custom-model".to_string()),
-                _ => "mock-model".to_string(),
-            }
-        }
-    };
+    let initial_p_name = catalog::default_model_id(&config).to_string();
+    let initial_m_name = catalog::resolved_model_name(&config, &initial_p_name);
 
     // Spawn Agent Background Task
     let mcp_statuses_for_tui = mcp_statuses.clone();
@@ -1413,6 +1222,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
+        // Record that the default model was activated on startup, so the
+        // picker's recency ordering reflects "last used = now". Best-effort:
+        // usage tracking is rebuildable state and must never block startup.
+        let mut model_usage = model_usage;
+        {
+            let initial_id = catalog::default_model_id(&config).to_string();
+            model_usage.record(&initial_id);
+            if let Err(error) = model_usage.save() {
+                tracing::warn!(?error, "could not persist model usage telemetry");
+            }
+        }
+        // Push the initial model-picker snapshot (default id + per-model
+        // favorite / key-ready / last-used) so the picker is ready the moment
+        // the user opens it.
+        let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
+            &config,
+            &model_usage,
+        )));
         if open_picker_on_start {
             let _ = resp_tx.send(AgentResponse::SessionsOverview(
                 build_sessions_overview(&session).await,
@@ -1429,6 +1256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // the "running" state with no interruption feedback. A later
                     // turn bumps the generation itself and supersedes this one.
                     agent.reject_pending_permissions();
+                    agent.reject_pending_user_questions();
                     let _ = resp_tx.send(AgentResponse::PermissionsCleared);
                     let mut token = ctt_clone.write().await;
                     if let Some(t) = token.take() {
@@ -1445,6 +1273,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ));
                     }
                 }
+                AgentRequest::UserQuestionReply {
+                    request_id,
+                    answers,
+                } => {
+                    if !agent.reply_user_question(&request_id, answers) {
+                        let _ = resp_tx.send(AgentResponse::Error(
+                            "Question request is no longer pending.".to_string(),
+                        ));
+                    }
+                }
                 AgentRequest::SwitchProvider {
                     provider_type,
                     model,
@@ -1458,82 +1296,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "openai" => config.openai_api_key = Some(key),
                             "gemini" => config.gemini_api_key = Some(key),
                             "kimi-code" => config.kimi_code_api_key = Some(key),
-                            "kimi" => config.kimi_api_key = Some(key),
-                            "deepseek" => config.deepseek_api_key = Some(key),
+                            "deepseek" | "deepseek-flash" | "deepseek-pro" => {
+                                config.deepseek_api_key = Some(key)
+                            }
                             "qwen" => config.qwen_api_key = Some(key),
                             "glm" => config.glm_api_key = Some(key),
-                            "volcengine" => config.volcengine_api_key = Some(key),
-                            "custom" => config.custom_api_key = Some(key),
                             _ => {}
                         }
                     }
                     if let Some(url) = base_url {
-                        match provider_type.as_str() {
-                            "llama" => config.llama_base_url = Some(url),
-                            "custom" => config.custom_base_url = Some(url),
-                            _ => {}
+                        if provider_type.as_str() == "llama" {
+                            config.llama_base_url = Some(url);
                         }
                     }
-                    let new_p: Arc<dyn Provider> = {
-                        let pt = provider_type.as_str();
-                        // An explicit env var wins, then the persisted config key.
-                        let api_key = openai_provider_spec(pt)
-                            .map(|spec| spec.env_api_key)
-                            .or(match pt {
-                                "openai" => Some("OPENAI_API_KEY"),
-                                "gemini" => Some("GEMINI_API_KEY"),
-                                "custom" => Some("CUSTOM_API_KEY"),
-                                _ => None,
-                            })
-                            .and_then(|env| std::env::var(env).ok())
-                            .or_else(|| config_api_key(&config, pt))
-                            .unwrap_or_default();
-                        let user_agent = (pt == "kimi-code").then(|| {
-                            std::env::var("KIMI_CODE_USER_AGENT")
-                                .ok()
-                                .or(config.kimi_code_user_agent.clone())
-                                .unwrap_or_else(|| KIMI_CODE_USER_AGENT.to_string())
-                        });
-                        let base_url = match pt {
-                            "llama" => std::env::var("LLAMA_BASE_URL")
-                                .ok()
-                                .or(config.llama_base_url.clone()),
-                            "custom" => Some(
-                                std::env::var("CUSTOM_BASE_URL")
-                                    .ok()
-                                    .or(config.custom_base_url.clone())
-                                    .unwrap_or_default(),
-                            ),
-                            _ => None,
-                        };
-                        make_provider(pt, api_key, model.clone(), base_url, user_agent)
-                    };
-                    *provider_for_task
-                        .write()
-                        .unwrap_or_else(|error| error.into_inner()) = new_p;
-
-                    // Update and save config
+                    // Persist the chosen model and default-provider pointer before
+                    // building so the catalog reads them back. The key/url writes
+                    // above already landed in `config`. Keep both the canonical
+                    // `default_model` pointer and the legacy `default_provider`
+                    // in sync so they never diverge.
+                    config.default_model = Some(provider_type.clone());
                     config.default_provider = provider_type.clone();
                     match provider_type.as_str() {
                         "openai" => config.openai_model = Some(model.clone()),
                         "gemini" => config.gemini_model = Some(model.clone()),
                         "kimi-code" => {}
                         "llama" => config.llama_model = Some(model.clone()),
-                        "kimi" => config.kimi_model = Some(model.clone()),
-                        "deepseek" => config.deepseek_model = Some(model.clone()),
+                        "deepseek" | "deepseek-flash" => {
+                            config.deepseek_flash_model = Some(model.clone())
+                        }
+                        "deepseek-pro" => config.deepseek_pro_model = Some(model.clone()),
                         "qwen" => config.qwen_model = Some(model.clone()),
                         "glm" => config.glm_model = Some(model.clone()),
-                        "volcengine" => config.volcengine_model = Some(model.clone()),
-                        "custom" => config.custom_model = Some(model.clone()),
                         _ => {}
                     }
                     let _ = config.save();
 
+                    // Build through the catalog so api-key / user-agent / base-url
+                    // resolution is shared with startup. The TUI-supplied model
+                    // still wins over any ambient env var, preserving the
+                    // pre-catalog switch semantics.
+                    let new_p: Arc<dyn Provider> =
+                        match catalog::build_catalog(&config).get(provider_type.as_str()) {
+                            Some(entry) => match entry.default_channel() {
+                                Some(channel) => {
+                                    let mut channel = channel.clone();
+                                    channel.model = model.clone();
+                                    channel.build(&entry.id)
+                                }
+                                None => Arc::new(MockProvider),
+                            },
+                            None => Arc::new(MockProvider),
+                        };
+                    *provider_for_task
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner()) = new_p;
+
                     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
+                    // Record the switch as an activation so the picker's recency
+                    // ordering tracks it. Best-effort: telemetry is rebuildable.
+                    model_usage.record(&provider_type);
+                    if let Err(error) = model_usage.save() {
+                        tracing::warn!(?error, "could not persist model usage telemetry");
+                    }
                     let _ = resp_tx.send(AgentResponse::ProviderSwitched {
                         provider: provider_type,
                         model,
                     });
+                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
+                        &config,
+                        &model_usage,
+                    )));
+                }
+                AgentRequest::ToggleFavorite { id } => {
+                    // Toggle the canonical id in the favorites list, persist,
+                    // and push a fresh picker snapshot so the ★ flips at once.
+                    let canonical = neenee_core::catalog::canonical_id(&id).to_string();
+                    if let Some(pos) = config.favorites.iter().position(|fav| *fav == canonical) {
+                        config.favorites.remove(pos);
+                    } else {
+                        config.favorites.push(canonical);
+                    }
+                    if let Err(error) = config.save() {
+                        tracing::warn!(?error, "could not persist favorites");
+                    }
+                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
+                        &config,
+                        &model_usage,
+                    )));
+                }
+                AgentRequest::SetDefaultModel { id } => {
+                    // `d` in the picker: make `id` the default AND activate it,
+                    // reusing the catalog so resolution rules stay shared. No
+                    // new key/model comes from the TUI — the model's existing
+                    // resolved config is used as-is.
+                    let canonical = neenee_core::catalog::canonical_id(&id).to_string();
+                    config.default_model = Some(canonical.clone());
+                    config.default_provider = canonical.clone();
+                    if let Err(error) = config.save() {
+                        tracing::warn!(?error, "could not persist default model");
+                    }
+                    let new_p = catalog::build_provider_for(&config, &canonical);
+                    *provider_for_task
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner()) = new_p;
+                    model_usage.record(&canonical);
+                    if let Err(error) = model_usage.save() {
+                        tracing::warn!(?error, "could not persist model usage telemetry");
+                    }
+                    let model_name = catalog::resolved_model_name(&config, &canonical);
+                    let _ = resp_tx.send(AgentResponse::ProviderSwitched {
+                        provider: canonical.clone(),
+                        model: model_name,
+                    });
+                    let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
+                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
+                        &config,
+                        &model_usage,
+                    )));
                 }
                 AgentRequest::DeleteSession { id } => match session.delete(&id).await {
                     Ok(()) => {
@@ -1627,20 +1506,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
                                 }
-                                match embedding_store_for_commands.read().await.search(query, 5).await {
+                                match embedding_store_for_commands
+                                    .read()
+                                    .await
+                                    .search(query, 5)
+                                    .await
+                                {
                                     Ok(results) => {
                                         if results.is_empty() {
                                             let _ = resp_tx.send(AgentResponse::Text(
                                                 "No relevant history found.".to_string(),
                                             ));
                                         } else {
-                                            let mut lines = vec![
-                                                "Relevant history (most similar first):"
-                                                    .to_string(),
-                                            ];
-                                            for (i, (text, score)) in
-                                                results.iter().enumerate()
-                                            {
+                                            let mut lines =
+                                                vec!["Relevant history (most similar first):"
+                                                    .to_string()];
+                                            for (i, (text, score)) in results.iter().enumerate() {
                                                 lines.push(format!(
                                                     "{}. [score={:.3}]\n{}",
                                                     i + 1,
@@ -1852,7 +1733,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "/compact" => {
                             let mut current = history.lock().await.clone();
                             let settings = CompactionSettings::from(&config);
-                            let hooks = RelayCompactionHooks { tx: resp_tx.clone() };
+                            let hooks = RelayCompactionHooks {
+                                tx: resp_tx.clone(),
+                            };
                             match compact_turn_history(
                                 &mut current,
                                 &session,

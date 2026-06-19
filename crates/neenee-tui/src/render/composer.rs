@@ -90,8 +90,16 @@ pub fn draw_composer(
     // When the prompt is blurred (Browse zone), the panel drops to the dimmer
     // `user_panel_bg` and the prompt glyph uses `text_muted`, matching the
     // already-sent user-message styling so the live box visibly recedes.
-    let panel_bg = if focused { theme.input_surface() } else { theme.user_surface() };
-    let prompt_fg = if focused { theme.brand() } else { theme.muted() };
+    let panel_bg = if focused {
+        theme.input_surface()
+    } else {
+        theme.user_surface()
+    };
+    let prompt_fg = if focused {
+        theme.brand()
+    } else {
+        theme.muted()
+    };
     let app_bg = theme.surface();
     let full_w = input_rect.width as usize;
     // Reserve the left prompt prefix (`› `) and a matching right pad so text
@@ -119,7 +127,13 @@ pub fn draw_composer(
     for (i, wl) in wrapped.iter().enumerate() {
         if byte_cursor <= wl.end_byte {
             cursor_line = i;
-            let local = byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len());
+            // Floor to a char boundary before slicing: a masked text (e.g.
+            // `•••`) paired with a byte cursor from the unmasked string can
+            // land inside a multi-byte codepoint, which would panic `[..local]`.
+            let local = crate::selection::floor_char_boundary(
+                &wl.text,
+                byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len()),
+            );
             cursor_col = wl.text[..local].width();
             break;
         }

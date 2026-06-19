@@ -106,7 +106,8 @@ mod tests {
 
     #[test]
     fn parse_text_tool_call_accepts_bare_json() {
-        let call = parse_text_tool_call("{\"tool\":\"alpha\",\"arguments\":{\"k\":1}}").expect("bare json");
+        let call = parse_text_tool_call("{\"tool\":\"alpha\",\"arguments\":{\"k\":1}}")
+            .expect("bare json");
         assert_eq!(call.name, "alpha");
         assert_eq!(call.arguments, "{\"k\":1}");
     }
@@ -133,8 +134,7 @@ mod tests {
 
     #[test]
     fn parse_text_tool_call_accepts_name_key() {
-        let call =
-            parse_text_tool_call("{\"name\":\"alpha\"}").expect("name key is accepted");
+        let call = parse_text_tool_call("{\"name\":\"alpha\"}").expect("name key is accepted");
         assert_eq!(call.name, "alpha");
         assert_eq!(call.arguments, "{}");
     }
@@ -157,8 +157,9 @@ mod tests {
     fn parse_text_tool_call_skips_non_tool_json_objects() {
         // A JSON object without a tool/name key is skipped; a later object
         // carrying the identifier is still recognised.
-        let call = parse_text_tool_call("{\"note\":\"thinking\"}{\"tool\":\"alpha\",\"arguments\":{}}")
-            .expect("later object has the tool key");
+        let call =
+            parse_text_tool_call("{\"note\":\"thinking\"}{\"tool\":\"alpha\",\"arguments\":{}}")
+                .expect("later object has the tool key");
         assert_eq!(call.name, "alpha");
     }
 }

@@ -27,8 +27,8 @@ Three capability surfaces matter for tool-using agents:
 | `LlamaServerProvider` | no | no | no | `providers.rs` (`LlamaServerProvider`) |
 | `MockProvider` | no | no | no | `providers.rs` (`MockProvider`) |
 
-The six OpenAI-compatible presets in `OPENAI_PROVIDER_SPECS`
-(`kimi-code`, `kimi`, `deepseek`, `qwen`, `glm`, `volcengine`) are built by
+The five OpenAI-compatible presets in `OPENAI_PROVIDER_SPECS`
+(`kimi-code`, `deepseek-flash`, `deepseek-pro`, `qwen`, `glm`) are built by
 `OpenAiProviderSpec::build`, which returns an `OpenAiCompatProvider` with its
 `id` field set to the preset identifier. They therefore inherit every
 capability of `OpenAiCompatProvider`. `GeminiProvider` and `LlamaServerProvider`
@@ -51,33 +51,35 @@ table, not hard-coded per struct.
 
 | `default_provider` | Endpoint | API key env | Model env | Default / popular models |
 |--------------------|----------|-------------|-----------|--------------------------|
-| `kimi-code` | `https://api.kimi.com/coding/v1/chat/completions` | `KIMI_CODE_API_KEY` | `KIMI_CODE_MODEL` (ignored; model is pinned) | `kimi-for-coding` |
-| `kimi` | `https://api.moonshot.cn/v1/chat/completions` | `KIMI_API_KEY` | `KIMI_MODEL` | `moonshot-v1-8k`, `moonshot-v1-32k`, `moonshot-v1-128k` |
-| `deepseek` | `https://api.deepseek.com/v1/chat/completions` | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL` | `deepseek-chat`, `deepseek-reasoner` |
+| `kimi-code` | `https://api.kimi.com/coding/v1/chat/completions` | `KIMI_CODE_API_KEY` | `KIMI_CODE_MODEL` (ignored; model is pinned) | `kimi-code` |
+| `deepseek-flash` | `https://api.deepseek.com/v1/chat/completions` | `DEEPSEEK_API_KEY` | `DEEPSEEK_FLASH_MODEL` | `deepseek-chat` (V3) |
+| `deepseek-pro` | `https://api.deepseek.com/v1/chat/completions` | `DEEPSEEK_API_KEY` | `DEEPSEEK_PRO_MODEL` | `deepseek-reasoner` (R1, returns `reasoning_content`) |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `DASHSCOPE_API_KEY` | `QWEN_MODEL` | `qwen-plus`, `qwen-max`, `qwen-turbo`, `qwen-coder-plus` |
 | `glm` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | `GLM_API_KEY` | `GLM_MODEL` | `glm-4-plus`, `glm-4`, `glm-4-air`, `glm-4-flash`, `glm-4v` |
-| `volcengine` | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` | `VOLCENGINE_API_KEY` | `VOLCENGINE_MODEL` | `deepseek-v3-250324`, `deepseek-r1-250324`, `doubao-pro-256k` |
 
 ### Bespoke providers
 
 | `default_provider` | Struct | Endpoint | API key env | Model env | Default / popular models |
 |--------------------|--------|----------|-------------|-----------|--------------------------|
 | `openai` | `OpenAiCompatProvider` | `https://api.openai.com/v1/chat/completions` | `OPENAI_API_KEY` | `OPENAI_MODEL` | `gpt-4o`, `gpt-4o-mini` |
-| `gemini` | `GeminiProvider` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}` | `GEMINI_API_KEY` | `GEMINI_MODEL` | `gemini-1.5-pro`, `gemini-1.5-flash`, `gemini-2.0-flash` |
+| `gemini` | `GeminiProvider` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}` | `GEMINI_API_KEY` | `GEMINI_MODEL` | `gemini-2.5-flash` (default), `gemini-2.0-flash`, `gemini-1.5-pro` |
 | `llama` | `LlamaServerProvider` | `${LLAMA_BASE_URL}/v1/chat/completions` | none | `LLAMA_MODEL` | user-supplied |
-| `custom` | `OpenAiCompatProvider` | `${CUSTOM_BASE_URL}` | `CUSTOM_API_KEY` | `CUSTOM_MODEL` | user-supplied |
 | `mock` | `MockProvider` | n/a | none | none | test fixture |
 
 Notes:
 
-- `kimi-code` is the only preset with a `fixed_model` (`kimi-for-coding`),
+- `kimi-code` is the only preset with a `fixed_model` (`kimi-code`),
   so its `KIMI_CODE_MODEL` env var is ignored. It is also the only preset
   with a `default_user_agent`; the value defaults to `KIMI_CODE_USER_AGENT`
   (`opencode/1.17.4`) and can be overridden via the `KIMI_CODE_USER_AGENT`
   env var or `config.toml`.
 - `qwen` reads its API key from `DASHSCOPE_API_KEY` but its model from
   `QWEN_MODEL`.
-- `llama` and `custom` are the only providers that read a base URL; the
+- `deepseek-flash` and `deepseek-pro` share one API key (`DEEPSEEK_API_KEY`)
+  and one endpoint; Flash targets `deepseek-chat` (V3) while Pro targets
+  `deepseek-reasoner` (R1, which returns `reasoning_content`). The legacy
+  `deepseek` id is treated as an alias for `deepseek-flash`.
+- `llama` is the only provider that reads a base URL; the
   registry presets hard-code their endpoint inside `OPENAI_PROVIDER_SPECS`.
 - `llama` and `mock` always report as ready in the API-key status check
   (`provider_key_status` in `main.rs`); the rest require their API key env
@@ -85,21 +87,26 @@ Notes:
 
 ## Dispatch sites
 
-Provider construction is centralized in `make_provider`
-(`crates/neenee/src/main.rs`). It is the single source of truth shared by
-startup and runtime switching:
+Provider construction is centralized in the model catalog
+(`catalog::build_provider_for` / `catalog::build_catalog` in
+`crates/neenee/src/catalog.rs`). Every provider id — registry preset or
+bespoke — is materialized into a `Channel` carrying fully resolved
+credentials, model id, and transport, so startup and runtime switching share
+one source of truth for the env-var-then-config resolution rules. The legacy
+`deepseek` id is aliased to `deepseek-flash` inside the catalog.
 
-1. If `openai_provider_spec(provider_type)` matches a registry entry,
-   `OpenAiProviderSpec::build` constructs the `OpenAiCompatProvider`.
-2. Otherwise a `match` handles the bespoke providers (`gemini`, `llama`,
-   `custom`, `openai`); the fallthrough arm returns `MockProvider`.
+1. The registry presets are built from `OPENAI_PROVIDER_SPECS` via
+   `OpenAiProviderSpec::build`, yielding an `OpenAiCompatProvider` with its
+   `id` field set to the preset identifier.
+2. The bespoke providers (`openai`, `gemini`, `llama`, `mock`) get their own
+   one-channel entries; an unknown id resolves to `MockProvider`.
 
 | Site | Function | Purpose |
 |------|----------|---------|
-| Startup dispatch | `main` (initial provider block) | Reads `config.default_provider`, resolves env/config values, calls `make_provider` |
-| Runtime switch | `AgentRequest::SwitchProvider` handler | Resolves a TUI-entered key/url, persists it to `config.toml`, calls `make_provider` |
-| API-key status | `provider_key_status` | Reports per-provider readiness to the TUI |
-| Model-name mirror | `initial_m_name` block | Friendly default model label for the TUI header |
+| Startup dispatch | `catalog::build_provider_for` | Reads `config.default_provider`, resolves env/config values via the catalog |
+| Runtime switch | `AgentRequest::SwitchProvider` handler | Resolves a TUI-entered key/url, persists it to `config.toml`, rebuilds via the catalog |
+| API-key status | `provider_key_status` | Reports per-provider readiness to the TUI (derived from the catalog) |
+| Model-name mirror | `catalog::resolved_model_name` | Friendly default model label for the TUI header |
 
 Runtime provider switching uses `ProxyProvider` (`main.rs`), an
 `Arc<RwLock<Arc<dyn Provider>>>` holder that hot-swaps the active provider

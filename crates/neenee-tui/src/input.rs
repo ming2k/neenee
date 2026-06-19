@@ -74,11 +74,19 @@ pub enum InputAction {
     SendChat(String),
     /// Send a slash command.
     SendSlash(String),
-    /// Switch provider.
-    SwitchProvider {
-        provider_type: String,
-        model: String,
-    },
+    /// Activate a model from the `/models` picker: the default model when the
+    /// filter is empty (fast path), otherwise the highlighted filtered row.
+    /// Falls through to the API-key setup modal when the target has no key.
+    ModelPickerActivate,
+    /// Toggle the favorite flag on the highlighted picker row.
+    ModelPickerToggleFavorite,
+    /// Open the unified model editor (`e`) for the highlighted picker row.
+    OpenModelEditor,
+    /// Submit the unified model editor: persist the entered key / model-id and
+    /// activate the target model.
+    SubmitModelEditor,
+    /// Cycle focus between the editor's fields (API key ↔ model id).
+    ModelEditorNextField,
     /// Interrupt current operation.
     Interrupt,
     /// Open models modal.
@@ -165,6 +173,22 @@ pub enum InputAction {
     PermissionDetailsUp,
     /// Scroll the expanded "Details" body of the permission sheet down a row.
     PermissionDetailsDown,
+    /// Move the selection up inside the question modal.
+    QuestionUp,
+    /// Move the selection down inside the question modal.
+    QuestionDown,
+    /// Toggle/select the currently highlighted question option.
+    QuestionToggle,
+    /// Submit the question modal answers.
+    QuestionSubmit,
+    /// Cancel the question modal.
+    QuestionCancel,
+    /// Select a question option by its 1-based index.
+    QuestionSelect(usize),
+    /// Insert a character into the question modal's "Other" free-text field.
+    QuestionInsertChar(char),
+    /// Delete a character from the question modal's "Other" free-text field.
+    QuestionBackspace,
     /// Start selection at screen coordinates.
     SelectionStart { x: u16, y: u16 },
     /// Update selection to screen coordinates.
@@ -180,14 +204,6 @@ pub enum InputAction {
     /// drive hover affordances on clickable elements like reasoning-trace
     /// headers. Suppressed while an overlay modal is open.
     Hover { x: u16, y: u16 },
-    /// Submit the API key typed in the key-input modal.
-    SubmitApiKey,
-    /// Submit a custom OpenAI-compatible endpoint.
-    SubmitEndpoint,
-    /// Submit the model ID for a custom endpoint.
-    SubmitModelName,
-    /// Configure the API key for the selected provider in the models modal.
-    ConfigureKey,
     /// Leave the current sub-agent view and return to the parent.
     ExitSubAgent,
     /// Move to the previous sibling sub-agent task.
@@ -200,13 +216,7 @@ pub enum InputAction {
 /// accept free-text input. Used by the Alt+Enter and Ctrl+J multi-line
 /// entry bindings (plain Enter sends the message).
 fn insert_newline(input: &mut String, cursor_position: &mut usize, active_modal: super::Modal) {
-    if matches!(
-        active_modal,
-        super::Modal::None
-            | super::Modal::ApiKey
-            | super::Modal::Endpoint
-            | super::Modal::ModelName
-    ) {
+    if matches!(active_modal, super::Modal::None) {
         let byte_pos = input
             .char_indices()
             .map(|(i, _)| i)
@@ -370,6 +380,8 @@ pub fn process_event(
                         } else {
                             InputAction::PermissionReject
                         }
+                    } else if context.active_modal == super::Modal::Question {
+                        InputAction::QuestionCancel
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
                     } else if context.in_subagent_view {
@@ -428,16 +440,12 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Enter => match context.active_modal {
-                    super::Modal::Models => InputAction::SwitchProvider {
-                        provider_type: String::new(),
-                        model: String::new(),
-                    },
+                    super::Modal::Models => InputAction::ModelPickerActivate,
+                    super::Modal::ModelEditor => InputAction::SubmitModelEditor,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
                     super::Modal::Permission => InputAction::PermissionSubmit,
-                    super::Modal::ApiKey => InputAction::SubmitApiKey,
-                    super::Modal::Endpoint => InputAction::SubmitEndpoint,
-                    super::Modal::ModelName => InputAction::SubmitModelName,
+                    super::Modal::Question => InputAction::QuestionSubmit,
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::None => {
@@ -458,7 +466,11 @@ pub fn process_event(
                         let text = std::mem::take(input);
                         *cursor_position = 0;
                         if text.starts_with('/') {
-                            match text.as_str() {
+                            // Match on the trimmed text: accepting a slash
+                            // completion appends a trailing space, which would
+                            // otherwise make "/models " miss the exact-match
+                            // arm and silently no-op in the backend.
+                            match text.trim() {
                                 "/models" => InputAction::OpenModels,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
@@ -482,6 +494,10 @@ pub fn process_event(
                             None => 0,
                         };
                         InputAction::AcceptSuggestion(next.to_string())
+                    } else if context.active_modal == super::Modal::ModelEditor {
+                        // Tab cycles focus between the editor's API-key and
+                        // model-id fields.
+                        InputAction::ModelEditorNextField
                     } else if context.active_modal != super::Modal::None
                         && context.active_modal != super::Modal::Permission
                     {
@@ -535,10 +551,8 @@ pub fn process_event(
                     if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
                     }
@@ -549,10 +563,8 @@ pub fn process_event(
                     if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
                     }
@@ -570,6 +582,16 @@ pub fn process_event(
                             '[' => return InputAction::PrevSibling,
                             ']' => return InputAction::NextSibling,
                             _ => {}
+                        }
+                    }
+                    if context.active_modal == super::Modal::Question && c == ' ' {
+                        return InputAction::QuestionToggle;
+                    }
+                    if context.active_modal == super::Modal::Question {
+                        if let Some(d) = c.to_digit(10) {
+                            if d >= 1 && d <= 9 {
+                                return InputAction::QuestionSelect(d as usize);
+                            }
                         }
                     }
                     if context.active_modal == super::Modal::None
@@ -595,17 +617,31 @@ pub fn process_event(
                         *cursor_position += 1;
                         return InputAction::ReturnToComposeZone;
                     }
-                    if context.active_modal == super::Modal::Models && c == 'k' {
-                        InputAction::ConfigureKey
+                    if context.active_modal == super::Modal::Models && c == '*' {
+                        // Star a model as a favorite. `*` is chosen over `f`
+                        // because every letter collides with the fuzzy filter
+                        // (you could never start a query for "flash" or
+                        // "deepseek"). `*` evokes the favorite star and never
+                        // begins a model-name query.
+                        InputAction::ModelPickerToggleFavorite
+                    } else if context.active_modal == super::Modal::Models
+                        && c == 'e'
+                        && input.is_empty()
+                    {
+                        // `e` opens the editor for the highlighted row. Gated
+                        // on an empty filter so it never fights typing: no
+                        // built-in model name starts with `e`, so clearing the
+                        // filter then pressing `e` always reaches the editor.
+                        InputAction::OpenModelEditor
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
+                    } else if context.active_modal == super::Modal::Question {
+                        InputAction::QuestionInsertChar(c)
                     } else if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) {
                         let byte_pos = input
                             .char_indices()
@@ -620,13 +656,13 @@ pub fn process_event(
                     }
                 }
                 KeyCode::Backspace => {
-                    if matches!(
+                    if context.active_modal == super::Modal::Question {
+                        InputAction::QuestionBackspace
+                    } else if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -648,10 +684,8 @@ pub fn process_event(
                     if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -665,10 +699,8 @@ pub fn process_event(
                     if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) && *cursor_position < input.chars().count()
                     {
                         *cursor_position += 1;
@@ -679,6 +711,7 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
+                    super::Modal::Question => InputAction::QuestionUp,
                     super::Modal::Permission => {
                         // Browse zone: walk transcript targets. Compose zone:
                         // scroll the expanded details, otherwise fall through
@@ -693,9 +726,7 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
-                    super::Modal::ApiKey
-                    | super::Modal::Endpoint
-                    | super::Modal::ModelName
+                    super::Modal::ModelEditor
                     | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -713,6 +744,7 @@ pub fn process_event(
                     super::Modal::Models => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
+                    super::Modal::Question => InputAction::QuestionDown,
                     super::Modal::Permission => {
                         if context.focus_zone.is_browse() {
                             InputAction::FocusNextTarget
@@ -723,9 +755,7 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
-                    super::Modal::ApiKey
-                    | super::Modal::Endpoint
-                    | super::Modal::ModelName
+                    super::Modal::ModelEditor
                     | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -770,10 +800,8 @@ pub fn process_event(
                     } else if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
@@ -790,10 +818,8 @@ pub fn process_event(
                     } else if matches!(
                         context.active_modal,
                         super::Modal::None
-                            | super::Modal::ApiKey
-                            | super::Modal::Endpoint
-                            | super::Modal::ModelName
                             | super::Modal::HistorySearch
+                            | super::Modal::Models | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
@@ -932,7 +958,36 @@ mod tests {
     }
 
     #[test]
-    fn k_in_models_modal_configures_api_key() {
+    fn star_in_models_modal_toggles_favorite() {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::Modal::Models,
+                is_responding: false,
+                completion_kind: crate::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::ModelPickerToggleFavorite);
+    }
+
+    #[test]
+    fn letter_in_models_modal_feeds_the_fuzzy_filter() {
+        // `k` used to open the key configurator; now every letter feeds the
+        // fuzzy filter so users can search for "kimi" or "deepseek".
         let mut input = String::new();
         let mut cursor = 0;
         let mut drag = SelectionDrag::default();
@@ -955,7 +1010,8 @@ mod tests {
             },
             &mut drag,
         );
-        assert_eq!(action, InputAction::ConfigureKey);
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input, "k");
     }
 
     #[test]
@@ -1395,13 +1451,9 @@ mod tests {
 
     #[test]
     fn home_and_end_move_caret_in_free_text_modals() {
-        // The API-key / endpoint / model-name modals are single-line inputs;
-        // Home/End should edit there too, not be swallowed.
-        for modal in [
-            crate::Modal::ApiKey,
-            crate::Modal::Endpoint,
-            crate::Modal::ModelName,
-        ] {
+        // The unified model editor borrows the input line for one field at a
+        // time; Home/End should edit there too, not be swallowed.
+        for modal in [crate::Modal::ModelEditor, crate::Modal::HistorySearch] {
             let mut input = "abc".to_string();
             let mut cursor = 2;
             let action = run_key(

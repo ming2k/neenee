@@ -36,11 +36,7 @@ impl ProcessLock {
             use std::os::unix::io::AsRawFd;
 
             let file = File::create(path).map_err(|error| {
-                format!(
-                    "could not open lock file {}: {}",
-                    path.display(),
-                    error
-                )
+                format!("could not open lock file {}: {}", path.display(), error)
             })?;
             let fd = file.as_raw_fd();
             let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
@@ -49,7 +45,8 @@ impl ProcessLock {
                 return Err(format!(
                     "could not acquire advisory lock on {}: {} \
                      (another neenee instance may already be running for this project)",
-                    path.display(), err
+                    path.display(),
+                    err
                 ));
             }
             Ok(Self { file })

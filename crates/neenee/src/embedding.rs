@@ -80,10 +80,7 @@ pub struct EmbeddingStore {
 }
 
 impl EmbeddingStore {
-    pub async fn open(
-        path: PathBuf,
-        provider: Arc<dyn EmbeddingProvider>,
-    ) -> Result<Self, String> {
+    pub async fn open(path: PathBuf, provider: Arc<dyn EmbeddingProvider>) -> Result<Self, String> {
         let index = if path.exists() {
             let raw = tokio::fs::read_to_string(&path)
                 .await
@@ -107,11 +104,7 @@ impl EmbeddingStore {
     }
 
     /// Index every message in `messages` that is not already indexed.
-    pub async fn index(
-        &mut self,
-        messages: &[Message],
-        session_id: &str,
-    ) -> Result<(), String> {
+    pub async fn index(&mut self, messages: &[Message], session_id: &str) -> Result<(), String> {
         let mut new_entries = Vec::new();
         for (i, message) in messages.iter().enumerate() {
             self.index_message(message, session_id, i, &mut new_entries)
@@ -182,11 +175,7 @@ impl EmbeddingStore {
     }
 
     /// Return the `k` most similar indexed texts for `query`.
-    pub async fn search(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<( String, f32)>, String> {
+    pub async fn search(&self, query: &str, k: usize) -> Result<Vec<(String, f32)>, String> {
         if self.index.entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -205,6 +194,7 @@ impl EmbeddingStore {
         Ok(scored)
     }
 
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -251,10 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_indexes_and_searches() {
-        let dir = std::env::temp_dir().join(format!(
-            "neenee-embedding-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("neenee-embedding-{}", uuid::Uuid::new_v4()));
         let provider: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(8));
         let mut store = EmbeddingStore::open(dir.join("index.json"), provider)
             .await

@@ -12,3 +12,4 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-tool-rendering-redesign.md) | Tool-step rendering redesign: log entries over expandable cards | Accepted |
+| [0002](0002-model-channel-abstraction.md) | Model/channel abstraction and picker redesign | Proposed |
