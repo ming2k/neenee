@@ -648,9 +648,9 @@ pub fn draw_tool_step_detail_overlay(
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();
-    if let Some(header) = msg.tool_step_header() {
+    if let Some(summary) = msg.tool_step_summary() {
         lines.push(Line::from(Span::styled(
-            header,
+            summary,
             Style::default()
                 .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),

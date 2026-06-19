@@ -20,7 +20,7 @@ use crate::layout::LayoutMap;
 use crate::selection::SelectionState;
 
 use super::Theme;
-use super::turn_artifacts::draw_tool_step;
+use super::step::draw_tool_step;
 
 /// Build a finished tool-step message with optional output and expand state.
 fn tool_step(name: &str, arguments: &str, output: Option<&str>, expanded: bool) -> TranscriptMessage {

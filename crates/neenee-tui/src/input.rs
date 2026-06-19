@@ -372,11 +372,6 @@ pub fn process_event(
                         }
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
-                    } else if context.focus_zone.is_browse() {
-                        // First Esc returns the keyboard focus to the input
-                        // box. Subsequent presses walk back through sub-agent
-                        // views and the interrupt arm.
-                        InputAction::ReturnToComposeZone
                     } else if context.in_subagent_view {
                         InputAction::ExitSubAgent
                     } else if context.is_responding {
@@ -1151,14 +1146,12 @@ mod tests {
     }
 
     #[test]
-    fn escape_returns_to_compose_zone() {
-        // From Browse, the first Esc returns the keyboard focus to the input
-        // box. A subsequent Esc (now in Compose) walks back through sub-agent
-        // views / interrupt arms.
-        assert_eq!(
-            key_with_focus(KeyCode::Esc),
-            InputAction::ReturnToComposeZone
-        );
+    fn escape_in_browse_does_not_switch_zone() {
+        // Zone switching (Browse ↔ Compose) is Tab-only. Esc in Browse no
+        // longer returns to the input box — that overloaded Esc with too many
+        // meanings. Idle Browse + Esc is a no-op; Esc still exits sub-agent
+        // views, interrupts a running turn, and closes modals on its own.
+        assert_eq!(key_with_focus(KeyCode::Esc), InputAction::None);
     }
 
     #[test]

@@ -1,7 +1,11 @@
-//! Expandable step renderers: tool-step, thinking, child tool step, sub-agent
-//! task, plus their per-tool content renderers (code, listing, grep, bash) and
-//! shared header helpers. Also produces the sticky pinned-step header that
-//! [`super::draw_transcript`] overlays while a step body is scrolled into view.
+//! Step rendering implementation: the summary primitives, the per-tool body
+//! content renderers (code, listing, grep, bash, diff), and the top-level
+//! orchestrators (`draw_tool_step`, `draw_reasoning_trace`,
+//! `draw_subagent_inline_step`, `draw_subagent_bar`) that compose them. Also
+//! produces the sticky pinned-step summary that
+//! [`super::super::draw_transcript`] overlays while a step body is scrolled
+//! into view. State and color resolution live in [`super`] (re-exported from
+//! [`super::state`]).
 
 use ratatui::{
     layout::Rect,
@@ -12,18 +16,20 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use super::{summary_text_color, Disclosure, Interaction};
+
 use crate::document::{Block, TranscriptMessage};
 use crate::layout::{BlockRegion, LayoutMap};
 use crate::selection::SelectionState;
 
-use super::chrome::{breathing_color, spinner_glyph};
-use super::message_body::draw_message_body;
-use super::text_layout::{
+use crate::render::chrome::{breathing_color, spinner_glyph};
+use crate::render::message_body::draw_message_body;
+use crate::render::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
     WrappedLine,
 };
-use super::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
-use super::{
+use crate::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
+use crate::render::{
     transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, STEP_MIN_WIDTH,
     REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
     TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
@@ -140,53 +146,31 @@ fn nonempty_wrapped(wrapped: Vec<WrappedLine>) -> Vec<WrappedLine> {
     }
 }
 
-/// Tracked info for an expanded step, used to render a sticky header pinned
+/// Tracked info for an expanded step, used to render a sticky summary pinned
 /// under the HUD bar while the step's body is scrolled into view.
-pub(super) struct StickyStep {
+pub struct StickyStep {
     message_idx: usize,
-    header: String,
+    summary: String,
     color: Color,
     background: Option<Color>,
     /// usize::MAX for tool steps, usize::MAX - 1 for reasoning traces.
     block_idx: usize,
-    header_line: usize,
+    summary_line: usize,
     body_end_line: usize,
 }
 
-/// Unified step-header foreground, shared by every step kind (tool step,
-/// sub-agent inline step, reasoning trace) so they read consistently:
+/// Build the summary line of an expandable step: the `+`/`-` marker plus the
+/// summary text, padded to the full width. The body content is expected to
+/// start at column 2 so it left-aligns with the summary text.
 ///
-/// - **Expanded** (its body is open) → the primary foreground, the brightest
-///   state, signalling "this is the active/open step".
-/// - **Hovered** (pointer resting on the header while collapsed) → a distinct
-///   intermediate tone, a softer click affordance than "open".
-/// - **Idle** (collapsed, not hovered) → muted.
-///
-/// Notably a step that is merely *focused* (keyboard) but collapsed and not
-/// hovered is **not** brightened — collapsing it visibly calms the header
-/// instead of leaving it "still highlighted".
-fn step_header_color(theme: &Theme, expanded: bool, hovered: bool) -> Color {
-    if expanded {
-        theme.fg()
-    } else if hovered {
-        theme.hover()
-    } else {
-        theme.muted()
-    }
-}
-
-/// Build the header line of an expandable step: the `+`/`-` marker plus the
-/// summary, padded to the full width. The body content is expected to start at
-/// column 2 so it left-aligns with the header text.
-///
-/// Run state is conveyed purely by `header_color` (breathing accent while
-/// running, error red on failure, muted when cancelled, neutral on success) —
-/// there is no status glyph or per-tool icon in the header. An empty `expand`
-/// segment (and its trailing space) is skipped so callers can omit it cleanly.
-fn tool_header_line(
+/// Run state is conveyed purely by `fg` (breathing accent while running, error
+/// red on failure, muted when cancelled, neutral on success) — there is no
+/// status glyph or per-tool icon in the summary. An empty `expand` segment
+/// (and its trailing space) is skipped so callers can omit it cleanly.
+fn tool_summary_line(
     expand: &str,
-    header: &str,
-    header_color: Color,
+    summary: &str,
+    fg: Color,
     bg: Color,
     full_width: usize,
 ) -> Line<'static> {
@@ -199,40 +183,40 @@ fn tool_header_line(
         used += s.width();
         spans.push(Span::styled(
             s,
-            base.fg(header_color).add_modifier(Modifier::BOLD),
+            base.fg(fg).add_modifier(Modifier::BOLD),
         ));
     }
 
-    used += header.width();
+    used += summary.width();
     spans.push(Span::styled(
-        header.to_string(),
-        base.fg(header_color).add_modifier(Modifier::BOLD),
+        summary.to_string(),
+        base.fg(fg).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(padded_tail(full_width, used), base));
     Line::from(spans)
 }
 
-/// Render the shared header of an expandable step and record its rect in the
+/// Render the shared summary of an expandable step and record its rect in the
 /// layout map so clicks / `Enter` on it can toggle the step. Returns the
-/// content-line index of the header (used for sticky-pin tracking).
+/// content-line index of the summary (used for sticky-pin tracking).
 ///
 /// `block_idx` is the sentinel recorded in [`BlockRegion`] so the click handler
 /// can tell step/trace kinds apart: `usize::MAX` for tool steps and
 /// `usize::MAX - 1` for reasoning traces.
 #[allow(clippy::too_many_arguments)]
-fn draw_expandable_step_header(
+fn draw_step_summary(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     expanded: bool,
-    header: &str,
-    header_color: Color,
+    summary: &str,
+    summary_color: Color,
     bg: Color,
 ) -> usize {
     let expand = if expanded { "-" } else { "+" };
-    let header_line_idx = *ctx.content_lines;
+    let summary_line_idx = *ctx.content_lines;
 
-    let line = tool_header_line(expand, header, header_color, bg, ctx.full_width);
+    let line = tool_summary_line(expand, summary, summary_color, bg, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -245,7 +229,7 @@ fn draw_expandable_step_header(
         });
     }
 
-    header_line_idx
+    summary_line_idx
 }
 
 /// Draw blank rows padded to `full_width` with `style`'s background. The row
@@ -778,7 +762,7 @@ fn draw_tool_result(
     indent: usize,
     inner_w: usize,
 ) {
-    let kind = super::tools::presenter_for(name).result_kind();
+    let kind = crate::render::tools::presenter_for(name).result_kind();
     let block_idx = 1usize;
     match kind {
         ResultKind::Listing => draw_listing_content(
@@ -827,9 +811,9 @@ fn draw_tool_result(
             // fall back to parsing the arguments for legacy/restored steps.
             let diff: Vec<DiffLine> = match structured {
                 Some(neenee_core::ToolOutput::Patch { old, new, .. }) => {
-                    super::tools::line_diff(old, new)
+                    crate::render::tools::line_diff(old, new)
                 }
-                _ => super::tools::diff_lines_for(name, arguments),
+                _ => crate::render::tools::diff_lines_for(name, arguments),
             };
             draw_diff_content(ctx, &diff, indent, inner_w);
         }
@@ -961,11 +945,11 @@ fn draw_diff_content(
 
 /// Render a sub-agent `task` tool step as a compact, non-expandable step.
 /// Activating it (click / Enter) navigates into a dedicated sub-agent view
-/// rather than expanding a body inline. The step shows a one-line header
+/// rather than expanding a body inline. The step shows a one-line summary
 /// (the task description + duration) and a live status line summarizing the
 /// sub-agent's progress.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_subagent_inline_step(
+pub fn draw_subagent_inline_step(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -977,7 +961,7 @@ pub(super) fn draw_subagent_inline_step(
     content_lines: &mut usize,
     hovered: bool,
 ) {
-    let Some(header) = msg.tool_step_header() else {
+    let Some(summary) = msg.tool_step_summary() else {
         return;
     };
 
@@ -994,21 +978,29 @@ pub(super) fn draw_subagent_inline_step(
 
     let bg = theme.surface();
 
-    // Header: just the summary text, registered as a tool-step header
+    // Summary line: just the summary text, registered as a tool-step summary
     // (block_idx = usize::MAX) so the existing click/Enter handling recognizes
     // it; the app decides to navigate rather than toggle for `task` steps. No
     // expand marker or status glyph — the step navigates, and run state reads
-    // from the header color (this step has no spinner phase, so a running step
-    // is a steady accent rather than a breathing one). A finished step uses
-    // the shared hover/idle ladder (it never expands inline), so a non-hovered
-    // task reads calm and only lights up under the pointer.
-    let header_color = match status {
-        ToolStatus::Failed => theme.error_fg,
-        ToolStatus::Denied => theme.warn(),
-        ToolStatus::Cancelled => theme.text_muted,
-        ToolStatus::Ok => step_header_color(theme, false, hovered),
-        ToolStatus::Running => theme.info,
+    // from the summary color (this step has no spinner phase, so a running step
+    // is a steady accent rather than a breathing one). Color is resolved
+    // through the shared state machine: a non-completed lifecycle supplies an
+    // accent that wins outright; the completed case falls through to the
+    // disclosure × interaction weight ladder (a task never expands inline, so
+    // it is bright only under the pointer and calm otherwise).
+    let accent = match status {
+        ToolStatus::Failed => Some(theme.error_fg),
+        ToolStatus::Denied => Some(theme.warn()),
+        ToolStatus::Cancelled => Some(theme.text_muted),
+        ToolStatus::Ok => None,
+        ToolStatus::Running => Some(theme.info),
     };
+    let summary_color = summary_text_color(
+        accent,
+        Disclosure::Collapsed,
+        Interaction::from_hover(hovered),
+        theme,
+    );
     let mut ctx = RenderCtx::from_cursor(
         frame,
         transcript_area,
@@ -1019,8 +1011,8 @@ pub(super) fn draw_subagent_inline_step(
         current_y,
         content_lines,
     );
-    let header_line = tool_header_line("", &header, header_color, bg, ctx.full_width);
-    if let Some(rect) = ctx.paint(header_line) {
+    let summary_row = tool_summary_line("", &summary, summary_color, bg, ctx.full_width);
+    if let Some(rect) = ctx.paint(summary_row) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
             block_idx: usize::MAX,
@@ -1044,7 +1036,7 @@ pub(super) fn draw_subagent_inline_step(
                 Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.muted())),
                 Span::styled(padded_tail(ctx.full_width, used), bg_style),
             ]);
-            // Make the whole status line part of the same clickable header so
+            // Make the whole status line part of the same clickable summary so
             // clicking anywhere on the step enters the sub-agent view.
             if let Some(rect) = ctx.paint(line) {
                 ctx.layout_map.push(BlockRegion {
@@ -1064,7 +1056,7 @@ pub(super) fn draw_subagent_inline_step(
 /// Render the sub-agent navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full transcript width inside the app_bg gutters.
-pub(super) fn draw_subagent_bar(
+pub fn draw_subagent_bar(
     frame: &mut Frame,
     rect: Rect,
     bar: &SubagentBarInfo,
@@ -1111,11 +1103,11 @@ pub(super) fn draw_subagent_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), band);
 }
 
-/// Render a tool-step message as an expandable step with a summary header,
+/// Render a tool-step message as an expandable step with a summary line,
 /// a body, and per-line scroll handling so tall steps scroll like
 /// normal messages.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_tool_step(
+pub fn draw_tool_step(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -1130,40 +1122,48 @@ pub(super) fn draw_tool_step(
     spinner_phase: usize,
     hovered: bool,
 ) {
-    let Some(header) = msg.tool_step_header() else {
+    let Some(summary) = msg.tool_step_summary() else {
         return;
     };
     let expanded = msg.tool_step_expanded() == Some(true);
 
     // Run state is conveyed by color alone: a breathing accent while running,
     // red on failure, muted when cancelled, and neutral on success. There is no
-    // status glyph or per-tool icon in the header. `status_color` drives the
-    // child tool-step accents and the sticky pin; `header_color` drives the
-    // header text. For the common success case the header follows the shared
-    // expanded/hover/idle ladder so a finished call reads as calm: bright only
-    // while its body is open or the pointer rests on it, never merely because
-    // it carries keyboard focus.
+    // status glyph or per-tool icon in the summary. `status_color` drives the
+    // child tool-step accents and the sticky pin; the summary text color is
+    // resolved through the shared state machine. A non-completed lifecycle
+    // supplies an accent (breathing for Running) that wins outright; the
+    // completed case falls through to the disclosure × interaction weight
+    // ladder so a finished call reads as calm — bright only while its body is
+    // open or the pointer rests on it, never merely because it carries
+    // keyboard focus.
     let status = msg
         .tool_step_status()
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
     // Tool steps render flat on the app background (no band) — like
     // reasoning traces, only the optional content block carries a `code_bg`.
-    let header_bg = theme.surface();
+    let summary_bg = theme.surface();
     let status_color = match status {
-        // Breathing accent: luminance sweeps between the header bg and the
+        // Breathing accent: luminance sweeps between the summary bg and the
         // status color so a running step reads as "alive" without a spinner.
-        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), header_bg),
+        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), summary_bg),
         _ => status.color(theme),
     };
-    let header_color = match status {
-        ToolStatus::Ok => step_header_color(theme, expanded, hovered),
-        _ => status_color,
+    let accent = match status {
+        ToolStatus::Ok => None,
+        _ => Some(status_color),
     };
+    let summary_color = summary_text_color(
+        accent,
+        Disclosure::from_expanded(expanded),
+        Interaction::from_hover(hovered),
+        theme,
+    );
 
     // Render into the inset band so content never touches the terminal frame —
     // it sits inside the uniform 2-cell `app_bg` gutters shared with prose and
-    // code blocks. All helpers below (header, body, child tool steps) read
+    // code blocks. All helpers below (summary, body, child tool steps) read
     // `transcript_area.x` / `transcript_area.width` directly, so shrinking here
     // propagates everywhere.
     let transcript_area = transcript_band_rect(transcript_area);
@@ -1187,7 +1187,7 @@ pub(super) fn draw_tool_step(
     }
 
     let inner_width = transcript_area.width as usize;
-    let header_line_idx = {
+    let summary_line_idx = {
         let mut ctx = RenderCtx::from_cursor(
             frame,
             transcript_area,
@@ -1198,20 +1198,20 @@ pub(super) fn draw_tool_step(
             current_y,
             content_lines,
         );
-        draw_expandable_step_header(
+        draw_step_summary(
             &mut ctx,
             mi,
             usize::MAX,
             expanded,
-            &header,
-            header_color,
-            header_bg,
+            &summary,
+            summary_color,
+            summary_bg,
         )
     };
 
     // Body region (only when expanded). Tool steps are flat — no band, no
     // Tool/Arguments/Result labels — so an expanded step reads like a log entry:
-    // the tool-specific content directly under the header (bash → `$ cmd` +
+    // the tool-specific content directly under the summary (bash → `$ cmd` +
     // output; list/grep → entries; edit/write → diff; read → code), indented to
     // align with prose. Only content blocks carry a `code_bg`; everything else
     // sits on the app background.
@@ -1243,11 +1243,11 @@ pub(super) fn draw_tool_step(
             } = &msg.kind
             {
                 // Unknown / MCP tools spell out their arguments as `key: value`
-                // rows (the header only carries the primary one). No label — the
+                // rows (the summary only carries the primary one). No label — the
                 // key names are self-describing, and the result block below
                 // carries its own `code_bg` so the two stay visually distinct.
                 if matches!(
-                    super::tools::presenter_for(name).arg_layout(),
+                    crate::render::tools::presenter_for(name).arg_layout(),
                     ArgLayout::KeyValue
                 ) {
                     let kv = crate::document::parse_arguments_kv(arguments);
@@ -1367,24 +1367,24 @@ pub(super) fn draw_tool_step(
     if expanded {
         sticky_steps.push(StickyStep {
             message_idx: mi,
-            header,
+            summary,
             color: status_color,
             background: Some(theme.surface()),
             block_idx: usize::MAX,
-            header_line: header_line_idx,
+            summary_line: summary_line_idx,
             body_end_line: *content_lines,
         });
     }
 }
 
-/// Render a nested child tool step as a compact header line plus its output.
+/// Render a nested child tool step as a compact summary line plus its output.
 #[allow(clippy::too_many_arguments)]
 fn draw_child_tool_step(
     ctx: &mut RenderCtx<'_, '_>,
     child: &TranscriptMessage,
     status_color: Color,
 ) {
-    let Some(header) = child.tool_step_header() else {
+    let Some(summary) = child.tool_step_summary() else {
         return;
     };
     let surface = ctx.theme.surface();
@@ -1392,9 +1392,9 @@ fn draw_child_tool_step(
     let indent = 6usize;
     let bg_style = Style::default().bg(surface);
 
-    let header_text = header.to_string();
-    let header_lines = wrap_text(&header_text, full_width.saturating_sub(indent));
-    for wl in &header_lines {
+    let summary_text = summary.to_string();
+    let summary_lines = wrap_text(&summary_text, full_width.saturating_sub(indent));
+    for wl in &summary_lines {
         let used = indent + wl.text.width();
         let line = Line::from(vec![
             Span::styled(" ".repeat(indent), bg_style),
@@ -1439,17 +1439,17 @@ fn advance_plain_blank_rows(
     }
 }
 
-fn reasoning_trace_header_line(
+fn reasoning_summary_line(
     marker: &str,
-    header: &str,
+    summary: &str,
     marker_color: Color,
-    header_color: Color,
+    summary_color: Color,
     full_width: usize,
 ) -> Line<'static> {
     let marker_prefix_cols = TRANSCRIPT_H_INSET as usize;
     let marker_text = format!("{} ", marker);
-    let header_text = header.to_string();
-    let used = marker_prefix_cols + marker_text.width() + header_text.width();
+    let summary_text = summary.to_string();
+    let used = marker_prefix_cols + marker_text.width() + summary_text.width();
     Line::from(vec![
         Span::styled(" ".repeat(marker_prefix_cols), Style::default()),
         Span::styled(
@@ -1459,32 +1459,40 @@ fn reasoning_trace_header_line(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            header_text,
+            summary_text,
             Style::default()
-                .fg(header_color)
+                .fg(summary_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(padded_tail(full_width, used), Style::default()),
     ])
 }
 
-fn draw_reasoning_trace_header(
+fn draw_reasoning_summary(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     expanded: bool,
     marker_override: Option<&str>,
-    header: &str,
+    summary: &str,
+    marker_color: Color,
     hovered: bool,
 ) -> usize {
     let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
-    let header_line_idx = *ctx.content_lines;
-    // Shared step-header ladder: an open trace reads as the primary foreground
-    // (the active state), a collapsed trace under the pointer lights up to the
-    // intermediate hover tone as a click affordance, and an idle collapsed
-    // trace stays muted.
-    let header_color = step_header_color(ctx.theme, expanded, hovered);
+    let summary_line_idx = *ctx.content_lines;
+    // A reasoning trace's lifecycle only affects its marker (a breathing `●`
+    // while running, supplied by the caller as `marker_color`), never the
+    // summary text, so no accent is supplied and the summary color is the
+    // pure disclosure × interaction weight from the shared state machine:
+    // open → primary foreground, collapsed + hovered → intermediate hover
+    // tone, otherwise muted.
+    let summary_color = summary_text_color(
+        None,
+        Disclosure::from_expanded(expanded),
+        Interaction::from_hover(hovered),
+        ctx.theme,
+    );
 
-    let line = reasoning_trace_header_line(marker, header, ctx.theme.info(), header_color, ctx.full_width);
+    let line = reasoning_summary_line(marker, summary, marker_color, summary_color, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1497,14 +1505,14 @@ fn draw_reasoning_trace_header(
         });
     }
 
-    header_line_idx
+    summary_line_idx
 }
 
 /// Render a reasoning trace as expandable prose. It keeps the thinking
 /// message model for stream semantics, but presents it as body-aligned text
 /// instead of a colored step.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_reasoning_trace(
+pub fn draw_reasoning_trace(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -1516,10 +1524,10 @@ pub(super) fn draw_reasoning_trace(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_steps: &mut Vec<StickyStep>,
-    _spinner_phase: usize,
+    spinner_phase: usize,
     hovered: bool,
 ) {
-    let Some(header) = msg.thinking_header() else {
+    let Some(summary) = msg.thinking_summary() else {
         return;
     };
     let expanded = msg.thinking_expanded() == Some(true);
@@ -1549,7 +1557,7 @@ pub(super) fn draw_reasoning_trace(
         return;
     }
 
-    let header_line_idx = {
+    let summary_line_idx = {
         let mut ctx = RenderCtx::from_cursor(
             frame,
             transcript_area,
@@ -1560,12 +1568,21 @@ pub(super) fn draw_reasoning_trace(
             current_y,
             content_lines,
         );
-        draw_reasoning_trace_header(
+        draw_reasoning_summary(
             &mut ctx,
             mi,
             expanded,
             running.then(|| spinner_glyph()),
-            &header,
+            &summary,
+            // While streaming the `●` marker breathes between its info tone
+            // and the surface — the same liveness cue a running tool step uses
+            // — so an in-progress trace reads as active. Once finished, the
+            // marker reverts to a steady `+`/`-` in the info tone.
+            if running {
+                breathing_color(spinner_phase, theme.info(), theme.surface())
+            } else {
+                theme.info()
+            },
             hovered,
         )
     };
@@ -1640,26 +1657,26 @@ pub(super) fn draw_reasoning_trace(
     if expanded {
         sticky_steps.push(StickyStep {
             message_idx: mi,
-            header,
+            summary,
             color: theme.muted(),
             background: None,
             block_idx: usize::MAX - 1,
-            header_line: header_line_idx,
+            summary_line: summary_line_idx,
             body_end_line: *content_lines,
         });
     }
 }
 
 /// If any expanded step's body covers the top of the viewport, render its
-/// header pinned there as a sticky overlay and return its layout info so the
-/// app can route clicks to it. Returns `None` when no sticky header is
+/// summary pinned there as a sticky overlay and return its layout info so the
+/// app can route clicks to it. Returns `None` when no sticky summary is
 /// needed.
 ///
-/// A sticky header only exists for an *expanded* step (its body is what is
+/// A sticky summary only exists for an *expanded* step (its body is what is
 /// scrolled into view), so it always renders in the shared ladder's expanded
-/// state — the primary foreground — matching the inline header of an open
+/// state — the primary foreground — matching the inline summary of an open
 /// step.
-pub(super) fn draw_sticky_header_if_needed(
+pub fn draw_sticky_summary_if_needed(
     frame: &mut Frame,
     transcript_area: Rect,
     sticky_steps: &[StickyStep],
@@ -1669,19 +1686,19 @@ pub(super) fn draw_sticky_header_if_needed(
     let first_visible = scroll as usize;
     let step = sticky_steps
         .iter()
-        .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)?;
-    // Sticky steps are always expanded → the header reads in its active tone.
-    let header_color = theme.fg();
+        .find(|c| c.summary_line < first_visible && c.body_end_line > first_visible)?;
+    // Sticky steps are always expanded → the summary reads in its active tone.
+    let summary_color = theme.fg();
     let line_rect = if let Some(bg) = step.background {
         // Pin inside the same inset band the steps render into so the sticky
-        // header aligns exactly with the (possibly scrolled-away) real header.
+        // summary aligns exactly with the (possibly scrolled-away) real summary.
         let band = transcript_band_rect(transcript_area);
         let line_rect = Rect::new(band.x, transcript_area.y, band.width, 1);
         frame.render_widget(
-            Paragraph::new(tool_header_line(
+            Paragraph::new(tool_summary_line(
                 "-",
-                &step.header,
-                header_color,
+                &step.summary,
+                summary_color,
                 bg,
                 band.width as usize,
             )),
@@ -1696,11 +1713,11 @@ pub(super) fn draw_sticky_header_if_needed(
             1,
         );
         frame.render_widget(
-            Paragraph::new(reasoning_trace_header_line(
+            Paragraph::new(reasoning_summary_line(
                 "-",
-                &step.header,
+                &step.summary,
                 step.color,
-                header_color,
+                summary_color,
                 transcript_area.width as usize,
             )),
             line_rect,
@@ -1709,10 +1726,10 @@ pub(super) fn draw_sticky_header_if_needed(
     };
     Some(StickyInfo {
         message_idx: step.message_idx,
-        header: step.header.clone(),
+        summary: step.summary.clone(),
         color: step.color,
         block_idx: step.block_idx,
         rect: line_rect,
-        header_line: step.header_line,
+        summary_line: step.summary_line,
     })
 }

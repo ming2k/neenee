@@ -51,6 +51,10 @@ pub enum MessageKind {
         /// `finish_tool_step` / `cancel_tool_step` transitions below.
         status: ToolStepStatus,
         expanded: bool,
+        /// Whether the user has manually pinned `expanded`. While true, the
+        /// auto/system setter ([`Self::set_tool_step_expanded`]) is a no-op so
+        /// lifecycle transitions can't override a deliberate user choice.
+        user_pinned: bool,
         duration_ms: Option<u64>,
         /// Wall-clock instant the step started, so the UI can show a live
         /// elapsed time while the call (or sub-agent) is still running.
@@ -64,6 +68,8 @@ pub enum MessageKind {
         content: String,
         duration_ms: Option<u64>,
         expanded: bool,
+        /// User-pinned flag — see [`MessageKind::ToolStep::user_pinned`].
+        user_pinned: bool,
     },
 }
 
@@ -236,6 +242,7 @@ impl TranscriptMessage {
                 structured: None,
                 status: ToolStepStatus::Running,
                 expanded: false,
+                user_pinned: false,
                 duration_ms: None,
                 started_at: Some(std::time::Instant::now()),
                 children: Vec::new(),
@@ -503,12 +510,37 @@ impl TranscriptMessage {
         }
     }
 
+    /// Auto/system disclosure setter: sets `expanded` **unless** the user has
+    /// pinned the step (in which case it's a no-op). This is what lifecycle
+    /// transitions (start / finish / cancel) and step creation call, so the
+    /// derived default never fights a manual choice. User-driven toggles go
+    /// through [`Self::pin_tool_step_expanded`].
     pub fn set_tool_step_expanded(&mut self, expanded: bool) {
         if let MessageKind::ToolStep {
-            expanded: current, ..
+            expanded: current,
+            user_pinned,
+            ..
+        } = &mut self.kind
+        {
+            if *user_pinned {
+                return;
+            }
+            *current = expanded;
+            self.refresh_tool_step();
+        }
+    }
+
+    /// User-driven disclosure change: force `expanded` and mark it pinned so
+    /// later lifecycle transitions leave it alone.
+    pub fn pin_tool_step_expanded(&mut self, expanded: bool) {
+        if let MessageKind::ToolStep {
+            expanded: current,
+            user_pinned,
+            ..
         } = &mut self.kind
         {
             *current = expanded;
+            *user_pinned = true;
             self.refresh_tool_step();
         }
     }
@@ -622,7 +654,7 @@ impl TranscriptMessage {
                     {
                         // A tool step still in flight.
                         let header = child
-                            .tool_step_header()
+                            .tool_step_summary()
                             .unwrap_or_else(|| "tool".to_string());
                         format!("↳ Running {} · {}", stats, header)
                     }
@@ -646,6 +678,7 @@ impl TranscriptMessage {
                 content: content.clone(),
                 duration_ms: None,
                 expanded: false,
+                user_pinned: false,
             },
             provider: None,
             model: None,
@@ -666,12 +699,32 @@ impl TranscriptMessage {
         }
     }
 
+    /// Auto/system disclosure setter — respects a user pin. See
+    /// [`Self::set_tool_step_expanded`] for the rationale.
     pub fn set_thinking_expanded(&mut self, expanded: bool) {
         if let MessageKind::Thinking {
-            expanded: current, ..
+            expanded: current,
+            user_pinned,
+            ..
+        } = &mut self.kind
+        {
+            if *user_pinned {
+                return;
+            }
+            *current = expanded;
+        }
+    }
+
+    /// User-driven disclosure change: force `expanded` and pin it.
+    pub fn pin_thinking_expanded(&mut self, expanded: bool) {
+        if let MessageKind::Thinking {
+            expanded: current,
+            user_pinned,
+            ..
         } = &mut self.kind
         {
             *current = expanded;
+            *user_pinned = true;
         }
     }
 
@@ -681,8 +734,8 @@ impl TranscriptMessage {
         }
     }
 
-    /// Human-readable header for the reasoning trace (always one line).
-    pub fn thinking_header(&self) -> Option<String> {
+    /// Human-readable summary for the reasoning trace (always one line).
+    pub fn thinking_summary(&self) -> Option<String> {
         let MessageKind::Thinking {
             content,
             duration_ms,
@@ -707,7 +760,7 @@ impl TranscriptMessage {
     /// Shows only what the tool did and a duration suffix for finished
     /// states — the technical tool name lives inside the expanded body to
     /// reduce cognitive load.
-    pub fn tool_step_header(&self) -> Option<String> {
+    pub fn tool_step_summary(&self) -> Option<String> {
         let MessageKind::ToolStep {
             name,
             arguments,
@@ -743,6 +796,7 @@ impl TranscriptMessage {
             structured: _,
             status,
             expanded,
+            user_pinned: _,
             duration_ms,
             started_at: _,
             children: _,
@@ -1627,10 +1681,10 @@ mod tests {
         assert!(step.cancel_tool_step("call_1"));
         assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Cancelled));
 
-        // The header advertises the cancelled state instead of staying blank.
-        let header = step.tool_step_header().expect("header");
-        assert!(header.contains("cancelled"), "got: {header}");
-        // The raw (collapsed) transcript line mirrors the header.
+        // The summary advertises the cancelled state instead of staying blank.
+        let summary = step.tool_step_summary().expect("summary");
+        assert!(summary.contains("cancelled"), "got: {summary}");
+        // The raw (collapsed) transcript line mirrors the summary.
         assert!(step.raw.contains("cancelled"), "got: {}", step.raw);
 
         // Cancelled is terminal: a late result or another cancel is ignored.

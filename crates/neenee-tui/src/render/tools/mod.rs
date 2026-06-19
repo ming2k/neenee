@@ -4,15 +4,15 @@
 //! transcript: the one-line collapsed summary and the declarative
 //! classifications that drive its expanded body. This collapses the per-tool
 //! `match name { … }` branches that were previously scattered across
-//! `document.rs` (`argument_summary`) and `turn_artifacts.rs` (result
+//! `document.rs` (`argument_summary`) and `step/renderers.rs` (result
 //! rendering) into one place — adding a tool means adding a file and one
 //! registry arm.
 //!
 //! Each presenter owns a collapsed [`summary`](ToolPresenter::summary) and
 //! declarative [`result_kind`](ToolPresenter::result_kind) /
 //! [`arg_layout`](ToolPresenter::arg_layout) classifications that drive the
-//! expanded body (`turn_artifacts` owns the drawing primitives; this module
-//! owns the per-tool decisions). `document.rs` and `turn_artifacts.rs` call the
+//! expanded body (`step/renderers.rs` owns the drawing primitives; this module
+//! owns the per-tool decisions). `document.rs` and `step/renderers.rs` call the
 //! `*_for` entry points below instead of matching on tool names.
 
 mod bash;
@@ -82,8 +82,8 @@ impl ToolStatus {
 }
 
 /// How a tool's result output is rendered in the expanded step body. The
-/// drawing primitives live in `turn_artifacts`; presenters only declare which
-/// one applies, so the per-tool dispatch lives in one place (the registry).
+/// drawing primitives live in `step/renderers.rs`; presenters only declare
+/// which one applies, so the per-tool dispatch lives in one place (the registry).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResultKind {
     /// Line-numbered code block (default / unknown tools, `read_file`).

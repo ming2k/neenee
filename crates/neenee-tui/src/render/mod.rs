@@ -12,10 +12,10 @@ mod text_layout;
 mod theme;
 /// Per-tool presentation registry: each tool's icon, collapsed summary,
 /// optional preview, and expanded-body classification. `document.rs` and
-/// `turn_artifacts.rs` dispatch through its `*_for` entry points instead of
+/// `step/renderers.rs` dispatch through its `*_for` entry points instead of
 /// matching on tool names (see tools/mod.rs).
 pub(crate) mod tools;
-mod turn_artifacts;
+mod step;
 
 #[cfg(test)]
 mod snapshot_tests;
@@ -49,8 +49,8 @@ use text_layout::{
     block_selection_range, line_selection, prohibited_line_end, prohibited_line_start,
 };
 pub use theme::Theme;
-use turn_artifacts::{
-    draw_reasoning_trace, draw_sticky_header_if_needed, draw_subagent_bar,
+use step::{
+    draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
     draw_subagent_inline_step, draw_tool_step, StickyStep,
 };
 
@@ -144,18 +144,18 @@ pub struct TranscriptRender {
     pub sticky: Option<StickyInfo>,
 }
 
-/// A sticky pinned step header (returned to the app for click handling).
+/// A sticky pinned step summary (returned to the app for click handling).
 pub struct StickyInfo {
     pub message_idx: usize,
-    pub header: String,
+    pub summary: String,
     pub color: Color,
     pub block_idx: usize,
     pub rect: Rect,
-    /// The content-line index of the real header inside the stream. The app
+    /// The content-line index of the real summary inside the stream. The app
     /// uses this to re-anchor the scroll offset when the user collapses the
-    /// pinned step, so the real header takes the sticky's place at the top of
+    /// pinned step, so the real summary takes the sticky's place at the top of
     /// the viewport instead of jumping to unrelated content.
-    pub header_line: usize,
+    pub summary_line: usize,
 }
 
 /// Draw the main transcript area, recording layout info.
@@ -416,10 +416,10 @@ pub fn draw_transcript(
         Rect::new(0, 0, 0, 0)
     };
 
-    // Sticky pinned header: if an expanded step's body covers the top of the
-    // viewport (its header is scrolled out of view), pin its header to the line
-    // directly under the HUD bar so the user can always collapse it.
-    let sticky_info = draw_sticky_header_if_needed(
+    // Sticky pinned summary: if an expanded step's body covers the top of the
+    // viewport (its summary is scrolled out of view), pin its summary to the
+    // line directly under the HUD bar so the user can always collapse it.
+    let sticky_info = draw_sticky_summary_if_needed(
         frame,
         transcript_area,
         &sticky_steps,

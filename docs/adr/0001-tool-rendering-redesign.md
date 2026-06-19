@@ -1,6 +1,6 @@
 # 0001. Tool-step rendering redesign: log entries over expandable cards
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Date:** 2026-06-19
 
 ## Context
@@ -54,12 +54,12 @@ and opencode, founded on six pillars:
    duplicated/legacy `Theme` tokens.
 5. **Stream everything.** Add a streaming channel (`ToolStream::Stdout` /
    `Stderr` / `Replace`) so `bash`, `grep`, and `listing` grow live; the spinner
-   is replaced by a single "breathing" status dot (luminance sweep, with
-   `•`/`○` blink and static fallbacks).
-6. **Header grammar.** `dot  icon  verb  summary  meta`, e.g.
-   `●  $  Run  cargo test  1.2s`. A fixed-width icon column makes the transcript
-   scannable; the dot encodes state (`●` running, `○` ok, `✕` failed, `⚠`
-   denied).
+   is replaced by a "breathing" header-color sweep while running.
+6. **Header grammar.** `+  verb  summary  meta` (collapsed) / `-  verb  summary  meta`
+   (expanded), e.g. `+  Read  crates/main.rs  · 0ms`. A `+` / `-` marker column
+   indicates expand state. Status is conveyed by header color only: a breathing
+   accent while running, `error_fg` on failure, `text_muted` when cancelled,
+   and neutral on success. No per-tool icons or status glyphs.
 
 Supporting refactor: introduce a `RenderCtx` carrying the frame, area, theme,
 width, density, and the `skip_rows`/`y` scroll accumulators, plus a single

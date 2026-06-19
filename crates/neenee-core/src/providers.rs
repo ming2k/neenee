@@ -281,6 +281,175 @@ fn parse_openai_stream_data(data: &str) -> Vec<ProviderStreamEvent> {
     events
 }
 
+/// Sentinel tokens that wrap a tool call when a model mirrors it as text
+/// content alongside native `tool_calls` (ChatML/Hermes/Qwen style), e.g.
+/// `{"tool":"bash",...}<|tool_calls_section_end|>`.
+const TOOL_CALL_SENTINELS: &[&str] = &[
+    "<|tool_calls_section_begin|>",
+    "<|tool_calls_section_end|>",
+    "<|tool_calls_begin|>",
+    "<|tool_calls_end|>",
+    "<|tool_call_begin|>",
+    "<|tool_call_end|>",
+    "<|tool's_call_begin|>",
+    "<|tool's_call_end|>",
+    "<tool_call>",
+    "</tool_call>",
+];
+
+/// Streaming filter that strips tool-call "echo" text from a content channel.
+///
+/// Models such as GLM/Qwen return native `tool_calls` *and* mirror the call as
+/// text in `delta.content`, wrapped in sentinel tokens. That mirror is not
+/// assistant prose. Feeding each content delta through [`feed`](Self::feed)
+/// suppresses it before it ever becomes a `TextDelta`, so the UI never
+/// flickers and the harness needs no after-the-fact retraction.
+///
+/// Content is treated as an echo when it contains a sentinel token, or when it
+/// is nothing but JSON object(s) carrying a `tool`/`name` key (with optional
+/// surrounding whitespace). Everything else passes through unchanged; sentinel
+/// tokens split across deltas are still recognised.
+struct ToolCallEchoFilter {
+    pending: String,
+    echo: bool,
+}
+
+/// Maximum bytes of `{`-prefixed content to buffer while deciding whether it is
+/// a tool-call echo. Real tool calls are far smaller; exceeding this flushes
+/// the buffer as ordinary text so a large legitimate JSON response is not held
+/// back indefinitely.
+const MAX_ECHO_BUFFER: usize = 8192;
+
+impl ToolCallEchoFilter {
+    fn new() -> Self {
+        Self {
+            pending: String::new(),
+            echo: false,
+        }
+    }
+
+    /// Feed a content delta; returns the text safe to emit now. Echo content is
+    /// held back until classified, then dropped.
+    fn feed(&mut self, delta: &str) -> String {
+        if self.echo {
+            return String::new();
+        }
+        self.pending.push_str(delta);
+
+        // A sentinel token anywhere means the whole content is a tool-call
+        // section — drop the buffer and suppress the rest of the stream.
+        if TOOL_CALL_SENTINELS
+            .iter()
+            .any(|token| self.pending.contains(token))
+        {
+            self.echo = true;
+            self.pending.clear();
+            return String::new();
+        }
+
+        let trimmed = self.pending.trim_start();
+        if trimmed.starts_with('{') {
+            let brace = self.pending.len() - trimmed.len();
+            return self.classify_json_prefix(brace);
+        }
+
+        // Ordinary prose: emit everything that cannot be the start of a
+        // sentinel token, holding a short ASCII tail back so a sentinel split
+        // across two deltas is still recognised on the next call.
+        let emit = prose_emit_len(&self.pending);
+        if emit > 0 {
+            let out = self.pending[..emit].to_string();
+            self.pending = self.pending[emit..].to_string();
+            return out;
+        }
+        String::new()
+    }
+
+    /// Flush whatever remains once the stream ends (safe, non-echo text).
+    fn finish(&mut self) -> String {
+        if self.echo {
+            self.pending.clear();
+            return String::new();
+        }
+        std::mem::take(&mut self.pending)
+    }
+
+    /// `self.pending[brace..]` begins with `{`. If the object is complete,
+    /// classify it; otherwise keep buffering (or flush if it has grown too
+    /// large to plausibly be a tool call).
+    fn classify_json_prefix(&mut self, brace: usize) -> String {
+        match crate::tool_call::find_balanced_json_object(&self.pending, brace) {
+            Some(end) => {
+                let candidate = &self.pending[brace..=end];
+                let is_tool_call = serde_json::from_str::<Value>(candidate)
+                    .map(|value| {
+                        value
+                            .get("tool")
+                            .or_else(|| value.get("name"))
+                            .and_then(|node| node.as_str())
+                            .is_some()
+                    })
+                    .unwrap_or(false);
+                if is_tool_call {
+                    let rest = self.pending[end + 1..].to_string();
+                    self.pending.clear();
+                    // Only whitespace (or nothing) after the tool-call object:
+                    // the whole content was an echo.
+                    if rest.trim().is_empty() {
+                        self.echo = true;
+                        return String::new();
+                    }
+                    // More content follows — it may be another echoed call, a
+                    // trailing sentinel, or (rarely) real prose. Recurse.
+                    self.feed(&rest)
+                } else {
+                    // Valid JSON but not a tool call — ordinary content.
+                    std::mem::take(&mut self.pending)
+                }
+            }
+            None => {
+                if self.pending.len() > MAX_ECHO_BUFFER {
+                    std::mem::take(&mut self.pending)
+                } else {
+                    String::new()
+                }
+            }
+        }
+    }
+}
+
+/// Largest prefix length of `pending` that is safe to emit now, retaining any
+/// trailing suffix that could be the start of a sentinel token.
+fn prose_emit_len(pending: &str) -> usize {
+    let max_sentinel = TOOL_CALL_SENTINELS.iter().map(|token| token.len()).max().unwrap_or(0);
+    let scan_from = pending.len().saturating_sub(max_sentinel);
+    let bytes = pending.as_bytes();
+    let mut cursor = scan_from;
+    while cursor < bytes.len() {
+        if pending.is_char_boundary(cursor) {
+            let suffix = &pending[cursor..];
+            if TOOL_CALL_SENTINELS
+                .iter()
+                .any(|token| token.starts_with(suffix))
+            {
+                return cursor;
+            }
+        }
+        cursor += 1;
+    }
+    bytes.len()
+}
+
+/// Run a complete content string through an echo filter and return whatever
+/// survives (empty for a pure echo). Used by the non-streaming path so it
+/// matches the streaming behaviour exactly.
+fn filter_content_echo(content: &str) -> String {
+    let mut filter = ToolCallEchoFilter::new();
+    let mut out = filter.feed(content);
+    out.push_str(&filter.finish());
+    out
+}
+
 #[async_trait]
 impl Provider for OpenAiCompatProvider {
     fn prepare_tools(&self, tools: &[Arc<dyn Tool>]) {
@@ -320,7 +489,7 @@ impl Provider for OpenAiCompatProvider {
         }
 
         let choice = &response_json["choices"][0]["message"];
-        let content = choice["content"].as_str().unwrap_or("").to_string();
+        let content = filter_content_echo(choice["content"].as_str().unwrap_or(""));
         let reasoning_content = choice["reasoning_content"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -424,23 +593,55 @@ impl Provider for OpenAiCompatProvider {
         let response = ensure_success(response, "OpenAI").await?;
 
         let mut buffer = String::new();
-        Ok(response
-            .bytes_stream()
-            .map(move |item| {
-                let bytes = item.map_err(|error| transport_error("OpenAI", error))?;
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-                let mut events = Vec::new();
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer.drain(..pos + 1);
-                    if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
-                        if data != "[DONE]" {
-                            events.extend(parse_openai_stream_data(data).into_iter().map(Ok));
-                        }
+        // Tool-call echo filter shared between the body and the end-of-stream
+        // flush: it suppresses any content that mirrors a native tool call
+        // (see `ToolCallEchoFilter`) before it becomes a `TextDelta`.
+        let echo_filter = Arc::new(Mutex::new(ToolCallEchoFilter::new()));
+        let filter_for_body = Arc::clone(&echo_filter);
+        let body = response.bytes_stream().map(move |item| {
+            let bytes = item.map_err(|error| transport_error("OpenAI", error))?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            let mut parsed = Vec::new();
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim().to_string();
+                buffer.drain(..pos + 1);
+                if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
+                    if data != "[DONE]" {
+                        parsed.extend(parse_openai_stream_data(data));
                     }
                 }
-                Ok::<_, String>(events)
-            })
+            }
+            let mut filter = filter_for_body
+                .lock()
+                .expect("tool-call echo filter mutex poisoned");
+            let mut events: Vec<Result<ProviderStreamEvent, String>> = Vec::new();
+            for event in parsed {
+                if let ProviderStreamEvent::TextDelta(text) = event {
+                    let emitted = filter.feed(&text);
+                    if !emitted.is_empty() {
+                        events.push(Ok(ProviderStreamEvent::TextDelta(emitted)));
+                    }
+                } else {
+                    events.push(Ok(event));
+                }
+            }
+            Ok::<_, String>(events)
+        });
+        // Flush any buffered non-echo text once the byte stream ends.
+        let tail = futures::stream::once(async move {
+            let emitted = echo_filter
+                .lock()
+                .expect("tool-call echo filter mutex poisoned")
+                .finish();
+            let events: Vec<Result<ProviderStreamEvent, String>> = if emitted.is_empty() {
+                Vec::new()
+            } else {
+                vec![Ok(ProviderStreamEvent::TextDelta(emitted))]
+            };
+            Ok::<_, String>(events)
+        });
+        Ok(body
+            .chain(tail)
             .flat_map(|result| match result {
                 Ok(events) => futures::stream::iter(events),
                 Err(error) => futures::stream::iter(vec![Err(error)]),
@@ -992,6 +1193,103 @@ mod tests {
                 arguments: "{\"pa".to_string(),
             }]
         );
+    }
+
+    /// Drive a sequence of content deltas through an echo filter and return
+    /// `(surviving_text, echo_flag)` — mirroring how `stream_chat_events`
+    /// feeds deltas and then flushes at stream end.
+    fn run_echo_filter(deltas: &[&str]) -> (String, bool) {
+        let mut filter = ToolCallEchoFilter::new();
+        let mut out = String::new();
+        for delta in deltas {
+            out.push_str(&filter.feed(delta));
+        }
+        out.push_str(&filter.finish());
+        (out, filter.echo)
+    }
+
+    #[test]
+    fn echo_filter_suppresses_json_wrapped_in_sentinel() {
+        // The exact GLM leak from the bug report: a tool call mirrored as text
+        // and wrapped in `<|tool_calls_section_end|>` must never reach the UI.
+        let (out, echo) = run_echo_filter(&[
+            "{\"tool\":\"bash\",\"arguments\":{\"command\":\"git show 493588a\"}}",
+            "<|tool_calls_section_end|>",
+        ]);
+        assert!(echo, "should be classified as an echo");
+        assert!(out.is_empty(), "nothing should be emitted: got {out:?}");
+    }
+
+    #[test]
+    fn echo_filter_suppresses_multi_argument_tool_call() {
+        // edit_file with special chars (colons, hyphens) inside string values.
+        let (out, echo) = run_echo_filter(&[
+            "{\"tool\":\"edit_file\",\"arguments\":{\"path\":\"docs/adr/0001-tool-rendering-redesign.md\",\"old_string\":\"- Status: Accepted\",\"new_string\":\"- Status: Implemented\"}}",
+            "<|tool_calls_section_end|>",
+        ]);
+        assert!(echo);
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn echo_filter_suppresses_bare_json_without_sentinel() {
+        let (out, echo) = run_echo_filter(&["{\"name\":\"read_file\",\"arguments\":{}}"]);
+        assert!(echo);
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn echo_filter_buffers_until_json_completes_no_flicker() {
+        // The JSON arrives in fragments. Until it is complete and classified,
+        // nothing is emitted — so the body never flickers on screen.
+        let (out, echo) = run_echo_filter(&["{\"too", "l\":\"bash\",\"arguments\":{}}"]);
+        assert!(echo);
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn echo_filter_recognises_sentinel_split_across_deltas() {
+        let (out, echo) = run_echo_filter(&[
+            "<|tool_calls_secti",
+            "on_end|>",
+            "{\"tool\":\"bash\",\"arguments\":{}}",
+        ]);
+        assert!(echo);
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn echo_filter_passes_through_plain_prose() {
+        let (out, echo) = run_echo_filter(&["Let me read that file ", "for you."]);
+        assert!(!echo);
+        assert_eq!(out, "Let me read that file for you.");
+    }
+
+    #[test]
+    fn echo_filter_keeps_prose_with_embedded_non_tool_json() {
+        let (out, echo) = run_echo_filter(&["Here is data: {\"key\":42} done"]);
+        assert!(!echo);
+        assert_eq!(out, "Here is data: {\"key\":42} done");
+    }
+
+    #[test]
+    fn echo_filter_drops_tool_call_json_keeps_trailing_prose() {
+        // A tool-call object followed by real prose: the echo is dropped, the
+        // prose survives.
+        let (out, echo) =
+            run_echo_filter(&["{\"tool\":\"bash\",\"arguments\":{}} now running it"]);
+        assert!(!echo, "trailing prose means the stream is not a pure echo");
+        assert_eq!(out, " now running it");
+    }
+
+    #[test]
+    fn filter_content_echo_matches_streaming_classification() {
+        // Non-streaming helper agrees with the streaming filter.
+        assert!(filter_content_echo(
+            "{\"tool\":\"bash\",\"arguments\":{\"command\":\"ls\"}}<|tool_calls_section_end|>"
+        )
+        .is_empty());
+        assert_eq!(filter_content_echo("plain assistant text"), "plain assistant text");
     }
 
     #[test]

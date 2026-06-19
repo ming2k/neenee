@@ -6,6 +6,7 @@ pub mod input;
 pub mod layout;
 pub mod render;
 pub mod selection;
+pub mod step_interaction;
 
 use crossterm::{
     event::{
@@ -34,9 +35,7 @@ use tokio::sync::{mpsc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
 use crate::document::{MessageKind, TranscriptMessage};
-use crate::layout::{
-    InteractiveTarget, InteractiveTargetKind, LayoutMap, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
-};
+use crate::layout::{InteractiveTarget, InteractiveTargetKind, LayoutMap};
 use crate::render::Theme;
 use crate::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionDrag, SelectionState,
@@ -486,16 +485,16 @@ pub struct App {
     /// so clicks inside it route to `/goal status`. `None` when no goal is
     /// shown or the hint bar is hidden (overlay modal open).
     pub hint_goal_rect: Option<ratatui::layout::Rect>,
-    /// Content-line index of the sticky step's real header. Used to re-anchor
-    /// the scroll offset when the user collapses the pinned step so the header
+    /// Content-line index of the sticky step's real summary. Used to re-anchor
+    /// the scroll offset when the user collapses the pinned step so the summary
     /// lands at the top of the viewport instead of jumping to unrelated content.
-    pub sticky_header_line: Option<usize>,
+    pub sticky_summary_line: Option<usize>,
     /// Content-line the user asked to keep pinned at the top of the viewport by
-    /// collapsing a sticky header. While set, the per-frame scroll clamp is
+    /// collapsing a sticky summary. While set, the per-frame scroll clamp is
     /// allowed to scroll past the natural `max_scroll` so a short tail of
     /// content below the collapsed step does not yank the header back down.
     /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
-    pub pin_header_line: Option<usize>,
+    pub pin_summary_line: Option<usize>,
     /// Stack of sub-agent task call-ids that the view is zoomed into. Empty
     /// means the root conversation is shown; a non-empty stack renders the
     /// focused `task` tool step's child messages as the main stream, with a
@@ -844,7 +843,7 @@ impl App {
     /// - Sticky-overlay header (its real header is scrolled off the top): point
     ///   `scroll` at the recorded header content-line so the real header lands
     ///   at row 0 where the overlay sat. The line is also recorded in
-    ///   `pin_header_line` so the per-frame clamp does not pull it back down
+    ///   `pin_summary_line` so the per-frame clamp does not pull it back down
     ///   once the collapsed body shortens the stream.
     /// - Either way `follow_bottom` is cleared: the user is now pinning their
     ///   attention on this header, so the next frame's auto-follow must not
@@ -855,14 +854,14 @@ impl App {
     /// side effects like clearing the text selection.
     fn toggle_step_pinned(&mut self, messages: &mut [TranscriptMessage], mi: usize) -> bool {
         let pinned_to_top = self.sticky_step == Some(mi);
-        let sticky_header_line = self.sticky_header_line;
+        let sticky_summary_line = self.sticky_summary_line;
         let toggled = resolve_focused_mut(messages, &self.focus_stack, mi)
             .map(|message| {
                 if let Some(expanded) = message.tool_step_expanded() {
-                    message.set_tool_step_expanded(!expanded);
+                    message.pin_tool_step_expanded(!expanded);
                     true
                 } else if let Some(expanded) = message.thinking_expanded() {
-                    message.set_thinking_expanded(!expanded);
+                    message.pin_thinking_expanded(!expanded);
                     true
                 } else {
                     false
@@ -872,19 +871,19 @@ impl App {
         if toggled {
             self.follow_bottom = false;
             if pinned_to_top {
-                if let Some(header_line) = sticky_header_line {
-                    self.scroll = header_line.min(u16::MAX as usize) as u16;
+                if let Some(summary_line) = sticky_summary_line {
+                    self.scroll = summary_line.min(u16::MAX as usize) as u16;
                     // Remember the line so the per-frame clamp (which runs after
                     // this, once the collapsed body has shrunk the stream) keeps
-                    // allowing scroll up to it instead of yanking the header
+                    // allowing scroll up to it instead of yanking the summary
                     // back down to `max_scroll`.
-                    self.pin_header_line = Some(header_line);
+                    self.pin_summary_line = Some(summary_line);
                 }
             } else {
                 // Any other toggle (e.g. expanding) is no longer pinning a
-                // collapsed header at the top: drop a stale pin so normal
+                // collapsed summary at the top: drop a stale pin so normal
                 // clamping resumes.
-                self.pin_header_line = None;
+                self.pin_summary_line = None;
             }
         }
         toggled
@@ -978,8 +977,8 @@ impl App {
         self.drag.cancel();
         self.sticky_step = None;
         self.sticky_rect = None;
-        self.sticky_header_line = None;
-        self.pin_header_line = None;
+        self.sticky_summary_line = None;
+        self.pin_summary_line = None;
         self.focused_target = None;
     }
 
@@ -1247,11 +1246,14 @@ pub async fn run_tui(
                         let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                         let mut thinking =
                             TranscriptMessage::thinking(delta).with_attribution(provider, model);
-                        // Honor the configured default expand state for
-                        // reasoning traces (`[tui.default_expanded] thinking`).
-                        if tui_config_clone.thinking_default_expanded() {
-                            thinking.set_thinking_expanded(true);
-                        }
+                        // A reasoning trace expands while streaming — watching
+                        // the model think live is the value of the trace. On
+                        // completion the transition leaves it as-is (no
+                        // auto-collapse), so the user keeps what they were
+                        // reading.
+                        thinking.set_thinking_expanded(
+                            step_interaction::default_thinking_expanded(true),
+                        );
                         msgs.push(thinking);
                         reasoning_start = Some(std::time::Instant::now());
                     }
@@ -1301,19 +1303,12 @@ pub async fn run_tui(
                     *activity_clone.lock().await = tool_activity_status(&name).to_string();
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
-                    // Respect the global density: in Comfortable mode new tool
-                    // steps spawn expanded so mid-turn calls match the user's
-                    // last Ctrl+T choice. Some tools (e.g. edit_file) default
-                    // to expanded even in Compact mode so their diff is shown
-                    // without an extra toggle; the `[tui]` config can override
-                    // this per tool.
-                    let expanded = tool_density_clone.load(Ordering::SeqCst)
-                        || tui_config_clone.tool_default_expanded(&name);
-                    let mut message =
+                    // A tool step starts collapsed: there's no result to show
+                    // yet. The lifecycle-aware default (see `step_interaction`)
+                    // expands it on completion — Ok follows per-tool density,
+                    // Failed/Denied force-expand to surface the error.
+                    let message =
                         TranscriptMessage::tool_step(id, name, arguments).with_attribution(provider, model);
-                    if expanded {
-                        message.set_tool_step_expanded(true);
-                    }
                     msgs.push(message);
                     ir_clone.store(true, Ordering::SeqCst);
                 }
@@ -1326,14 +1321,50 @@ pub async fn run_tui(
                 } => {
                     *activity_clone.lock().await = "thinking".to_string();
                     let (provider, model) = attribution(&cp_clone, &cm_clone).await;
+                    let density = tool_density_clone.load(Ordering::SeqCst);
                     let mut msgs = messages_clone.lock().await;
-                    if !msgs.iter_mut().any(|message| {
-                        message.finish_tool_step(&id, output.clone(), structured.clone(), duration_ms)
-                    }) {
+                    let mut finished = false;
+                    for existing in msgs.iter_mut() {
+                        if existing.finish_tool_step(
+                            &id,
+                            output.clone(),
+                            structured.clone(),
+                            duration_ms,
+                        ) {
+                            // Apply the lifecycle-aware default disclosure: Ok
+                            // follows per-tool density, Failed/Denied force-
+                            // expand to surface the error. Respects any user
+                            // pin via the system setter.
+                            if let Some(status) = existing.tool_step_status() {
+                                let default = step_interaction::default_tool_expanded(
+                                    status,
+                                    &name,
+                                    &tui_config_clone,
+                                    density,
+                                );
+                                existing.set_tool_step_expanded(default);
+                            }
+                            finished = true;
+                            break;
+                        }
+                    }
+                    if !finished {
+                        // No matching in-flight call (e.g. turn restored from
+                        // history): synthesize a finished step with its default
+                        // disclosure applied directly.
                         let mut message =
                             TranscriptMessage::tool_step(id.clone(), name.clone(), "{}")
                                 .with_attribution(provider, model);
                         message.finish_tool_step(&id, output, structured, duration_ms);
+                        if let Some(status) = message.tool_step_status() {
+                            let default = step_interaction::default_tool_expanded(
+                                status,
+                                &name,
+                                &tui_config_clone,
+                                density,
+                            );
+                            message.set_tool_step_expanded(default);
+                        }
                         msgs.push(message);
                     }
                 }
@@ -1342,13 +1373,24 @@ pub async fn run_tui(
                     // interrupt. Flip its step (and any nested sub-agent
                     // children) to Cancelled so it never stays "running".
                     let mut msgs = messages_clone.lock().await;
-                    if !msgs.iter_mut().any(|message| message.cancel_tool_step(&id)) {
+                    let mut cancelled = false;
+                    for message in msgs.iter_mut() {
+                        if message.cancel_tool_step(&id) {
+                            // Cancelled reads as inert → collapse (respecting
+                            // any user pin via the system setter).
+                            message.set_tool_step_expanded(false);
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                    if !cancelled {
                         // The ToolCall event may have been dropped with the
                         // aborted turn; synthesize a minimal cancelled step so
                         // the user still sees the call was abandoned.
                         let mut message =
                             TranscriptMessage::tool_step(id.clone(), "tool", "{}");
                         message.cancel_tool_step(&id);
+                        message.set_tool_step_expanded(false);
                         msgs.push(message);
                     }
                 }
@@ -1482,8 +1524,8 @@ pub async fn run_tui(
         sticky_step: None,
         sticky_rect: None,
         hint_goal_rect: None,
-        sticky_header_line: None,
-        pin_header_line: None,
+        sticky_summary_line: None,
+        pin_summary_line: None,
         focus_stack: Vec::new(),
         tx,
         should_quit,
@@ -1868,12 +1910,12 @@ async fn run_app_loop<B: Backend>(
                 Some(info) => {
                     app.sticky_step = Some(info.message_idx);
                     app.sticky_rect = Some(info.rect);
-                    app.sticky_header_line = Some(info.header_line);
+                    app.sticky_summary_line = Some(info.summary_line);
                 }
                 None => {
                     app.sticky_step = None;
                     app.sticky_rect = None;
-                    app.sticky_header_line = None;
+                    app.sticky_summary_line = None;
                 }
             }
 
@@ -2014,7 +2056,7 @@ async fn run_app_loop<B: Backend>(
             // active, allow scrolling up to that line so the header stays at
             // the top of the viewport instead of being dragged back down.
             let limit = app
-                .pin_header_line
+                .pin_summary_line
                 .map(|line| natural_max.max(line.min(u16::MAX as usize) as u16))
                 .unwrap_or(natural_max);
             app.scroll = app.scroll.min(limit);
@@ -2125,7 +2167,7 @@ async fn run_app_loop<B: Backend>(
                         }
                         app.history_index = None;
                         app.follow_bottom = true;
-                        app.pin_header_line = None;
+                        app.pin_summary_line = None;
                         let _ = app.tx.send(AgentRequest::Chat { text, images });
                     } else if let Some((start, end)) = app.selection.normalized_range() {
                         // Enter on a selected step: navigate into a sub-agent
@@ -2162,7 +2204,7 @@ async fn run_app_loop<B: Backend>(
                     runtime.is_responding.store(true, Ordering::SeqCst);
                     *runtime.activity_status.lock().await = "queued".to_string();
                     app.follow_bottom = true;
-                    app.pin_header_line = None;
+                    app.pin_summary_line = None;
                     runtime
                         .messages
                         .lock()
@@ -2323,7 +2365,7 @@ async fn run_app_loop<B: Backend>(
                         // scrollable, so the wheel / page keys drive the
                         // conversation behind it, not the sheet's own body.
                         app.follow_bottom = false;
-                        app.pin_header_line = None;
+                        app.pin_summary_line = None;
                         // Mouse wheel tick = 4 lines, not 1, so scrolling feels fast
                         // and responsive instead of crawling line-by-line.
                         app.scroll = app.scroll.saturating_sub(4);
@@ -2333,7 +2375,7 @@ async fn run_app_loop<B: Backend>(
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
                     } else {
-                        app.pin_header_line = None;
+                        app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
                         if app.scroll >= app.max_scroll {
                             app.follow_bottom = true;
@@ -2342,13 +2384,13 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::ScrollPageUp => {
                     app.follow_bottom = false;
-                    app.pin_header_line = None;
+                    app.pin_summary_line = None;
                     // Leave one line of overlap so the reader keeps context.
                     let step = app.view_height.saturating_sub(1).max(1);
                     app.scroll = app.scroll.saturating_sub(step);
                 }
                 input::InputAction::ScrollPageDown => {
-                    app.pin_header_line = None;
+                    app.pin_summary_line = None;
                     let step = app.view_height.saturating_sub(1).max(1);
                     app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
                     if app.scroll >= app.max_scroll {
@@ -2357,11 +2399,11 @@ async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::ScrollTop => {
                     app.follow_bottom = false;
-                    app.pin_header_line = None;
+                    app.pin_summary_line = None;
                     app.scroll = 0;
                 }
                 input::InputAction::ScrollBottom => {
-                    app.pin_header_line = None;
+                    app.pin_summary_line = None;
                     app.scroll = app.max_scroll;
                     app.follow_bottom = true;
                 }
@@ -2438,8 +2480,10 @@ async fn run_app_loop<B: Backend>(
                     let mut messages = runtime.messages.lock().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
                         // Sub-agent task steps are navigated, not expanded.
+                        // This is a user bulk action → pin each step so the
+                        // choice survives later lifecycle transitions.
                         if !message.is_subagent_task() {
-                            message.set_tool_step_expanded(expand);
+                            message.pin_tool_step_expanded(expand);
                         }
                     }
                     drop(messages);
@@ -2810,7 +2854,7 @@ async fn run_app_loop<B: Backend>(
                         runtime.is_responding.store(true, Ordering::SeqCst);
                         *runtime.activity_status.lock().await = "queued".to_string();
                         app.follow_bottom = true;
-                        app.pin_header_line = None;
+                        app.pin_summary_line = None;
                         runtime
                             .messages
                             .lock()
@@ -2853,37 +2897,38 @@ async fn run_app_loop<B: Backend>(
                             app.focused_target = None;
                             app.selection = SelectionState::start_range(cursor);
                             app.drag.start(cursor);
-                        } else if cursor.block_idx == TOOL_STEP_BLOCK_IDX {
-                            // Clicked a tool-step header: navigate into a
-                            // sub-agent task, otherwise toggle that step.
-                            let mi = cursor.message_idx;
-                            app.focused_target = Some(InteractiveTarget::tool_step(mi));
+                        } else if let Some((mi, kind)) = step_interaction::summary_at(&cursor) {
+                            // Clicked a step summary: navigate into a sub-agent
+                            // task, otherwise toggle that step's disclosure.
+                            app.focused_target = Some(kind.focus_target(mi));
                             let mut messages = runtime.messages.lock().await;
-                            let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
-                                .and_then(|message| {
-                                    if message.is_subagent_task() {
-                                        message.tool_step_call_id().map(String::from)
+                            match kind {
+                                step_interaction::StepKind::ToolStep => {
+                                    let enter_id = resolve_focused_mut(
+                                        &mut messages,
+                                        &app.focus_stack,
+                                        mi,
+                                    )
+                                    .and_then(|message| {
+                                        if message.is_subagent_task() {
+                                            message.tool_step_call_id().map(String::from)
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    if let Some(id) = enter_id {
+                                        drop(messages);
+                                        app.enter_subagent(id);
                                     } else {
-                                        None
+                                        app.toggle_step_pinned(&mut messages, mi);
+                                        drop(messages);
                                     }
-                                });
-                            if let Some(id) = enter_id {
-                                drop(messages);
-                                app.enter_subagent(id);
-                            } else {
-                                app.toggle_step_pinned(&mut messages, mi);
-                                drop(messages);
+                                }
+                                step_interaction::StepKind::Thinking => {
+                                    app.toggle_step_pinned(&mut messages, mi);
+                                    drop(messages);
+                                }
                             }
-                            app.focus_zone = input::FocusZone::Browse;
-                            app.selection = SelectionState::None;
-                            app.drag.cancel();
-                        } else if cursor.block_idx == THINKING_BLOCK_IDX {
-                            // Clicked a reasoning trace header: toggle that trace.
-                            let mi = cursor.message_idx;
-                            app.focused_target = Some(InteractiveTarget::thinking(mi));
-                            let mut messages = runtime.messages.lock().await;
-                            app.toggle_step_pinned(&mut messages, mi);
-                            drop(messages);
                             app.focus_zone = input::FocusZone::Browse;
                             app.selection = SelectionState::None;
                             app.drag.cancel();
@@ -2913,13 +2958,14 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::RightClick { x, y } => {
-                    // Right-click on a tool-step header opens the full-output
+                    // Right-click on a tool-step summary opens the full-output
                     // detail overlay. For permission-denied steps this is the
                     // fastest way to surface the "Permission denied" message
                     // and the terminated-turn feedback.
                     if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        if cursor.block_idx == TOOL_STEP_BLOCK_IDX {
-                            let mi = cursor.message_idx;
+                        if let Some((mi, step_interaction::StepKind::ToolStep)) =
+                            step_interaction::summary_at(&cursor)
+                        {
                             app.focused_target = Some(InteractiveTarget::tool_step(mi));
                             app.tool_detail_message_idx = Some(mi);
                             app.tool_detail_scroll = 0;
@@ -2960,9 +3006,9 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::Hover { x, y } => {
-                    // Every step header (tool step, sub-agent task, reasoning
+                    // Every step summary (tool step, sub-agent task, reasoning
                     // trace) carries the same hover affordance. When the pointer
-                    // rests on one — either the inline header or the sticky
+                    // rests on one — either the inline summary or the sticky
                     // pinned variant — record its message index so the next draw
                     // lights it up to the intermediate hover tone; otherwise
                     // clear it.
@@ -2982,11 +3028,7 @@ async fn run_app_loop<B: Backend>(
                             app.hovered_step = is_step.then_some(mi);
                         }
                     } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        app.hovered_step = matches!(
-                            cursor.block_idx,
-                            THINKING_BLOCK_IDX | TOOL_STEP_BLOCK_IDX
-                        )
-                        .then_some(cursor.message_idx);
+                        app.hovered_step = step_interaction::hovered_summary(&cursor);
                     } else {
                         app.hovered_step = None;
                     }
@@ -3371,14 +3413,10 @@ fn transcript_messages_from_core(
             if let Some(calls) = message.tool_calls.take() {
                 for call in calls {
                     // Historical results match by tool name, so use it as the id.
-                    let expanded = config.tool_default_expanded(&call.name);
+                    // Disclosure is applied when the matching result finishes
+                    // the step below (lifecycle-aware default), mirroring live.
                     let mut step =
                         TranscriptMessage::tool_step(call.name.clone(), call.name, call.arguments);
-                    // Apply the per-tool default expand so restored steps match
-                    // live behavior (see the ToolCall handler).
-                    if expanded {
-                        step.set_tool_step_expanded(true);
-                    }
                     step.provider = provider.clone();
                     step.model = model.clone();
                     restored.push(step);
@@ -3390,17 +3428,31 @@ fn transcript_messages_from_core(
         }
         if message.role == Role::Tool {
             if let Some((name, output)) = parse_tool_result(&message.content) {
-                if restored
-                    .iter_mut()
-                    .any(|item| {
-                        item.finish_tool_step(
-                            name,
-                            output,
-                            neenee_core::ToolOutput::text(output),
-                            0,
-                        )
-                    })
-                {
+                let mut finished = false;
+                for item in restored.iter_mut() {
+                    if item.finish_tool_step(
+                        name,
+                        output,
+                        neenee_core::ToolOutput::text(output),
+                        0,
+                    ) {
+                        // Apply the lifecycle-aware default disclosure so
+                        // restored steps match live (Failed/Denied expand,
+                        // Ok follows per-tool config).
+                        if let Some(status) = item.tool_step_status() {
+                            let default = step_interaction::default_tool_expanded(
+                                status,
+                                name,
+                                config,
+                                false,
+                            );
+                            item.set_tool_step_expanded(default);
+                        }
+                        finished = true;
+                        break;
+                    }
+                }
+                if finished {
                     continue;
                 }
             }
@@ -3496,9 +3548,9 @@ mod tests {
         assert!(thinking.is_thinking());
         // A finished reasoning block must not be rendered with a live spinner.
         assert!(
-            thinking.thinking_header().unwrap().contains("0ms"),
+            thinking.thinking_summary().unwrap().contains("0ms"),
             "restored thinking should have a finished duration, got {:?}",
-            thinking.thinking_header()
+            thinking.thinking_summary()
         );
     }
 
@@ -3829,8 +3881,8 @@ mod tests {
             sticky_step: None,
             sticky_rect: None,
             hint_goal_rect: None,
-            sticky_header_line: None,
-            pin_header_line: None,
+            sticky_summary_line: None,
+            pin_summary_line: None,
             focus_stack: Vec::new(),
             tx: new_test_channel(),
             should_quit: Arc::new(AtomicBool::new(false)),
