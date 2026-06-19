@@ -2221,7 +2221,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_compaction_uses_provider_summary() {
-        use neenee_core::providers::MockProvider;
+        use neenee_providers::MockProvider;
 
         let mut history = vec![
             Message::new(Role::System, "system"),
@@ -2285,7 +2285,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_compaction_falls_back_when_provider_errors() {
-        use neenee_core::providers::MockProvider;
+        use neenee_providers::MockProvider;
 
         // MockProvider succeeds, so to exercise the fallback we instead pass a
         // provider that always errors and assert we still get an excerpt-based

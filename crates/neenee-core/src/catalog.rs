@@ -14,10 +14,6 @@
 //!
 //! See `docs/adr/0002-model-channel-abstraction.md` for the design.
 
-use crate::providers::{GeminiProvider, LlamaServerProvider, MockProvider, OpenAiCompatProvider};
-use crate::Provider;
-use std::sync::Arc;
-
 /// How a [`Channel`] speaks to its model. Determines which `Provider`
 /// implementation [`Channel::build`] constructs.
 ///
@@ -75,40 +71,6 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Construct the concrete `Provider` for this channel. Pure: no I/O and no
-    /// environment access — every value was resolved when the channel was
-    /// built. `entry_id` becomes the provider's attribution id
-    /// ([`Provider::provider_id`]) so assistant responses are attributed to the
-    /// logical model even after a mid-session switch.
-    pub fn build(&self, entry_id: &str) -> Arc<dyn Provider> {
-        match &self.transport {
-            Transport::Mock => Arc::new(MockProvider),
-            Transport::GeminiNative => Arc::new(GeminiProvider {
-                api_key: self.api_key.clone(),
-                model: self.model.clone(),
-                id: entry_id.to_string(),
-            }),
-            Transport::Llama { base_url } => Arc::new(LlamaServerProvider {
-                base_url: base_url.clone(),
-                model: self.model.clone(),
-                id: entry_id.to_string(),
-            }),
-            Transport::OpenAiCompat {
-                base_url,
-                user_agent,
-            } => {
-                let mut provider = OpenAiCompatProvider::with_base_url_and_user_agent(
-                    self.api_key.clone(),
-                    self.model.clone(),
-                    base_url,
-                    user_agent,
-                );
-                provider.id = entry_id.to_string();
-                Arc::new(provider)
-            }
-        }
-    }
-
     /// Whether this channel has a usable API key. Keyless transports
     /// ([`Transport::Llama`], [`Transport::Mock`]) always report ready; the rest
     /// require a non-empty key.
@@ -246,23 +208,6 @@ mod tests {
         assert_eq!(canonical.id, "deepseek-flash");
         assert_eq!(legacy.id, "deepseek-flash");
         assert!(catalog.get("unknown").is_none());
-    }
-
-    #[test]
-    fn channel_build_stamps_entry_id_on_provider() {
-        let channel = Channel {
-            id: "default".to_string(),
-            label: "OpenAI".to_string(),
-            transport: Transport::OpenAiCompat {
-                base_url: "https://api.openai.com/v1/chat/completions".to_string(),
-                user_agent: "agent".to_string(),
-            },
-            api_key: "k".to_string(),
-            model: "gpt-4o".to_string(),
-        };
-        let provider = channel.build("openai");
-        assert_eq!(provider.provider_id(), "openai");
-        assert_eq!(provider.model(), "gpt-4o");
     }
 
     #[test]

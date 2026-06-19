@@ -4,7 +4,6 @@ use neenee_core::{
     async_trait,
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
-    providers::MockProvider,
     tools::{
         AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
         TaskTool, TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
@@ -13,6 +12,7 @@ use neenee_core::{
     GoalService, GoalStatus, GoalStore, HarnessError, HarnessSnapshot, ImagePart, Message,
     Provider, ProviderStreamEvent, Role, SessionOverview, Tool, TurnTimer, GOAL_COMPLETE_MARKER,
 };
+use neenee_providers::MockProvider;
 use neenee_tui::start_tui;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -1329,7 +1329,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(channel) => {
                                     let mut channel = channel.clone();
                                     channel.model = model.clone();
-                                    channel.build(&entry.id)
+                                    neenee_providers::build_provider_for_channel(
+                                        &channel,
+                                        &entry.id,
+                                    )
                                 }
                                 None => Arc::new(MockProvider),
                             },

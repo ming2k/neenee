@@ -36,11 +36,9 @@ pub mod plan;
 pub mod pressure;
 pub mod project;
 mod prompt;
-pub mod providers;
 pub mod skills;
-mod tool_call;
+pub mod tool_call;
 pub mod tools;
-
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
 pub use catalog::{Catalog, Channel, ModelEntry, Transport};
 pub use events::{

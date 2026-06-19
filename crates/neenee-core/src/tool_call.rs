@@ -13,7 +13,7 @@ use crate::{Message, Role, ToolCall};
 /// the matching closing `}` at the same nesting depth. String literals and
 /// escapes are respected, so braces inside strings do not affect nesting.
 /// Returns `None` if the braces never balance.
-pub(crate) fn find_balanced_json_object(text: &str, start: usize) -> Option<usize> {
+pub fn find_balanced_json_object(text: &str, start: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0i32;
     let mut in_str = false;
@@ -50,7 +50,7 @@ pub(crate) fn find_balanced_json_object(text: &str, start: usize) -> Option<usiz
 /// tool identifier is used, so any text around the JSON is ignored. Both the
 /// `"tool"` key and the OpenAI/MCP `"name"` key are accepted as the tool
 /// identifier.
-pub(crate) fn parse_text_tool_call(text: &str) -> Option<ToolCall> {
+pub fn parse_text_tool_call(text: &str) -> Option<ToolCall> {
     let mut start = 0;
     while let Some(offset) = text[start..].find('{') {
         let brace_at = start + offset;
@@ -92,7 +92,7 @@ pub(crate) fn parse_text_tool_call(text: &str) -> Option<ToolCall> {
 /// every tool result to reference an assistant tool call), while non-native
 /// providers simply ignore the `tool_calls` field and keep using the message
 /// `content`.
-pub(crate) fn attach_fallback_tool_call(messages: &mut [Message], call: &ToolCall) {
+pub fn attach_fallback_tool_call(messages: &mut [Message], call: &ToolCall) {
     if let Some(last) = messages.last_mut() {
         if last.role == Role::Assistant && last.tool_calls.is_none() {
             last.tool_calls = Some(vec![call.clone()]);

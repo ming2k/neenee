@@ -15,7 +15,9 @@ use crate::model_usage::ModelUsage;
 use neenee_core::catalog::{
     builtin_metadata, canonical_id, Catalog, Channel, ModelEntry, Transport,
 };
-use neenee_core::providers::{KIMI_CODE_USER_AGENT, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS};
+use neenee_providers::{
+    KIMI_CODE_USER_AGENT, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec,
+};
 use neenee_core::{ModelPickerRow, ModelPickerSnapshot};
 
 /// Resolve the effective default-model id: `config.default_model` when set,
@@ -188,7 +190,7 @@ fn entry_with_metadata(id: &str, channels: Vec<Channel>, builtin: bool) -> Model
 /// Build a single-channel entry for an OpenAI-compatible registry preset.
 fn openai_compat_entry_from_spec(
     config: &Config,
-    spec: &neenee_core::providers::OpenAiProviderSpec,
+    spec: &OpenAiProviderSpec,
 ) -> ModelEntry {
     let api_key =
         env_or_config(Some(spec.env_api_key), config_key_for(config, spec.id)).unwrap_or_default();
@@ -329,10 +331,10 @@ pub fn build_provider_for(config: &Config, id: &str) -> std::sync::Arc<dyn neene
     let catalog = build_catalog(config);
     match catalog.get(id) {
         Some(entry) => match entry.default_channel() {
-            Some(channel) => channel.build(&entry.id),
-            None => std::sync::Arc::new(neenee_core::providers::MockProvider),
+            Some(channel) => neenee_providers::build_provider_for_channel(channel, &entry.id),
+            None => std::sync::Arc::new(neenee_providers::MockProvider),
         },
-        None => std::sync::Arc::new(neenee_core::providers::MockProvider),
+        None => std::sync::Arc::new(neenee_providers::MockProvider),
     }
 }
 

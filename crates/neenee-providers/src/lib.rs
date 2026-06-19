@@ -1,4 +1,5 @@
-use crate::{retryable_error, Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall};
+use neenee_core::{retryable_error, Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall};
+use neenee_core::catalog::Channel;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -423,7 +424,7 @@ impl ToolCallEchoFilter {
     /// classify it; otherwise keep buffering (or flush if it has grown too
     /// large to plausibly be a tool call).
     fn classify_json_prefix(&mut self, brace: usize) -> String {
-        match crate::tool_call::find_balanced_json_object(&self.pending, brace) {
+        match neenee_core::tool_call::find_balanced_json_object(&self.pending, brace) {
             Some(end) => {
                 let candidate = &self.pending[brace..=end];
                 let is_tool_call = serde_json::from_str::<Value>(candidate)
@@ -1546,5 +1547,78 @@ mod tests {
 
         headers.insert("retry-after-ms", "750".parse().unwrap());
         assert_eq!(retry_after_ms(&headers), Some(750));
+    }
+}
+
+/// Construct the concrete `Provider` for a [`neenee_core::catalog::Channel`].
+///
+/// This is the construction layer that knows about every concrete `Provider`
+/// implementation; it lives in `neenee-providers` (not `neenee-core`) so the
+/// domain crate stays free of HTTP I/O. `entry_id` becomes the provider's
+/// attribution id (`Provider::provider_id`) so assistant responses are
+/// attributed to the logical model even after a mid-session switch.
+pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn Provider> {
+    use neenee_core::catalog::Transport;
+    match &channel.transport {
+        Transport::Mock => Arc::new(MockProvider),
+        Transport::GeminiNative => Arc::new(GeminiProvider {
+            api_key: channel.api_key.clone(),
+            model: channel.model.clone(),
+            id: entry_id.to_string(),
+        }),
+        Transport::Llama { base_url } => Arc::new(LlamaServerProvider {
+            base_url: base_url.clone(),
+            model: channel.model.clone(),
+            id: entry_id.to_string(),
+        }),
+        Transport::OpenAiCompat {
+            base_url,
+            user_agent,
+        } => {
+            let mut provider = OpenAiCompatProvider::with_base_url_and_user_agent(
+                channel.api_key.clone(),
+                channel.model.clone(),
+                base_url,
+                user_agent,
+            );
+            provider.id = entry_id.to_string();
+            Arc::new(provider)
+        }
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+    use neenee_core::catalog::{Channel, Transport};
+
+    #[test]
+    fn build_provider_stamps_entry_id_on_openai_compat() {
+        let channel = Channel {
+            id: "default".to_string(),
+            label: "OpenAI".to_string(),
+            transport: Transport::OpenAiCompat {
+                base_url: "https://api.openai.com/v1/chat/completions".to_string(),
+                user_agent: "agent".to_string(),
+            },
+            api_key: "k".to_string(),
+            model: "gpt-4o".to_string(),
+        };
+        let provider = build_provider_for_channel(&channel, "openai");
+        assert_eq!(provider.provider_id(), "openai");
+        assert_eq!(provider.model(), "gpt-4o");
+    }
+
+    #[test]
+    fn build_provider_returns_mock_for_mock_transport() {
+        let channel = Channel {
+            id: "default".to_string(),
+            label: "Mock".to_string(),
+            transport: Transport::Mock,
+            api_key: String::new(),
+            model: "mock".to_string(),
+        };
+        let provider = build_provider_for_channel(&channel, "mock");
+        assert_eq!(provider.provider_id(), "mock");
     }
 }
