@@ -13,9 +13,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::document::{Block, TranscriptMessage};
-use crate::layout::{
-    BlockRegion, InteractiveTarget, LayoutMap, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
-};
+use crate::layout::{BlockRegion, LayoutMap};
 use crate::selection::SelectionState;
 
 use super::chrome::{breathing_color, spinner_glyph};
@@ -153,6 +151,28 @@ pub(super) struct StickyStep {
     block_idx: usize,
     header_line: usize,
     body_end_line: usize,
+}
+
+/// Unified step-header foreground, shared by every step kind (tool step,
+/// sub-agent inline step, reasoning trace) so they read consistently:
+///
+/// - **Expanded** (its body is open) → the primary foreground, the brightest
+///   state, signalling "this is the active/open step".
+/// - **Hovered** (pointer resting on the header while collapsed) → a distinct
+///   intermediate tone, a softer click affordance than "open".
+/// - **Idle** (collapsed, not hovered) → muted.
+///
+/// Notably a step that is merely *focused* (keyboard) but collapsed and not
+/// hovered is **not** brightened — collapsing it visibly calms the header
+/// instead of leaving it "still highlighted".
+fn step_header_color(theme: &Theme, expanded: bool, hovered: bool) -> Color {
+    if expanded {
+        theme.fg()
+    } else if hovered {
+        theme.hover()
+    } else {
+        theme.muted()
+    }
 }
 
 /// Build the header line of an expandable step: the `+`/`-` marker plus the
@@ -955,7 +975,7 @@ pub(super) fn draw_subagent_inline_step(
     skip_rows: &mut usize,
     current_y: &mut u16,
     content_lines: &mut usize,
-    focused: bool,
+    hovered: bool,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
@@ -979,12 +999,14 @@ pub(super) fn draw_subagent_inline_step(
     // it; the app decides to navigate rather than toggle for `task` steps. No
     // expand marker or status glyph — the step navigates, and run state reads
     // from the header color (this step has no spinner phase, so a running step
-    // is a steady accent rather than a breathing one).
+    // is a steady accent rather than a breathing one). A finished step uses
+    // the shared hover/idle ladder (it never expands inline), so a non-hovered
+    // task reads calm and only lights up under the pointer.
     let header_color = match status {
         ToolStatus::Failed => theme.error_fg,
         ToolStatus::Denied => theme.warn(),
         ToolStatus::Cancelled => theme.text_muted,
-        ToolStatus::Ok => if focused { theme.text } else { theme.text_muted },
+        ToolStatus::Ok => step_header_color(theme, false, hovered),
         ToolStatus::Running => theme.info,
     };
     let mut ctx = RenderCtx::from_cursor(
@@ -1106,18 +1128,21 @@ pub(super) fn draw_tool_step(
     content_lines: &mut usize,
     sticky_steps: &mut Vec<StickyStep>,
     spinner_phase: usize,
-    focused: bool,
+    hovered: bool,
 ) {
     let Some(header) = msg.tool_step_header() else {
         return;
     };
+    let expanded = msg.tool_step_expanded() == Some(true);
 
     // Run state is conveyed by color alone: a breathing accent while running,
     // red on failure, muted when cancelled, and neutral on success. There is no
     // status glyph or per-tool icon in the header. `status_color` drives the
     // child tool-step accents and the sticky pin; `header_color` drives the
-    // header text (and stays neutral/focus-aware for the common success case so
-    // a finished call reads as calm rather than a wall of color).
+    // header text. For the common success case the header follows the shared
+    // expanded/hover/idle ladder so a finished call reads as calm: bright only
+    // while its body is open or the pointer rests on it, never merely because
+    // it carries keyboard focus.
     let status = msg
         .tool_step_status()
         .map(ToolStatus::from_status)
@@ -1132,11 +1157,10 @@ pub(super) fn draw_tool_step(
         _ => status.color(theme),
     };
     let header_color = match status {
-        ToolStatus::Ok => if focused { theme.text } else { theme.text_muted },
+        ToolStatus::Ok => step_header_color(theme, expanded, hovered),
         _ => status_color,
     };
 
-    let expanded = msg.tool_step_expanded() == Some(true);
     // Render into the inset band so content never touches the terminal frame —
     // it sits inside the uniform 2-cell `app_bg` gutters shared with prose and
     // code blocks. All helpers below (header, body, child tool steps) read
@@ -1454,9 +1478,11 @@ fn draw_reasoning_trace_header(
 ) -> usize {
     let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
     let header_line_idx = *ctx.content_lines;
-    // Hover affordance: the muted header lights up to the primary foreground
-    // (dark→bright) to signal the line is clickable.
-    let header_color = if hovered { ctx.theme.fg() } else { ctx.theme.muted() };
+    // Shared step-header ladder: an open trace reads as the primary foreground
+    // (the active state), a collapsed trace under the pointer lights up to the
+    // intermediate hover tone as a click affordance, and an idle collapsed
+    // trace stays muted.
+    let header_color = step_header_color(ctx.theme, expanded, hovered);
 
     let line = reasoning_trace_header_line(marker, header, ctx.theme.info(), header_color, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
@@ -1628,34 +1654,24 @@ pub(super) fn draw_reasoning_trace(
 /// header pinned there as a sticky overlay and return its layout info so the
 /// app can route clicks to it. Returns `None` when no sticky header is
 /// needed.
+///
+/// A sticky header only exists for an *expanded* step (its body is what is
+/// scrolled into view), so it always renders in the shared ladder's expanded
+/// state — the primary foreground — matching the inline header of an open
+/// step.
 pub(super) fn draw_sticky_header_if_needed(
     frame: &mut Frame,
     transcript_area: Rect,
     sticky_steps: &[StickyStep],
     scroll: u16,
-    hovered_reasoning: Option<usize>,
-    focused_target: Option<InteractiveTarget>,
     theme: &Theme,
 ) -> Option<StickyInfo> {
     let first_visible = scroll as usize;
     let step = sticky_steps
         .iter()
         .find(|c| c.header_line < first_visible && c.body_end_line > first_visible)?;
-    // Reasoning sticky headers brighten on hover (dark→bright affordance),
-    // matching the inline reasoning-trace header.
-    let reasoning_hovered =
-        step.background.is_none() && hovered_reasoning == Some(step.message_idx);
-    let focused = focused_target.is_some_and(|target| {
-        target.message_idx == step.message_idx
-            && match target.kind {
-                crate::layout::InteractiveTargetKind::ToolStep => {
-                    step.block_idx == TOOL_STEP_BLOCK_IDX
-                }
-                crate::layout::InteractiveTargetKind::Thinking => {
-                    step.block_idx == THINKING_BLOCK_IDX
-                }
-            }
-    });
+    // Sticky steps are always expanded → the header reads in its active tone.
+    let header_color = theme.fg();
     let line_rect = if let Some(bg) = step.background {
         // Pin inside the same inset band the steps render into so the sticky
         // header aligns exactly with the (possibly scrolled-away) real header.
@@ -1665,11 +1681,7 @@ pub(super) fn draw_sticky_header_if_needed(
             Paragraph::new(tool_header_line(
                 "-",
                 &step.header,
-                if focused {
-                    theme.fg()
-                } else {
-                    theme.muted()
-                },
+                header_color,
                 bg,
                 band.width as usize,
             )),
@@ -1683,11 +1695,6 @@ pub(super) fn draw_sticky_header_if_needed(
             transcript_area.width,
             1,
         );
-        let header_color = if reasoning_hovered || focused {
-            theme.fg()
-        } else {
-            theme.muted()
-        };
         frame.render_widget(
             Paragraph::new(reasoning_trace_header_line(
                 "-",

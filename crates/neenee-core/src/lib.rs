@@ -793,13 +793,19 @@ impl Agent {
     }
 
     pub fn reply_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        let sender = self
-            .permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .remove(request_id);
-        sender.is_some_and(|sender| sender.send(decision).is_ok())
+        let mut perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
+        let sender = perms.pending.remove(request_id);
+        let sent = sender.is_some_and(|sender| sender.send(decision).is_ok());
+        // Rejecting one permission aborts the turn, so resolve every other
+        // pending request in the same concurrent batch too. Without this,
+        // their tool futures stay blocked on their reply channels and the
+        // batch's `join_all` deadlocks — the turn would hang forever.
+        if sent && decision == PermissionDecision::Reject {
+            for (_, pending_sender) in perms.pending.drain() {
+                let _ = pending_sender.send(PermissionDecision::Reject);
+            }
+        }
+        sent
     }
 
     pub fn reject_pending_permissions(&self) {

@@ -437,19 +437,16 @@ pub fn draw_permission_sheet(
         .unwrap_or_else(|| request.arguments.clone());
     let scope_meaningful = !request.scope.is_empty() && request.scope != "*";
 
-    // Header line: icon + tool, plus the concrete scope (path/command) when
+    // Header line: tool name, plus the concrete scope (path/command) when
     // it adds information. The scope is the single most useful detail, so it
     // earns a spot in the collapsed summary; everything else hides behind
-    // "Details".
-    let mut header = vec![
-        Span::styled("△ ", Style::default().fg(theme.warn())),
-        Span::styled(
-            request.tool.clone(),
-            Style::default()
-                .fg(theme.warn())
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    // "Details". The left bar carries the severity cue.
+    let mut header = vec![Span::styled(
+        request.tool.clone(),
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::BOLD),
+    )];
     if confirm_always {
         header.push(Span::styled(
             " — always allow until exit?",
@@ -575,7 +572,7 @@ pub fn draw_permission_sheet(
             if is_reject || is_cancel {
                 theme.err()
             } else {
-                theme.warn()
+                theme.brand()
             }
         } else {
             theme.raised()

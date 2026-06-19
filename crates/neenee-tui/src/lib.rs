@@ -24,7 +24,7 @@ use ratatui::{
     Terminal,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     error::Error,
     io,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -546,11 +546,12 @@ pub struct App {
     pub drag: SelectionDrag,
     /// Layout map for the current frame (updated each draw).
     pub layout_map: LayoutMap,
-    /// Message index of the reasoning trace whose header currently rests under
-    /// the mouse pointer (inline or sticky pinned), so the next draw brightens
-    /// it as a dark→bright hover affordance hinting that it is clickable.
-    /// `None` whenever the pointer is elsewhere or an overlay modal is open.
-    pub hovered_reasoning: Option<usize>,
+    /// Message index of the step (tool step or reasoning trace) whose header
+    /// currently rests under the mouse pointer (inline or sticky pinned), so
+    /// the next draw lights it up to the intermediate hover tone as a click
+    /// affordance. `None` whenever the pointer is elsewhere or an overlay
+    /// modal is open.
+    pub hovered_step: Option<usize>,
     /// Global tool-step density (false = Compact default, true = Comfortable:
     /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
@@ -608,7 +609,7 @@ struct UiRuntime {
     current_model: Arc<Mutex<String>>,
     harness: Arc<Mutex<HarnessSnapshot>>,
     activity_status: Arc<Mutex<String>>,
-    pending_permission: Arc<Mutex<Option<PermissionRequest>>>,
+    pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
     is_responding: Arc<AtomicBool>,
     messages: Arc<Mutex<Vec<TranscriptMessage>>>,
     key_status: Arc<Mutex<HashMap<String, bool>>>,
@@ -1152,7 +1153,7 @@ pub async fn run_tui(
     let harness_clone = harness.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
-    let pending_permission = Arc::new(Mutex::new(None::<PermissionRequest>));
+    let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
     let pending_permission_clone = pending_permission.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
@@ -1374,12 +1375,16 @@ pub async fn run_tui(
                     }
                 }
                 AgentResponse::PermissionRequest(request) => {
-                    *pending_permission_clone.lock().await = Some(request);
+                    // A single model response can carry several write tool
+                    // calls, each emitting its own request before blocking on
+                    // its reply. Queue them FIFO so none is lost; the UI shows
+                    // one sheet at a time and hands off as each is resolved.
+                    pending_permission_clone.lock().await.push_back(request);
                     *activity_clone.lock().await = "awaiting permission".to_string();
                     ir_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::PermissionsCleared => {
-                    *pending_permission_clone.lock().await = None;
+                    pending_permission_clone.lock().await.clear();
                     activity_clone.lock().await.clear();
                 }
                 AgentResponse::ProviderKeys(status) => {
@@ -1508,7 +1513,7 @@ pub async fn run_tui(
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
-        hovered_reasoning: None,
+        hovered_step: None,
         tool_density: tool_density.clone(),
         tui_config: tui_config.clone(),
         tool_detail_message_idx: None,
@@ -1630,7 +1635,7 @@ async fn run_app_loop<B: Backend>(
             app.current_goal = harness.goal;
             app.loop_status = harness.loop_status;
             app.activity_status = runtime.activity_status.lock().await.clone();
-            app.pending_permission = runtime.pending_permission.lock().await.clone();
+            app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
             if app.pending_permission.is_some() && app.active_modal == Modal::None {
                 app.active_modal = Modal::Permission;
@@ -1773,8 +1778,8 @@ async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    hovered_reasoning: chrome_interactive
-                        .then_some(app.hovered_reasoning)
+                    hovered_step: chrome_interactive
+                        .then_some(app.hovered_step)
                         .flatten(),
                     focused_target: chrome_interactive
                         .then_some(app.focused_target)
@@ -2735,26 +2740,57 @@ async fn run_app_loop<B: Backend>(
                                 _ => PermissionDecision::Reject,
                             }
                         };
-                        *runtime.pending_permission.lock().await = None;
-                        app.active_modal = Modal::None;
-                        app.modal_index = 0;
-                        app.permission_confirm_always = false;
-                        app.permission_show_details = false;
+                        let request_id = request.id;
                         let _ = app.tx.send(AgentRequest::PermissionReply {
-                            request_id: request.id,
+                            request_id: request_id.clone(),
                             decision,
                         });
+                        if decision == PermissionDecision::Reject {
+                            // A rejection aborts the turn: resolve every other
+                            // queued request too, otherwise their tool futures
+                            // stay blocked and the batch deadlocks.
+                            let queued: Vec<PermissionRequest> =
+                                runtime.pending_permission.lock().await.drain(..).collect();
+                            for pending in queued {
+                                let _ = app.tx.send(AgentRequest::PermissionReply {
+                                    request_id: pending.id,
+                                    decision: PermissionDecision::Reject,
+                                });
+                            }
+                            app.pending_permission = None;
+                            app.active_modal = Modal::None;
+                        } else {
+                            // Drop the request we just answered and surface the
+                            // next one (if any) so the sheet hands off without
+                            // flashing the composer for a frame.
+                            let mut queue = runtime.pending_permission.lock().await;
+                            queue.retain(|r| r.id != request_id);
+                            app.pending_permission = queue.front().cloned();
+                            drop(queue);
+                            if app.pending_permission.is_none() {
+                                app.active_modal = Modal::None;
+                            }
+                        }
+                        app.modal_index = 0;
+                        app.permission_scroll = 0;
+                        app.permission_max_scroll = 0;
+                        app.permission_confirm_always = false;
+                        app.permission_show_details = false;
                     }
                 }
                 input::InputAction::PermissionReject => {
-                    if let Some(request) = app.pending_permission.take() {
-                        *runtime.pending_permission.lock().await = None;
-                        app.active_modal = Modal::None;
-                        app.modal_index = 0;
-                        app.permission_confirm_always = false;
-                        app.permission_show_details = false;
+                    // Rejecting aborts the turn; resolve every queued request
+                    // so the concurrent tool batch can finish.
+                    let queued: Vec<PermissionRequest> =
+                        runtime.pending_permission.lock().await.drain(..).collect();
+                    app.pending_permission = None;
+                    app.active_modal = Modal::None;
+                    app.modal_index = 0;
+                    app.permission_confirm_always = false;
+                    app.permission_show_details = false;
+                    for pending in queued {
                         let _ = app.tx.send(AgentRequest::PermissionReply {
-                            request_id: request.id,
+                            request_id: pending.id,
                             decision: PermissionDecision::Reject,
                         });
                     }
@@ -2924,29 +2960,35 @@ async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::Hover { x, y } => {
-                    // Only reasoning-trace headers carry a hover affordance
-                    // today. When the pointer rests on one — either the inline
-                    // header (block_idx == THINKING_BLOCK_IDX) or the sticky pinned
-                    // variant — record its message index so the next draw
-                    // brightens it; otherwise clear it.
+                    // Every step header (tool step, sub-agent task, reasoning
+                    // trace) carries the same hover affordance. When the pointer
+                    // rests on one — either the inline header or the sticky
+                    // pinned variant — record its message index so the next draw
+                    // lights it up to the intermediate hover tone; otherwise
+                    // clear it.
                     if app.sticky_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         if let Some(mi) = app.sticky_step {
-                            let is_thinking = runtime
+                            let is_step = runtime
                                 .messages
                                 .lock()
                                 .await
                                 .get(mi)
-                                .map(|m| m.is_thinking())
+                                .map(|m| {
+                                    m.is_thinking() || m.is_tool_step() || m.is_subagent_task()
+                                })
                                 .unwrap_or(false);
-                            app.hovered_reasoning = is_thinking.then_some(mi);
+                            app.hovered_step = is_step.then_some(mi);
                         }
                     } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        app.hovered_reasoning =
-                            (cursor.block_idx == THINKING_BLOCK_IDX).then_some(cursor.message_idx);
+                        app.hovered_step = matches!(
+                            cursor.block_idx,
+                            THINKING_BLOCK_IDX | TOOL_STEP_BLOCK_IDX
+                        )
+                        .then_some(cursor.message_idx);
                     } else {
-                        app.hovered_reasoning = None;
+                        app.hovered_step = None;
                     }
                 }
                 input::InputAction::ConfigureKey => {
@@ -3818,7 +3860,7 @@ mod tests {
             selection: SelectionState::None,
             drag: SelectionDrag::default(),
             layout_map: LayoutMap::new(),
-            hovered_reasoning: None,
+            hovered_step: None,
             tool_density: Arc::new(AtomicBool::new(false)),
             tui_config: Arc::new(config::TuiConfig::default()),
             tool_detail_message_idx: None,

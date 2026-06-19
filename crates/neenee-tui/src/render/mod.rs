@@ -63,7 +63,7 @@ use ratatui::{
 };
 
 use crate::document::TranscriptMessage;
-use crate::layout::{InteractiveTarget, LayoutMap, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX};
+use crate::layout::{InteractiveTarget, LayoutMap};
 use crate::selection::SelectionState;
 #[cfg(test)]
 use neenee_core::PermissionRequest;
@@ -106,10 +106,12 @@ pub struct TranscriptView<'a> {
     /// When set, the view is zoomed into a sub-agent task: a navigation bar is
     /// rendered and `messages` is the focused task's child stream.
     pub subagent_bar: Option<SubagentBarInfo>,
-    /// Message index of the reasoning trace whose header is currently hovered,
-    /// so its header renders brightened (dark→bright) as a click affordance.
-    /// `None` when nothing is hovered.
-    pub hovered_reasoning: Option<usize>,
+    /// Message index of the step (tool step or reasoning trace) whose header
+    /// currently rests under the mouse pointer (inline or sticky pinned), so
+    /// the next draw lights it up to the intermediate hover tone as a click
+    /// affordance. `None` whenever the pointer is elsewhere or an overlay
+    /// modal is open.
+    pub hovered_step: Option<usize>,
     /// Keyboard-focused activatable target.
     pub focused_target: Option<InteractiveTarget>,
     pub theme: &'a Theme,
@@ -172,9 +174,9 @@ pub fn draw_transcript(
         byte_cursor,
         chrome_hidden,
         subagent_bar,
-        hovered_reasoning,
-        focused_target,
+        hovered_step,
         theme,
+        ..
     } = view;
     let full = frame.size();
     // Components render inside the vertical viewport margins (1 cell top and
@@ -292,9 +294,7 @@ pub fn draw_transcript(
                 &mut skip_rows,
                 &mut current_y,
                 &mut content_lines,
-                focused_target.is_some_and(|target| {
-                    target.message_idx == mi && target.block_idx == TOOL_STEP_BLOCK_IDX
-                }),
+                hovered_step == Some(mi),
             );
         } else if msg.is_tool_step() {
             draw_tool_step(
@@ -310,9 +310,7 @@ pub fn draw_transcript(
                 &mut content_lines,
                 &mut sticky_steps,
                 spinner_phase,
-                focused_target.is_some_and(|target| {
-                    target.message_idx == mi && target.block_idx == TOOL_STEP_BLOCK_IDX
-                }),
+                hovered_step == Some(mi),
             );
         } else if msg.is_thinking() {
             draw_reasoning_trace(
@@ -328,10 +326,7 @@ pub fn draw_transcript(
                 &mut content_lines,
                 &mut sticky_steps,
                 spinner_phase,
-                hovered_reasoning == Some(mi)
-                    || focused_target.is_some_and(|target| {
-                        target.message_idx == mi && target.block_idx == THINKING_BLOCK_IDX
-                    }),
+                hovered_step == Some(mi),
             );
         } else {
             draw_message_body(
@@ -429,8 +424,6 @@ pub fn draw_transcript(
         transcript_area,
         &sticky_steps,
         scroll,
-        hovered_reasoning,
-        focused_target,
         theme,
     );
 
@@ -544,7 +537,7 @@ mod tests {
                         byte_cursor: 5,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        hovered_reasoning: None,
+                        hovered_step: None,
                         focused_target: None,
                         theme: &theme,
                     },
@@ -698,7 +691,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        hovered_reasoning: None,
+                        hovered_step: None,
                         focused_target: None,
                         theme: &theme,
                     },
@@ -729,7 +722,7 @@ mod tests {
                             index: 1,
                             total: 1,
                         }),
-                        hovered_reasoning: None,
+                        hovered_step: None,
                         focused_target: None,
                         theme: &theme,
                     },
@@ -849,7 +842,7 @@ mod tests {
                             byte_cursor: input.len(),
                             chrome_hidden: false,
                             subagent_bar: None,
-                            hovered_reasoning: None,
+                            hovered_step: None,
                             focused_target: None,
                             theme,
                         },
@@ -990,7 +983,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        hovered_reasoning: None,
+                        hovered_step: None,
                         focused_target: None,
                         theme: &theme,
                     },

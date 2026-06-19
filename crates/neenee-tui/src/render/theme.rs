@@ -21,6 +21,11 @@ pub struct Theme {
     pub text: Color,
     /// Muted/secondary text.
     pub text_muted: Color,
+    /// Intermediate foreground for an interactive step header that is under
+    /// the pointer but not in its expanded/active state — sits between
+    /// `text_muted` (idle) and `text` (expanded) so hover reads as a softer
+    /// affordance than "open".
+    pub text_hover: Color,
     /// Solid background for panels (modals, sheets).
     pub panel_bg: Color,
     /// Background for the live input box; brighter than `user_panel_bg` so the
@@ -62,6 +67,7 @@ impl Default for Theme {
             app_bg: Color::Rgb(7, 8, 8),
             text: Color::Rgb(213, 213, 205),
             text_muted: Color::Rgb(119, 125, 117),
+            text_hover: Color::Rgb(175, 180, 172),
             panel_bg: Color::Rgb(14, 15, 15),
             input_bg: Color::Rgb(18, 19, 19),
             user_panel_bg: Color::Rgb(11, 12, 12),
@@ -126,6 +132,12 @@ impl Theme {
     }
     pub fn muted(&self) -> Color {
         self.text_muted
+    }
+    /// Foreground for an interactive step header while collapsed but under the
+    /// pointer — an intermediate tone between `muted()` (idle) and `fg()`
+    /// (expanded/active), so hover reads as a softer affordance than "open".
+    pub fn hover(&self) -> Color {
+        self.text_hover
     }
     pub fn dim(&self) -> Color {
         self.dim_fg
