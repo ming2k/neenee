@@ -195,7 +195,7 @@ pub enum ToolStream {
 /// (mirrors `BashTool::call`). Pub(crate) so the bash tool can compute the
 /// pre-truncation length to decide its `truncated` flag without duplicating
 /// the format logic.
-pub(crate) fn shell_inner_text(stdout: &str, stderr: &str, exit: Option<i32>) -> String {
+pub fn shell_inner_text(stdout: &str, stderr: &str, exit: Option<i32>) -> String {
     if exit == Some(0) {
         if stdout.is_empty() && !stderr.is_empty() {
             format!("(success, stderr):\n{}", stderr)
@@ -226,7 +226,7 @@ fn shell_to_text(stdout: &str, stderr: &str, exit: Option<i32>, truncated: bool)
         format!(
             "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_file if you need specific parts]",
             inner.len(),
-            crate::tools::truncate_utf8(&inner, TRUNCATED_CHARS)
+            truncate_utf8(&inner, TRUNCATED_CHARS)
         )
     } else {
         inner
@@ -406,4 +406,20 @@ mod tests {
         let o = ToolOutput::text("plain");
         assert!(o.subagent_payload().is_none());
     }
+}
+
+/// Truncate `text` to at most `max_bytes` without splitting a multibyte UTF-8
+/// character. Returns a `&str` slice of `text`.
+///
+/// Shared by the structured-output formatter (in this crate) and the tool
+/// implementations (`neenee-tools`) that produce the outputs being formatted.
+pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }

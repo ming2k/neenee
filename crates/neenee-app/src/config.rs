@@ -1,8 +1,8 @@
 use crate::fsutil;
 use crate::paths;
-use neenee_core::mcp::McpServerConfig;
+use neenee_core::McpServerConfig;
 use neenee_core::skills::SkillsConfig;
-use neenee_core::tools::WebSearchConfig;
+use neenee_core::WebSearchConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

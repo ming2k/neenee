@@ -1,12 +1,15 @@
-use crate::{Tool, ToolAccess};
+use neenee_core::{truncate_utf8, Tool, ToolAccess, WebSearchConfig};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
+pub mod commands;
+pub mod mcp;
+pub mod project;
 pub mod search;
+
 use search::SearchProvider;
 
 /// Read a file from disk.
@@ -127,7 +130,7 @@ impl Tool for ReadFileTool {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -150,7 +153,7 @@ impl Tool for ReadFileTool {
             .extension()
             .map(|e| e.to_string_lossy().to_string());
         if start >= lines.len() {
-            return Ok(crate::ToolOutput::Code {
+            return Ok(neenee_core::ToolOutput::Code {
                 lang,
                 text: String::new(),
             });
@@ -169,7 +172,7 @@ impl Tool for ReadFileTool {
         } else {
             result
         };
-        Ok(crate::ToolOutput::Code { lang, text })
+        Ok(neenee_core::ToolOutput::Code { lang, text })
     }
 }
 
@@ -198,13 +201,13 @@ impl Tool for WriteFileTool {
         json_string(arguments, "path")
     }
     fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
-        crate::plan::is_plan_path(&json_string(arguments, "path"))
+        neenee_core::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -217,9 +220,9 @@ impl Tool for WriteFileTool {
         }
 
         std::fs::write(path, content).map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-        Ok(crate::ToolOutput::Patch {
+        Ok(neenee_core::ToolOutput::Patch {
             path: path.to_string(),
-            op: crate::PatchOp::Create,
+            op: neenee_core::PatchOp::Create,
             old: String::new(),
             new: content.to_string(),
         })
@@ -254,13 +257,13 @@ impl Tool for EditFileTool {
         json_string(arguments, "path")
     }
     fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
-        crate::plan::is_plan_path(&json_string(arguments, "path"))
+        neenee_core::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
@@ -278,9 +281,9 @@ impl Tool for EditFileTool {
                 let new_content = normalized_content.replace(&normalized_old, new_str);
                 std::fs::write(path, new_content)
                     .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-                return Ok(crate::ToolOutput::Patch {
+                return Ok(neenee_core::ToolOutput::Patch {
                     path: path.to_string(),
-                    op: crate::PatchOp::Edit,
+                    op: neenee_core::PatchOp::Edit,
                     old: old_str.to_string(),
                     new: new_str.to_string(),
                 });
@@ -294,9 +297,9 @@ impl Tool for EditFileTool {
         let new_content = content.replace(old_str, new_str);
         std::fs::write(path, new_content)
             .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
-        Ok(crate::ToolOutput::Patch {
+        Ok(neenee_core::ToolOutput::Patch {
             path: path.to_string(),
-            op: crate::PatchOp::Edit,
+            op: neenee_core::PatchOp::Edit,
             old: old_str.to_string(),
             new: new_str.to_string(),
         })
@@ -331,7 +334,7 @@ impl Tool for BashTool {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         // Non-streaming path: delegate with no-op sinks.
         self.call_structured_with_events("", arguments, Box::new(|_| {}), &mut |_| {})
             .await
@@ -346,9 +349,9 @@ impl Tool for BashTool {
         &self,
         _call_id: &str,
         arguments: &str,
-        _on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
-        on_stream: &mut (dyn FnMut(crate::ToolStream) + Send + 'a),
-    ) -> Result<crate::ToolOutput, String> {
+        _on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
+        on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
+    ) -> Result<neenee_core::ToolOutput, String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -398,7 +401,7 @@ impl Tool for BashTool {
             while let Ok(Some(line)) = lines.next_line().await {
                 stdout_buf.push_str(&line);
                 stdout_buf.push('\n');
-                on_stream(crate::ToolStream::Stdout(format!("{}\n", line)));
+                on_stream(neenee_core::ToolStream::Stdout(format!("{}\n", line)));
             }
             let stderr_buf = stderr_task.await.unwrap_or_default();
             let status = child
@@ -407,14 +410,14 @@ impl Tool for BashTool {
                 .map_err(|e| format!("Failed to wait: {}", e))?;
             let exit = status.code();
             let truncated =
-                crate::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len() > 8000;
-            Ok(crate::ToolOutput::Shell {
+                neenee_core::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len() > 8000;
+            Ok(neenee_core::ToolOutput::Shell {
                 command: command.to_string(),
                 stdout: stdout_buf,
                 stderr: stderr_buf,
                 exit,
                 truncated,
-            }) as Result<crate::ToolOutput, String>
+            }) as Result<neenee_core::ToolOutput, String>
         };
 
         timeout(timeout_duration, run)
@@ -491,13 +494,13 @@ impl Tool for GrepTool {
         Ok(stdout)
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         let out = self.call(arguments).await?;
         let pattern = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
             .and_then(|a| a["pattern"].as_str().map(str::to_string))
             .unwrap_or_default();
-        Ok(crate::ToolOutput::Matches {
+        Ok(neenee_core::ToolOutput::Matches {
             pattern,
             lines: out.split('\n').map(str::to_string).collect(),
         })
@@ -609,17 +612,17 @@ impl Tool for ListDirTool {
         }
     }
 
-    async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
         let out = self.call(arguments).await?;
-        Ok(crate::ToolOutput::Listing {
+        Ok(neenee_core::ToolOutput::Listing {
             entries: out.split('\n').map(str::to_string).collect(),
         })
     }
 }
 
-/// Re-export skill tools so the rest of the crate can keep using
-/// `crate::tools::{UseSkillTool, ListSkillsTool, ReloadSkillsTool}`.
-pub use crate::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
+/// Re-export skill tools so callers can use them as `neenee_tools::UseSkillTool`
+/// etc. without reaching into `neenee_core::skills::tools`.
+pub use neenee_core::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 
 /// Fast file pattern matching using globs.
 pub struct GlobTool;
@@ -750,57 +753,6 @@ impl Default for WebFetchTool {
     }
 }
 
-/// Configuration for the web tools (`webfetch`, `websearch`), stored under the
-/// `[websearch]` table in `config.toml`.
-///
-/// Defaults target the hosted Exa MCP search (anonymous, no key) with Parallel
-/// as the fallback — mirroring how other coding agents handle web search
-/// out-of-the-box. Note: with the defaults, search queries are sent to
-/// third-party servers (Exa/Parallel); switch `provider` to a self-hosted
-/// `searxng` instance if query privacy matters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSearchConfig {
-    /// Primary search backend. One of: `"exa"` (default; hosted MCP, anonymous
-    /// or `exa_api_key`), `"parallel"` (hosted MCP), `"duckduckgo"` (best-effort
-    /// scraping, frequently blocked), `"searxng"` (self-hosted, keyless), or
-    /// `"tavily"` (hosted API, requires `tavily_api_key`).
-    pub provider: String,
-    /// Fallback backend tried when `provider` fails. Empty string disables it.
-    /// Default `"parallel"`.
-    pub fallback: String,
-    /// Optional proxy URL applied to both `webfetch` and `websearch`.
-    /// Supports `http://`, `https://`, `socks5://`, and `socks5h://`. Takes
-    /// precedence over the `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` env vars.
-    pub proxy: Option<String>,
-    /// Per-request timeout in seconds (default 20).
-    pub timeout_secs: u64,
-    /// Exa API key (optional; anonymous use works without it).
-    pub exa_api_key: Option<String>,
-    /// Parallel Search API key (optional; anonymous use works without it).
-    pub parallel_api_key: Option<String>,
-    /// SearXNG JSON search endpoint, e.g. `http://localhost:8080/search`.
-    /// Required when `provider = "searxng"`.
-    pub searxng_url: Option<String>,
-    /// Tavily API key. Required when `provider = "tavily"`.
-    pub tavily_api_key: Option<String>,
-}
-
-impl Default for WebSearchConfig {
-    fn default() -> Self {
-        Self {
-            provider: "exa".to_string(),
-            fallback: "parallel".to_string(),
-            proxy: None,
-            timeout_secs: 20,
-            exa_api_key: None,
-            parallel_api_key: None,
-            searxng_url: None,
-            tavily_api_key: None,
-        }
-    }
-}
-
 /// Build the shared HTTP client honoring the web tools' proxy and timeout.
 fn http_client(config: &WebSearchConfig) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
@@ -819,17 +771,6 @@ fn http_client(config: &WebSearchConfig) -> Result<reqwest::Client, String> {
     builder
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
-}
-
-pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// Naive HTML → text conversion. Collapses whitespace and strips tags/scripts.
@@ -1216,14 +1157,14 @@ fn render_todo(items: &[TodoItem]) -> String {
 /// any write operations. Recursion is prevented by excluding `task` (and
 /// other dispatch tools) from the sub-agent's toolset.
 pub struct TaskTool {
-    provider: Arc<dyn crate::Provider>,
-    tools: Vec<Arc<dyn crate::Tool>>,
+    provider: Arc<dyn neenee_core::Provider>,
+    tools: Vec<Arc<dyn neenee_core::Tool>>,
 }
 
 impl TaskTool {
     /// `tools` should be the parent agent's full toolset; the task tool filters
     /// it down to read-only tools for the spawned sub-agent.
-    pub fn new(provider: Arc<dyn crate::Provider>, tools: Vec<Arc<dyn crate::Tool>>) -> Self {
+    pub fn new(provider: Arc<dyn neenee_core::Provider>, tools: Vec<Arc<dyn neenee_core::Tool>>) -> Self {
         Self { provider, tools }
     }
 }
@@ -1262,7 +1203,7 @@ impl Tool for TaskTool {
         &self,
         _call_id: &str,
         arguments: &str,
-        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+        on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
     ) -> Result<String, String> {
         self.run_sub_agent(arguments, on_event).await
     }
@@ -1271,9 +1212,9 @@ impl Tool for TaskTool {
         &self,
         call_id: &str,
         arguments: &str,
-        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
-        _on_stream: &mut (dyn FnMut(crate::ToolStream) + Send + 'a),
-    ) -> Result<crate::ToolOutput, String> {
+        on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
+        _on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
+    ) -> Result<neenee_core::ToolOutput, String> {
         let _ = call_id;
         // Run the sub-agent, streaming its lifecycle as SubTaskEvents to the
         // parent harness (so the live TUI builds the nested view in real
@@ -1295,7 +1236,7 @@ impl Tool for TaskTool {
         } else {
             outcome.final_content.trim().to_string()
         };
-        Ok(crate::ToolOutput::Subagent {
+        Ok(neenee_core::ToolOutput::Subagent {
             summary,
             messages: outcome.messages,
             usage: outcome.token_usage,
@@ -1306,8 +1247,8 @@ impl Tool for TaskTool {
 /// Internal result of running a sub-agent. Bundles everything the parent
 /// harness needs to persist the nested transcript and account for real cost.
 struct SubAgentOutcome {
-    messages: Vec<crate::Message>,
-    token_usage: crate::TokenUsage,
+    messages: Vec<neenee_core::Message>,
+    token_usage: neenee_core::TokenUsage,
     /// Final assistant content, mirrored for convenience so the parent doesn't
     /// have to scan `messages` for the last Assistant turn.
     final_content: String,
@@ -1317,7 +1258,7 @@ impl TaskTool {
     async fn run_sub_agent_outcome<'a>(
         &self,
         arguments: &str,
-        mut on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+        mut on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
     ) -> Result<SubAgentOutcome, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -1334,24 +1275,24 @@ impl TaskTool {
         }
 
         // Sub-agent gets read-only tools only; never itself (no recursion).
-        let sub_tools: Vec<Arc<dyn crate::Tool>> = self
+        let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self
             .tools
             .iter()
-            .filter(|tool| tool.access() == crate::ToolAccess::Read && tool.name() != "task")
+            .filter(|tool| tool.access() == neenee_core::ToolAccess::Read && tool.name() != "task")
             .cloned()
             .collect();
 
-        let goal_service = crate::GoalService::new(
-            crate::GoalStore::open_in_memory()
+        let goal_service = neenee_core::GoalService::new(
+            neenee_core::GoalStore::open_in_memory()
                 .await
                 .map_err(|err| format!("failed to create sub-agent goal store: {err}"))?,
         );
-        let sub_agent = crate::Agent::new(
+        let sub_agent = neenee_core::Agent::new(
             self.provider.clone(),
             sub_tools,
-            crate::AgentMode::Build,
+            neenee_core::AgentMode::Build,
             goal_service,
-            crate::skills::SkillRegistry::empty(),
+            neenee_core::skills::SkillRegistry::empty(),
         );
 
         let system = format!(
@@ -1362,8 +1303,8 @@ impl TaskTool {
             TASK_MAX_ROUNDS_HINT, description,
         );
         let mut messages = vec![
-            crate::Message::new(crate::Role::System, system),
-            crate::Message::new(crate::Role::User, prompt.to_string()),
+            neenee_core::Message::new(neenee_core::Role::System, system),
+            neenee_core::Message::new(neenee_core::Role::User, prompt.to_string()),
         ];
         // The sub-agent runs with its own (never-cancelled) token. When the
         // parent turn is interrupted, the parent's dispatch drops this future
@@ -1399,7 +1340,7 @@ impl TaskTool {
                 tracing::warn!(error = %error_string, "sub-agent failed; preserving partial transcript");
                 Ok(SubAgentOutcome {
                     messages,
-                    token_usage: crate::TokenUsage::default(),
+                    token_usage: neenee_core::TokenUsage::default(),
                     final_content: format!("Error: {error_string}"),
                 })
             }
@@ -1409,7 +1350,7 @@ impl TaskTool {
     async fn run_sub_agent<'a>(
         &self,
         arguments: &str,
-        on_event: Box<dyn FnMut(crate::SubTaskEvent) + Send + 'a>,
+        on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
     ) -> Result<String, String> {
         let outcome = self.run_sub_agent_outcome(arguments, on_event).await?;
         let content = outcome.final_content.trim().to_string();
@@ -1420,44 +1361,44 @@ impl TaskTool {
         }
     }
 
-    fn forward_event(event: crate::AgentEvent, on_event: &mut dyn FnMut(crate::SubTaskEvent)) {
+    fn forward_event(event: neenee_core::AgentEvent, on_event: &mut dyn FnMut(neenee_core::SubTaskEvent)) {
         match event {
-            crate::AgentEvent::ModelRequestStarted { tool_round } => {
+            neenee_core::AgentEvent::ModelRequestStarted { tool_round } => {
                 let status = if tool_round == 0 {
                     "waiting for model".to_string()
                 } else {
                     format!("waiting for model · round {}", tool_round + 1)
                 };
-                on_event(crate::SubTaskEvent::Activity(status));
+                on_event(neenee_core::SubTaskEvent::Activity(status));
             }
-            crate::AgentEvent::AssistantDelta { delta, start } => {
+            neenee_core::AgentEvent::AssistantDelta { delta, start } => {
                 if start {
-                    on_event(crate::SubTaskEvent::StreamStart);
+                    on_event(neenee_core::SubTaskEvent::StreamStart);
                 }
-                on_event(crate::SubTaskEvent::StreamDelta(delta));
+                on_event(neenee_core::SubTaskEvent::StreamDelta(delta));
             }
-            crate::AgentEvent::AssistantEnd(content) => {
-                on_event(crate::SubTaskEvent::StreamEnd(content));
+            neenee_core::AgentEvent::AssistantEnd(content) => {
+                on_event(neenee_core::SubTaskEvent::StreamEnd(content));
             }
-            crate::AgentEvent::ToolCall {
+            neenee_core::AgentEvent::ToolCall {
                 id,
                 name,
                 arguments,
             } => {
-                on_event(crate::SubTaskEvent::ToolCall {
+                on_event(neenee_core::SubTaskEvent::ToolCall {
                     id,
                     name,
                     arguments,
                 });
             }
-            crate::AgentEvent::ToolResult {
+            neenee_core::AgentEvent::ToolResult {
                 id,
                 name,
                 output,
                 duration_ms,
                 ..
             } => {
-                on_event(crate::SubTaskEvent::ToolResult {
+                on_event(neenee_core::SubTaskEvent::ToolResult {
                     id,
                     name,
                     output,
@@ -1472,7 +1413,7 @@ impl TaskTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Message, Provider, Role};
+    use neenee_core::{Message, Provider, Role};
     use futures::stream::{self, BoxStream};
 
     struct CannedProvider;
@@ -1618,7 +1559,7 @@ mod tests {
     fn write_and_edit_tools_allow_plan_paths_in_plan_mode() {
         // The plans directory must exist so is_plan_path can resolve it.
         let cwd = std::env::current_dir().unwrap();
-        std::fs::create_dir_all(cwd.join(crate::plan::PLANS_DIR)).unwrap();
+        std::fs::create_dir_all(cwd.join(neenee_core::plan::PLANS_DIR)).unwrap();
 
         let write = WriteFileTool;
         let edit = EditFileTool;

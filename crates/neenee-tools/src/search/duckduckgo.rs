@@ -84,7 +84,7 @@ fn browser_headers(origin: &str) -> reqwest::header::HeaderMap {
 
 /// A short, whitespace-collapsed excerpt of a response body for diagnostics.
 fn body_snippet(html: &str) -> String {
-    crate::tools::html_to_text(html).chars().take(300).collect()
+    crate::html_to_text(html).chars().take(300).collect()
 }
 
 /// Parse DuckDuckGo HTML results. Tolerant to markup variations.

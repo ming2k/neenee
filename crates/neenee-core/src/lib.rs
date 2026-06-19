@@ -29,16 +29,17 @@ pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 pub mod capability;
 pub mod catalog;
-pub mod commands;
 pub mod events;
-pub mod mcp;
 pub mod plan;
 pub mod pressure;
-pub mod project;
 mod prompt;
 pub mod skills;
 pub mod tool_call;
-pub mod tools;
+pub mod webconfig;
+pub mod mcp;
+pub use webconfig::WebSearchConfig;
+pub use mcp::{McpConnectionStatus, McpServerConfig};
+pub use tool_output::truncate_utf8;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
 pub use catalog::{Catalog, Channel, ModelEntry, Transport};
 pub use events::{

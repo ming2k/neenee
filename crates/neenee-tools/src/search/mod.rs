@@ -13,7 +13,7 @@
 //! third-party service; set a different `provider` (e.g. self-hosted
 //! `searxng`) in `config.toml` if that matters.
 
-use crate::tools::WebSearchConfig;
+use neenee_core::WebSearchConfig;
 use async_trait::async_trait;
 
 pub mod duckduckgo;
