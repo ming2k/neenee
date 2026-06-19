@@ -1625,57 +1625,31 @@ fn reasoning_trace_header_line(
     ])
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_reasoning_trace_header(
-    frame: &mut Frame,
-    transcript_area: Rect,
-    full_width: usize,
+    ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     expanded: bool,
     marker_override: Option<&str>,
     header: &str,
-    theme: &Theme,
-    layout_map: &mut LayoutMap,
-    skip_rows: &mut usize,
-    current_y: &mut u16,
-    content_lines: &mut usize,
     hovered: bool,
 ) -> usize {
     let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
-    let header_line_idx = *content_lines;
+    let header_line_idx = *ctx.content_lines;
     // Hover affordance: the muted header lights up to the primary foreground
     // (dark→bright) to signal the line is clickable.
-    let header_color = if hovered {
-        theme.text
-    } else {
-        theme.text_muted
-    };
+    let header_color = if hovered { ctx.theme.text } else { ctx.theme.text_muted };
 
-    *content_lines += 1;
-    if *skip_rows > 0 {
-        *skip_rows = skip_rows.saturating_sub(1);
-    } else if *current_y < transcript_area.y + transcript_area.height {
-        let line_rect = Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(reasoning_trace_header_line(
-                marker,
-                header,
-                theme.info,
-                header_color,
-                full_width,
-            )),
-            line_rect,
-        );
-        layout_map.push(BlockRegion {
+    let line = reasoning_trace_header_line(marker, header, ctx.theme.info, header_color, ctx.full_width);
+    if let Some(rect) = ctx.paint(line) {
+        ctx.layout_map.push(BlockRegion {
             message_idx: mi,
             block_idx: usize::MAX - 1,
             start_byte: 0,
             end_byte: 0,
             text: String::new(),
             prefix_cols: TRANSCRIPT_H_INSET,
-            rect: line_rect,
+            rect,
         });
-        *current_y += 1;
     }
 
     header_line_idx
@@ -1730,21 +1704,26 @@ pub(super) fn draw_reasoning_trace(
         return;
     }
 
-    let header_line_idx = draw_reasoning_trace_header(
-        frame,
-        transcript_area,
-        full_width,
-        mi,
-        expanded,
-        running.then(|| spinner_glyph()),
-        &header,
-        theme,
-        layout_map,
-        skip_rows,
-        current_y,
-        content_lines,
-        hovered,
-    );
+    let header_line_idx = {
+        let mut ctx = RenderCtx::from_cursor(
+            frame,
+            transcript_area,
+            full_width,
+            theme,
+            layout_map,
+            skip_rows,
+            current_y,
+            content_lines,
+        );
+        draw_reasoning_trace_header(
+            &mut ctx,
+            mi,
+            expanded,
+            running.then(|| spinner_glyph()),
+            &header,
+            hovered,
+        )
+    };
 
     if expanded {
         let body_prefix = " ".repeat(TRANSCRIPT_BODY_PREFIX_COLS as usize);
@@ -1774,37 +1753,36 @@ pub(super) fn draw_reasoning_trace(
                 }
                 emitted_any_block = true;
                 let lines = wrap_text(content, body_wrap_width);
-                *content_lines += lines.len();
+                let mut ctx = RenderCtx::from_cursor(
+                    frame,
+                    transcript_area,
+                    full_width,
+                    theme,
+                    layout_map,
+                    skip_rows,
+                    current_y,
+                    content_lines,
+                );
+                let sel_range = block_selection_range(selection, mi, bi);
                 for wl in &lines {
-                    if *skip_rows > 0 {
-                        *skip_rows = skip_rows.saturating_sub(1);
-                        continue;
-                    }
-                    if *current_y >= transcript_area.y + transcript_area.height {
-                        break;
-                    }
-                    let sel_range = block_selection_range(selection, mi, bi);
+                    let block_wl = WrappedLine {
+                        text: wl.text.clone(),
+                        start_byte: wl.start_byte,
+                        end_byte: wl.end_byte,
+                    };
                     let line = line_spans(
                         &body_prefix,
                         Style::default(),
                         &wl.text,
-                        line_selection(sel_range, wl),
-                        Style::default().fg(theme.text_muted),
-                        theme.selected_bg,
+                        line_selection(sel_range, &block_wl),
+                        Style::default().fg(ctx.theme.text_muted),
+                        ctx.theme.selected_bg,
                     );
-                    let line_rect =
-                        Rect::new(transcript_area.x, *current_y, transcript_area.width, 1);
-                    frame.render_widget(Paragraph::new(line), line_rect);
-                    layout_map.push(BlockRegion {
-                        message_idx: mi,
-                        block_idx: bi,
-                        start_byte: wl.start_byte,
-                        end_byte: wl.end_byte,
-                        text: wl.text.clone(),
-                        prefix_cols: TRANSCRIPT_BODY_PREFIX_COLS,
-                        rect: line_rect,
-                    });
-                    *current_y += 1;
+                    let used = (TRANSCRIPT_BODY_PREFIX_COLS as usize) + wl.text.width();
+                    let mut line = line;
+                    line.spans
+                        .push(Span::styled(padded_tail(ctx.full_width, used), Style::default()));
+                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_PREFIX_COLS);
                 }
             }
         }
