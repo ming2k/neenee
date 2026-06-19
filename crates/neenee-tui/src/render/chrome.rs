@@ -74,7 +74,7 @@ pub fn draw_status_bar(
         return;
     }
     let spinner = spinner_glyph();
-    let spinner_color = breathing_color(spinner_phase, theme.primary, theme.app_bg);
+    let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
@@ -85,7 +85,7 @@ pub fn draw_status_bar(
         Span::styled(
             status,
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::ITALIC),
         ),
     ]);
@@ -158,8 +158,8 @@ pub fn draw_completion_menu(
     let block = RtBlock::default()
         .borders(Borders::LEFT)
         .border_type(ratatui::widgets::BorderType::Thick)
-        .border_style(Style::default().fg(theme.primary))
-        .style(Style::default().bg(theme.menu_bg));
+        .border_style(Style::default().fg(theme.brand()))
+        .style(Style::default().bg(theme.body()));
 
     let lines: Vec<Line> = completions
         .iter()
@@ -169,15 +169,15 @@ pub fn draw_completion_menu(
             let is_selected = Some(i) == selected_idx;
             let style = if is_selected {
                 Style::default()
-                    .bg(theme.primary)
-                    .fg(contrast_fg(theme.primary))
+                    .bg(theme.brand())
+                    .fg(contrast_fg(theme.brand()))
             } else {
-                Style::default().fg(theme.text)
+                Style::default().fg(theme.fg())
             };
         let cmd_style = if is_selected {
             style.add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
         };
         // Build the row spans. When the description is empty (e.g. the
         // `@path` menu), drop the `· desc` suffix entirely so the row is just
@@ -188,13 +188,13 @@ pub fn draw_completion_menu(
             Span::styled(format!("{:<width$}", c.label, width = max_cmd), cmd_style),
         ];
         if any_desc {
-            spans.push(Span::styled("· ", Style::default().fg(theme.text_muted)));
+            spans.push(Span::styled("· ", Style::default().fg(theme.muted())));
             spans.push(Span::styled(
                 format!("{:<width$}", c.description, width = max_desc),
                 if is_selected {
                     style
                 } else {
-                    Style::default().fg(theme.text_muted)
+                    Style::default().fg(theme.muted())
                 },
             ));
         }
@@ -255,8 +255,8 @@ pub fn draw_hint_bar(
         focus_zone,
     } = view;
 
-    let bg = theme.app_bg;
-    let accent_bg = theme.element_bg;
+    let bg = theme.surface();
+    let accent_bg = theme.raised();
     let full_w = rect.width as usize;
 
     // --- Focus-zone pill (leftmost). Renders as `[ COMPOSE ]` / `[ BROWSE ]`
@@ -270,9 +270,9 @@ pub fn draw_hint_bar(
         "COMPOSE"
     };
     let zone_fg = if focus_zone.is_browse() {
-        theme.warning
+        theme.warn()
     } else {
-        theme.primary
+        theme.brand()
     };
     let zone_text = format!(" {} ", zone_label);
     let zone_pill_width = zone_text.width() + 2; // +2 for the surrounding brackets
@@ -347,7 +347,7 @@ pub fn draw_hint_bar(
     right_spans.push(Span::styled(
         current_model.to_string(),
         Style::default()
-            .fg(theme.primary)
+            .fg(theme.brand())
             .add_modifier(Modifier::BOLD)
             .bg(bg),
     ));
@@ -364,7 +364,7 @@ pub fn draw_hint_bar(
         goal_start_x = Some(right_width);
         right_spans.push(Span::styled(
             label.clone(),
-            Style::default().fg(theme.text_muted).bg(accent_bg),
+            Style::default().fg(theme.muted()).bg(accent_bg),
         ));
         right_width += *w;
         goal_end_x = Some(right_width);
@@ -378,7 +378,7 @@ pub fn draw_hint_bar(
     if !mcp_summary.is_empty() {
         right_spans.push(Span::styled(
             mcp_summary,
-            Style::default().fg(theme.text_muted).bg(bg),
+            Style::default().fg(theme.muted()).bg(bg),
         ));
         right_width += mcp_width;
     }
@@ -438,7 +438,7 @@ pub fn draw_hint_bar(
     ));
     spans.push(Span::styled(
         path_display,
-        Style::default().fg(theme.text_muted).bg(bg),
+        Style::default().fg(theme.muted()).bg(bg),
     ));
     spans.push(Span::styled(" ".repeat(gap), Style::default().bg(bg)));
     spans.extend(right_spans);
@@ -602,11 +602,11 @@ fn context_usage_spans(
     };
     let filled = (ratio * cells as f64).round() as usize;
     let color = if ratio < CONTEXT_USAGE_WARN_THRESHOLD {
-        theme.success
+        theme.ok()
     } else if ratio < CONTEXT_USAGE_CRIT_THRESHOLD {
-        theme.warning
+        theme.warn()
     } else {
-        theme.error_fg
+        theme.err()
     };
     let pct = (ratio * 100.0).round() as u32;
 
@@ -618,7 +618,7 @@ fn context_usage_spans(
         // segments.
         spans.push(Span::styled(
             "[",
-            Style::default().fg(theme.text_muted).bg(bg),
+            Style::default().fg(theme.muted()).bg(bg),
         ));
         for i in 0..cells {
             if i < filled {
@@ -626,13 +626,13 @@ fn context_usage_spans(
             } else {
                 spans.push(Span::styled(
                     "░",
-                    Style::default().fg(theme.text_muted).bg(bg),
+                    Style::default().fg(theme.muted()).bg(bg),
                 ));
             }
         }
         spans.push(Span::styled(
             "] ",
-            Style::default().fg(theme.text_muted).bg(bg),
+            Style::default().fg(theme.muted()).bg(bg),
         ));
     }
     spans.push(Span::styled(
@@ -645,7 +645,7 @@ fn context_usage_spans(
             format_token_count(used),
             format_token_count(max)
         ),
-        Style::default().fg(theme.text_muted).bg(bg),
+        Style::default().fg(theme.muted()).bg(bg),
     ));
     spans
 }
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn context_usage_spans_show_bar_percentage_and_counts() {
         let theme = Theme::default();
-        let spans = context_usage_spans(20_200, 256_000, &theme, theme.panel_bg, true);
+        let spans = context_usage_spans(20_200, 256_000, &theme, theme.panel(), true);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("[█░░░░░░░░░]"), "bar rendered: {text}");
         assert!(text.contains(" 8%"), "percentage rendered: {text}");
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn context_usage_spans_omit_bar_when_disabled() {
         let theme = Theme::default();
-        let spans = context_usage_spans(20_200, 256_000, &theme, theme.panel_bg, false);
+        let spans = context_usage_spans(20_200, 256_000, &theme, theme.panel(), false);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         // Compact readout still present ...
         assert!(text.contains("8%"), "percentage rendered: {text}");

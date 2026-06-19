@@ -379,7 +379,7 @@ fn draw_tool_body_section(
                 &wl.text,
                 line_selection(sel_range, &block_wl),
                 content_style,
-                ctx.theme.selected_bg,
+                ctx.theme.selected(),
             );
             let used = indent + wl.text.width();
             line.spans
@@ -402,7 +402,7 @@ fn draw_code_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.body();
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split('\n') {
@@ -437,11 +437,11 @@ fn draw_code_content(
                 &gutter,
                 gutter_gap,
                 code_bg,
-                ctx.theme.dim_fg,
+                ctx.theme.dim(),
                 &wl.text,
                 line_selection(sel_range, &block_wl),
-                ctx.theme.code_fg,
-                ctx.theme.selected_bg,
+                ctx.theme.code_text(),
+                ctx.theme.selected(),
                 ctx.full_width,
             );
             ctx.paint_text_row(line, mi, block_idx, &block_wl, gutter_indent as u16);
@@ -461,10 +461,10 @@ fn draw_listing_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.body();
     let pad = Style::default().bg(code_bg);
-    let dir_fg = ctx.theme.info;
-    let file_fg = ctx.theme.code_fg;
+    let dir_fg = ctx.theme.info();
+    let file_fg = ctx.theme.code_text();
     let sel_range = block_selection_range(selection, mi, block_idx);
     let wrap_w = inner_w.saturating_sub(indent).max(1);
 
@@ -492,7 +492,7 @@ fn draw_listing_content(
                 &wl.text,
                 line_selection(sel_range, &block_wl),
                 base,
-                ctx.theme.selected_bg,
+                ctx.theme.selected(),
             );
             let used = indent + wl.text.width();
             line.spans
@@ -578,7 +578,7 @@ fn emit_simple_rows(
             &wl.text,
             line_selection(sel_range, &block_wl),
             style,
-            ctx.theme.selected_bg,
+            ctx.theme.selected(),
         );
         let used = indent + wl.text.width();
         line.spans
@@ -604,14 +604,14 @@ fn draw_grep_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.body();
     let pad = Style::default().bg(code_bg);
     let header_style = Style::default()
         .bg(code_bg)
-        .fg(ctx.theme.heading_fg)
+        .fg(ctx.theme.heading())
         .add_modifier(Modifier::BOLD);
-    let dim = Style::default().bg(code_bg).fg(ctx.theme.dim_fg);
-    let match_style = Style::default().bg(code_bg).fg(ctx.theme.code_fg);
+    let dim = Style::default().bg(code_bg).fg(ctx.theme.dim());
+    let match_style = Style::default().bg(code_bg).fg(ctx.theme.code_text());
     let sel_range = block_selection_range(selection, mi, block_idx);
 
     // Walk logical lines with their byte offsets in `content`.
@@ -682,7 +682,7 @@ fn draw_grep_content(
                             }
                             spans.push(Span::styled(
                                 wl.text[lo..hi].to_string(),
-                                match_style.bg(ctx.theme.selected_bg),
+                                match_style.bg(ctx.theme.selected()),
                             ));
                             if hi < wl.text.len() {
                                 spans.push(Span::styled(wl.text[hi..].to_string(), match_style));
@@ -732,13 +732,13 @@ fn draw_bash_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let result_bg = ctx.theme.menu_bg;
+    let result_bg = ctx.theme.body();
     let pad = Style::default().bg(result_bg);
-    let base = Style::default().bg(result_bg).fg(ctx.theme.code_fg);
-    let stderr_style = Style::default().bg(result_bg).fg(ctx.theme.error_fg);
+    let base = Style::default().bg(result_bg).fg(ctx.theme.code_text());
+    let stderr_style = Style::default().bg(result_bg).fg(ctx.theme.err());
     let marker_style = Style::default()
         .bg(result_bg)
-        .fg(ctx.theme.warning)
+        .fg(ctx.theme.warn())
         .add_modifier(Modifier::BOLD);
     let sel_range = block_selection_range(selection, mi, block_idx);
     let wrap_w = inner_w.saturating_sub(indent).max(1);
@@ -841,7 +841,7 @@ fn emit_bash_lines(
                 &wl.text,
                 line_selection(sel_range, &block_wl),
                 style,
-                ctx.theme.selected_bg,
+                ctx.theme.selected(),
             );
             let used = indent + wl.text.width();
             line.spans
@@ -949,9 +949,9 @@ fn draw_diff_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let bg = ctx.theme.code_bg;
+    let bg = ctx.theme.body();
     let pad = Style::default().bg(bg);
-    let gutter_fg = ctx.theme.dim_fg;
+    let gutter_fg = ctx.theme.dim();
     // Gutter width from the widest 1-based line number, min 2 so single-digit
     // files still align with a leading space.
     let max_no = diff
@@ -969,9 +969,9 @@ fn draw_diff_content(
 
     for line in diff {
         let (sign, base_fg, hi_bg) = match line.op {
-            DiffOp::Add => ('+', ctx.theme.success, add_hi_bg),
-            DiffOp::Remove => ('-', ctx.theme.error_fg, del_hi_bg),
-            DiffOp::Context => (' ', ctx.theme.dim_fg, bg),
+            DiffOp::Add => ('+', ctx.theme.ok(), add_hi_bg),
+            DiffOp::Remove => ('-', ctx.theme.err(), del_hi_bg),
+            DiffOp::Context => (' ', ctx.theme.dim(), bg),
         };
         let no = line.old_no.or(line.new_no).unwrap_or(0);
         let gutter = format!("{:>width$} ", no, width = gutter_w);
@@ -1067,7 +1067,7 @@ pub(super) fn draw_subagent_inline_card(
         return;
     }
 
-    let bg = theme.element_bg;
+    let bg = theme.raised();
     let marker = match status {
         ToolStatus::Running => "▸",
         ToolStatus::Cancelled => "⊘",
@@ -1084,7 +1084,7 @@ pub(super) fn draw_subagent_inline_card(
     // tool-step card header (block_idx = usize::MAX) so the existing
     // click/Enter handling recognizes it; the app decides to navigate rather
     // than toggle for `task` steps. No expand marker — the card navigates.
-    let header_color = if focused { theme.text } else { theme.text_muted };
+    let header_color = if focused { theme.fg() } else { theme.muted() };
     let mut ctx = RenderCtx::from_cursor(
         frame,
         transcript_area,
@@ -1126,7 +1126,7 @@ pub(super) fn draw_subagent_inline_card(
             let used = 2 + wl.text.width();
             let line = Line::from(vec![
                 Span::styled("  ", bg_style),
-                Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.text_muted)),
+                Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.muted())),
                 Span::styled(padded_tail(ctx.full_width, used), bg_style),
             ]);
             // Make the whole status line part of the same clickable header so
@@ -1160,13 +1160,13 @@ pub(super) fn draw_subagent_bar(
     if full_width < CARD_MIN_WIDTH {
         return;
     }
-    let bg = theme.menu_bg;
-    let muted = Style::default().bg(bg).fg(theme.text_muted);
+    let bg = theme.body();
+    let muted = Style::default().bg(bg).fg(theme.muted());
     let label_style = Style::default()
         .bg(bg)
-        .fg(theme.text)
+        .fg(theme.fg())
         .add_modifier(Modifier::BOLD);
-    let accent = Style::default().bg(bg).fg(theme.primary);
+    let accent = Style::default().bg(bg).fg(theme.brand());
 
     let left_label = format!(" {} ", "Subagent");
     let desc = bar.label.to_string();
@@ -1229,7 +1229,7 @@ pub(super) fn draw_tool_step_card(
     let status_color = match status {
         // Breathing dot: luminance sweeps between the header bg and the status
         // color so a running step reads as "alive" without a frantic spinner.
-        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), theme.element_bg),
+        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), theme.raised()),
         _ => status.color(theme),
     };
     let status_glyph: &str = match status {
@@ -1292,8 +1292,8 @@ pub(super) fn draw_tool_step_card(
             status_color,
             icon,
             &header,
-            if focused { theme.text } else { theme.text_muted },
-            theme.element_bg,
+            if focused { theme.fg() } else { theme.muted() },
+            theme.raised(),
         );
 
         // Collapsed preview: under the header, lift a few lines of key content
@@ -1337,21 +1337,21 @@ pub(super) fn draw_tool_step_card(
     // `menu_bg` row separates the header from the body and every pair of
     // sections (Tool / Arguments / Result / children) so each part breathes.
     if expanded {
-        let body_bg = theme.menu_bg;
+        let body_bg = theme.body();
         let pad = Style::default().bg(body_bg);
         let label_style = Style::default()
             .bg(body_bg)
-            .fg(theme.text_muted)
+            .fg(theme.muted())
             .add_modifier(Modifier::BOLD);
-        let arg_style = Style::default().bg(body_bg).fg(theme.text_muted);
+        let arg_style = Style::default().bg(body_bg).fg(theme.muted());
         let indent = 2usize;
         let inner_w = inner_width.saturating_sub(indent);
         let meta_label_width = 9usize;
         let meta_label_style = Style::default()
             .bg(body_bg)
-            .fg(theme.text_muted)
+            .fg(theme.muted())
             .add_modifier(Modifier::BOLD);
-        let command_style = Style::default().bg(body_bg).fg(theme.text);
+        let command_style = Style::default().bg(body_bg).fg(theme.fg());
 
         {
             let mut ctx = RenderCtx::from_cursor(
@@ -1526,7 +1526,7 @@ pub(super) fn draw_tool_step_card(
             header,
             color: status_color,
             icon,
-            background: Some(theme.element_bg),
+            background: Some(theme.raised()),
             block_idx: usize::MAX,
             header_line: header_line_idx,
             body_end_line: *content_lines,
@@ -1544,7 +1544,7 @@ fn draw_child_tool_step(
     let Some(header) = child.tool_step_header() else {
         return;
     };
-    let body_bg = ctx.theme.menu_bg;
+    let body_bg = ctx.theme.body();
     let full_width = ctx.full_width;
     let indent = 6usize;
     let bg_style = Style::default().bg(body_bg);
@@ -1571,7 +1571,7 @@ fn draw_child_tool_step(
             let used = indent + wl.text.width();
             let line = Line::from(vec![
                 Span::styled(" ".repeat(indent), bg_style),
-                Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.text)),
+                Span::styled(wl.text.clone(), bg_style.fg(ctx.theme.fg())),
                 Span::styled(padded_tail(full_width, used), bg_style),
             ]);
             let _ = ctx.paint(line);
@@ -1637,9 +1637,9 @@ fn draw_reasoning_trace_header(
     let header_line_idx = *ctx.content_lines;
     // Hover affordance: the muted header lights up to the primary foreground
     // (dark→bright) to signal the line is clickable.
-    let header_color = if hovered { ctx.theme.text } else { ctx.theme.text_muted };
+    let header_color = if hovered { ctx.theme.fg() } else { ctx.theme.muted() };
 
-    let line = reasoning_trace_header_line(marker, header, ctx.theme.info, header_color, ctx.full_width);
+    let line = reasoning_trace_header_line(marker, header, ctx.theme.info(), header_color, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1775,8 +1775,8 @@ pub(super) fn draw_reasoning_trace(
                         Style::default(),
                         &wl.text,
                         line_selection(sel_range, &block_wl),
-                        Style::default().fg(ctx.theme.text_muted),
-                        ctx.theme.selected_bg,
+                        Style::default().fg(ctx.theme.muted()),
+                        ctx.theme.selected(),
                     );
                     let used = (TRANSCRIPT_BODY_PREFIX_COLS as usize) + wl.text.width();
                     let mut line = line;
@@ -1799,7 +1799,7 @@ pub(super) fn draw_reasoning_trace(
         sticky_cards.push(StickyCard {
             message_idx: mi,
             header,
-            color: theme.text_muted,
+            color: theme.muted(),
             icon: ' ',
             background: None,
             block_idx: usize::MAX - 1,
@@ -1822,16 +1822,16 @@ fn draw_tool_preview(
     mi: usize,
     lines: &[PreviewLine],
 ) {
-    let body_bg = ctx.theme.menu_bg;
+    let body_bg = ctx.theme.body();
     let pad = Style::default().bg(body_bg);
     let indent = 2usize;
     let inner_w = ctx.full_width.saturating_sub(indent).max(1);
 
     for line in lines {
         let fg = match line.tone {
-            PreviewTone::Primary => ctx.theme.text,
-            PreviewTone::Muted => ctx.theme.text_muted,
-            PreviewTone::Faint => ctx.theme.dim_fg,
+            PreviewTone::Primary => ctx.theme.fg(),
+            PreviewTone::Muted => ctx.theme.muted(),
+            PreviewTone::Faint => ctx.theme.dim(),
         };
         // Hard-truncate to the inner width (no per-line ellipsis) so the preview
         // height stays predictable; a trailing `…` row already signals "more".
@@ -1911,9 +1911,9 @@ pub(super) fn draw_sticky_header_if_needed(
                 card.icon,
                 &card.header,
                 if focused {
-                    theme.text
+                    theme.fg()
                 } else {
-                    theme.text_muted
+                    theme.muted()
                 },
                 bg,
                 band.width as usize,
@@ -1929,9 +1929,9 @@ pub(super) fn draw_sticky_header_if_needed(
             1,
         );
         let header_color = if reasoning_hovered || focused {
-            theme.text
+            theme.fg()
         } else {
-            theme.text_muted
+            theme.muted()
         };
         frame.render_widget(
             Paragraph::new(reasoning_trace_header_line(

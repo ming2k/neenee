@@ -68,12 +68,12 @@ impl ToolStatus {
     /// previously each duplicated.
     pub fn color(self, theme: &Theme) -> Color {
         match self {
-            ToolStatus::Running => theme.info,
-            ToolStatus::Ok => theme.success,
-            ToolStatus::Failed => theme.error_fg,
+            ToolStatus::Running => theme.info(),
+            ToolStatus::Ok => theme.ok(),
+            ToolStatus::Failed => theme.err(),
             // No dedicated cancelled accent: reuse the muted tone so a
             // cancelled card reads as inert rather than as a fresh failure.
-            ToolStatus::Cancelled => theme.text_muted,
+            ToolStatus::Cancelled => theme.muted(),
         }
     }
 }

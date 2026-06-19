@@ -184,7 +184,7 @@ pub fn draw_transcript(
     // Paint the entire frame with the app background so the TUI owns every
     // pixel rather than leaving gaps at the terminal emulator's default color.
     frame.render_widget(
-        RtBlock::default().style(Style::default().bg(theme.app_bg)),
+        RtBlock::default().style(Style::default().bg(theme.surface())),
         full,
     );
 
@@ -481,8 +481,8 @@ fn draw_attribution_badge(
         let prefix = " ".repeat(TRANSCRIPT_H_INSET as usize);
         let line = Line::from(vec![
             Span::styled(prefix, Style::default()),
-            Span::styled("◆ ", Style::default().fg(theme.dim_fg)),
-            Span::styled(label, Style::default().fg(theme.text_muted)),
+            Span::styled("◆ ", Style::default().fg(theme.dim())),
+            Span::styled(label, Style::default().fg(theme.muted())),
         ]);
         let rect = Rect::new(area.x, *current_y, area.width, 1);
         frame.render_widget(Paragraph::new(line), rect);
@@ -917,9 +917,9 @@ mod tests {
         use ratatui::Terminal;
 
         let theme = Theme::default();
-        let user_bg = theme.user_panel_bg;
-        let input_bg = theme.input_bg;
-        let app_bg = theme.app_bg;
+        let user_bg = theme.user_surface();
+        let input_bg = theme.input_surface();
+        let app_bg = theme.surface();
         let width = 60u16;
         let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();

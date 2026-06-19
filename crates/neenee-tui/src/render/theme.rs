@@ -76,3 +76,88 @@ impl Default for Theme {
         }
     }
 }
+
+/// Semantic accessors (ADR-0001 P4): renderers reference intent
+/// (surface / body / raised / ok / err / …) rather than the raw palette field
+/// names, so the palette can be retuned in one place. The fields stay `pub`
+/// for `Theme::default()` construction; new rendering code should prefer these.
+impl Theme {
+    // ── Surfaces (backgrounds) ──
+    /// Frame background — the base everything sits on.
+    pub fn surface(&self) -> Color {
+        self.app_bg
+    }
+    /// Card body / content surface.
+    pub fn body(&self) -> Color {
+        self.menu_bg
+    }
+    /// Raised surface (header bands, footer bars).
+    pub fn raised(&self) -> Color {
+        self.element_bg
+    }
+    /// Modal / sheet surface.
+    pub fn panel(&self) -> Color {
+        self.panel_bg
+    }
+    /// Live input-box surface.
+    pub fn input_surface(&self) -> Color {
+        self.input_bg
+    }
+    /// Sent-user-message surface.
+    pub fn user_surface(&self) -> Color {
+        self.user_panel_bg
+    }
+    /// Tint behind the user's own messages.
+    pub fn user_tint(&self) -> Color {
+        self.user_bg
+    }
+    /// Dim overlay behind modals.
+    pub fn backdrop(&self) -> Color {
+        self.backdrop
+    }
+    /// Selection highlight background.
+    pub fn selected(&self) -> Color {
+        self.selected_bg
+    }
+
+    // ── Foregrounds ──
+    pub fn fg(&self) -> Color {
+        self.text
+    }
+    pub fn muted(&self) -> Color {
+        self.text_muted
+    }
+    pub fn dim(&self) -> Color {
+        self.dim_fg
+    }
+    pub fn brand(&self) -> Color {
+        self.primary
+    }
+    pub fn ok(&self) -> Color {
+        self.success
+    }
+    pub fn warn(&self) -> Color {
+        self.warning
+    }
+    pub fn err(&self) -> Color {
+        self.error_fg
+    }
+    pub fn info(&self) -> Color {
+        self.info
+    }
+    pub fn code_text(&self) -> Color {
+        self.code_fg
+    }
+    pub fn heading(&self) -> Color {
+        self.heading_fg
+    }
+    pub fn quote(&self) -> Color {
+        self.quote_fg
+    }
+    pub fn user_text(&self) -> Color {
+        self.user_fg
+    }
+    pub fn system_text(&self) -> Color {
+        self.system_fg
+    }
+}

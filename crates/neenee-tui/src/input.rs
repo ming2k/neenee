@@ -7,16 +7,18 @@ use crate::selection::SelectionDrag;
 
 /// Which surface currently owns keyboard focus.
 ///
-/// The TUI splits keyboard input into two zones so the same key (Tab, arrows,
-/// Enter) has a single, unambiguous meaning per zone:
+/// The TUI splits keyboard input into two zones so the same key (arrows,
+/// Enter) has a single, unambiguous meaning per zone. `Tab` is reserved as the
+/// symmetric toggle between the two zones:
 ///
 /// - [`FocusZone::Compose`] — the input box owns the keys. Typing inserts into
 ///   the prompt, `↑`/`↓` walk input history or slash suggestions, `Tab`
-///   accepts a slash suggestion. This is the default.
-/// - [`FocusZone::Browse`] — the conversation stream owns the keys. `Tab` /
-///   `↑` / `↓` cycle the keyboard-focused card, `Enter` / `Space` activate it,
-///   and any printable character drops back into [`FocusZone::Compose`] and
-///   inserts itself.
+///   accepts a slash suggestion (when one is open) or toggles into Browse.
+///   This is the default.
+/// - [`FocusZone::Browse`] — the conversation stream owns the keys. `↑` / `↓`
+///   cycle the keyboard-focused card, `Enter` / `Space` activate it, `Tab`
+///   toggles back to Compose, and any other printable character drops back
+///   into [`FocusZone::Compose`] and inserts itself.
 ///
 /// Transitions are explicit so the meaning of every key is derivable from the
 /// current zone, and a visible indicator (input border + hint-bar label) tells
@@ -114,8 +116,8 @@ pub enum InputAction {
     /// Activate the current keyboard-focused target.
     ActivateFocusedTarget,
     /// Switch the keyboard focus zone to the conversation stream (Browse).
-    /// `backward` is `true` for Shift+Tab (lands on the last card) and
-    /// `false` for Tab (lands on the first card).
+    /// One half of the Tab toggle: `backward` is `true` for Shift+Tab (lands
+    /// on the last card) and `false` for Tab (lands on the first card).
     EnterBrowseZone { backward: bool },
     /// Switch the keyboard focus zone back to the input box (Compose).
     ReturnToComposeZone,
@@ -449,29 +451,35 @@ pub fn process_event(
                         && context.completion_kind != super::CompletionKind::None
                         && context.suggestion_count > 0
                     {
+                        // A slash/path suggestion menu is open: accept the
+                        // next entry rather than toggling zones.
                         let next = match context.suggestion_index {
                             Some(i) => (i + 1) % context.suggestion_count,
                             None => 0,
                         };
                         InputAction::AcceptSuggestion(next.to_string())
+                    } else if context.active_modal != super::Modal::None {
+                        InputAction::None
                     } else if context.focus_zone.is_browse() {
-                        InputAction::FocusNextTarget
-                    } else if context.active_modal == super::Modal::None && input.is_empty() {
+                        // Browse → Compose: Tab is a symmetric zone toggle.
+                        InputAction::ReturnToComposeZone
+                    } else {
                         // Compose → Browse: hand the keyboard over to the
                         // conversation stream and focus the first card.
+                        // Works with or without text in the prompt (the draft
+                        // is preserved in the buffer).
                         InputAction::EnterBrowseZone { backward: false }
-                    } else {
-                        InputAction::None
                     }
                 }
                 KeyCode::BackTab => {
-                    if context.focus_zone.is_browse() {
-                        InputAction::FocusPrevTarget
-                    } else if context.active_modal == super::Modal::None && input.is_empty() {
+                    if context.active_modal != super::Modal::None {
+                        InputAction::None
+                    } else if context.focus_zone.is_browse() {
+                        // Browse → Compose: Shift+Tab mirrors Tab's toggle.
+                        InputAction::ReturnToComposeZone
+                    } else {
                         // Compose → Browse, focusing the last card.
                         InputAction::EnterBrowseZone { backward: true }
-                    } else {
-                        InputAction::None
                     }
                 }
                 // Ctrl+J: alias for Alt+Enter — insert a literal newline.
@@ -1030,16 +1038,22 @@ mod tests {
     }
 
     #[test]
-    fn tab_in_compose_enters_browse_in_main_view() {
-        // Compose (default) + empty input + no slash suggestions: Tab hands
-        // focus over to the conversation stream rather than silently doing
-        // nothing.
+    fn tab_toggles_between_compose_and_browse() {
+        // Compose + Tab hands focus to the conversation stream (forward =
+        // first card). Tab is a pure zone toggle, so it fires whether or not
+        // the prompt has text — the draft stays in the buffer.
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::Tab, false, &mut input),
             InputAction::EnterBrowseZone { backward: false }
         );
+        let mut input = String::from("draft");
+        assert_eq!(
+            key_in_view(KeyCode::Tab, false, &mut input),
+            InputAction::EnterBrowseZone { backward: false }
+        );
         // Shift+Tab enters Browse as well, but lands on the last card.
+        let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::BackTab, false, &mut input),
             InputAction::EnterBrowseZone { backward: true }
@@ -1047,16 +1061,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_and_arrows_cycle_cards_in_browse_zone() {
-        // Once in Browse, Tab / BackTab / Up / Down all walk the keyboard focus
-        // across the visible interactive targets.
+    fn tab_toggles_back_to_compose_in_browse_zone() {
+        // In Browse, Tab / Shift+Tab hand focus back to the prompt. Only the
+        // arrow keys still walk across the interactive targets.
         assert_eq!(
             key_with_focus(KeyCode::Tab),
-            InputAction::FocusNextTarget
+            InputAction::ReturnToComposeZone
         );
         assert_eq!(
             key_with_focus(KeyCode::BackTab),
-            InputAction::FocusPrevTarget
+            InputAction::ReturnToComposeZone
         );
         assert_eq!(key_with_focus(KeyCode::Up), InputAction::FocusPrevTarget);
         assert_eq!(key_with_focus(KeyCode::Down), InputAction::FocusNextTarget);

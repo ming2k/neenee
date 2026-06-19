@@ -560,8 +560,8 @@ pub struct App {
     /// Which surface (input box vs conversation stream) currently owns
     /// keyboard focus. See [`input::FocusZone`] for the full semantics.
     /// Defaults to [`input::FocusZone::Compose`] so typing flows into the
-    /// prompt box; `Tab` on an empty prompt hands focus to the stream, and
-    /// any printable key (or `Esc`) hands it back.
+    /// prompt box; `Tab` toggles focus to the stream and back, and any
+    /// printable key (or `Esc`) hands it back from Browse.
     pub focus_zone: input::FocusZone,
     /// Tracks the last cursor visibility command we sent to the terminal so
     /// we only emit `Hide` / `Show` escape codes when the desired state
@@ -2820,6 +2820,10 @@ async fn run_app_loop<B: Backend>(
                                 app.drag.start(cursor);
                             }
                             app.focused_target = None;
+                            // Clicking anywhere in the conversation content
+                            // hands keyboard focus to the stream (Browse), so
+                            // the click location always determines the zone.
+                            app.focus_zone = input::FocusZone::Browse;
                         }
                     } else {
                         app.selection = SelectionState::None;

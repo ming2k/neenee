@@ -42,14 +42,14 @@ pub(crate) fn draw_models_modal(
     key_status: &HashMap<String, bool>,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(72, 60, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(vec![Span::styled(
         " Select Model Solution",
         Style::default()
-            .fg(theme.primary)
+            .fg(theme.brand())
             .add_modifier(Modifier::BOLD),
     )])];
 
@@ -57,31 +57,31 @@ pub(crate) fn draw_models_modal(
         let is_current = solution.id == current_provider;
         let is_selected = i == modal_index;
         let row_bg = if is_selected {
-            theme.primary
+            theme.brand()
         } else {
-            theme.panel_bg
+            theme.panel()
         };
         let row_fg = if is_selected {
-            contrast_fg(theme.primary)
+            contrast_fg(theme.brand())
         } else {
-            theme.text
+            theme.fg()
         };
         let base = Style::default().bg(row_bg).fg(row_fg);
         let (key_label, key_color) = match key_status.get(solution.id) {
-            Some(true) => ("✓ ready", theme.success),
-            Some(false) => ("✗ no key", theme.error_fg),
+            Some(true) => ("✓ ready", theme.ok()),
+            Some(false) => ("✗ no key", theme.err()),
             None => ("", row_fg),
         };
         let key_style = if is_selected {
-            Style::default().bg(row_bg).fg(contrast_fg(theme.primary))
+            Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
         } else {
             Style::default().fg(key_color)
         };
         let prefix = if is_current { "● " } else { "  " };
         let dim = if is_selected {
-            Style::default().bg(row_bg).fg(contrast_fg(theme.primary))
+            Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
         } else {
-            Style::default().fg(theme.text_muted)
+            Style::default().fg(theme.muted())
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", prefix), dim),
@@ -97,10 +97,10 @@ pub(crate) fn draw_models_modal(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " ↑↓ navigate · Enter select/setup · k configure · Esc ",
-        Style::default().fg(theme.text_muted),
+        Style::default().fg(theme.muted()),
     )));
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -112,7 +112,7 @@ pub fn draw_solution_input_modal(
     masked: bool,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(60, 30, viewport_rect(frame));
     frame.render_widget(Clear, area);
     let display = if masked {
@@ -124,34 +124,34 @@ pub fn draw_solution_input_modal(
         Line::from(Span::styled(
             format!(" {}", title),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             format!(" {}", help),
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme.primary)),
-            Span::styled(display, Style::default().fg(theme.text)),
-            Span::styled("▏", Style::default().fg(theme.primary)),
+            Span::styled("> ", Style::default().fg(theme.brand())),
+            Span::styled(display, Style::default().fg(theme.fg())),
+            Span::styled("▏", Style::default().fg(theme.brand())),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             " Enter continue · Esc cancel ",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
     ];
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Draw the API-key entry modal. The key itself is already masked by the caller.
 pub fn draw_api_key_modal(frame: &mut Frame, provider: &str, masked_key: &str, theme: &Theme) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(56, 34, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
@@ -159,35 +159,35 @@ pub fn draw_api_key_modal(frame: &mut Frame, provider: &str, masked_key: &str, t
         Line::from(Span::styled(
             format!(" API key · {}", provider),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" Key  ", Style::default().fg(theme.text_muted)),
+            Span::styled(" Key  ", Style::default().fg(theme.muted())),
             Span::styled(
                 masked_key.to_string(),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("▏", Style::default().fg(theme.primary)),
+            Span::styled("▏", Style::default().fg(theme.brand())),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             " Saved to the local config file; environment",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
         Line::from(Span::styled(
             " variables of the same provider still win.",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
         Line::from(""),
         Line::from(Span::styled(
             " Enter save & switch · Esc cancel ",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
     ];
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -219,14 +219,14 @@ pub fn draw_sessions_modal(
     selected: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(80, 64, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         " Sessions",
         Style::default()
-            .fg(theme.primary)
+            .fg(theme.brand())
             .add_modifier(Modifier::BOLD),
     ))];
 
@@ -234,26 +234,26 @@ pub fn draw_sessions_modal(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " No previous sessions yet.",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )));
     }
 
     for (i, session) in sessions.iter().enumerate() {
         let is_selected = i == selected;
         let bg = if is_selected {
-            theme.primary
+            theme.brand()
         } else {
-            theme.panel_bg
+            theme.panel()
         };
         let fg = if is_selected {
-            contrast_fg(theme.primary)
+            contrast_fg(theme.brand())
         } else {
-            theme.text
+            theme.fg()
         };
         let muted = if is_selected {
-            contrast_fg(theme.primary)
+            contrast_fg(theme.brand())
         } else {
-            theme.text_muted
+            theme.muted()
         };
         let badge = if session.active { "● " } else { "  " };
         let overview: String = session.overview.chars().take(48).collect();
@@ -281,10 +281,10 @@ pub fn draw_sessions_modal(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " ↑↓ navigate · Enter open · d delete · Esc close ",
-        Style::default().fg(theme.text_muted),
+        Style::default().fg(theme.muted()),
     )));
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -307,7 +307,7 @@ pub fn draw_history_modal(
     modal_index: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(70, 55, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
@@ -315,11 +315,11 @@ pub fn draw_history_modal(
         Span::styled(
             " Input History",
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("❯ ", Style::default().fg(theme.text_muted)),
+        Span::styled("❯ ", Style::default().fg(theme.muted())),
         Span::styled(
             if query.is_empty() {
                 "type to fuzzy-filter"
@@ -328,9 +328,9 @@ pub fn draw_history_modal(
             },
             Style::default()
                 .fg(if query.is_empty() {
-                    theme.text_muted
+                    theme.muted()
                 } else {
-                    theme.text
+                    theme.fg()
                 })
                 .add_modifier(Modifier::BOLD),
         ),
@@ -340,14 +340,14 @@ pub fn draw_history_modal(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  (no history yet — send a message to populate this list)",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )));
     } else if ranked.is_empty() {
         // Query produced no matches.
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  (no matches — try a shorter or different query)",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )));
     } else {
         // Build a char-index set per row for O(1) "is this char matched?"
@@ -355,19 +355,19 @@ pub fn draw_history_modal(
         for (row, (orig_idx, m)) in ranked.iter().enumerate() {
             let is_selected = row == modal_index;
             let bg = if is_selected {
-                theme.primary
+                theme.brand()
             } else {
-                theme.panel_bg
+                theme.panel()
             };
             let fg = if is_selected {
-                contrast_fg(theme.primary)
+                contrast_fg(theme.brand())
             } else {
-                theme.text
+                theme.fg()
             };
             let num_style = if is_selected {
-                Style::default().bg(bg).fg(contrast_fg(theme.primary))
+                Style::default().bg(bg).fg(contrast_fg(theme.brand()))
             } else {
-                Style::default().fg(theme.text_muted)
+                Style::default().fg(theme.muted())
             };
             let base_style = Style::default().bg(bg).fg(fg);
             let matched_style = if is_selected {
@@ -375,12 +375,12 @@ pub fn draw_history_modal(
                 // readable on the primary-color background.
                 Style::default()
                     .bg(bg)
-                    .fg(contrast_fg(theme.primary))
+                    .fg(contrast_fg(theme.brand()))
                     .add_modifier(Modifier::UNDERLINED)
             } else {
                 Style::default()
                     .bg(bg)
-                    .fg(theme.primary)
+                    .fg(theme.brand())
                     .add_modifier(Modifier::BOLD)
             };
 
@@ -402,10 +402,10 @@ pub fn draw_history_modal(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " type to filter · ↑↓ navigate · Enter insert · Esc close ",
-        Style::default().fg(theme.text_muted),
+        Style::default().fg(theme.muted()),
     )));
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -438,43 +438,43 @@ pub fn draw_permission_sheet(
 
     let mut body_lines: Vec<Line> = Vec::new();
     body_lines.push(Line::from(vec![
-        Span::styled("△ ", Style::default().fg(theme.warning)),
+        Span::styled("△ ", Style::default().fg(theme.warn())),
         Span::styled(
             "Permission required",
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
         ),
     ]));
     body_lines.push(Line::from(""));
     body_lines.push(Line::from(vec![
-        Span::styled("Tool ", Style::default().fg(theme.text_muted)),
+        Span::styled("Tool ", Style::default().fg(theme.muted())),
         Span::styled(
             request.tool.clone(),
             Style::default()
-                .fg(theme.warning)
+                .fg(theme.warn())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  Scope ", Style::default().fg(theme.text_muted)),
-        Span::styled(request.scope.clone(), Style::default().fg(theme.info)),
+        Span::styled("  Scope ", Style::default().fg(theme.muted())),
+        Span::styled(request.scope.clone(), Style::default().fg(theme.info())),
     ]));
     body_lines.push(Line::from(Span::styled(
         request.description.clone(),
-        Style::default().fg(theme.text),
+        Style::default().fg(theme.fg()),
     )));
     body_lines.push(Line::from(""));
     body_lines.push(Line::from(Span::styled(
         "Arguments",
-        Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.info()).add_modifier(Modifier::BOLD),
     )));
     body_lines.extend(
         arg_lines
             .into_iter()
-            .map(|line| line.style(Style::default().fg(theme.code_fg))),
+            .map(|line| line.style(Style::default().fg(theme.code_text()))),
     );
     if confirm_always {
         body_lines.push(Line::from(""));
         body_lines.push(Line::from(Span::styled(
             "This permits the tool until neenee exits.",
-            Style::default().fg(theme.warning),
+            Style::default().fg(theme.warn()),
         )));
     }
 
@@ -512,11 +512,11 @@ pub fn draw_permission_sheet(
     let sheet_h = (fixed_height + body_h).min(sheet_bottom).max(1);
     let sheet_top = sheet_bottom.saturating_sub(sheet_h);
 
-    draw_dim_backdrop(frame, size, theme.backdrop);
+    draw_dim_backdrop(frame, size, theme.backdrop());
 
     let area = Rect::new(sheet_x, size.y + sheet_top, sheet_width, sheet_h);
     frame.render_widget(Clear, area);
-    frame.render_widget(panel_block(theme.warning, theme.panel_bg), area);
+    frame.render_widget(panel_block(theme.warn(), theme.panel()), area);
 
     let content_x = area.x + 1 + PERMISSION_SHEET_H_PADDING;
     let body_area = Rect::new(
@@ -538,7 +538,7 @@ pub fn draw_permission_sheet(
         .saturating_sub(PERMISSION_SHEET_BOTTOM_PADDING + footer_height);
     let footer_band = Rect::new(area.x + 1, footer_y, area.width.saturating_sub(1), 1);
     frame.render_widget(
-        RtBlock::default().style(Style::default().bg(theme.element_bg)),
+        RtBlock::default().style(Style::default().bg(theme.raised())),
         footer_band,
     );
 
@@ -548,20 +548,20 @@ pub fn draw_permission_sheet(
         let is_selected = index == selected;
         let bg = if is_selected {
             if is_reject {
-                theme.error_fg
+                theme.err()
             } else {
-                theme.warning
+                theme.warn()
             }
         } else {
-            theme.element_bg
+            theme.raised()
         };
         let fg = if is_selected {
             contrast_fg(bg)
         } else {
-            theme.text
+            theme.fg()
         };
         if index > 0 {
-            footer_spans.push(Span::styled("  ", Style::default().bg(theme.element_bg)));
+            footer_spans.push(Span::styled("  ", Style::default().bg(theme.raised())));
         }
         footer_spans.push(Span::styled(
             format!(" {} ", label),
@@ -579,16 +579,16 @@ pub fn draw_permission_sheet(
     if used + hint_width <= footer_width {
         footer_spans.push(Span::styled(
             " ".repeat(footer_width - used - hint_width),
-            Style::default().bg(theme.element_bg),
+            Style::default().bg(theme.raised()),
         ));
         footer_spans.push(Span::styled(
             hint,
-            Style::default().bg(theme.element_bg).fg(theme.text_muted),
+            Style::default().bg(theme.raised()).fg(theme.muted()),
         ));
     } else if used < footer_width {
         footer_spans.push(Span::styled(
             " ".repeat(footer_width - used),
-            Style::default().bg(theme.element_bg),
+            Style::default().bg(theme.raised()),
         ));
     }
 
@@ -603,7 +603,7 @@ pub fn draw_permission_sheet(
 /// "press Esc again to interrupt"). Warn-colored like the original exit toast.
 pub fn draw_armed_toast(frame: &mut Frame, message: &str, theme: &Theme) {
     let size = frame.size();
-    toast(frame, theme, message, theme.warning, size.width);
+    toast(frame, theme, message, theme.warn(), size.width);
 }
 
 /// Draw the help / keybindings modal.
@@ -619,7 +619,7 @@ pub fn draw_tool_step_detail_overlay(
     theme: &Theme,
 ) {
     use crate::document::MessageKind;
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(92, 84, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
@@ -628,15 +628,15 @@ pub fn draw_tool_step_detail_overlay(
         lines.push(Line::from(Span::styled(
             header,
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
     }
 
-    let body_style = Style::default().fg(theme.text);
-    let stderr_style = Style::default().fg(theme.error_fg);
-    let marker_style = Style::default().fg(theme.warning).add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(theme.fg());
+    let stderr_style = Style::default().fg(theme.err());
+    let marker_style = Style::default().fg(theme.warn()).add_modifier(Modifier::BOLD);
     match &msg.kind {
         MessageKind::ToolStep {
             structured:
@@ -652,7 +652,7 @@ pub fn draw_tool_step_detail_overlay(
             if !command.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("$ {}", command),
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
                 )));
             }
             for line in stdout.split('\n') {
@@ -690,10 +690,10 @@ pub fn draw_tool_step_detail_overlay(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " ↑/↓ or wheel scroll · esc close ",
-        Style::default().fg(theme.text_muted),
+        Style::default().fg(theme.muted()),
     )));
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((scroll, 0))
@@ -704,7 +704,7 @@ pub fn draw_tool_step_detail_overlay(
 }
 
 pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop);
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(58, 70, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
@@ -712,15 +712,15 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Span::styled(
             format!("{:<10}", k),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let desc = |d: &str| Span::styled(d.to_string(), Style::default().fg(theme.text_muted));
+    let desc = |d: &str| Span::styled(d.to_string(), Style::default().fg(theme.muted()));
     let section = |title: &str| {
         Span::styled(
             title.to_string(),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
         )
     };
     let row = |k: &str, d: &str| Line::from(vec![key(k), desc(d)]);
@@ -729,7 +729,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(Span::styled(
             " Help",
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -747,11 +747,10 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(desc(
             "[BROWSE] so you always know where the next key lands.",
         )),
-        row("tab", "compose → browse (empty input)"),
-        row("shift+tab", "compose → browse (last card)"),
-        row("esc / any key", "browse → compose"),
+        row("tab", "toggle compose ↔ browse"),
+        row("shift+tab", "toggle (browse: last card)"),
         row("↑ / ↓", "compose: history · browse: cycle cards"),
-        row("tab", "browse: cycle cards · compose: suggestion"),
+        row("esc / any key", "browse → compose"),
         row("enter / ␠", "browse: activate focused card"),
         Line::from(""),
         Line::from(section("Views & tools")),
@@ -770,11 +769,11 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(Span::styled(
             " esc · close ",
-            Style::default().fg(theme.text_muted),
+            Style::default().fg(theme.muted()),
         )),
     ];
 
-    let block = panel_block(theme.primary, theme.panel_bg);
+    let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -782,9 +781,9 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
 pub fn draw_copy_toast(frame: &mut Frame, message: &str, failed: bool, theme: &Theme) {
     let size = frame.size();
     let color = if failed {
-        theme.error_fg
+        theme.err()
     } else {
-        theme.success
+        theme.ok()
     };
     toast(frame, theme, message, color, size.width);
 }
@@ -802,11 +801,11 @@ fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Color, width: u
         .borders(Borders::LEFT | Borders::RIGHT)
         .border_type(ratatui::widgets::BorderType::Thick)
         .border_style(Style::default().fg(color))
-        .style(Style::default().bg(theme.panel_bg));
+        .style(Style::default().bg(theme.panel()));
 
     let line = Line::from(Span::styled(
         text,
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
     ));
     // Vertically center the single line within the 3-row panel.
     let para = Paragraph::new(vec![Line::from(""), line]);

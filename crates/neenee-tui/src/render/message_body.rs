@@ -56,9 +56,9 @@ pub(super) fn draw_message_body(
             Block::Text { content } => {
                 let is_user = msg.role == neenee_core::Role::User;
                 let base = match msg.role {
-                    neenee_core::Role::User => Style::default().fg(theme.user_fg),
-                    neenee_core::Role::System => Style::default().fg(theme.system_fg),
-                    _ => Style::default().fg(theme.text),
+                    neenee_core::Role::User => Style::default().fg(theme.user_text()),
+                    neenee_core::Role::System => Style::default().fg(theme.system_text()),
+                    _ => Style::default().fg(theme.fg()),
                 };
                 let full_width = area.width as usize;
                 let body_wrap_width = area
@@ -86,7 +86,7 @@ pub(super) fn draw_message_body(
                 // User messages get top/bottom padding rows (matching the input
                 // box's breathing room).  The padding is a blank `user_panel_bg`
                 // row with the `┃` bar so the message reads as a solid panel.
-                let user_bg = theme.user_panel_bg;
+                let user_bg = theme.user_surface();
                 let user_gutter = " ".repeat(USER_MESSAGE_OUTER_GUTTER_COLS);
                 let user_content_w = full_width.saturating_sub(2 * USER_MESSAGE_OUTER_GUTTER_COLS);
 
@@ -101,15 +101,15 @@ pub(super) fn draw_message_body(
                             let pad = Line::from(vec![
                                 Span::styled(
                                     user_gutter.clone(),
-                                    Style::default().bg(theme.app_bg),
+                                    Style::default().bg(theme.surface()),
                                 ),
                                 Span::styled(
                                     "▄".repeat(user_content_w),
-                                    Style::default().fg(user_bg).bg(theme.app_bg),
+                                    Style::default().fg(user_bg).bg(theme.surface()),
                                 ),
                                 Span::styled(
                                     user_gutter.clone(),
-                                    Style::default().bg(theme.app_bg),
+                                    Style::default().bg(theme.surface()),
                                 ),
                             ]);
                             let rect = Rect::new(area.x, *current_y, area.width, 1);
@@ -133,12 +133,12 @@ pub(super) fn draw_message_body(
                         // band. Selection is character-level, not line-level,
                         // so the user can highlight arbitrary substrings.
                         let bg = user_bg;
-                        let text_style = Style::default().bg(bg).fg(theme.text_muted);
-                        let sel_style = Style::default().bg(theme.selected_bg).fg(theme.text);
+                        let text_style = Style::default().bg(bg).fg(theme.muted());
+                        let sel_style = Style::default().bg(theme.selected()).fg(theme.fg());
                         let sel = line_selection(sel_range, wl);
 
                         let mut spans = vec![
-                            Span::styled(user_gutter.clone(), Style::default().bg(theme.app_bg)),
+                            Span::styled(user_gutter.clone(), Style::default().bg(theme.surface())),
                             Span::styled(
                                 " ".repeat(USER_MESSAGE_TEXT_GAP_COLS),
                                 Style::default().bg(bg),
@@ -167,7 +167,7 @@ pub(super) fn draw_message_body(
                         ));
                         spans.push(Span::styled(
                             user_gutter.clone(),
-                            Style::default().bg(theme.app_bg),
+                            Style::default().bg(theme.surface()),
                         ));
                         Line::from(spans)
                     } else {
@@ -178,7 +178,7 @@ pub(super) fn draw_message_body(
                             &wl.text,
                             line_selection(sel_range, wl),
                             base,
-                            theme.selected_bg,
+                            theme.selected(),
                         )
                     };
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
@@ -217,15 +217,15 @@ pub(super) fn draw_message_body(
                             let pad = Line::from(vec![
                                 Span::styled(
                                     user_gutter.clone(),
-                                    Style::default().bg(theme.app_bg),
+                                    Style::default().bg(theme.surface()),
                                 ),
                                 Span::styled(
                                     "▀".repeat(user_content_w),
-                                    Style::default().fg(user_bg).bg(theme.app_bg),
+                                    Style::default().fg(user_bg).bg(theme.surface()),
                                 ),
                                 Span::styled(
                                     user_gutter.clone(),
-                                    Style::default().bg(theme.app_bg),
+                                    Style::default().bg(theme.surface()),
                                 ),
                             ]);
                             let rect = Rect::new(area.x, *current_y, area.width, 1);
@@ -253,9 +253,9 @@ pub(super) fn draw_message_body(
                 let table = build_table_render(headers, rows, aligns, available);
                 let ncols = headers.len().max(1);
 
-                let base = Style::default().fg(theme.text);
-                let border_style = Style::default().fg(theme.text_muted);
-                let sel_bg = theme.selected_bg;
+                let base = Style::default().fg(theme.fg());
+                let border_style = Style::default().fg(theme.muted());
+                let sel_bg = theme.selected();
 
                 // A whole-table selection (middle-click) still copies the grid
                 // with borders stripped, so keep recording the displayed grid.
@@ -428,7 +428,7 @@ pub(super) fn draw_message_body(
                 // Borderless code block: a uniform `code_bg` band with a
                 // line-number gutter, matching opencode's clean look. No
                 // `╭─ ╰─` frame, no per-line `│` rule.
-                let code_bg = theme.code_bg;
+                let code_bg = theme.body();
                 // The solid-background band is inset from the transcript edges so it
                 // reads as a distinct panel rather than bleeding into the
                 // terminal frame. Content (gutter + code) lives inside the
@@ -468,7 +468,7 @@ pub(super) fn draw_message_body(
                             Span::styled(" ", Style::default().bg(code_bg)),
                             Span::styled(
                                 lang.to_string(),
-                                Style::default().bg(code_bg).fg(theme.dim_fg),
+                                Style::default().bg(code_bg).fg(theme.dim()),
                             ),
                             Span::styled(
                                 padded_tail(full_width, used),
@@ -523,11 +523,11 @@ pub(super) fn draw_message_body(
                             &gutter,
                             gutter_gap,
                             code_bg,
-                            theme.dim_fg,
+                            theme.dim(),
                             &wl.text,
                             line_selection(sel_range, &block_wl),
-                            theme.code_fg,
-                            theme.selected_bg,
+                            theme.code_text(),
+                            theme.selected(),
                             full_width,
                         );
                         let line_rect = Rect::new(band_x, *current_y, band_w, 1);
@@ -557,7 +557,7 @@ pub(super) fn draw_message_body(
                 } else {
                     Modifier::BOLD
                 };
-                let style = Style::default().fg(theme.heading_fg).add_modifier(modifier);
+                let style = Style::default().fg(theme.heading()).add_modifier(modifier);
                 let continuation = " ".repeat(prefix_cols as usize);
                 let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
@@ -579,7 +579,7 @@ pub(super) fn draw_message_body(
                         &wl.text,
                         line_selection(sel_range, wl),
                         style,
-                        theme.selected_bg,
+                        theme.selected(),
                     );
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
@@ -612,14 +612,14 @@ pub(super) fn draw_message_body(
                         break;
                     }
 
-                    let base = Style::default().fg(theme.quote_fg);
+                    let base = Style::default().fg(theme.quote());
                     let line = line_spans(
                         "   ▎ ",
-                        Style::default().fg(theme.quote_fg),
+                        Style::default().fg(theme.quote()),
                         &wl.text,
                         line_selection(sel_range, wl),
                         base,
-                        theme.selected_bg,
+                        theme.selected(),
                     );
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
@@ -647,7 +647,7 @@ pub(super) fn draw_message_body(
                     let width = area.width.saturating_sub(6) as usize;
                     let text = format!("   {}", "─".repeat(width));
                     let line =
-                        Line::from(vec![Span::styled(text, Style::default().fg(theme.dim_fg))]);
+                        Line::from(vec![Span::styled(text, Style::default().fg(theme.dim()))]);
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);
                     *current_y += 1;
@@ -688,14 +688,14 @@ pub(super) fn draw_message_body(
                         break;
                     }
 
-                    let base = Style::default().fg(theme.text);
+                    let base = Style::default().fg(theme.fg());
                     let line = line_spans(
                         &prefix,
-                        Style::default().fg(theme.primary),
+                        Style::default().fg(theme.brand()),
                         &wl.text,
                         line_selection(sel_range, wl),
                         base,
-                        theme.selected_bg,
+                        theme.selected(),
                     );
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
                     frame.render_widget(Paragraph::new(line), line_rect);

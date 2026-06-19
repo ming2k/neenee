@@ -79,9 +79,9 @@ pub fn draw_composer(
     // When the prompt is blurred (Browse zone), the panel drops to the dimmer
     // `user_panel_bg` and the prompt glyph uses `text_muted`, matching the
     // already-sent user-message styling so the live box visibly recedes.
-    let panel_bg = if focused { theme.input_bg } else { theme.user_panel_bg };
-    let prompt_fg = if focused { theme.primary } else { theme.text_muted };
-    let app_bg = theme.app_bg;
+    let panel_bg = if focused { theme.input_surface() } else { theme.user_surface() };
+    let prompt_fg = if focused { theme.brand() } else { theme.muted() };
+    let app_bg = theme.surface();
     let full_w = input_rect.width as usize;
     // Reserve the left prompt prefix (`› `) and a matching right pad so text
     // never touches either edge of the input panel — the box reads as a
@@ -167,7 +167,7 @@ pub fn draw_composer(
             };
             spans.push(Span::styled(
                 wl.text.clone(),
-                Style::default().bg(panel_bg).fg(theme.text),
+                Style::default().bg(panel_bg).fg(theme.fg()),
             ));
             spans.push(Span::styled(
                 padded_tail(full_w, used),
