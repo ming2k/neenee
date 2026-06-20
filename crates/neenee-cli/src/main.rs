@@ -1,28 +1,27 @@
 use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
-use neenee_harness::skills::SkillRegistry;
+use neenee_harness::skills::{
+    tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool},
+    SkillRegistry,
+};
+use neenee_harness::TaskTool;
 use neenee_tools::{
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
-    AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ListSkillsTool,
-    ReadFileTool, ReloadSkillsTool, TaskTool, TodoWriteTool, UseSkillTool, WebFetchTool,
-    WebSearchTool, WriteFileTool,
+    AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
+    TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
 };
 use neenee_core::{
     AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore, Message,
     Provider, SessionOverview, Tool,
 };
 use neenee_harness::Agent;
+use neenee_harness::catalog;
 use neenee_harness::orchestration::{
     compact_turn_history, emit_goal_updated, refresh_agent_goal, send_compaction,
     send_harness_state, start_goal_loop, start_interactive_turn, CompactionSettings,
     InteractiveTurnContext, LoopRunContext, MidTurnCompactionGate, ProxyProvider,
     RelayCompactionHooks, TurnInput,
 };
-// Imports only the test code in `mod tests` needs. Kept at the crate root
-// (rather than inside the test module) so the production build can also see
-// `TurnContext` for the inline `TurnContext { ... }` literal in main(); the
-// items gated test-only here are: async_trait, the event/error/token-bill
-// types, and the orchestration helpers that are only invoked from tests.
 #[cfg(test)]
 use neenee_core::{
     async_trait, AgentEvent, GoalAccountingResult, HarnessError, HarnessSnapshot,
@@ -32,10 +31,8 @@ use neenee_core::{
 use neenee_harness::orchestration::{self, TurnContext, execute_turn, retry_delay_ms};
 use neenee_providers::MockProvider;
 use neenee_app::{
-    catalog, embedding, lock, model_usage, paths, config::Config, search_tool::SearchHistoryTool,
-    session::{
-        self, discard_trailing_loop_prompts, SessionStore,
-    },
+    embedding, lock, model_usage, paths, config::Config, search_tool::SearchHistoryTool,
+    session::{self, discard_trailing_loop_prompts, SessionStore},
 };
 use crate::tui::start_tui;
 #[allow(dead_code)]

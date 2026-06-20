@@ -14,7 +14,6 @@
 //! reachable tomorrow (see ADR-0003).
 
 pub mod blobs;
-pub mod catalog;
 pub mod config;
 pub mod embedding;
 pub mod events;

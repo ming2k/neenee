@@ -73,9 +73,13 @@ const MAX_REPEATED_TOOL_CALLS: usize = 3;
 pub mod agent;
 pub use agent::Agent;
 
+pub mod catalog;
 pub mod orchestration;
 mod prompt;
 pub mod skills;
+pub mod task_tool;
+
+pub use task_tool::TaskTool;
 
 #[cfg(test)]
 mod tests;

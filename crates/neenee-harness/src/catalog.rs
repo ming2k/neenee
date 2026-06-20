@@ -10,8 +10,8 @@
 //! per-provider fields. The on-disk schema is unchanged; later phases add
 //! multi-channel entries, favorites, and recency.
 
-use crate::config::{Config, UserChannelConfig, UserModelConfig, UserTransport};
-use crate::model_usage::ModelUsage;
+use neenee_app::config::{Config, UserChannelConfig, UserModelConfig, UserTransport};
+use neenee_app::model_usage::ModelUsage;
 use neenee_core::catalog::{
     builtin_metadata, canonical_id, Catalog, Channel, ModelEntry, Transport,
 };
