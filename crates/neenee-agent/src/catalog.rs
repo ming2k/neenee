@@ -10,7 +10,7 @@
 //! per-provider fields. The on-disk schema is unchanged; later phases add
 //! multi-channel entries, favorites, and recency.
 
-use neenee_core::catalog::{builtin_metadata, Catalog, Channel, ModelEntry, Transport};
+use neenee_core::catalog::{builtin_metadata, Channel, ModelEntry, Transport};
 use neenee_core::{ModelPickerRow, ModelPickerSnapshot};
 use neenee_providers::{OpenAiProviderSpec, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS};
 use neenee_store::config::{Config, UserChannelConfig, UserModelConfig, UserTransport};
@@ -129,7 +129,7 @@ fn config_key_for(config: &Config, id: &str) -> Option<String> {
     match id {
         "openai" => config.openai_api_key.clone(),
         "gemini" => config.gemini_api_key.clone(),
-        "kimi-k2.7-code" => config.moonshot_api_key.clone(),
+        "kimi-code" => config.moonshot_api_key.clone(),
         "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key.clone(),
         "qwen" => config.qwen_api_key.clone(),
         "glm" => config.glm_api_key.clone(),
@@ -144,7 +144,7 @@ fn config_model_for(config: &Config, id: &str) -> Option<String> {
         "openai" => config.openai_model.clone(),
         "gemini" => config.gemini_model.clone(),
         "llama" => config.llama_model.clone(),
-        "kimi-k2.7-code" => config.moonshot_model.clone(),
+        "kimi-code" => config.moonshot_model.clone(),
         "deepseek-v4-flash" => config.deepseek_flash_model.clone(),
         "deepseek-v4-pro" => config.deepseek_pro_model.clone(),
         "qwen" => config.qwen_model.clone(),
@@ -187,7 +187,10 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
         env_or_config(Some(spec.env_model), config_model_for(config, spec.id))
             .unwrap_or_else(|| spec.default_model.to_string())
     };
-    let user_agent = NEENEE_USER_AGENT.to_string();
+    let user_agent = spec
+        .default_user_agent
+        .unwrap_or(NEENEE_USER_AGENT)
+        .to_string();
     let (name, _, _) = builtin_metadata(spec.id)
         .map(|(n, d, c)| (n.to_string(), d.to_string(), c))
         .unwrap_or_else(|| (spec.id.to_string(), String::new(), 0));
@@ -210,7 +213,7 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
 /// fixture. Order does not affect behavior — all lookups are by id — but a
 /// stable order makes the catalog readable in debug output and (later) the
 /// picker's default pre-search listing.
-pub fn build_catalog(config: &Config) -> Catalog {
+pub fn build_catalog(config: &Config) -> Vec<ModelEntry> {
     let mut entries: Vec<ModelEntry> = Vec::new();
 
     // OpenAI-compatible registry presets.
@@ -298,7 +301,7 @@ pub fn build_catalog(config: &Config) -> Catalog {
         }
     }
 
-    Catalog { entries }
+    entries
 }
 
 /// Resolve the active provider for a given model id from `config`. Returns the
@@ -307,8 +310,8 @@ pub fn build_catalog(config: &Config) -> Catalog {
 /// the resolution logic that used to be duplicated at startup and in the
 /// `SwitchProvider` handler.
 pub fn build_provider_for(config: &Config, id: &str) -> std::sync::Arc<dyn neenee_core::Provider> {
-    let catalog = build_catalog(config);
-    match catalog.get(id) {
+    let entries = build_catalog(config);
+    match entries.iter().find(|e| e.id == id) {
         Some(entry) => match entry.default_channel() {
             Some(channel) => neenee_providers::build_provider_for_channel(channel, &entry.id),
             None => std::sync::Arc::new(neenee_providers::MockProvider),
@@ -322,7 +325,8 @@ pub fn build_provider_for(config: &Config, id: &str) -> std::sync::Arc<dyn neene
 /// `initial_m_name` block in `main.rs`.
 pub fn resolved_model_name(config: &Config, id: &str) -> String {
     build_catalog(config)
-        .get(id)
+        .iter()
+        .find(|e| e.id == id)
         .and_then(|entry| entry.default_channel())
         .map(|channel| channel.model.clone())
         .unwrap_or_else(|| "mock-model".to_string())
@@ -334,10 +338,9 @@ pub fn resolved_model_name(config: &Config, id: &str) -> String {
 /// startup and after any mutation so the picker always shows a consistent
 /// picture (ADR-0002 phase 3).
 pub fn build_picker_state(config: &Config, usage: &ModelUsage) -> ModelPickerSnapshot {
-    let catalog = build_catalog(config);
+    let entries = build_catalog(config);
     let default_id = default_model_id(config).to_string();
-    let rows = catalog
-        .entries
+    let rows = entries
         .iter()
         .map(|entry| ModelPickerRow {
             id: entry.id.clone(),
@@ -368,9 +371,9 @@ mod tests {
 
     #[test]
     fn catalog_contains_every_builtin_preset() {
-        let catalog = build_catalog(&bare_config());
-        let ids: Vec<&str> = catalog.entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"kimi-k2.7-code"), "missing kimi-k2.7-code: {ids:?}");
+        let entries = build_catalog(&bare_config());
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"kimi-code"), "missing kimi-code: {ids:?}");
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"gemini"));
         assert!(ids.contains(&"llama"));
@@ -378,7 +381,7 @@ mod tests {
         // Every registry preset is present.
         for spec in OPENAI_PROVIDER_SPECS {
             assert!(
-                catalog.get(spec.id).is_some(),
+                entries.iter().find(|e| e.id == spec.id).is_some(),
                 "registry preset {} missing",
                 spec.id
             );
@@ -386,26 +389,28 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k27_code_uses_official_endpoint_and_default_model() {
+    fn kimi_code_uses_kimi_code_platform() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MOONSHOT_MODEL");
         let config = bare_config();
-        let catalog = build_catalog(&config);
-        let entry = catalog.get("kimi-k2.7-code").expect("kimi-k2.7-code entry");
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "kimi-code").expect("kimi-code entry");
         let channel = entry.default_channel().expect("default channel");
+        // The Kimi Code platform pins the model id to kimi-for-coding.
         assert_eq!(
-            channel.model, "kimi-k2.7-code",
-            "default model must be kimi-k2.7-code"
+            channel.model, "kimi-for-coding",
+            "model must be the pinned kimi-for-coding alias"
         );
         let (base_url, user_agent) = match &channel.transport {
             Transport::OpenAiCompat {
                 base_url,
                 user_agent,
             } => (base_url.clone(), user_agent.clone()),
-            other => panic!("kimi-k2.7-code must be OpenAiCompat, got {other:?}"),
+            other => panic!("kimi-code must be OpenAiCompat, got {other:?}"),
         };
-        assert_eq!(base_url, "https://api.moonshot.ai/v1/chat/completions");
-        assert_eq!(user_agent, NEENEE_USER_AGENT);
+        assert_eq!(base_url, "https://api.kimi.com/coding/v1/chat/completions");
+        // The Kimi Code platform requires a recognized coding-agent UA.
+        assert_eq!(user_agent, "opencode/0.1.0");
     }
 
     #[test]
@@ -414,8 +419,8 @@ mod tests {
         std::env::remove_var("GEMINI_MODEL");
         let mut config = bare_config();
         config.gemini_model = Some("gemini-2.0-flash".to_string());
-        let catalog = build_catalog(&config);
-        let entry = catalog.get("gemini").expect("gemini entry");
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "gemini").expect("gemini entry");
         assert_eq!(entry.default_channel().unwrap().model, "gemini-2.0-flash");
     }
 
@@ -451,9 +456,9 @@ mod tests {
 
     #[test]
     fn keyless_providers_report_ready_without_keys() {
-        let catalog = build_catalog(&bare_config());
-        let llama = catalog.get("llama").expect("llama entry");
-        let mock = catalog.get("mock").expect("mock entry");
+        let entries = build_catalog(&bare_config());
+        let llama = entries.iter().find(|e| e.id == "llama").expect("llama entry");
+        let mock = entries.iter().find(|e| e.id == "mock").expect("mock entry");
         assert!(llama.key_ready(), "llama must be keyless-ready");
         assert!(mock.key_ready(), "mock must be keyless-ready");
     }
@@ -462,8 +467,8 @@ mod tests {
     fn cloud_providers_report_not_ready_without_key() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OPENAI_API_KEY");
-        let catalog = build_catalog(&bare_config());
-        let openai = catalog.get("openai").expect("openai entry");
+        let entries = build_catalog(&bare_config());
+        let openai = entries.iter().find(|e| e.id == "openai").expect("openai entry");
         assert!(
             !openai.key_ready(),
             "openai without a key must not be ready"
@@ -500,8 +505,8 @@ mod tests {
 
     #[test]
     fn user_model_overrides_builtin_by_id() {
-        let catalog = build_catalog(&gemini_two_channel_config());
-        let gemini = catalog.get("gemini").expect("overridden gemini entry");
+        let entries = build_catalog(&gemini_two_channel_config());
+        let gemini = entries.iter().find(|e| e.id == "gemini").expect("overridden gemini entry");
         // The user-supplied name wins over the built-in "Gemini 2.5 Flash".
         assert_eq!(gemini.name, "Gemini (custom)");
         assert!(!gemini.builtin, "an override is user-owned, not read-only");
@@ -515,8 +520,8 @@ mod tests {
     fn user_channel_resolves_env_key_over_inline() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GEMINI_STUDIO_KEY", "env-key");
-        let catalog = build_catalog(&gemini_two_channel_config());
-        let entry = catalog.get("gemini").unwrap();
+        let entries = build_catalog(&gemini_two_channel_config());
+        let entry = entries.iter().find(|e| e.id == "gemini").unwrap();
         // Studio names an env var → the env value wins.
         let studio = entry.channels.iter().find(|c| c.label == "Studio").unwrap();
         assert_eq!(studio.api_key, "env-key");
@@ -542,8 +547,8 @@ mod tests {
             }],
             ..Default::default()
         }];
-        let catalog = build_catalog(&config);
-        let relay = catalog.get("my-relay").expect("appended user model");
+        let entries = build_catalog(&config);
+        let relay = entries.iter().find(|e| e.id == "my-relay").expect("appended user model");
         assert_eq!(relay.name, "My Relay");
         assert_eq!(relay.default_channel().unwrap().model, "my-model");
     }

@@ -42,17 +42,20 @@ pub struct OpenAiProviderSpec {
 /// The single registry of OpenAI-compatible providers — the source of truth for
 /// their endpoints, default models, and environment variables.
 pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
-    // Kimi K2.7 Code — Moonshot AI's strongest coding model. Official API at
-    // api.moonshot.ai, OpenAI-compatible. Model can be overridden (e.g. to
-    // kimi-k2.7-code-highspeed) via MOONSHOT_MODEL env or config.
+    // Kimi Code — Moonshot AI's coding model, served via the Kimi Code
+    // membership platform (api.kimi.com/coding/v1). The platform requires a
+    // recognized coding-agent User-Agent and pins the model id to the fixed
+    // `kimi-for-coding` alias (the backend auto-routes to the latest model,
+    // so the preset id carries no version number). API key env still uses
+    // the MOONSHOT_API_KEY legacy name for config compatibility.
     OpenAiProviderSpec {
-        id: "kimi-k2.7-code",
-        base_url: "https://api.moonshot.ai/v1/chat/completions",
-        default_model: "kimi-k2.7-code",
+        id: "kimi-code",
+        base_url: "https://api.kimi.com/coding/v1/chat/completions",
+        default_model: "kimi-for-coding",
         env_api_key: "MOONSHOT_API_KEY",
         env_model: "MOONSHOT_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
+        fixed_model: Some("kimi-for-coding"),
+        default_user_agent: Some("opencode/0.1.0"),
     },
     // DeepSeek V4 Flash — versatile model with thinking + non-thinking modes.
     OpenAiProviderSpec {
@@ -176,25 +179,25 @@ mod spec_tests {
     use super::*;
 
     #[test]
-    fn kimi_k27_code_uses_official_endpoint_and_model() {
-        let spec = openai_provider_spec("kimi-k2.7-code").expect("kimi-k2.7-code spec");
-        // Model defaults to kimi-k2.7-code but can be overridden (e.g. highspeed).
-        assert_eq!(spec.resolve_model(None), "kimi-k2.7-code");
+    fn kimi_code_uses_kimi_code_platform() {
+        let spec = openai_provider_spec("kimi-code").expect("kimi-code spec");
+        // The Kimi Code platform pins the model id — overrides are ignored.
+        assert_eq!(spec.resolve_model(None), "kimi-for-coding");
         assert_eq!(
             spec.resolve_model(Some("kimi-k2.7-code-highspeed".to_string())),
-            "kimi-k2.7-code-highspeed"
+            "kimi-for-coding"
         );
 
         let provider = spec.build("test-key".to_string(), None, None);
-        assert_eq!(provider.base_url, "https://api.moonshot.ai/v1/chat/completions");
-        assert_eq!(provider.model, "kimi-k2.7-code");
-        // No special user agent — uses the shared neenee default.
-        assert_eq!(provider.user_agent, NEENEE_USER_AGENT);
+        assert_eq!(provider.base_url, "https://api.kimi.com/coding/v1/chat/completions");
+        assert_eq!(provider.model, "kimi-for-coding");
+        // The Kimi Code platform requires a recognized coding-agent UA.
+        assert_eq!(provider.user_agent, "opencode/0.1.0");
         // The registry stamps the preset id onto the concrete provider so
-        // assistant responses can be attributed to "kimi-k2.7-code".
-        assert_eq!(provider.id, "kimi-k2.7-code");
-        assert_eq!(provider.provider_id(), "kimi-k2.7-code");
-        assert_eq!(provider.model(), "kimi-k2.7-code");
+        // assistant responses can be attributed to "kimi-code".
+        assert_eq!(provider.id, "kimi-code");
+        assert_eq!(provider.provider_id(), "kimi-code");
+        assert_eq!(provider.model(), "kimi-for-coding");
     }
 
     #[test]

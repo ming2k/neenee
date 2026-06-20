@@ -122,7 +122,6 @@ fn short_session_id(id: &str) -> &str {
 /// provider construction share one resolution path.
 fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
     catalog::build_catalog(config)
-        .entries
         .iter()
         .map(|entry| (entry.id.clone(), entry.key_ready()))
         .collect()
@@ -148,7 +147,6 @@ fn build_session_context(
     // Catalog entry carries the authoritative display metadata; fall back to
     // the raw model id / empty when the provider isn't a known catalog entry.
     let entry = catalog::build_catalog(config)
-        .entries
         .into_iter()
         .find(|e| e.id == provider_id);
     let display_name = entry
@@ -597,7 +595,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match provider_type.as_str() {
                             "openai" => config.openai_api_key = Some(key),
                             "gemini" => config.gemini_api_key = Some(key),
-                            "kimi-k2.7-code" => config.moonshot_api_key = Some(key),
+                            "kimi-code" => config.moonshot_api_key = Some(key),
                             "deepseek-v4-flash" | "deepseek-v4-pro" => {
                                 config.deepseek_api_key = Some(key)
                             }
@@ -621,7 +619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match provider_type.as_str() {
                         "openai" => config.openai_model = Some(model.clone()),
                         "gemini" => config.gemini_model = Some(model.clone()),
-                        "kimi-k2.7-code" => config.moonshot_model = Some(model.clone()),
+                        "kimi-code" => config.moonshot_model = Some(model.clone()),
                         "llama" => config.llama_model = Some(model.clone()),
                         "deepseek-v4-flash" => {
                             config.deepseek_flash_model = Some(model.clone())
@@ -640,7 +638,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // still wins over any ambient env var, preserving the
                     // pre-catalog switch semantics.
                     let new_p: Arc<dyn Provider> = match catalog::build_catalog(&config)
-                        .get(provider_type.as_str())
+                        .iter()
+                        .find(|e| e.id == provider_type)
                     {
                         Some(entry) => match entry.default_channel() {
                             Some(channel) => {

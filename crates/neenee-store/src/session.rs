@@ -1750,7 +1750,7 @@ mod tests {
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")
-            .with_attribution("kimi-k2.7-code", "kimi-k2.7-code");
+            .with_attribution("kimi-code", "kimi-for-coding");
         let assistant = Message {
             tool_calls: Some(vec![call.clone()]),
             ..assistant

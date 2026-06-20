@@ -28,7 +28,7 @@ Three capability surfaces matter for tool-using agents:
 | `MockProvider` | no | no | no | `providers.rs` (`MockProvider`) |
 
 The five OpenAI-compatible presets in `OPENAI_PROVIDER_SPECS`
-(`kimi-k2.7-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `qwen`, `glm`) are built by
+(`kimi-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `qwen`, `glm`) are built by
 `OpenAiProviderSpec::build`, which returns an `OpenAiCompatProvider` with its
 `id` field set to the preset identifier. They therefore inherit every
 capability of `OpenAiCompatProvider`. `GeminiProvider` and `LlamaServerProvider`
@@ -51,7 +51,7 @@ table, not hard-coded per struct.
 
 | `default_provider` | Endpoint | API key env | Model env | Default / popular models |
 |--------------------|----------|-------------|-----------|--------------------------|
-| `kimi-k2.7-code` | `https://api.moonshot.ai/v1/chat/completions` | `MOONSHOT_API_KEY` | `MOONSHOT_MODEL` | `kimi-k2.7-code`, `kimi-k2.7-code-highspeed` |
+| `kimi-code` | `https://api.kimi.com/coding/v1/chat/completions` | `MOONSHOT_API_KEY` | `MOONSHOT_MODEL` | `kimi-for-coding` (pinned; auto-updates to latest) |
 | `deepseek-v4-flash` | `https://api.deepseek.com/v1/chat/completions` | `DEEPSEEK_API_KEY` | `DEEPSEEK_FLASH_MODEL` | `deepseek-v4-flash` |
 | `deepseek-v4-pro` | `https://api.deepseek.com/v1/chat/completions` | `DEEPSEEK_API_KEY` | `DEEPSEEK_PRO_MODEL` | `deepseek-v4-pro` |
 | `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `DASHSCOPE_API_KEY` | `QWEN_MODEL` | `qwen-plus`, `qwen-max`, `qwen-turbo`, `qwen-coder-plus` |

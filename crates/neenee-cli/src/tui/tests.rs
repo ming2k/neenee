@@ -40,13 +40,13 @@
         // provider/model so a resumed session that mixed models stays
         // traceable in the transcript.
         let message = Message::new(Role::Assistant, "Hello from kimi")
-            .with_attribution("kimi-k2.7-code", "kimi-k2.7-code");
+            .with_attribution("kimi-code", "kimi-for-coding");
         let restored = transcript_message_from_core(message).unwrap();
-        assert_eq!(restored.provider.as_deref(), Some("kimi-k2.7-code"));
-        assert_eq!(restored.model.as_deref(), Some("kimi-k2.7-code"));
+        assert_eq!(restored.provider.as_deref(), Some("kimi-code"));
+        assert_eq!(restored.model.as_deref(), Some("kimi-for-coding"));
         assert_eq!(
             restored.attribution_label(),
-            Some(("kimi-k2.7-code".to_string(), "kimi-k2.7-code".to_string()))
+            Some(("kimi-code".to_string(), "kimi-for-coding".to_string()))
         );
 
         // A plain user message carries no attribution.

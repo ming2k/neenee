@@ -851,7 +851,11 @@ pub(super) async fn run_app_loop<B: Backend>(
                                     app.editor_target = Some(sol_idx);
                                     app.editor_field = 0;
                                     app.editor_key.clear();
-                                    app.editor_model = solution.model.to_string();
+                                    app.editor_model = initial_editor_model(
+                                        &solution,
+                                        &app.current_provider,
+                                        &app.current_model,
+                                    );
                                     app.input.clear();
                                     app.cursor_position = 0;
                                     app.active_modal = Modal::ModelEditor;
@@ -892,7 +896,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                             app.editor_key.clear();
                             app.editor_model = SOLUTIONS
                                 .get(idx)
-                                .map(|s| s.model.to_string())
+                                .map(|solution| {
+                                    initial_editor_model(
+                                        solution,
+                                        &app.current_provider,
+                                        &app.current_model,
+                                    )
+                                })
                                 .unwrap_or_default();
                             app.input.clear();
                             app.cursor_position = 0;
@@ -2107,6 +2117,17 @@ pub(super) fn extract_selection_text(
         }
         _ => None,
     }
+}
+
+fn initial_editor_model(
+    solution: &crate::tui::ModelSolution,
+    current_provider: &str,
+    current_model: &str,
+) -> String {
+    if current_provider == solution.id {
+        return current_model.to_string();
+    }
+    solution.model.to_string()
 }
 
 pub(super) fn display_status(loop_status: &str, activity: &str, awaiting_permission: bool) -> String {

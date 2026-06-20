@@ -30,7 +30,7 @@ pub mod skillsconfig;
 pub mod tool_call;
 pub mod webconfig;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
-pub use catalog::{Catalog, Channel, ModelEntry, Transport};
+pub use catalog::{Channel, ModelEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo,
     ModelInfo, ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest,

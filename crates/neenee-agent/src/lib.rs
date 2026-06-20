@@ -62,7 +62,7 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Catalog, Channel, CompactionGate, Goal,
+    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal,
     GoalAccountingResult, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus,
     GoalStore, HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig,
     Message, ModelEntry, ModelPickerRow, ModelPickerSnapshot, PatchOp, PermissionDecision,

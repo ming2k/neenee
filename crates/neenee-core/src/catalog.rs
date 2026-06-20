@@ -86,7 +86,7 @@ impl Channel {
 #[derive(Debug, Clone)]
 pub struct ModelEntry {
     /// Canonical stable identifier. Phase 1 reuses the legacy provider id
-    /// (`"gemini"`, `"kimi-k2.7-code"`, ...) so existing config keeps working.
+    /// (`"gemini"`, `"kimi-code"`, ...) so existing config keeps working.
     pub id: String,
     /// Display name (e.g. `"Gemini"`).
     pub name: String,
@@ -117,23 +117,6 @@ impl ModelEntry {
     }
 }
 
-/// The full set of known models, materialized from configuration.
-#[derive(Debug, Clone, Default)]
-pub struct Catalog {
-    /// Insertion order; lookup is linear. The catalog is small (dozens of
-    /// entries at most), so a `Vec` keeps iteration order deterministic for
-    /// display without the overhead of a map.
-    pub entries: Vec<ModelEntry>,
-}
-
-impl Catalog {
-/// Look up an entry by id. Exact match only; preset ids are unique and do
-/// not have alias mappings.
-pub fn get(&self, id: &str) -> Option<&ModelEntry> {
-        self.entries.iter().find(|entry| entry.id == id)
-    }
-}
-
 /// Display metadata for a built-in preset. Returns `(name, description,
 /// context_window)`. Returns `None` for ids with no built-in metadata; the
 /// loader falls back to the raw id as the name in that case.
@@ -143,8 +126,8 @@ pub fn get(&self, id: &str) -> Option<&ModelEntry> {
 /// the migration is intentional and documented.
 pub fn builtin_metadata(id: &str) -> Option<(&'static str, &'static str, usize)> {
     let (name, description, context_window) = match id {
-        "kimi-k2.7-code" => (
-            "Kimi K2.7 Code",
+        "kimi-code" => (
+            "Kimi Code",
             "Moonshot AI coding model",
             256_000,
         ),
@@ -167,34 +150,36 @@ mod tests {
 
     #[test]
     fn catalog_lookup_is_exact_match() {
-        let catalog = Catalog {
-            entries: vec![ModelEntry {
-                id: "deepseek-v4-flash".to_string(),
-                name: "DeepSeek V4 Flash".to_string(),
-                description: String::new(),
-                context_window: 0,
-                channels: vec![Channel {
-                    id: "default".to_string(),
-                    label: "DeepSeek V4 Flash".to_string(),
-                    transport: Transport::OpenAiCompat {
-                        base_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
-                        user_agent: "agent".to_string(),
-                    },
-                    api_key: "k".to_string(),
-                    model: "deepseek-v4-flash".to_string(),
-                }],
-                default_channel: 0,
-                builtin: true,
+        let entries = vec![ModelEntry {
+            id: "deepseek-v4-flash".to_string(),
+            name: "DeepSeek V4 Flash".to_string(),
+            description: String::new(),
+            context_window: 0,
+            channels: vec![Channel {
+                id: "default".to_string(),
+                label: "DeepSeek V4 Flash".to_string(),
+                transport: Transport::OpenAiCompat {
+                    base_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+                    user_agent: "agent".to_string(),
+                },
+                api_key: "k".to_string(),
+                model: "deepseek-v4-flash".to_string(),
             }],
-        };
+            default_channel: 0,
+            builtin: true,
+        }];
         assert_eq!(
-            catalog.get("deepseek-v4-flash").expect("exact id").id,
+            entries
+                .iter()
+                .find(|e| e.id == "deepseek-v4-flash")
+                .expect("exact id")
+                .id,
             "deepseek-v4-flash"
         );
         // No alias mapping: stale ids do not resolve.
-        assert!(catalog.get("deepseek").is_none());
-        assert!(catalog.get("deepseek-flash").is_none());
-        assert!(catalog.get("unknown").is_none());
+        assert!(entries.iter().find(|e| e.id == "deepseek").is_none());
+        assert!(entries.iter().find(|e| e.id == "deepseek-flash").is_none());
+        assert!(entries.iter().find(|e| e.id == "unknown").is_none());
     }
 
     #[test]
@@ -238,7 +223,7 @@ mod tests {
     #[test]
     fn builtin_metadata_covers_every_preset() {
         for id in [
-            "kimi-k2.7-code",
+            "kimi-code",
             "openai",
             "gemini",
             "deepseek-v4-flash",

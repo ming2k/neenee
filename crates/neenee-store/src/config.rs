@@ -120,9 +120,12 @@ pub struct Config {
     // Llama (local)
     pub llama_base_url: Option<String>,
     pub llama_model: Option<String>,
-    // Moonshot / Kimi K2.7 Code (official API)
+    // Moonshot / Kimi Code (membership platform). `kimi-code` and its
+    // `kimi-code-plan` sibling route share one API key (mirroring the
+    // DeepSeek flash/pro split) but carry independent model overrides.
     pub moonshot_api_key: Option<String>,
     pub moonshot_model: Option<String>,
+    pub moonshot_plan_model: Option<String>,
     // DeepSeek V4 (Flash + Pro); shared API key.
     pub deepseek_api_key: Option<String>,
     pub deepseek_flash_model: Option<String>,
@@ -179,7 +182,8 @@ impl Default for Config {
             llama_base_url: Some("http://localhost:8080".to_string()),
             llama_model: Some("local-model".to_string()),
             moonshot_api_key: None,
-            moonshot_model: Some("kimi-k2.7-code".to_string()),
+            moonshot_model: Some("kimi-for-coding".to_string()),
+            moonshot_plan_model: Some("kimi-for-coding".to_string()),
             deepseek_api_key: None,
             deepseek_flash_model: Some("deepseek-v4-flash".to_string()),
             deepseek_pro_model: Some("deepseek-v4-pro".to_string()),

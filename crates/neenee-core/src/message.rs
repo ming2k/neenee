@@ -38,13 +38,13 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImagePart>>,
     /// Identifier of the provider/solution that produced this assistant
-    /// message (e.g. `"kimi-k2.7-code"`, `"gemini"`). Stamped by the harness so a
+    /// message (e.g. `"kimi-code"`, `"gemini"`). Stamped by the harness so a
     /// session that mixes multiple models stays traceable after resume. Other
     /// roles leave this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Model identifier that produced this assistant message (e.g.
-    /// `"kimi-k2.7-code"`). Companion to [`Message::provider`].
+    /// `"kimi-code"`). Companion to [`Message::provider`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default)]

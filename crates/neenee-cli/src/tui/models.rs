@@ -54,9 +54,9 @@ pub(crate) fn model_display_name(provider: &str, model: &str) -> String {
 
 pub(crate) const SOLUTIONS: &[ModelSolution] = &[
     ModelSolution {
-        id: "kimi-k2.7-code",
-        name: "Kimi K2.7 Code",
-        model: "kimi-k2.7-code",
+        id: "kimi-code",
+        name: "Kimi Code",
+        model: "kimi-for-coding",
         description: "Moonshot AI coding model",
         context_window: 256_000,
     },
@@ -172,8 +172,8 @@ mod tests {
             "DeepSeek V4 Pro"
         );
         assert_eq!(
-            model_display_name("kimi-k2.7-code", "kimi-k2.7-code"),
-            "Kimi K2.7 Code"
+            model_display_name("kimi-code", "kimi-for-coding"),
+            "Kimi Code"
         );
         assert_eq!(
             model_display_name("gemini", "gemini-2.5-flash"),

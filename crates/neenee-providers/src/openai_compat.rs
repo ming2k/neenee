@@ -19,7 +19,7 @@ pub struct OpenAiCompatProvider {
     /// Stable provider/solution id surfaced via [`Provider::provider_id`] so
     /// assistant messages can be attributed. Defaults to `"openai"`; the
     /// OpenAI-compatible registry overrides it to the preset id (e.g.
-    /// `"kimi-k2.7-code"`) in [`crate::OpenAiProviderSpec::build`].
+    /// `"kimi-code"`) in [`crate::OpenAiProviderSpec::build`].
     pub id: String,
     tools: Mutex<Option<Vec<Value>>>,
 }
