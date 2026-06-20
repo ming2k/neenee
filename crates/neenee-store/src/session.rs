@@ -77,6 +77,15 @@ struct SessionData {
     /// during the one-shot legacy migration. Legacy snapshots missing the
     /// field default to the current cwd.
     project_root: PathBuf,
+    /// Path to the plan file most recently approved via `plan_exit`. Mirrored
+    /// from `Agent::active_plan_path` so resume restores the Build-mode
+    /// "you are implementing X" hint. `None` for legacy snapshots.
+    #[serde(default)]
+    active_plan_path: Option<PathBuf>,
+    /// Live plan progress snapshot, mirrored from `Agent::plan_progress`.
+    /// Drives the sticky panel above the input box on resume.
+    #[serde(default)]
+    plan_progress: Option<neenee_core::PlanProgress>,
     /// Schema version of this session file. Migrations increment this and are
     /// applied lazily on load.
     schema_version: u32,
@@ -99,6 +108,8 @@ impl Default for SessionData {
             loop_checkpoint: None,
             compaction: None,
             project_root: default_project_root(),
+            active_plan_path: None,
+            plan_progress: None,
             schema_version: CURRENT_SCHEMA_VERSION,
             checksum: None,
         }
@@ -275,6 +286,12 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.compaction = Some(checkpoint.clone());
             }
             SessionEvent::Archived { messages } => data.archived_messages.extend(messages.clone()),
+            SessionEvent::ActivePlanPathSet { path } => {
+                data.active_plan_path = path.clone();
+            }
+            SessionEvent::PlanProgressSet { progress } => {
+                data.plan_progress = progress.clone();
+            }
             SessionEvent::Reset { id } => {
                 let project_root = data.project_root.clone();
                 let schema_version = data.schema_version;
@@ -329,6 +346,24 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             timestamp: data.updated_at,
             event: SessionEvent::CheckpointSet {
                 checkpoint: Some(checkpoint.clone()),
+            },
+        });
+    }
+    if let Some(plan_path) = &data.active_plan_path {
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::ActivePlanPathSet {
+                path: Some(plan_path.clone()),
+            },
+        });
+    }
+    if let Some(progress) = &data.plan_progress {
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::PlanProgressSet {
+                progress: Some(progress.clone()),
             },
         });
     }
@@ -508,6 +543,50 @@ impl SessionStore {
 
     pub async fn checkpoint(&self) -> Option<LoopCheckpoint> {
         self.data.lock().await.loop_checkpoint.clone()
+    }
+
+    /// Path to the plan file most recently approved via `plan_exit`. Mirrored
+    /// from `Agent::active_plan_path` so a resumed session restores the
+    /// Build-mode "you are implementing X" hint.
+    pub async fn active_plan_path(&self) -> Option<PathBuf> {
+        self.data.lock().await.active_plan_path.clone()
+    }
+
+    /// Replace the active plan path. Pass `None` to clear (used when the
+    /// agent re-enters Plan mode). Persists both the snapshot and the event
+    /// log so resume restores the same path.
+    pub async fn set_active_plan_path(
+        &self,
+        path: Option<PathBuf>,
+    ) -> Result<(), String> {
+        let mut data = self.data.lock().await;
+        data.active_plan_path = path.clone();
+        data.updated_at = unix_timestamp();
+        ensure_event_log_started(&self.event_log, &data)?;
+        self.event_log
+            .append(SessionEvent::ActivePlanPathSet { path })?;
+        self.persist(&data)
+    }
+
+    /// Live plan progress snapshot, mirrored from `Agent::plan_progress` so
+    /// resume restores the sticky panel above the input box.
+    pub async fn plan_progress(&self) -> Option<neenee_core::PlanProgress> {
+        self.data.lock().await.plan_progress.clone()
+    }
+
+    /// Replace the plan progress snapshot. Persists both the snapshot and
+    /// the event log so resume restores the same picture.
+    pub async fn set_plan_progress(
+        &self,
+        progress: Option<neenee_core::PlanProgress>,
+    ) -> Result<(), String> {
+        let mut data = self.data.lock().await;
+        data.plan_progress = progress.clone();
+        data.updated_at = unix_timestamp();
+        ensure_event_log_started(&self.event_log, &data)?;
+        self.event_log
+            .append(SessionEvent::PlanProgressSet { progress })?;
+        self.persist(&data)
     }
 
     pub async fn compaction(&self) -> Option<CompactionCheckpoint> {
@@ -2019,6 +2098,54 @@ mod tests {
         let sessions = store.list().await.unwrap();
         assert_eq!(sessions.len(), 2);
         assert!(sessions.iter().any(|item| item.active));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn plan_state_round_trips_through_disk() {
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-plan-state-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore {
+            project_root: directory.clone(),
+            path: path.clone(),
+            archive_dir: directory.join("sessions"),
+            event_log: EventLog::new(path.with_extension("jsonl")),
+            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
+            data: Mutex::new(SessionData::default()),
+        };
+        assert_eq!(store.active_plan_path().await, None);
+        assert_eq!(store.plan_progress().await, None);
+
+        let plan = PathBuf::from(".neenee/plans/feature-x.md");
+        store.set_active_plan_path(Some(plan.clone())).await.unwrap();
+
+        let progress = neenee_core::PlanProgress::from_markdown(
+            plan.clone(),
+            "## Summary\n## Key Changes\n",
+        );
+        store
+            .set_plan_progress(Some(progress.clone()))
+            .await
+            .unwrap();
+
+        // Reload from disk and confirm both values round-trip.
+        let reloaded = SessionStore::for_path(path.clone());
+        assert_eq!(
+            reloaded.active_plan_path().await.as_deref(),
+            Some(plan.as_path()),
+            "active plan path should round-trip through disk"
+        );
+        let loaded_progress = reloaded.plan_progress().await.expect("progress persisted");
+        assert_eq!(loaded_progress.path, plan);
+        assert_eq!(loaded_progress.sections.len(), 2);
+
+        // Clearing also persists.
+        reloaded.set_active_plan_path(None).await.unwrap();
+        reloaded.set_plan_progress(None).await.unwrap();
+        assert_eq!(reloaded.active_plan_path().await, None);
+        assert_eq!(reloaded.plan_progress().await, None);
+
         let _ = fs::remove_dir_all(directory);
     }
 

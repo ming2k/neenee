@@ -494,6 +494,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     refresh_agent_goal(&agent, &goal_service, &thread_id).await;
 
+    // Restore the active plan path + plan progress from the persisted
+    // session so resume re-enters Build mode with the "you are implementing
+    // X" hint intact and the sticky panel showing the same sections. If the
+    // session was in Plan mode when last saved both will be None (plan_enter
+    // clears them), so there is nothing to restore.
+    if let Some(plan_path) = session.active_plan_path().await {
+        agent.set_active_plan_path(Some(plan_path));
+    }
+    if let Some(progress) = session.plan_progress().await {
+        agent.set_plan_progress(Some(progress));
+    }
+
     // Load history
     let input_history = Config::load_history();
 
@@ -795,6 +807,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 };
                                 agent.set_mode(new_mode);
+                                // `set_mode(Plan)` clears the active plan
+                                // path and progress in-memory; mirror that
+                                // to the session so a resume after a manual
+                                // mode switch does not resurrect a stale
+                                // plan hint or stale progress.
+                                let agent_plan = agent.active_plan_path();
+                                let stored_plan = session.active_plan_path().await;
+                                if agent_plan != stored_plan {
+                                    if let Err(err) =
+                                        session.set_active_plan_path(agent_plan).await
+                                    {
+                                        let _ = resp_tx.send(AgentResponse::Error(format!(
+                                            "could not persist plan path: {err}"
+                                        )));
+                                    }
+                                }
+                                let agent_progress = agent.plan_progress();
+                                let stored_progress = session.plan_progress().await;
+                                if agent_progress != stored_progress {
+                                    if let Err(err) =
+                                        session.set_plan_progress(agent_progress).await
+                                    {
+                                        let _ = resp_tx.send(AgentResponse::Error(format!(
+                                            "could not persist plan progress: {err}"
+                                        )));
+                                    }
+                                }
                                 let _ = resp_tx.send(AgentResponse::Text(format!(
                                     "Mode changed to: {:?}",
                                     new_mode

@@ -462,6 +462,155 @@ async fn plan_mode_blocks_tools_unless_explicitly_read_only() {
 }
 
 #[tokio::test]
+async fn plan_exit_asks_user_and_implements_when_approved() {
+    // Write a real plan file so plan_exit can read its content and seed
+    // PlanProgress for the sticky panel.
+    let cwd = std::env::current_dir().unwrap();
+    let plans_dir = cwd.join(".neenee/plans");
+    std::fs::create_dir_all(&plans_dir).unwrap();
+    let plan_path = plans_dir.join("approval-approve.md");
+    std::fs::write(&plan_path, "# Approve Me\n\n## Summary\n- step 1\n- step 2").unwrap();
+
+    let agent = Arc::new(Agent::new(
+        Arc::new(TestProvider),
+        Vec::new(),
+        AgentMode::Plan,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    ));
+
+    let relative = ".neenee/plans/approval-approve.md";
+    let arguments = format!(
+        "{{\"plan_path\":\"{}\"}}",
+        relative.replace('\\', "\\\\")
+    );
+    let call = ToolCall {
+        id: "call".to_string(),
+        name: "plan_exit".to_string(),
+        arguments,
+    };
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task_agent = agent.clone();
+    let task = tokio::spawn(async move {
+        task_agent
+            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
+                let _ = event_tx.send(event);
+            })
+            .await
+    });
+
+    // First event is the approval prompt.
+    let request = match event_rx.recv().await.unwrap() {
+        AgentEvent::UserQuestionRequest(request) => request,
+        event => panic!("unexpected event: {:?}", event),
+    };
+    assert!(!task.is_finished(), "task should block on user reply");
+    assert!(
+        request.questions[0]
+            .options
+            .iter()
+            .any(|opt| opt.label == "Approve"),
+        "approval option missing"
+    );
+
+    assert!(agent.reply_user_question(
+        &request.id,
+        vec![vec!["Approve".to_string()]],
+    ));
+
+    let output = task.await.unwrap().unwrap().to_text();
+    assert!(output.contains("Plan approved."), "{}", output);
+    assert!(output.contains("step 1"), "plan content echoed: {}", output);
+    assert_eq!(agent.get_mode(), AgentMode::Build);
+    assert_eq!(
+        agent.active_plan_path(),
+        Some(std::path::PathBuf::from(relative))
+    );
+    // Plan progress is seeded from the approved plan's `## Summary` heading.
+    let progress = agent.plan_progress().expect("progress seeded");
+    assert!(
+        progress.sections.iter().any(|s| s.name == "Summary"),
+        "sections parsed from plan: {:?}",
+        progress.sections
+    );
+}
+
+#[tokio::test]
+async fn plan_exit_keeps_planning_when_rejected() {
+    let agent = Arc::new(Agent::new(
+        Arc::new(TestProvider),
+        Vec::new(),
+        AgentMode::Plan,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    ));
+    let call = ToolCall {
+        id: "call".to_string(),
+        name: "plan_exit".to_string(),
+        arguments: r#"{"plan_path":".neenee/plans/missing-but-ok.md"}"#
+            .to_string(),
+    };
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task_agent = agent.clone();
+    let task = tokio::spawn(async move {
+        task_agent
+            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
+                let _ = event_tx.send(event);
+            })
+            .await
+    });
+
+    let request = match event_rx.recv().await.unwrap() {
+        AgentEvent::UserQuestionRequest(request) => request,
+        event => panic!("unexpected event: {:?}", event),
+    };
+
+    // User picks "Keep planning".
+    assert!(agent.reply_user_question(
+        &request.id,
+        vec![vec!["Keep planning".to_string()]],
+    ));
+
+    let output = task.await.unwrap().unwrap().to_text();
+    assert!(output.contains("User wants to keep planning"), "{}", output);
+    assert_eq!(agent.get_mode(), AgentMode::Plan);
+    assert_eq!(agent.active_plan_path(), None);
+    assert_eq!(agent.plan_progress(), None);
+}
+
+#[tokio::test]
+async fn manual_mode_switch_to_plan_clears_plan_state() {
+    let agent = Agent::new(
+        Arc::new(TestProvider),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_active_plan_path(Some(std::path::PathBuf::from(
+        ".neenee/plans/was-here.md",
+    )));
+    agent.set_plan_progress(Some(plan::PlanProgress::from_markdown(
+        std::path::PathBuf::from(".neenee/plans/was-here.md"),
+        "## X\n",
+    )));
+    assert!(agent.active_plan_path().is_some());
+    assert!(agent.plan_progress().is_some());
+
+    // Manual /mode plan clears both (mirrors plan_enter's behavior).
+    agent.set_mode(AgentMode::Plan);
+    assert_eq!(agent.active_plan_path(), None);
+    assert_eq!(agent.plan_progress(), None);
+
+    // Switching back to Build does not resurrect them.
+    agent.set_mode(AgentMode::Build);
+    assert_eq!(agent.active_plan_path(), None);
+    assert_eq!(agent.plan_progress(), None);
+}
+
+#[tokio::test]
 async fn write_tool_waits_for_permission_and_always_is_cached() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),

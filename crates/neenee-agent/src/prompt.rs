@@ -17,21 +17,77 @@ impl Agent {
         ];
 
         parts.push(
-            "Plan workflow: in Build mode, if a request is complex, spans multiple files, or would \
-             benefit from designing first, call the plan_enter tool to switch to Plan mode. In Plan \
-             mode, research with read-only tools, write the plan to .neenee/plans/<name>.md (the \
-             only location you may write while planning), then call plan_exit to switch back to \
-             Build mode and implement the plan. Do not enter Plan mode for simple tasks or when the \
-             user wants immediate implementation."
+            "Plan workflow: in Build mode, if a request is complex, spans multiple files, has \
+             unclear requirements, or would benefit from designing first, call the plan_enter \
+             tool to switch to Plan mode. In Plan mode, research with read-only tools, write \
+             the plan to .neenee/plans/<name>.md (the only location you may write while \
+             planning), then call plan_exit to switch back to Build mode and implement the \
+             plan. The user must approve plan_exit before the mode flips, so do not call it \
+             until the plan is genuinely ready. Do not enter Plan mode for simple tasks or \
+             when the user wants immediate implementation."
                 .to_string(),
         );
 
+        // Surface the active plan path in Build mode so the model follows
+        // the approved plan without re-reading the file each turn, and tell
+        // it about the per-section progress tool.
+        if mode == AgentMode::Build {
+            if let Some(path) = self.active_plan_path() {
+                let display = path.display().to_string();
+                parts.push(format!(
+                    "You are implementing the approved plan at {display}. Follow it step by \
+                     step. If you discover the plan is wrong or incomplete, pause and tell \
+                     the user rather than silently deviating. You may re-enter Plan mode by \
+                     calling plan_enter if a redesign is required; that clears this plan.\n\n\
+                     Use the update_plan_progress tool to mark each `##` section as you work: \
+                     in_progress when you start it, done when it is complete. The user sees a \
+                     sticky panel with section status, so keeping it current is part of the \
+                     job. Before declaring the work complete, spawn an independent verifier \
+                     via the `task` tool with a prompt like: 'Re-read the plan at {display}. \
+                     Walk through each section and report PASS, PARTIAL, or FAIL with \
+                     concrete evidence.' The verifier has a clean context, so it is not \
+                     biased by what you wrote.",
+                    display = display,
+                ));
+            }
+        }
+
         if mode == AgentMode::Plan {
             parts.push(
-                "You are currently in Plan mode. You may only use read-only tools, except that you \
-                 may write files under .neenee/plans/. When the plan is written and finalized, call \
-                 plan_exit to return to Build mode and implement it; do not implement edits while \
-                 in Plan mode."
+                "You are currently in Plan mode. Plan mode is a read-only phase: you may use \
+                 any read-only tool freely (read_file, grep, glob, list_dir, task, etc.) and \
+                 you may write files ONLY under .neenee/plans/. Any other write — including \
+                 edits to source files, running formatters that rewrite files, or shell \
+                 commands whose purpose is to carry out the plan — is blocked and reported \
+                 as an error. Tests, builds, and dry-run commands that write only to caches \
+                 or build artifacts are allowed.\n\n\
+                 Work in three phases:\n\n\
+                 Phase 1 — Ground in the environment. Before asking the user anything, run at \
+                 least one targeted exploration pass (search files, read entrypoints, \
+                 inspect configs/types). Eliminate unknowns you can derive from the repo.\n\n\
+                 Phase 2 — Clarify intent. For each remaining unknown, decide whether it is \
+                 discoverable (answerable from the repo or system: keep exploring) or a \
+                 preference/tradeoff (only answerable by the user: ask via ask_user, with \
+                 2–4 concrete options and a recommended default). Bias toward questions over \
+                 guessing; never ask about something you could read.\n\n\
+                 Phase 3 — Write a decision-complete plan. 'Decision complete' means the \
+                 implementer does not need to make any new design choices — only mechanical \
+                 execution. Use the plan template: Summary, Key Changes (grouped by \
+                 subsystem, not file-by-file), Test Plan, Assumptions. Keep it concise by \
+                 default; expand only if the user asks for more detail. Write the plan to \
+                 .neenee/plans/<name>.md using the write_file tool — that path is the only \
+                 writable target in Plan mode.\n\n\
+                 When you present the official plan, wrap the same content in \
+                 <proposed_plan>...</proposed_plan> tags (on their own lines; markdown inside) \
+                 so the TUI can render it as a distinct card. Emit at most one \
+                 <proposed_plan> block per turn, and only when you are presenting a complete \
+                 spec. The block is a presentation aid — it does not replace writing the \
+                 plan to disk or calling plan_exit.\n\n\
+                 When the plan is decision-complete, call plan_exit with the plan_path. The \
+                 user will be asked to approve; if they reject, refine the plan based on \
+                 their feedback and call plan_exit again. Do NOT use ask_user to ask 'is \
+                 this plan okay?' — plan_exit is exactly that approval gate. Do not \
+                 implement edits while in Plan mode."
                     .to_string(),
             );
         }

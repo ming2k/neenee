@@ -539,6 +539,25 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         ));
     }
 
+    // Sync the agent's plan state to the session so resume restores both the
+    // "you are implementing X" hint and the sticky panel's sections. Each
+    // value is compared against the session's current value to skip the
+    // write on turns where nothing changed (the common case).
+    let agent_plan = agent.active_plan_path();
+    let stored_plan = session.active_plan_path().await;
+    if agent_plan != stored_plan {
+        if let Err(err) = session.set_active_plan_path(agent_plan).await {
+            tracing::warn!(error = %err, "could not persist active plan path");
+        }
+    }
+    let agent_progress = agent.plan_progress();
+    let stored_progress = session.plan_progress().await;
+    if agent_progress != stored_progress {
+        if let Err(err) = session.set_plan_progress(agent_progress).await {
+            tracing::warn!(error = %err, "could not persist plan progress");
+        }
+    }
+
     Ok(completed)
 }
 

@@ -48,6 +48,16 @@ pub enum SessionEvent {
     /// was recorded. Any archived messages are preserved by a preceding
     /// `Archived` event.
     Forked { id: String, parent_id: String },
+    /// The active plan path (set when `plan_exit` is approved, cleared when
+    /// the agent re-enters Plan mode). Mirrored from `Agent::active_plan_path`
+    /// so resume restores the Build-mode "you are implementing X" hint.
+    ActivePlanPathSet { path: Option<std::path::PathBuf> },
+    /// The plan progress snapshot changed (set by `plan_exit`, mutated by
+    /// `update_plan_progress`, cleared by `plan_enter`). Mirrored from
+    /// `Agent::plan_progress` so resume restores the sticky panel.
+    PlanProgressSet {
+        progress: Option<neenee_core::PlanProgress>,
+    },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and
