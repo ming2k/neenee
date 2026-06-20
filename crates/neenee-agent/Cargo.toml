@@ -1,11 +1,11 @@
 [package]
-name = "neenee-harness"
+name = "neenee-agent"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 neenee-core = { path = "../neenee-core" }
-neenee-app = { path = "../neenee-app" }
+neenee-store = { path = "../neenee-store" }
 neenee-providers = { path = "../neenee-providers" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

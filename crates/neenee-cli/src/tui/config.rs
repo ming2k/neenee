@@ -1,6 +1,6 @@
 //! TUI presentation policy on top of the data-layer `[tui]` table.
 //!
-//! The serialisable data struct ([`TuiConfig`]) lives in `neenee-app::config`
+//! The serialisable data struct ([`TuiConfig`]) lives in `neenee-store::config`
 //! so every frontend (TUI, future GUI) can read the same `config.toml`
 //! without cross-frontend dependencies. This module re-exports that struct
 //! for TUI-internal convenience and layers the **presenter-aware** policy on
@@ -10,7 +10,7 @@
 
 use crate::tui::render::tools::presenter_for;
 
-pub use neenee_app::config::TuiConfig;
+pub use neenee_store::config::TuiConfig;
 
 /// Effective default-expand state for a tool step. An explicit config entry
 /// wins; otherwise the presenter's built-in default applies.
@@ -27,7 +27,7 @@ pub fn tool_default_expanded(config: &TuiConfig, name: &str) -> bool {
 pub fn thinking_default_expanded(config: &TuiConfig) -> bool {
     config
         .default_expanded
-        .get(neenee_app::config::THINKING_KEY)
+        .get(neenee_store::config::THINKING_KEY)
         .copied()
         .unwrap_or(false)
 }
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn thinking_defaults_collapsed_and_is_overridable() {
         assert!(!thinking_default_expanded(&TuiConfig::default()));
-        let cfg = config(&[(neenee_app::config::THINKING_KEY, true)]);
+        let cfg = config(&[(neenee_store::config::THINKING_KEY, true)]);
         assert!(thinking_default_expanded(&cfg));
     }
 

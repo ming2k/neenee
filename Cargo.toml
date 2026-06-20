@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "crates/neenee-core",
-    "crates/neenee-app",
+    "crates/neenee-store",
     "crates/neenee-providers",
     "crates/neenee-tools",
-    "crates/neenee-harness",
+    "crates/neenee-agent",
     "crates/neenee-cli",
 ]
 resolver = "2"

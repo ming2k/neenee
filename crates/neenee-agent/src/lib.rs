@@ -1,5 +1,5 @@
 //! The orchestration layer between the pure domain (`neenee-core`) and the
-//! application services (`neenee-app`) on one side, and the frontends on the
+//! application services (`neenee-store`) on one side, and the frontends on the
 //! other.
 //!
 //! # What lives here
@@ -21,17 +21,36 @@
 //!
 //! # Dependency posture
 //!
-//! `neenee-harness` depends on `neenee-core` (domain vocabulary) and
-//! `neenee-app` (durable state: `SessionStore`, `Config`, `EmbeddingStore`).
-//! It speaks to providers and tools through the core `Provider` / `Tool`
-//! traits, so it does **not** depend on `neenee-providers` or `neenee-tools`
-//! at lib build time — concrete provider/tool instances are constructed by
-//! the binary, which depends on everything. (`neenee-tools` depends on
-//! `neenee-harness` for `Agent` because `TaskTool` spawns sub-agents; the
-//! relationship is one-way, no cycle.)
+//! `neenee-agent` is the wiring layer: it depends on `neenee-core`
+//! (domain vocabulary), `neenee-store` (durable state: `SessionStore`,
+//! `Config`, `EmbeddingStore`), and `neenee-providers` (the
+//! `build_provider_for_channel` factory plus the user-agent / spec
+//! constants the catalog uses when constructing concrete impls). It
+//! speaks to tools through the core `Tool` trait, so it does **not**
+//! depend on `neenee-tools` at lib build time — concrete tool instances
+//! are constructed by the binary, which depends on everything.
+//! (`neenee-tools` is a *dev*-dependency so the
+//! `ask_user_tool_blocks_and_returns_selected_answers` integration test
+//! can construct a real `AskUserTool`; dev-deps do not form cycles.)
+//!
+//! ## Why catalog and TaskTool live here (not in store / tools)
+//!
+//! Both got relocated here from their intuitive homes to keep the
+//! dependency graph strictly layered (see ADR-0005):
+//!
+//! - **`catalog`** builds concrete `Provider` impls from a `Config`. It
+//!   used to live in `neenee-store`, which forced store to depend on
+//!   `neenee-providers` — an inversion, since store is otherwise a peer
+//!   of providers. The catalog is fundamentally a factory consumed by
+//!   orchestration, so it lives where orchestration lives.
+//! - **`TaskTool`** spawns sub-agents via `Agent::new`. It used to live
+//!   in `neenee-tools`, which forced tools to depend on this crate —
+//!   another inversion, since tools are below the agent layer. The
+//!   task tool is fundamentally an orchestration primitive that
+//!   happens to satisfy the `Tool` trait, so it lives here too.
 //!
 //! Everything `neenee-core` exports is re-exported here so consumers can
-//! `use neenee_harness::*` and get the full domain vocabulary alongside the
+//! `use neenee_agent::*` and get the full domain vocabulary alongside the
 //! orchestration API.
 
 pub use neenee_core::*;

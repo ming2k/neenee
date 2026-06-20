@@ -2,8 +2,8 @@
 //!
 //! Lives in `neenee-core` for the same reason [`crate::WebSearchConfig`] and
 //! [`crate::McpServerConfig`] do: the app-layer `Config` owns the `[skills]`
-//! table and the loader (in `neenee-harness::skills`) needs to read it, and
-//! `neenee-app` does not depend on `neenee-harness`.
+//! table and the loader (in `neenee-agent::skills`) needs to read it, and
+//! `neenee-store` does not depend on `neenee-agent`.
 
 use serde::{Deserialize, Serialize};
 

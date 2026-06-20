@@ -1,9 +1,9 @@
 use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
-use neenee_harness::skills::{
+use neenee_agent::skills::{
     tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool},
     SkillRegistry,
 };
-use neenee_harness::TaskTool;
+use neenee_agent::TaskTool;
 use neenee_tools::{
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
@@ -14,9 +14,9 @@ use neenee_core::{
     AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore, Message,
     Provider, SessionOverview, Tool,
 };
-use neenee_harness::Agent;
-use neenee_harness::catalog;
-use neenee_harness::orchestration::{
+use neenee_agent::Agent;
+use neenee_agent::catalog;
+use neenee_agent::orchestration::{
     compact_turn_history, emit_goal_updated, refresh_agent_goal, send_compaction,
     send_harness_state, start_goal_loop, start_interactive_turn, CompactionSettings,
     InteractiveTurnContext, LoopRunContext, MidTurnCompactionGate, ProxyProvider,
@@ -28,9 +28,9 @@ use neenee_core::{
     ProviderStreamEvent, TurnTimer, GOAL_COMPLETE_MARKER,
 };
 #[cfg(test)]
-use neenee_harness::orchestration::{self, TurnContext, execute_turn, retry_delay_ms};
+use neenee_agent::orchestration::{self, TurnContext, execute_turn, retry_delay_ms};
 use neenee_providers::MockProvider;
-use neenee_app::{
+use neenee_store::{
     embedding, lock, model_usage, paths, config::Config, search_tool::SearchHistoryTool,
     session::{self, discard_trailing_loop_prompts, SessionStore},
 };

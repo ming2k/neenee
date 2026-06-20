@@ -1,6 +1,6 @@
 //! `TaskTool` — spawns a read-only exploration sub-agent for research subtasks.
 //!
-//! Lives in `neenee-harness` (not `neenee-tools`) because it constructs an
+//! Lives in `neenee-agent` (not `neenee-tools`) because it constructs an
 //! [`crate::Agent`] internally: spawning a sub-agent is an orchestration
 //! concern, not a domain-tool concern. The other tools (Bash/Read/Web/…)
 //! stay in `neenee-tools` and remain pure trait implementations.

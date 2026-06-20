@@ -1428,26 +1428,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "neenee-app"
+name = "neenee-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
- "crc32c",
- "directories",
  "dirs",
  "futures",
- "hex",
- "libc",
+ "glob",
  "neenee-core",
  "neenee-providers",
+ "neenee-store",
+ "neenee-tools",
+ "reqwest",
  "serde",
  "serde_json",
- "sha2",
+ "serde_yaml",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -1460,10 +1461,10 @@ dependencies = [
  "dirs",
  "futures",
  "insta",
- "neenee-app",
+ "neenee-agent",
  "neenee-core",
- "neenee-harness",
  "neenee-providers",
+ "neenee-store",
  "neenee-tools",
  "pulldown-cmark",
  "ratatui",
@@ -1506,30 +1507,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "neenee-harness"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dirs",
- "futures",
- "glob",
- "neenee-app",
- "neenee-core",
- "neenee-providers",
- "neenee-tools",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "neenee-providers"
 version = "0.1.0"
 dependencies = [
@@ -1540,6 +1517,29 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "neenee-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "crc32c",
+ "directories",
+ "dirs",
+ "futures",
+ "hex",
+ "libc",
+ "neenee-core",
+ "neenee-providers",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]

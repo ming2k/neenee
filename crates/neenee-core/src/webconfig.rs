@@ -2,7 +2,7 @@
 //!
 //! Lives in `neenee-core` (not `neenee-tools`) because both the app-layer
 //! `Config` (which owns the `[websearch]` table) and the tool implementations
-//! need the type, and we do not want `neenee-app` to depend on
+//! need the type, and we do not want `neenee-store` to depend on
 //! `neenee-tools`. It is plain serialisable data; the tool implementations
 //! live in `neenee-tools::web` and read this struct as input.
 

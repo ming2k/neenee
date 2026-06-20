@@ -28,7 +28,7 @@ use neenee_core::{
     HarnessSnapshot, ImagePart, Message, Provider, ProviderStreamEvent, Role, TurnTimer,
     GOAL_COMPLETE_MARKER,
 };
-use neenee_app::{
+use neenee_store::{
     session::{
         estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision,
         CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
