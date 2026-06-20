@@ -8,8 +8,8 @@
 //! directory (skills, commands, agents) and is reused by both the
 //! `init_config` tool and the `/init` slash command.
 
-use neenee_core::{Tool, ToolAccess};
 use async_trait::async_trait;
+use neenee_core::{Tool, ToolAccess};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 

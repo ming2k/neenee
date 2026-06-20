@@ -86,7 +86,7 @@ impl Channel {
 #[derive(Debug, Clone)]
 pub struct ModelEntry {
     /// Canonical stable identifier. Phase 1 reuses the legacy provider id
-    /// (`"gemini"`, `"kimi-code"`, ...) so existing config keeps working.
+    /// (`"gemini"`, `"kimi-k2.7-code"`, ...) so existing config keeps working.
     pub id: String,
     /// Display name (e.g. `"Gemini"`).
     pub name: String,
@@ -127,25 +127,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Look up an entry by id. Legacy aliases (e.g. `"deepseek"` →
-    /// `"deepseek-flash"`) are resolved by [`canonical_id`], preserving
-    /// pre-split config.
-    pub fn get(&self, id: &str) -> Option<&ModelEntry> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == canonical_id(id))
-    }
-}
-
-/// Canonical model id, resolving legacy aliases so that `"deepseek"` (the
-/// pre-split id) maps to `"deepseek-flash"`. This is the single place that
-/// knows about id aliases; both catalog lookup and usage telemetry go through
-/// it so a legacy `default_provider = "deepseek"` records and resolves
-/// consistently with the canonical entry.
-pub fn canonical_id(id: &str) -> &str {
-    match id {
-        "deepseek" => "deepseek-flash",
-        other => other,
+/// Look up an entry by id. Exact match only; preset ids are unique and do
+/// not have alias mappings.
+pub fn get(&self, id: &str) -> Option<&ModelEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
     }
 }
 
@@ -158,17 +143,17 @@ pub fn canonical_id(id: &str) -> &str {
 /// the migration is intentional and documented.
 pub fn builtin_metadata(id: &str) -> Option<(&'static str, &'static str, usize)> {
     let (name, description, context_window) = match id {
-        "kimi-code" => (
-            "Kimi Code",
-            "Kimi coding subscription (auto-updated model)",
-            128_000,
+        "kimi-k2.7-code" => (
+            "Kimi K2.7 Code",
+            "Moonshot AI coding model",
+            256_000,
         ),
-        "openai" => ("OpenAI", "OpenAI API", 128_000),
+        "openai" => ("OpenAI GPT-4o", "OpenAI API", 128_000),
         "gemini" => ("Gemini 2.5 Flash", "Google Gemini 2.5 Flash", 1_000_000),
-        "deepseek-flash" => ("DeepSeek Flash (V3)", "DeepSeek V3 chat", 64_000),
-        "deepseek-pro" => ("DeepSeek Pro (R1)", "DeepSeek R1 reasoning", 64_000),
-        "qwen" => ("Qwen", "Alibaba DashScope", 131_072),
-        "glm" => ("GLM", "Zhipu AI", 128_000),
+        "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash", 1_000_000),
+        "deepseek-v4-pro" => ("DeepSeek V4 Pro", "DeepSeek V4 Pro", 1_000_000),
+        "qwen" => ("Qwen Plus", "Alibaba DashScope", 131_072),
+        "glm" => ("GLM 4 Plus", "Zhipu AI", 128_000),
         "llama" => ("Llama", "Local Llama server", 0),
         "mock" => ("Mock", "Test provider", 0),
         _ => return None,
@@ -181,32 +166,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_resolves_legacy_deepseek_alias() {
+    fn catalog_lookup_is_exact_match() {
         let catalog = Catalog {
             entries: vec![ModelEntry {
-                id: "deepseek-flash".to_string(),
-                name: "DeepSeek Flash".to_string(),
+                id: "deepseek-v4-flash".to_string(),
+                name: "DeepSeek V4 Flash".to_string(),
                 description: String::new(),
                 context_window: 0,
                 channels: vec![Channel {
                     id: "default".to_string(),
-                    label: "DeepSeek Flash".to_string(),
+                    label: "DeepSeek V4 Flash".to_string(),
                     transport: Transport::OpenAiCompat {
                         base_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
                         user_agent: "agent".to_string(),
                     },
                     api_key: "k".to_string(),
-                    model: "deepseek-chat".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
                 }],
                 default_channel: 0,
                 builtin: true,
             }],
         };
-        // The legacy alias and the canonical id resolve to the same entry.
-        let canonical = catalog.get("deepseek-flash").expect("canonical id");
-        let legacy = catalog.get("deepseek").expect("legacy alias");
-        assert_eq!(canonical.id, "deepseek-flash");
-        assert_eq!(legacy.id, "deepseek-flash");
+        assert_eq!(
+            catalog.get("deepseek-v4-flash").expect("exact id").id,
+            "deepseek-v4-flash"
+        );
+        // No alias mapping: stale ids do not resolve.
+        assert!(catalog.get("deepseek").is_none());
+        assert!(catalog.get("deepseek-flash").is_none());
         assert!(catalog.get("unknown").is_none());
     }
 
@@ -251,11 +238,11 @@ mod tests {
     #[test]
     fn builtin_metadata_covers_every_preset() {
         for id in [
-            "kimi-code",
+            "kimi-k2.7-code",
             "openai",
             "gemini",
-            "deepseek-flash",
-            "deepseek-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
             "qwen",
             "glm",
             "llama",

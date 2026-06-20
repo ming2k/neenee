@@ -80,7 +80,7 @@ rejection which aborts the whole turn.
 ## TUI rendering
 
 The question modal is a centered overlay (`draw_question_modal` in
-`crates/neenee-tui/src/render/overlays.rs`). It shows one question at a time:
+`crates/neenee-cli/src/tui/render/overlays.rs`). It shows one question at a time:
 
 - Single-select questions use radio buttons (`○` / `●`).
 - Multi-select questions use checkboxes (`[ ]` / `[x]`).

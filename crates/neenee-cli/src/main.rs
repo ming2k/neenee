@@ -1,20 +1,4 @@
-use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
-use neenee_agent::skills::{
-    tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool},
-    SkillRegistry,
-};
-use neenee_agent::TaskTool;
-use neenee_tools::{
-    mcp::load_mcp_tools,
-    project::{init_neenee_config, CreateProjectTool, InitConfigTool},
-    AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
-    TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
-};
-use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore, Message,
-    Provider, SessionOverview, Tool,
-};
-use neenee_agent::Agent;
+use crate::tui::start_tui;
 use neenee_agent::catalog;
 use neenee_agent::orchestration::{
     compact_turn_history, emit_goal_updated, refresh_agent_goal, send_compaction,
@@ -23,18 +7,34 @@ use neenee_agent::orchestration::{
     RelayCompactionHooks, TurnInput,
 };
 #[cfg(test)]
-use neenee_core::{
-    async_trait, AgentEvent, GoalAccountingResult, HarnessError, HarnessSnapshot,
-    ProviderStreamEvent, TurnTimer, GOAL_COMPLETE_MARKER,
+use neenee_agent::orchestration::{execute_turn, retry_delay_ms, TurnContext};
+use neenee_agent::skills::{
+    tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool},
+    SkillRegistry,
 };
+use neenee_agent::Agent;
+use neenee_agent::TaskTool;
 #[cfg(test)]
-use neenee_agent::orchestration::{self, TurnContext, execute_turn, retry_delay_ms};
+use neenee_core::{async_trait, ProviderStreamEvent};
+use neenee_core::{
+    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore, Message,
+    McpConnectionStatus, McpServerInfo, ModelInfo, Provider, SessionContextSnapshot, SessionOverview,
+    Tool,
+};
 use neenee_providers::MockProvider;
 use neenee_store::{
-    embedding, lock, model_usage, paths, config::Config, search_tool::SearchHistoryTool,
+    config::Config,
+    embedding, lock, model_usage, paths,
+    search_tool::SearchHistoryTool,
     session::{self, discard_trailing_loop_prompts, SessionStore},
 };
-use crate::tui::start_tui;
+use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
+use neenee_tools::{
+    mcp::load_mcp_tools,
+    project::{init_neenee_config, CreateProjectTool, InitConfigTool},
+    AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
+    TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
+};
 #[allow(dead_code)]
 mod tui;
 use std::collections::HashMap;
@@ -79,6 +79,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "mode",
     "mcp",
     "permissions",
+    "auto-approve",
     "session",
     "sessions",
     "resume",
@@ -127,6 +128,105 @@ fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// Build a render-ready snapshot of the live session for the session-context
+/// modal. Pulls model info from the catalog, tools/permissions/skills from the
+/// agent, and MCP per-server tool names by matching the `mcp__<server>__*`
+/// naming convention against the agent's installed tools.
+///
+/// Sent in reply to [`AgentRequest::QuerySessionContext`] and re-sent after any
+/// mutation ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`])
+/// so the modal always reflects the post-change state.
+fn build_session_context(
+    agent: &Agent,
+    _skills_registry: &SkillRegistry,
+    mcp_statuses: &[(String, McpConnectionStatus)],
+    config: &Config,
+) -> SessionContextSnapshot {
+    let provider_id = catalog::default_model_id(config).to_string();
+    let model = catalog::resolved_model_name(config, &provider_id);
+
+    // Catalog entry carries the authoritative display metadata; fall back to
+    // the raw model id / empty when the provider isn't a known catalog entry.
+    let entry = catalog::build_catalog(config)
+        .entries
+        .into_iter()
+        .find(|e| e.id == provider_id);
+    let display_name = entry
+        .as_ref()
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| model.clone());
+    let description = entry.as_ref().map(|e| e.description.clone()).unwrap_or_default();
+    let context_window = entry.as_ref().map(|e| e.context_window).unwrap_or(0);
+    let api_key_ready = entry.as_ref().map(|e| e.key_ready()).unwrap_or(false);
+
+    let model_info = ModelInfo {
+        provider: provider_id,
+        capabilities: derive_capabilities(&model),
+        display_name,
+        model,
+        context_window,
+        api_key_ready,
+        description,
+    };
+
+    let tools = agent.snapshot_tools();
+    let permissions = agent.allowed_tools_structured();
+    let skills = agent.snapshot_skills();
+
+    // Per-server tool names: match the agent's installed tools by their
+    // `mcp__<server>__<tool>` naming convention. The status enum only carries a
+    // count, so this is where the per-server list is reconstructed.
+    let mcp = mcp_statuses
+        .iter()
+        .map(|(name, status)| {
+            let prefix = format!("mcp:{}", name);
+            let tool_names: Vec<String> = tools
+                .iter()
+                .filter(|t| t.source == prefix)
+                .map(|t| t.name.clone())
+                .collect();
+            let (connected, disabled, failure) = match status {
+                McpConnectionStatus::Connected { .. } => (true, false, None),
+                McpConnectionStatus::Disabled => (false, true, None),
+                McpConnectionStatus::Failed(reason) => (false, false, Some(reason.clone())),
+            };
+            McpServerInfo {
+                name: name.clone(),
+                connected,
+                disabled,
+                failure,
+                tool_names,
+            }
+        })
+        .collect();
+
+    SessionContextSnapshot {
+        model: model_info,
+        tools,
+        permissions,
+        skills,
+        mcp,
+    }
+}
+
+/// Heuristic model-capability hints for the session modal. Per-model capability
+/// data is not yet modeled in the catalog, so these are inferred from the model
+/// id: every provider supports tool calling (the harness depends on it), and
+/// reasoning models are recognised by their conventional id fragments.
+fn derive_capabilities(model: &str) -> Vec<String> {
+    let mut caps = vec!["tool calling".to_string()];
+    let lower = model.to_lowercase();
+    if lower.contains("reasoner")
+        || lower.contains("r1")
+        || lower.contains("thinking")
+        || lower.contains("o1")
+        || lower.contains("o3")
+    {
+        caps.push("reasoning".to_string());
+    }
+    caps
+}
+
 #[derive(Debug)]
 enum StartupMode {
     Fresh,
@@ -135,15 +235,18 @@ enum StartupMode {
     Doctor,
 }
 
-fn parse_args(args: Vec<String>) -> (StartupMode, Option<std::path::PathBuf>) {
+fn parse_args(args: Vec<String>) -> (StartupMode, Option<std::path::PathBuf>, bool) {
     let mut iter = args.into_iter().peekable();
     let mut project: Option<std::path::PathBuf> = None;
+    let mut auto_approve = false;
     let mut rest = Vec::new();
     while let Some(arg) = iter.next() {
         if arg == "--project" {
             project = iter.next().map(std::path::PathBuf::from);
         } else if let Some(value) = arg.strip_prefix("--project=") {
             project = Some(std::path::PathBuf::from(value));
+        } else if arg == "--auto-approve" {
+            auto_approve = true;
         } else {
             rest.push(arg);
         }
@@ -156,13 +259,13 @@ fn parse_args(args: Vec<String>) -> (StartupMode, Option<std::path::PathBuf>) {
         [cmd, ..] if cmd == "doctor" => StartupMode::Doctor,
         [cmd, ..] => {
             eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity",
+                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity\n\nOptions:\n  --project <path>    operate on the project at <path>\n  --auto-approve      bypass write-tool permission prompts for this session",
                 cmd
             );
             std::process::exit(2);
         }
     };
-    (mode, project)
+    (mode, project, auto_approve)
 }
 
 async fn build_sessions_overview(session: &SessionStore) -> Vec<SessionOverview> {
@@ -261,7 +364,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
     // `neenee doctor` -> verify stored session integrity.
-    let (startup, project_override) = parse_args(std::env::args().skip(1).collect());
+    let (startup, project_override, auto_approve_at_start) =
+        parse_args(std::env::args().skip(1).collect());
     let project_root = project_override.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
@@ -306,12 +410,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // C12: lightweight semantic-search index for this project. The provider is
     // a deterministic mock; swap it for a local model or cloud API to get real
     // semantic similarity.
-    let embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>> =
-        Arc::new(AsyncRwLock::new(embedding::EmbeddingStore::open(
+    let embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>> = Arc::new(AsyncRwLock::new(
+        embedding::EmbeddingStore::open(
             paths::get().project_embeddings(&project_root),
             Arc::new(embedding::MockEmbeddingProvider::new(384)),
         )
-        .await?));
+        .await?,
+    ));
 
     let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
         Arc::new(BashTool),
@@ -353,6 +458,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         goal_service.clone(),
         (*skills_registry).clone(),
     ));
+    if auto_approve_at_start {
+        agent.set_auto_approve(true);
+        let _ = resp_tx.send(AgentResponse::Text(
+            "Auto-approve ON: write tools will execute without permission prompts."
+                .to_string(),
+        ));
+    }
 
     let active_messages = session.messages().await;
     let restored_messages = session.transcript().await;
@@ -485,8 +597,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match provider_type.as_str() {
                             "openai" => config.openai_api_key = Some(key),
                             "gemini" => config.gemini_api_key = Some(key),
-                            "kimi-code" => config.kimi_code_api_key = Some(key),
-                            "deepseek" | "deepseek-flash" | "deepseek-pro" => {
+                            "kimi-k2.7-code" => config.moonshot_api_key = Some(key),
+                            "deepseek-v4-flash" | "deepseek-v4-pro" => {
                                 config.deepseek_api_key = Some(key)
                             }
                             "qwen" => config.qwen_api_key = Some(key),
@@ -501,20 +613,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Persist the chosen model and default-provider pointer before
                     // building so the catalog reads them back. The key/url writes
-                    // above already landed in `config`. Keep both the canonical
-                    // `default_model` pointer and the legacy `default_provider`
-                    // in sync so they never diverge.
+                    // above already landed in `config`. Keep both `default_model`
+                    // and the legacy `default_provider` in sync so they never
+                    // diverge.
                     config.default_model = Some(provider_type.clone());
                     config.default_provider = provider_type.clone();
                     match provider_type.as_str() {
                         "openai" => config.openai_model = Some(model.clone()),
                         "gemini" => config.gemini_model = Some(model.clone()),
-                        "kimi-code" => {}
+                        "kimi-k2.7-code" => config.moonshot_model = Some(model.clone()),
                         "llama" => config.llama_model = Some(model.clone()),
-                        "deepseek" | "deepseek-flash" => {
+                        "deepseek-v4-flash" => {
                             config.deepseek_flash_model = Some(model.clone())
                         }
-                        "deepseek-pro" => config.deepseek_pro_model = Some(model.clone()),
+                        "deepseek-v4-pro" => {
+                            config.deepseek_pro_model = Some(model.clone())
+                        }
                         "qwen" => config.qwen_model = Some(model.clone()),
                         "glm" => config.glm_model = Some(model.clone()),
                         _ => {}
@@ -525,21 +639,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // resolution is shared with startup. The TUI-supplied model
                     // still wins over any ambient env var, preserving the
                     // pre-catalog switch semantics.
-                    let new_p: Arc<dyn Provider> =
-                        match catalog::build_catalog(&config).get(provider_type.as_str()) {
-                            Some(entry) => match entry.default_channel() {
-                                Some(channel) => {
-                                    let mut channel = channel.clone();
-                                    channel.model = model.clone();
-                                    neenee_providers::build_provider_for_channel(
-                                        &channel,
-                                        &entry.id,
-                                    )
-                                }
-                                None => Arc::new(MockProvider),
-                            },
+                    let new_p: Arc<dyn Provider> = match catalog::build_catalog(&config)
+                        .get(provider_type.as_str())
+                    {
+                        Some(entry) => match entry.default_channel() {
+                            Some(channel) => {
+                                let mut channel = channel.clone();
+                                channel.model = model.clone();
+                                neenee_providers::build_provider_for_channel(&channel, &entry.id)
+                            }
                             None => Arc::new(MockProvider),
-                        };
+                        },
+                        None => Arc::new(MockProvider),
+                    };
                     *provider_for_task
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = new_p;
@@ -561,13 +673,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )));
                 }
                 AgentRequest::ToggleFavorite { id } => {
-                    // Toggle the canonical id in the favorites list, persist,
-                    // and push a fresh picker snapshot so the ★ flips at once.
-                    let canonical = neenee_core::catalog::canonical_id(&id).to_string();
-                    if let Some(pos) = config.favorites.iter().position(|fav| *fav == canonical) {
+                    // Toggle the id in the favorites list, persist, and push a
+                    // fresh picker snapshot so the ★ flips at once.
+                    if let Some(pos) = config.favorites.iter().position(|fav| *fav == id) {
                         config.favorites.remove(pos);
                     } else {
-                        config.favorites.push(canonical);
+                        config.favorites.push(id.clone());
                     }
                     if let Err(error) = config.save() {
                         tracing::warn!(?error, "could not persist favorites");
@@ -582,23 +693,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // reusing the catalog so resolution rules stay shared. No
                     // new key/model comes from the TUI — the model's existing
                     // resolved config is used as-is.
-                    let canonical = neenee_core::catalog::canonical_id(&id).to_string();
-                    config.default_model = Some(canonical.clone());
-                    config.default_provider = canonical.clone();
+                    config.default_model = Some(id.clone());
+                    config.default_provider = id.clone();
                     if let Err(error) = config.save() {
                         tracing::warn!(?error, "could not persist default model");
                     }
-                    let new_p = catalog::build_provider_for(&config, &canonical);
+                    let new_p = catalog::build_provider_for(&config, &id);
                     *provider_for_task
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = new_p;
-                    model_usage.record(&canonical);
+                    model_usage.record(&id);
                     if let Err(error) = model_usage.save() {
                         tracing::warn!(?error, "could not persist model usage telemetry");
                     }
-                    let model_name = catalog::resolved_model_name(&config, &canonical);
+                    let model_name = catalog::resolved_model_name(&config, &id);
                     let _ = resp_tx.send(AgentResponse::ProviderSwitched {
-                        provider: canonical.clone(),
+                        provider: id.clone(),
                         model: model_name,
                     });
                     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
@@ -617,6 +727,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = resp_tx.send(AgentResponse::Error(error));
                     }
                 },
+                AgentRequest::QuerySessionContext => {
+                    let snapshot = build_session_context(
+                        &agent,
+                        &skills_registry,
+                        &mcp_statuses,
+                        &config,
+                    );
+                    let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+                }
+                AgentRequest::RevokePermission { tool, scope } => {
+                    let removed = agent.revoke_allowed_tool(&tool, &scope);
+                    if removed {
+                        let snapshot = build_session_context(
+                            &agent,
+                            &skills_registry,
+                            &mcp_statuses,
+                            &config,
+                        );
+                        let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+                    } else {
+                        let _ = resp_tx.send(AgentResponse::Error(format!(
+                            "No cached always-allow rule for {} {}.",
+                            tool, scope
+                        )));
+                    }
+                }
+                AgentRequest::ToggleTool { name, enabled } => {
+                    let changed = agent.set_tool_enabled(&name, enabled);
+                    let snapshot = build_session_context(
+                        &agent,
+                        &skills_registry,
+                        &mcp_statuses,
+                        &config,
+                    );
+                    if !changed {
+                        // Even a no-op (unknown tool, or already in the target
+                        // state) refreshes the snapshot so the modal settles
+                        // rather than leaving the row looking stale.
+                        let _ = resp_tx.send(AgentResponse::Error(format!(
+                            "Tool '{}' is unknown or already {}.",
+                            name,
+                            if enabled { "enabled" } else { "disabled" }
+                        )));
+                    }
+                    let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+                }
                 AgentRequest::SlashCommand(cmd) => {
                     let parts: Vec<&str> = cmd.split_whitespace().collect();
                     if parts.is_empty() {
@@ -682,6 +838,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 let _ = resp_tx.send(AgentResponse::Text(message));
                             }
+                        }
+                        "/auto-approve" => {
+                            let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
+                                Some("on") | Some("true") | Some("1") => Some(true),
+                                Some("off") | Some("false") | Some("0") => Some(false),
+                                Some(other) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                                        "Unknown value '{}'. Use `/auto-approve on|off`.",
+                                        other
+                                    )));
+                                    continue;
+                                }
+                                None => None,
+                            };
+                            let enabled = next.unwrap_or_else(|| !agent.get_auto_approve());
+                            agent.set_auto_approve(enabled);
+                            let _ = resp_tx.send(AgentResponse::Text(format!(
+                                "Auto-approve {}: write tools {} run without permission prompts.",
+                                if enabled { "ON" } else { "OFF" },
+                                if enabled { "will" } else { "won't" },
+                            )));
+                            let _ =
+                                resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
+                            send_harness_state(&resp_tx, &agent, "idle");
                         }
                         "/search" => {
                             let query = cmd.strip_prefix("/search").unwrap_or("").trim();
@@ -1422,6 +1602,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /compact  — Compact older complete turns now\n\
                                 /clear    — Clear the conversation history\n\
                                                                 /permissions [clear] — Show or clear always-allowed tool rules
+                                /auto-approve [on|off] — Toggle bypassing write-tool permission prompts
                                 /search <query> — Semantic search over the project's session history
 \n\
                                 /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
@@ -1497,6 +1678,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await;
                 }
+                AgentRequest::ShellCommand { command } => {
+                    // The `!` prefix path: run the command directly through
+                    // the `bash` tool, bypassing the LLM. The lifecycle
+                    // mirrors a normal tool step — `ToolCall` → live
+                    // `ToolStream` → `ToolResult` — so the existing render
+                    // path picks it up with no special-casing.
+                    let shell_tx = resp_tx.clone();
+                    let shell_token_slot = ctt_clone.clone();
+                    let shell_generation = generation_clone.clone();
+                    let shell_agent = agent.clone();
+                    tokio::spawn(async move {
+                        run_shell_command(
+                            command,
+                            shell_tx,
+                            shell_token_slot,
+                            shell_generation,
+                            shell_agent,
+                        )
+                        .await;
+                    });
+                }
             }
         }
     });
@@ -1522,6 +1724,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Execute a `!`-prefixed shell command directly through the `bash` tool,
+/// bypassing the LLM. Emits the same lifecycle events as a normal tool step
+/// (`ToolCall` → live `ToolStream` → `ToolResult` or `ToolCancelled`) so the
+/// existing render path picks it up unchanged.
+///
+/// Cancellation mirrors [`start_interactive_turn`]: a fresh
+/// [`CancellationToken`] is installed (any previous token is cancelled) and
+/// the generation counter is bumped so a later turn supersedes a still-running
+/// shell command and its tail-end events do not race with the new turn.
+async fn run_shell_command(
+    command: String,
+    tx: mpsc::UnboundedSender<AgentResponse>,
+    token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
+    generation_counter: Arc<AtomicU64>,
+    agent: Arc<Agent>,
+) {
+    use neenee_core::ToolStream;
+
+    let call_id = format!("shell_{}", uuid::Uuid::new_v4());
+    let arguments = serde_json::json!({ "command": command }).to_string();
+
+    // Mirror start_interactive_turn: install a fresh cancellation token,
+    // cancelling any in-flight predecessor, and bump the generation so we
+    // can tell on exit whether we are still the active turn.
+    let token = CancellationToken::new();
+    if let Some(previous) = token_slot.write().await.replace(token.clone()) {
+        agent.reject_pending_permissions();
+        let _ = tx.send(AgentResponse::PermissionsCleared);
+        previous.cancel();
+    }
+    let generation = generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let is_current = || generation_counter.load(Ordering::SeqCst) == generation;
+
+    // Surface the synthetic tool step starting. The response listener maps
+    // `name: "bash"` to the "running command" activity status.
+    let _ = tx.send(AgentResponse::ToolCall {
+        id: call_id.clone(),
+        name: "bash".to_string(),
+        arguments: arguments.clone(),
+    });
+
+    let bash = BashTool;
+    let tx_for_stream = tx.clone();
+    let call_id_for_stream = call_id.clone();
+    let mut on_stream = move |stream: ToolStream| {
+        if !is_current() {
+            return;
+        }
+        let _ = tx_for_stream.send(AgentResponse::ToolStream {
+            id: call_id_for_stream.clone(),
+            stream,
+        });
+    };
+
+    let run = bash.call_structured_with_events("", &arguments, Box::new(|_| {}), &mut on_stream);
+
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => {
+            // Ctrl+C (or a newer turn replacing us): dropping `run` kills
+            // the child via `kill_on_drop`. Only emit the cancellation
+            // event if we are still the active turn — a newer turn's
+            // ToolCall events must not be flattened by our exit.
+            if is_current() {
+                let _ = tx.send(AgentResponse::ToolCancelled {
+                    id: call_id,
+                    name: "bash".to_string(),
+                });
+            }
+        }
+        result = run => if is_current() {
+            match result {
+                Ok(structured) => {
+                    let output = structured.to_text();
+                    let _ = tx.send(AgentResponse::ToolResult {
+                        id: call_id,
+                        name: "bash".to_string(),
+                        output,
+                        structured,
+                        duration_ms: 0,
+                    });
+                }
+                Err(error) => {
+                    let structured = neenee_core::ToolOutput::Text(error.clone());
+                    let _ = tx.send(AgentResponse::ToolResult {
+                        id: call_id,
+                        name: "bash".to_string(),
+                        output: error,
+                        structured,
+                        duration_ms: 0,
+                    });
+                }
+            }
+        },
+    }
+
+    // Release the slot and flip the harness to idle, matching
+    // start_interactive_turn's cleanup. Guarded by the generation check so
+    // a newer turn is not reset by our exit.
+    let mut slot = token_slot.write().await;
+    if is_current() {
+        slot.take();
+        drop(slot);
+        send_harness_state(&tx, &agent, "idle");
+        let _ = tx.send(AgentResponse::Activity(String::new()));
+    }
 }
 
 fn format_goal_status(goal: &Goal) -> String {

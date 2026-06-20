@@ -120,10 +120,10 @@ pub struct Config {
     // Llama (local)
     pub llama_base_url: Option<String>,
     pub llama_model: Option<String>,
-    // Kimi Code subscription API
-    pub kimi_code_api_key: Option<String>,
-    pub kimi_code_user_agent: Option<String>,
-    // DeepSeek (Flash = deepseek-chat, Pro = deepseek-reasoner); shared API key.
+    // Moonshot / Kimi K2.7 Code (official API)
+    pub moonshot_api_key: Option<String>,
+    pub moonshot_model: Option<String>,
+    // DeepSeek V4 (Flash + Pro); shared API key.
     pub deepseek_api_key: Option<String>,
     pub deepseek_flash_model: Option<String>,
     pub deepseek_pro_model: Option<String>,
@@ -178,11 +178,11 @@ impl Default for Config {
             gemini_model: Some("gemini-2.5-flash".to_string()),
             llama_base_url: Some("http://localhost:8080".to_string()),
             llama_model: Some("local-model".to_string()),
-            kimi_code_api_key: None,
-            kimi_code_user_agent: Some("opencode/1.17.4".to_string()),
+            moonshot_api_key: None,
+            moonshot_model: Some("kimi-k2.7-code".to_string()),
             deepseek_api_key: None,
-            deepseek_flash_model: Some("deepseek-chat".to_string()),
-            deepseek_pro_model: Some("deepseek-reasoner".to_string()),
+            deepseek_flash_model: Some("deepseek-v4-flash".to_string()),
+            deepseek_pro_model: Some("deepseek-v4-pro".to_string()),
             qwen_api_key: None,
             qwen_model: Some("qwen-plus".to_string()),
             glm_api_key: None,
@@ -233,8 +233,7 @@ impl Config {
 
     pub fn save_history(history: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::history_file_path();
-        fsutil::atomic_write_json(&path, history)
-            .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        fsutil::atomic_write_json(&path, history).map_err(Box::<dyn std::error::Error>::from)?;
         Ok(())
     }
 }

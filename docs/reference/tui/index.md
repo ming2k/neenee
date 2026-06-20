@@ -1,7 +1,7 @@
 # TUI reference
 
 The neenee terminal UI is built with [ratatui] and rendered by the
-`crates/neenee-tui/src/render/` module tree (entry point `render/mod.rs`).
+`crates/neenee-cli/src/tui/render/` module tree (entry point `render/mod.rs`).
 
 ## Frame layout
 
@@ -20,11 +20,25 @@ The neenee terminal UI is built with [ratatui] and rendered by the
 See [layout.md](layout.md) for chunk heights, chrome hiding, and the full
 measurements table.
 
+## Focus zones
+
+The TUI splits keyboard input into two zones so the same key (arrows, Enter)
+has one meaning per zone:
+
+| Zone | Owns keys | How to enter | How to leave |
+|------|-----------|--------------|--------------|
+| **Compose** (default) | Input box — typing inserts into the prompt | Press any printable key (typically `p`) from Browse | `Ctrl+B` |
+| **Browse** | Conversation stream — `↑`/`↓` walk focused steps | `Ctrl+B` from Compose | Any printable key (typically `p`) |
+
+The focus-zone pill (`[ COMPOSE ]` / `[ BROWSE ]`) in the hint bar indicates
+which zone is active. `Tab` is completion-only (accepts a slash/path suggestion
+when one is open); it is not a zone toggle.
+
 ## Components
 
 | Component | Description |
 |-----------|-------------|
-| [Header](header.md) | Floating `panel_bg` half-block panel: model name + goal + context-usage bar |
+| [Header](header.md) | Floating `panel_bg` half-block panel: model name + goal + context-usage indicator |
 | [User message](user-message.md) | Sent prompts on a dimmer panel with `┃` bar |
 | [Input box](input-box.md) | Live editable prompt on a brighter panel |
 | [Assistant text](assistant-text.md) | Regular markdown text, 4-space indent |

@@ -48,13 +48,18 @@
 
 ## Architecture
 
+Strictly-layered six-crate workspace (see ADR-0005 for the topology and renames):
+
 | Crate | Responsibility |
 |-------|----------------|
-| `neenee-core` | Agent harness, providers, tools, goals, and skills. |
-| `neenee-tui` | Ratatui UI with semantic selection and live status. |
-| `neenee` | Provider wiring, slash commands, cancellation, and autonomous loops. |
+| `neenee-core` | Pure domain types: events, messages, tools, goals, skills config, capability traits. No I/O. |
+| `neenee-providers` | Concrete LLM providers (Kimi, OpenAI-compatible, Gemini native, Mock) and the `build_provider_for_channel` factory. |
+| `neenee-tools` | Concrete `Tool` implementations (bash, read/write/edit, glob, grep, web search, MCP loader, project init). |
+| `neenee-store` | Local coding-agent persistence: event-sourced sessions, blob store, config, paths, advisory locks, embedding index. |
+| `neenee-agent` | The `Agent` struct, turn orchestration, compaction, retries, model/channel catalog, skills, and `TaskTool`. |
+| `neenee-cli` | The `neenee` binary: inlined Ratatui TUI, slash commands, cancellation, and autonomous loops. |
 
-Provider streaming and tool-call delta reconstruction stay inside the harness, before execution.
+Dependency direction is strict: `core` ← {`providers`, `tools`, `store`} ← `agent` ← `cli`, with no reverse edges. Provider streaming and tool-call delta reconstruction stay inside the `agent` layer, before tool execution.
 
 ---
 
@@ -112,6 +117,7 @@ cargo run -- resume <id>
 
 | Shortcut | Action |
 |----------|--------|
+| `Ctrl+B` | Switch from input (Compose) to conversation stream (Browse). Press any key (typically `p`) to return. |
 | `Ctrl+T` | Expand / collapse tool arguments and output. |
 | `Ctrl+M` | Open the model selection modal. |
 | `Ctrl+C` | Context-aware: copy selection → interrupt response → close modal → clear input → exit (double press). |
@@ -134,13 +140,13 @@ Open the solution modal with `/models` or `Ctrl+M`. Presets include:
 
 | Preset | Notes |
 |--------|-------|
-| **Kimi Code** | Uses the official `kimi-code` model ID. Defaults to the approved OpenCode-compatible identity `opencode/1.17.4`. |
+| **Kimi K2.7 Code** | Moonshot AI's strongest coding model via the official `api.moonshot.ai` endpoint. 256K context. |
 | **OpenAI** | Standard OpenAI-compatible endpoint. |
 | **Gemini 2.5 Flash** | Google's Gemini 2.5 Flash model. |
-| **DeepSeek Flash (V3)** | DeepSeek V3 chat via the official `deepseek-chat` model. |
-| **DeepSeek Pro (R1)** | DeepSeek R1 reasoning via the official `deepseek-reasoner` model. |
-| **Qwen** | Alibaba DashScope. |
-| **GLM** | Zhipu AI. |
+| **DeepSeek V4 Flash** | DeepSeek V4 Flash via the official `deepseek-v4-flash` model. |
+| **DeepSeek V4 Pro** | DeepSeek V4 Pro via the official `deepseek-v4-pro` model. |
+| **Qwen Plus** | Alibaba DashScope. |
+| **GLM 4 Plus** | Zhipu AI. |
 
 Each preset shows whether a usable key is configured:
 - `✓ ready` — key present
@@ -150,11 +156,10 @@ Values are saved to `~/.config/neenee/config.toml`. Environment variables take p
 
 | Variable | Description |
 |----------|-------------|
-| `KIMI_CODE_API_KEY` | API key for Kimi Code. |
-| `KIMI_CODE_USER_AGENT` | Custom user agent for Kimi Code. |
+| `MOONSHOT_API_KEY` | API key for Kimi K2.7 Code. |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | API key / model override for Gemini (default `gemini-2.5-flash`). |
-| `DEEPSEEK_API_KEY` | Shared API key for DeepSeek Flash (V3) and Pro (R1). |
-| `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` | Model override for DeepSeek Flash / Pro. |
+| `DEEPSEEK_API_KEY` | Shared API key for DeepSeek V4 Flash and Pro. |
+| `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` | Model override for DeepSeek V4 Flash / Pro. |
 
 ### MCP Servers
 
@@ -189,11 +194,11 @@ read_only = false
 
 ### LLM Providers
 
-Edit `crates/neenee-core/src/providers.rs` to add new LLM backends (e.g., Anthropic, Ollama).
+Edit `crates/neenee-providers/src/lib.rs` to add new LLM backends (e.g., Anthropic, Ollama). See [How to add a provider](docs/how-to/add-a-provider.md).
 
 ### Tools
 
-Add new tools in `crates/neenee-core/src/tools.rs` by implementing the `Tool` trait.
+Add new tools in `crates/neenee-tools/src/lib.rs` by implementing the `Tool` trait. See [How to add a tool](docs/how-to/add-a-tool.md).
 
 ### Skills
 
@@ -306,8 +311,8 @@ Contributions are welcome! Please feel free to open an issue or submit a pull re
 
 This project is dual-licensed under either:
 
-- **MIT License**
-- **Apache License, Version 2.0**
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
 
 at your option.
 

@@ -25,7 +25,7 @@ mod meta;
 mod read;
 mod web;
 
-pub(crate) use diff::line_diff;
+pub(crate) use diff::{collapse_context_runs, line_diff};
 pub use diff::{DiffLine, DiffOp};
 
 use ratatui::style::Color;
@@ -209,8 +209,8 @@ pub fn diff_lines_for(name: &str, arguments: &str) -> Vec<DiffLine> {
     };
     let get = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("");
     match name {
-        "edit_file" => diff::line_diff(get("old_string"), get("new_string")),
-        "write_file" => diff::line_diff("", get("content")),
+        "edit_file" => diff::line_diff(get("old_string"), get("new_string"), 0),
+        "write_file" => diff::line_diff("", get("content"), 0),
         _ => Vec::new(),
     }
 }

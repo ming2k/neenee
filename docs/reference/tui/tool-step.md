@@ -96,7 +96,7 @@ sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 - `Enter` on a focused tool step opens the [detail overlay](#detail-overlay)
   (clicking the header toggles it inline).
 - `Ctrl+T` expands or collapses all tool steps.
-- `Tab` / `Shift+Tab` includes visible tool steps in the keyboard focus order.
+- `↑` / `↓` in Browse zone includes visible tool steps in the keyboard focus order.
 
 ## Sub-agent children
 
@@ -106,16 +106,16 @@ one-line header (the summary, colored by run state) with no marker glyph.
 
 ## Source
 
-`draw_tool_step` in `crates/neenee-tui/src/render/step/renderers.rs`. Shared
+`draw_tool_step` in `crates/neenee-cli/src/tui/render/step/renderers.rs`. Shared
 header via `draw_expandable_step_header` (from
-`crates/neenee-tui/src/render/step/mod.rs`). Expanded content dispatched by
+`crates/neenee-cli/src/tui/render/step/mod.rs`). Expanded content dispatched by
 `draw_tool_result` to `draw_listing_content`, `draw_grep_content`,
 `draw_bash_content` (which renders the `$ command` line + the structured
 `Shell` payload), `draw_diff_content`, or `draw_code_content`. The bash command
 is resolved by `bash_command_for`. Presenters (summary / `result_kind` /
-`arg_layout`) live in `crates/neenee-tui/src/render/tools/`. The structured
+`arg_layout`) live in `crates/neenee-cli/src/tui/render/tools/`. The structured
 payload comes from `ToolOutput`
 ([ADR-0001](../../adr/0001-tool-rendering-redesign.md)); header data from
 `tool_step_header()` and `parse_arguments_kv()` in `document.rs`. The detail
 overlay is `draw_tool_step_detail_overlay` in
-`crates/neenee-tui/src/render/overlays.rs`.
+`crates/neenee-cli/src/tui/render/overlays.rs`.

@@ -1,5 +1,5 @@
-use neenee_core::{truncate_utf8, Tool, ToolAccess, WebSearchConfig};
 use async_trait::async_trait;
+use neenee_core::{truncate_utf8, Tool, ToolAccess, WebSearchConfig};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
@@ -225,6 +225,7 @@ impl Tool for WriteFileTool {
             op: neenee_core::PatchOp::Create,
             old: String::new(),
             new: content.to_string(),
+            start_line: 0,
         })
     }
 }
@@ -278,6 +279,10 @@ impl Tool for EditFileTool {
             let normalized_content = content.replace("\r\n", "\n");
             let normalized_old = old_str.replace("\r\n", "\n");
             if normalized_content.contains(&normalized_old) {
+                let start_line = normalized_content
+                    .find(&normalized_old)
+                    .map(|offset| normalized_content[..offset].matches('\n').count() + 1)
+                    .unwrap_or(0);
                 let new_content = normalized_content.replace(&normalized_old, new_str);
                 std::fs::write(path, new_content)
                     .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
@@ -286,6 +291,7 @@ impl Tool for EditFileTool {
                     op: neenee_core::PatchOp::Edit,
                     old: old_str.to_string(),
                     new: new_str.to_string(),
+                    start_line,
                 });
             }
             return Err(format!(
@@ -294,6 +300,10 @@ impl Tool for EditFileTool {
             ));
         }
 
+        let start_line = content
+            .find(old_str)
+            .map(|offset| content[..offset].matches('\n').count() + 1)
+            .unwrap_or(0);
         let new_content = content.replace(old_str, new_str);
         std::fs::write(path, new_content)
             .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
@@ -302,6 +312,7 @@ impl Tool for EditFileTool {
             op: neenee_core::PatchOp::Edit,
             old: old_str.to_string(),
             new: new_str.to_string(),
+            start_line,
         })
     }
 }
@@ -410,7 +421,8 @@ impl Tool for BashTool {
                 .map_err(|e| format!("Failed to wait: {}", e))?;
             let exit = status.code();
             let truncated =
-                neenee_core::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len() > 8000;
+                neenee_core::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len()
+                    > 8000;
             Ok(neenee_core::ToolOutput::Shell {
                 command: command.to_string(),
                 stdout: stdout_buf,
@@ -471,12 +483,9 @@ impl Tool for GrepTool {
         if let Some(e) = ext {
             cmd.arg("-g").arg(format!("*.{}", e));
         }
-        cmd.args([
-            "--exclude-dir=.git",
-            "--exclude-dir=node_modules",
-            "--exclude-dir=target",
-            "--exclude-dir=__pycache__",
-        ]);
+        for dir in [".git", "node_modules", "target", "__pycache__"] {
+            cmd.arg("-g").arg(format!("!{}", dir));
+        }
         cmd.arg(pattern).arg(path);
 
         let output = cmd
@@ -1148,9 +1157,6 @@ fn render_todo(items: &[TodoItem]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neenee_core::{Message, Provider, Role};
-    use futures::stream::{self, BoxStream};
-
 
     #[tokio::test]
     async fn todo_tool_renders_updated_list() {

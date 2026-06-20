@@ -10,15 +10,11 @@
 //! per-provider fields. The on-disk schema is unchanged; later phases add
 //! multi-channel entries, favorites, and recency.
 
+use neenee_core::catalog::{builtin_metadata, Catalog, Channel, ModelEntry, Transport};
+use neenee_core::{ModelPickerRow, ModelPickerSnapshot};
+use neenee_providers::{OpenAiProviderSpec, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS};
 use neenee_store::config::{Config, UserChannelConfig, UserModelConfig, UserTransport};
 use neenee_store::model_usage::ModelUsage;
-use neenee_core::catalog::{
-    builtin_metadata, canonical_id, Catalog, Channel, ModelEntry, Transport,
-};
-use neenee_providers::{
-    KIMI_CODE_USER_AGENT, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec,
-};
-use neenee_core::{ModelPickerRow, ModelPickerSnapshot};
 
 /// Resolve the effective default-model id: `config.default_model` when set,
 /// otherwise the legacy `config.default_provider`. Canonicalized by the caller
@@ -39,12 +35,11 @@ pub fn default_model_id(config: &Config) -> &str {
 /// fields (`base_url`, `user_agent`) fall back to localhost defaults so a
 /// minimal entry still builds.
 fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Channel {
-    let api_key = env_or_config(
-        uc.api_key_env.as_deref(),
-        uc.api_key.clone(),
-    )
-    .unwrap_or_default();
-    let model = uc.model.clone().unwrap_or_else(|| fallback_model.to_string());
+    let api_key = env_or_config(uc.api_key_env.as_deref(), uc.api_key.clone()).unwrap_or_default();
+    let model = uc
+        .model
+        .clone()
+        .unwrap_or_else(|| fallback_model.to_string());
     let transport = match uc.transport {
         UserTransport::Mock => Transport::Mock,
         UserTransport::GeminiNative => Transport::GeminiNative,
@@ -55,9 +50,10 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
                 .unwrap_or_else(|| "http://localhost:8080".to_string()),
         },
         UserTransport::OpenAiCompat => Transport::OpenAiCompat {
-            base_url: uc.base_url.clone().unwrap_or_else(|| {
-                "http://localhost:8080/v1/chat/completions".to_string()
-            }),
+            base_url: uc
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:8080/v1/chat/completions".to_string()),
             user_agent: uc
                 .user_agent
                 .clone()
@@ -133,8 +129,8 @@ fn config_key_for(config: &Config, id: &str) -> Option<String> {
     match id {
         "openai" => config.openai_api_key.clone(),
         "gemini" => config.gemini_api_key.clone(),
-        "kimi-code" => config.kimi_code_api_key.clone(),
-        "deepseek" | "deepseek-flash" | "deepseek-pro" => config.deepseek_api_key.clone(),
+        "kimi-k2.7-code" => config.moonshot_api_key.clone(),
+        "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key.clone(),
         "qwen" => config.qwen_api_key.clone(),
         "glm" => config.glm_api_key.clone(),
         _ => None,
@@ -148,21 +144,13 @@ fn config_model_for(config: &Config, id: &str) -> Option<String> {
         "openai" => config.openai_model.clone(),
         "gemini" => config.gemini_model.clone(),
         "llama" => config.llama_model.clone(),
-        "deepseek" | "deepseek-flash" => config.deepseek_flash_model.clone(),
-        "deepseek-pro" => config.deepseek_pro_model.clone(),
+        "kimi-k2.7-code" => config.moonshot_model.clone(),
+        "deepseek-v4-flash" => config.deepseek_flash_model.clone(),
+        "deepseek-v4-pro" => config.deepseek_pro_model.clone(),
         "qwen" => config.qwen_model.clone(),
         "glm" => config.glm_model.clone(),
         _ => None,
     }
-}
-
-/// User agent for the Kimi coding endpoint: `KIMI_CODE_USER_AGENT` env var,
-/// then `config.kimi_code_user_agent`, then the built-in default.
-fn resolve_kimi_code_user_agent(config: &Config) -> String {
-    std::env::var("KIMI_CODE_USER_AGENT")
-        .ok()
-        .or(config.kimi_code_user_agent.clone())
-        .unwrap_or_else(|| KIMI_CODE_USER_AGENT.to_string())
 }
 
 /// Attach the built-in display metadata (name, description, context window) to
@@ -188,10 +176,7 @@ fn entry_with_metadata(id: &str, channels: Vec<Channel>, builtin: bool) -> Model
 }
 
 /// Build a single-channel entry for an OpenAI-compatible registry preset.
-fn openai_compat_entry_from_spec(
-    config: &Config,
-    spec: &OpenAiProviderSpec,
-) -> ModelEntry {
+fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> ModelEntry {
     let api_key =
         env_or_config(Some(spec.env_api_key), config_key_for(config, spec.id)).unwrap_or_default();
     // A pinned `fixed_model` always wins; otherwise env override, then config,
@@ -202,13 +187,7 @@ fn openai_compat_entry_from_spec(
         env_or_config(Some(spec.env_model), config_model_for(config, spec.id))
             .unwrap_or_else(|| spec.default_model.to_string())
     };
-    // Only kimi-code carries a default user agent and supports the env/config
-    // override path; every other registry preset uses the shared neenee agent.
-    let user_agent = if spec.id == "kimi-code" {
-        resolve_kimi_code_user_agent(config)
-    } else {
-        NEENEE_USER_AGENT.to_string()
-    };
+    let user_agent = NEENEE_USER_AGENT.to_string();
     let (name, _, _) = builtin_metadata(spec.id)
         .map(|(n, d, c)| (n.to_string(), d.to_string(), c))
         .unwrap_or_else(|| (spec.id.to_string(), String::new(), 0));
@@ -356,7 +335,7 @@ pub fn resolved_model_name(config: &Config, id: &str) -> String {
 /// picture (ADR-0002 phase 3).
 pub fn build_picker_state(config: &Config, usage: &ModelUsage) -> ModelPickerSnapshot {
     let catalog = build_catalog(config);
-    let default_id = canonical_id(default_model_id(config)).to_string();
+    let default_id = default_model_id(config).to_string();
     let rows = catalog
         .entries
         .iter()
@@ -375,10 +354,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Tests that mutate process-wide env vars (`*_API_KEY`, `*_MODEL`,
-    /// `KIMI_CODE_USER_AGENT`) must serialize against each other so the
-    /// parallel test runner never observes a half-set environment. Mirrors the
-    /// `ENV_GUARD` pattern in `paths.rs`.
+    /// Tests that mutate process-wide env vars (`*_API_KEY`, `*_MODEL`)
+    /// must serialize against each other so the parallel test runner never
+    /// observes a half-set environment. Mirrors the `ENV_GUARD` pattern in
+    /// `paths.rs`.
     static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     /// A config with no keys or model overrides set beyond the built-in
@@ -391,7 +370,7 @@ mod tests {
     fn catalog_contains_every_builtin_preset() {
         let catalog = build_catalog(&bare_config());
         let ids: Vec<&str> = catalog.entries.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"kimi-code"), "missing kimi-code: {ids:?}");
+        assert!(ids.contains(&"kimi-k2.7-code"), "missing kimi-k2.7-code: {ids:?}");
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"gemini"));
         assert!(ids.contains(&"llama"));
@@ -407,27 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn kimi_code_channel_pins_model_and_resolves_user_agent() {
+    fn kimi_k27_code_uses_official_endpoint_and_default_model() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        // Clear any ambient override so the built-in constant wins.
-        std::env::remove_var("KIMI_CODE_USER_AGENT");
+        std::env::remove_var("MOONSHOT_MODEL");
         let config = bare_config();
         let catalog = build_catalog(&config);
-        let entry = catalog.get("kimi-code").expect("kimi-code entry");
+        let entry = catalog.get("kimi-k2.7-code").expect("kimi-k2.7-code entry");
         let channel = entry.default_channel().expect("default channel");
         assert_eq!(
-            channel.model, "kimi-code",
-            "pinned model must ignore overrides"
+            channel.model, "kimi-k2.7-code",
+            "default model must be kimi-k2.7-code"
         );
         let (base_url, user_agent) = match &channel.transport {
             Transport::OpenAiCompat {
                 base_url,
                 user_agent,
             } => (base_url.clone(), user_agent.clone()),
-            other => panic!("kimi-code must be OpenAiCompat, got {other:?}"),
+            other => panic!("kimi-k2.7-code must be OpenAiCompat, got {other:?}"),
         };
-        assert_eq!(base_url, "https://api.kimi.com/coding/v1/chat/completions");
-        assert_eq!(user_agent, KIMI_CODE_USER_AGENT);
+        assert_eq!(base_url, "https://api.moonshot.ai/v1/chat/completions");
+        assert_eq!(user_agent, NEENEE_USER_AGENT);
     }
 
     #[test]
@@ -451,8 +429,8 @@ mod tests {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DEEPSEEK_PRO_MODEL");
         assert_eq!(
-            resolved_model_name(&bare_config(), "deepseek-pro"),
-            "deepseek-reasoner"
+            resolved_model_name(&bare_config(), "deepseek-v4-pro"),
+            "deepseek-v4-pro"
         );
     }
 
@@ -463,12 +441,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_deepseek_alias_builds_flash_provider() {
+    fn stale_deepseek_ids_fall_back_to_mock() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DEEPSEEK_FLASH_MODEL");
+        // No alias mapping: stale ids no longer resolve and fall back to mock.
         let provider = build_provider_for(&bare_config(), "deepseek");
-        assert_eq!(provider.provider_id(), "deepseek-flash");
-        assert_eq!(provider.model(), "deepseek-chat");
+        assert_eq!(provider.provider_id(), "mock");
     }
 
     #[test]

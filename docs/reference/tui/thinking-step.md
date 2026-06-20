@@ -50,10 +50,11 @@ See [expandable step](expandable-step.md#behavior) for the shared toggle,
 sticky-pin, and narrow-fallback behavior.
 
 Thinking steps participate in the same keyboard focus order as tool steps.
+Use `Ctrl+B` to enter Browse zone, then `↑` / `↓` to walk focused steps.
 `Enter` / `Space` opens or closes the focused thinking step.
 
 ## Source
 
 `draw_reasoning_trace` (and `draw_reasoning_trace_header`) in
-`crates/neenee-tui/src/render/turn_artifacts.rs`. Header data from
+`crates/neenee-cli/src/tui/render/turn_artifacts.rs`. Header data from
 `thinking_header()` in `document.rs`.

@@ -48,7 +48,7 @@ pub trait Provider: Send + Sync {
     /// Default is a no-op for providers that don't support native function calling.
     fn prepare_tools(&self, _tools: &[Arc<dyn Tool>]) {}
 
-    /// Stable provider/solution identifier (e.g. `"kimi-code"`, `"gemini"`).
+    /// Stable provider/solution identifier (e.g. `"kimi-k2.7-code"`, `"gemini"`).
     /// The harness stamps it onto assistant messages so a session that mixes
     /// multiple models stays traceable. Defaults to an empty string for
     /// providers (mostly test doubles) that don't carry an identity.
@@ -58,7 +58,7 @@ pub trait Provider: Send + Sync {
     fn provider_id(&self) -> String {
         String::new()
     }
-    /// The model identifier this provider targets (e.g. `"kimi-code"`).
+    /// The model identifier this provider targets (e.g. `"kimi-k2.7-code"`).
     /// Companion to [`Provider::provider_id`]; defaults to an empty string.
     fn model(&self) -> String {
         String::new()

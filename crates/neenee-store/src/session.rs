@@ -707,7 +707,14 @@ impl SessionStore {
                 }
             }
         }
-        summaries.push(summary(&data, true));
+        // Only surface the active session when it actually has content. A
+        // fresh empty session is what the user is already in — listing it at
+        // the top (where the freshly-touched `updated_at` sorts it) just
+        // shows a permanent "(empty session)" row that cannot be usefully
+        // resumed. Real archived sessions stay reachable.
+        if has_content(&data) {
+            summaries.push(summary(&data, true));
+        }
         summaries.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
         Ok(summaries)
     }
@@ -1611,11 +1618,12 @@ mod tests {
     /// Tests that touch process-global state (`paths::set_test_default` or
     /// process env vars) cannot run in parallel. We serialise them through
     /// this lock; pure-computation tests skip the guard.
-    static GLOBAL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static GLOBAL_GUARD: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     macro_rules! locked {
         ($body:block) => {{
-            let _guard = GLOBAL_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = GLOBAL_GUARD.lock().await;
             $body
         }};
     }
@@ -1678,8 +1686,10 @@ mod tests {
 
     #[test]
     fn schema_migration_bumps_version() {
-        let mut data = SessionData::default();
-        data.schema_version = 0;
+        let data = SessionData {
+            schema_version: 0,
+            ..SessionData::default()
+        };
         let migrated = migrate_session_data(data);
         assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
     }
@@ -1740,7 +1750,7 @@ mod tests {
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")
-            .with_attribution("kimi-code", "kimi-code");
+            .with_attribution("kimi-k2.7-code", "kimi-k2.7-code");
         let assistant = Message {
             tool_calls: Some(vec![call.clone()]),
             ..assistant
@@ -1852,8 +1862,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn migrate_flat_sessions_buckets_by_project_root() {
+    #[tokio::test]
+    async fn migrate_flat_sessions_buckets_by_project_root() {
         locked!({
             let root =
                 std::env::temp_dir().join(format!("neenee-flat-migrate-{}", uuid::Uuid::new_v4()));
@@ -1873,12 +1883,16 @@ mod tests {
                 ..SessionData::default()
             };
             fsutil::atomic_write_json(&dirs.data_dir.join("session.json"), &alpha_active).unwrap();
-            let mut alpha_archive = SessionData::default();
-            alpha_archive.id = "aaaaaaaa-0000-0000-0000-000000000001".to_string();
-            alpha_archive.project_root = PathBuf::from("/projects/alpha");
-            let mut beta_archive = SessionData::default();
-            beta_archive.id = "bbbbbbbb-0000-0000-0000-000000000002".to_string();
-            beta_archive.project_root = PathBuf::from("/projects/beta");
+            let alpha_archive = SessionData {
+                id: "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
+                project_root: PathBuf::from("/projects/alpha"),
+                ..SessionData::default()
+            };
+            let beta_archive = SessionData {
+                id: "bbbbbbbb-0000-0000-0000-000000000002".to_string(),
+                project_root: PathBuf::from("/projects/beta"),
+                ..SessionData::default()
+            };
             fsutil::atomic_write_json(
                 &legacy_dir.join(format!("{}.json", alpha_archive.id)),
                 &alpha_archive,
@@ -1955,6 +1969,56 @@ mod tests {
         assert_eq!(store.messages().await[0].content, "parent");
         store.open(&fork_id[..8]).await.unwrap();
         assert_eq!(store.messages().await[0].content, "fork");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn list_skips_active_session_when_it_has_no_content() {
+        // Regression: a fresh empty active session used to be appended to
+        // every `list()` call. Because `updated_at` is bumped on startup,
+        // it sorted to the top and permanently showed "(empty session)".
+        // The picker should only surface the active session once it has
+        // real content (messages, archived messages, a loop checkpoint, or
+        // a compaction marker).
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-session-list-empty-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore {
+            project_root: directory.clone(),
+            path: path.clone(),
+            archive_dir: directory.join("sessions"),
+            event_log: EventLog::new(path.with_extension("jsonl")),
+            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
+            data: Mutex::new(SessionData::default()),
+        };
+
+        // Seed one archived session so the picker has something to show,
+        // then keep the active session empty (the default state).
+        let archived = SessionData {
+            project_root: directory.clone(),
+            messages: vec![Message::new(neenee_core::Role::User, "archived branch")],
+            ..Default::default()
+        };
+        store.persist_archive(&archived).unwrap();
+
+        let sessions = store.list().await.unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "empty active session must not appear in the list"
+        );
+        assert_eq!(sessions[0].id, archived.id);
+        assert!(!sessions[0].active);
+
+        // Once the active session gets content it should reappear, marked
+        // active so the picker can badge it.
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "live branch")])
+            .await
+            .unwrap();
+        let sessions = store.list().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|item| item.active));
         let _ = fs::remove_dir_all(directory);
     }
 

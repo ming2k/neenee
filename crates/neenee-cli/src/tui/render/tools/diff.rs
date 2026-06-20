@@ -35,6 +35,8 @@ pub enum DiffOp {
     Add,
     /// Line present only in the old text.
     Remove,
+    /// Collapsed run of unchanged lines (elided context between changes).
+    Ellipsis,
 }
 
 /// One intra-line fragment: `text` plus whether it is part of the edited span
@@ -90,6 +92,19 @@ impl DiffLine {
     pub fn text(&self) -> String {
         self.frags.iter().map(|f| f.text.as_str()).collect()
     }
+
+    /// A collapsed-context marker line: `⋯` in muted style, no line number.
+    fn ellipsis() -> Self {
+        DiffLine {
+            op: DiffOp::Ellipsis,
+            old_no: None,
+            new_no: None,
+            frags: vec![DiffFrag {
+                text: "⋯".to_string(),
+                changed: false,
+            }],
+        }
+    }
 }
 
 /// Word-diff a removed/added line pair, returning the fragments for each side
@@ -130,7 +145,12 @@ fn word_diff_pair<'a>(old: &'a str, new: &'a str) -> (Vec<DiffFrag>, Vec<DiffFra
 /// Build the renderable diff with line numbers and intra-line word highlight.
 /// Adjacent delete/insert runs are paired up so a one-token edit highlights just
 /// that token instead of repainting whole lines.
-pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
+///
+/// `line_offset` is the number of file lines preceding the `old` snippet
+/// (typically `start_line - 1` from [`ToolOutput::Patch`]). It is added to
+/// every emitted line number so the gutter shows real file line numbers.
+/// Pass `0` when the offset is unknown or irrelevant (e.g. `write_file`).
+pub fn line_diff(old: &str, new: &str, line_offset: usize) -> Vec<DiffLine> {
     let diff = TextDiff::from_lines(old, new);
 
     // Buffer consecutive deletes/inserts so they can be paired into word-diffs.
@@ -147,22 +167,22 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
                 let (old_frags, new_frags) = word_diff_pair(old_text, new_text);
                 out.push(DiffLine {
                     op: DiffOp::Remove,
-                    old_no: Some(old_no + 1),
+                    old_no: Some(old_no + 1 + line_offset),
                     new_no: None,
                     frags: old_frags,
                 });
                 out.push(DiffLine {
                     op: DiffOp::Add,
                     old_no: None,
-                    new_no: Some(new_no + 1),
+                    new_no: Some(new_no + 1 + line_offset),
                     frags: new_frags,
                 });
             }
             for &(old_no, old_text) in del.iter().skip(pair) {
-                out.push(DiffLine::plain(DiffOp::Remove, old_text, old_no + 1));
+                out.push(DiffLine::plain(DiffOp::Remove, old_text, old_no + 1 + line_offset));
             }
             for &(new_no, new_text) in ins.iter().skip(pair) {
-                out.push(DiffLine::plain(DiffOp::Add, new_text, new_no + 1));
+                out.push(DiffLine::plain(DiffOp::Add, new_text, new_no + 1 + line_offset));
             }
             del.clear();
             ins.clear();
@@ -174,8 +194,8 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
                 ChangeTag::Equal => {
                     flush(&mut pending_del, &mut pending_ins, &mut out);
                     let text = change.value();
-                    let old_no = change.old_index().map(|i| i + 1).unwrap_or(0);
-                    let new_no = change.new_index().map(|i| i + 1).unwrap_or(0);
+                    let old_no = change.old_index().map(|i| i + 1 + line_offset).unwrap_or(0);
+                    let new_no = change.new_index().map(|i| i + 1 + line_offset).unwrap_or(0);
                     out.push(DiffLine::context(text, old_no, new_no));
                 }
                 ChangeTag::Delete => {
@@ -200,6 +220,64 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
     out
 }
 
+/// Default context lines shown on each side of a change before collapsing.
+const COLLAPSE_CONTEXT: usize = 4;
+
+/// Collapse long runs of unchanged context lines into a single [`DiffOp::Ellipsis`]
+/// marker so a diff spanning distant edits stays compact. Keeps up to
+/// [`COLLAPSE_CONTEXT`] lines of context around each change group; everything
+/// beyond that window is replaced by one `⋯` row.
+///
+/// Leading and trailing context (before the first / after the last change) is
+/// also trimmed to `COLLAPSE_CONTEXT` lines.
+pub fn collapse_context_runs(diff: &[DiffLine]) -> Vec<DiffLine> {
+    let n = diff.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Mark every line within COLLAPSE_CONTEXT of a change for keeping.
+    let mut keep = vec![false; n];
+    for (i, line) in diff.iter().enumerate() {
+        if line.op == DiffOp::Remove || line.op == DiffOp::Add {
+            for offset in 0..=COLLAPSE_CONTEXT {
+                if i >= offset {
+                    keep[i - offset] = true;
+                }
+                if i + offset < n {
+                    keep[i + offset] = true;
+                }
+            }
+        }
+    }
+
+    // Build output, inserting one ellipsis wherever a kept section follows a
+    // gap of one or more skipped lines.
+    let mut result = Vec::with_capacity(n);
+    let mut prev_kept = false;
+    let mut last_kept: Option<usize> = None;
+
+    for (i, line) in diff.iter().enumerate() {
+        if keep[i] {
+            if !prev_kept && i > 0 {
+                result.push(DiffLine::ellipsis());
+            }
+            result.push(line.clone());
+            prev_kept = true;
+            last_kept = Some(i);
+        } else {
+            prev_kept = false;
+        }
+    }
+
+    // Trailing ellipsis if skipped lines follow the last kept line.
+    if last_kept.is_some_and(|idx| idx + 1 < n) {
+        result.push(DiffLine::ellipsis());
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +291,7 @@ mod tests {
 
     #[test]
     fn paired_change_highlights_only_the_word() {
-        let diff = line_diff("let x = 1;", "let x = 2;");
+        let diff = line_diff("let x = 1;", "let x = 2;", 0);
         // Context-free single-line edit: one Remove, one Add.
         assert_eq!(diff.len(), 2);
         assert_eq!(diff[0].op, DiffOp::Remove);
@@ -248,7 +326,7 @@ mod tests {
 
     #[test]
     fn line_numbers_are_set_and_one_based() {
-        let diff = line_diff("a\nb\nc", "a\nB\nc");
+        let diff = line_diff("a\nb\nc", "a\nB\nc", 0);
         // a(ctx old1/new1), b(del old2), B(add new2), c(ctx old3/new3)
         assert_eq!(diff[0].op, DiffOp::Context);
         assert_eq!(diff[0].old_no, Some(1));
@@ -265,7 +343,7 @@ mod tests {
     fn interleaved_edits_do_not_collapse_to_all_remove_then_all_add() {
         let old = "a\nX\nb\nY\nc";
         let new = "a\nx\nb\ny\nc";
-        let diff = line_diff(old, new);
+        let diff = line_diff(old, new, 0);
         let ops: Vec<_> = diff.iter().map(|d| d.op).collect();
         // Should interleave: Ctx, Remove, Add, Ctx, Remove, Add, Ctx.
         assert_eq!(
@@ -280,5 +358,68 @@ mod tests {
                 DiffOp::Context,
             ]
         );
+    }
+
+    #[test]
+    fn line_offset_shifts_all_line_numbers() {
+        // The snippet starts at file line 15, so offset = 14.
+        let diff = line_diff("a\nb\nc", "a\nB\nc", 14);
+        // Context line "a": file line 15 (was 1 + 14).
+        assert_eq!(diff[0].op, DiffOp::Context);
+        assert_eq!(diff[0].old_no, Some(15));
+        assert_eq!(diff[0].new_no, Some(15));
+        // Removed "b": file line 16.
+        assert_eq!(diff[1].op, DiffOp::Remove);
+        assert_eq!(diff[1].old_no, Some(16));
+        // Added "B": file line 16.
+        assert_eq!(diff[2].op, DiffOp::Add);
+        assert_eq!(diff[2].new_no, Some(16));
+        // Context line "c": file line 17.
+        assert_eq!(diff[3].op, DiffOp::Context);
+        assert_eq!(diff[3].old_no, Some(17));
+    }
+
+    #[test]
+    fn collapse_inserts_ellipsis_for_long_context_runs() {
+        // Two changes separated by 20 context lines.
+        let old = "a\nCHANGE1\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nCHANGE2\nz";
+        let new = "a\nchange1\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nchange2\nz";
+        let diff = line_diff(old, new, 0);
+        let collapsed = collapse_context_runs(&diff);
+
+        // Should contain exactly one Ellipsis line.
+        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        assert_eq!(ellipsis_count, 1, "one ellipsis for the gap");
+
+        // The change lines survive.
+        let has_remove = collapsed.iter().any(|l| l.op == DiffOp::Remove);
+        let has_add = collapsed.iter().any(|l| l.op == DiffOp::Add);
+        assert!(has_remove && has_add);
+    }
+
+    #[test]
+    fn collapse_keeps_short_context_runs_intact() {
+        // Two changes separated by only 4 context lines — within the window.
+        let old = "a\nCHANGE1\nc\nd\ne\nf\nCHANGE2\nz";
+        let new = "a\nchange1\nc\nd\ne\nf\nchange2\nz";
+        let diff = line_diff(old, new, 0);
+        let collapsed = collapse_context_runs(&diff);
+
+        // No ellipsis needed — the gap fits within COLLAPSE_CONTEXT.
+        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        assert_eq!(ellipsis_count, 0);
+    }
+
+    #[test]
+    fn collapse_trims_leading_and_trailing_context() {
+        // 20 context lines, one change, 20 more context lines.
+        let old = "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nCHANGE\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20";
+        let new = "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nchange\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20";
+        let diff = line_diff(old, new, 0);
+        let collapsed = collapse_context_runs(&diff);
+
+        // Two ellipses: one before, one after the change.
+        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        assert_eq!(ellipsis_count, 2, "leading + trailing ellipsis");
     }
 }

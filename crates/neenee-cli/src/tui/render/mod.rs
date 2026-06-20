@@ -37,7 +37,8 @@ use message_body::draw_message_body;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal, draw_model_editor,
-    draw_permission_sheet, draw_question_modal, draw_sessions_modal, draw_tool_step_detail_overlay,
+    draw_permission_sheet, draw_question_modal, draw_session_modal, draw_sessions_modal,
+    draw_tool_step_detail_overlay,
 };
 use primitives::viewport_rect;
 use step::{
@@ -363,6 +364,25 @@ pub fn draw_transcript(
         }
     }
 
+    // Record the visible transcript content rect so clicks on gap rows
+    // (which carry no registered region) still switch keyboard focus to
+    // Browse. The rect spans the horizontal band inside the gutters —
+    // matching the user's mental model that the outer gutters are not
+    // transcript clicks — and the rows where content was actually drawn,
+    // clamped to the viewport so empty space below the last message stays
+    // inert. `current_y` already stops advancing once it reaches the
+    // viewport bottom, so this is a faithful bound on visible content.
+    let band = transcript_band_rect(transcript_area);
+    let content_bottom = current_y.min(transcript_area.y + transcript_area.height);
+    if content_bottom > transcript_area.y {
+        layout_map.set_transcript_content_rect(Rect::new(
+            band.x,
+            transcript_area.y,
+            band.width,
+            content_bottom - transcript_area.y,
+        ));
+    }
+
     // Sub-agent navigation band, drawn across the full transcript width (inside the
     // app_bg gutters) so it reads as a continuous bar pinned above the input.
     if let (Some(bar), Some(rect)) = (subagent_bar.as_ref(), subagent_bar_rect) {
@@ -600,16 +620,7 @@ mod tests {
                     0,
                     &theme,
                 );
-                draw_model_editor(
-                    f,
-                    "OpenAI",
-                    0,
-                    "",
-                    "gpt-4o",
-                    "",
-                    0,
-                    &theme,
-                );
+                draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
                 draw_help_modal(f, &theme);
                 draw_sessions_modal(
                     f,
@@ -652,7 +663,91 @@ mod tests {
                         multi_select: false,
                     }],
                 };
-                draw_question_modal(f, &question_request, 0, &[vec![1]], &[String::new()], 1, &theme);
+                draw_question_modal(
+                    f,
+                    &question_request,
+                    0,
+                    &[vec![1]],
+                    &[String::new()],
+                    1,
+                    &theme,
+                );
+                // Session context modal: every pane must render without panicking
+                // across (a) an unknown provider + empty snapshot, (b) a fully
+                // populated snapshot exercising the Skills / Permissions / Tools
+                // list panes and the MCP per-server tool names.
+                let snapshot = neenee_core::SessionContextSnapshot {
+                    model: neenee_core::ModelInfo {
+                        provider: "gemini".to_string(),
+                        model: "gemini-2.5-flash".to_string(),
+                        display_name: "Gemini 2.5 Flash".to_string(),
+                        context_window: 1_000_000,
+                        api_key_ready: true,
+                        description: "Google Gemini 2.5 Flash".to_string(),
+                        capabilities: vec!["tool calling".to_string()],
+                    },
+                    tools: vec![neenee_core::ToolInfo {
+                        name: "bash".to_string(),
+                        description: "run a shell command".to_string(),
+                        access: neenee_core::ToolAccess::Write,
+                        enabled: true,
+                        source: "builtin".to_string(),
+                    }],
+                    permissions: vec![neenee_core::PermissionRuleInfo {
+                        tool: "bash".to_string(),
+                        scope: "*".to_string(),
+                    }],
+                    skills: vec![neenee_core::SkillInfo {
+                        name: "rust-expert".to_string(),
+                        description: "Rust help".to_string(),
+                        version: Some("1.0.0".to_string()),
+                        enabled: true,
+                        source: "repo".to_string(),
+                        tags: vec!["rust".to_string()],
+                    }],
+                    mcp: vec![neenee_core::McpServerInfo {
+                        name: "fs".to_string(),
+                        connected: true,
+                        disabled: false,
+                        failure: None,
+                        tool_names: vec!["read_file".to_string(), "write_file".to_string()],
+                    }],
+                };
+                let mut key_status = HashMap::new();
+                key_status.insert("gemini".to_string(), true);
+                for (tab, idx) in [
+                    (crate::tui::SessionTab::Model, 0),
+                    (crate::tui::SessionTab::Mcp, 0),
+                    (crate::tui::SessionTab::Skills, 0),
+                    (crate::tui::SessionTab::Permissions, 0),
+                    (crate::tui::SessionTab::Tools, 0),
+                ] {
+                    draw_session_modal(
+                        f,
+                        tab,
+                        "custom-unknown",
+                        "some-model",
+                        &key_status,
+                        &[],
+                        Some(&snapshot),
+                        idx,
+                        &mut 0,
+                        &theme,
+                    );
+                }
+                // And once with no snapshot, to cover the placeholder fallbacks.
+                draw_session_modal(
+                    f,
+                    crate::tui::SessionTab::Model,
+                    "custom-unknown",
+                    "some-model",
+                    &key_status,
+                    &[],
+                    None,
+                    0,
+                    &mut 0,
+                    &theme,
+                );
             })
             .unwrap();
 
@@ -1117,12 +1212,150 @@ mod tests {
         );
     }
 
+    /// A queued user message (one staged in the send queue waiting for the
+    /// in-flight turn to finish) must render with the dimmer
+    /// `user_panel_bg_queued` band and a visible "⏸ Queued" badge so the user
+    /// can tell their message is pending, not delivered.
+    #[test]
+    fn queued_user_message_renders_badge_and_dimmer_bg() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let queued_bg = theme.user_surface_queued();
+        let delivered_bg = theme.user_surface();
+        let width = 40u16;
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let messages = vec![
+            TranscriptMessage::new(neenee_core::Role::User, "first queued").queued(),
+            TranscriptMessage::new(neenee_core::Role::User, "second queued").queued(),
+        ];
+
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                let _ = draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        theme: &theme,
+                    },
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+
+        // Both queued panels must carry the queued bg, never the delivered bg.
+        // Scan the inner-pad columns (2,3) of every row for any cell painted
+        // with the delivered bg — that would mean a queued message leaked the
+        // wrong surface.
+        for y in 0..buffer.area.height {
+            for x in 2..4 {
+                let bg = buffer.get(x, y).bg;
+                assert_ne!(
+                    bg, delivered_bg,
+                    "queued panels must never carry the delivered bg, found at ({},{})",
+                    x, y
+                );
+            }
+        }
+
+        // Each queued user message renders one "⏸ Queued" badge row. Count
+        // rows whose inner-padding cells carry the queued bg AND whose
+        // first-content cell starts with the pause glyph.
+        let badge_count = (0..buffer.area.height)
+            .filter(|&y| {
+                buffer.get(2, y).bg == queued_bg
+                    && buffer.get(4, y).symbol() == "⏸"
+            })
+            .count();
+        assert_eq!(
+            badge_count, 2,
+            "each queued user message must render one badge row, got {}",
+            badge_count
+        );
+    }
+
+    /// The transcript content rect must be recorded after rendering so that
+    /// clicks on gap rows (which carry no region) still switch keyboard focus
+    /// to Browse. It must span the horizontal band inside the outer gutters
+    /// (clicks in the gutters are not transcript clicks) and the vertical
+    /// extent of drawn content, including the inter-message gap row.
+    #[test]
+    fn transcript_content_rect_spans_band_and_gap_rows() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let width = 40u16;
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Two assistant text messages so a `MESSAGE_GAP_ROWS` blank row is
+        // emitted between them — that row is rendered but never registered.
+        let messages = vec![
+            TranscriptMessage::new(neenee_core::Role::Assistant, "first".to_string()),
+            TranscriptMessage::new(neenee_core::Role::Assistant, "second".to_string()),
+        ];
+        let mut layout_map = LayoutMap::new();
+        terminal
+            .draw(|f| {
+                draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        theme: &theme,
+                    },
+                );
+            })
+            .unwrap();
+
+        let rect = layout_map
+            .transcript_content_rect()
+            .expect("content rect must be recorded when messages are drawn");
+        // Horizontal band excludes the outer `TRANSCRIPT_H_INSET` gutters.
+        assert_eq!(rect.x, TRANSCRIPT_H_INSET);
+        assert_eq!(rect.width, width - 2 * TRANSCRIPT_H_INSET);
+
+        // The whole point of the rect: a gap row between the two messages is
+        // rendered but carries no region (clicking it does not resolve to a
+        // cursor). It must still fall inside the content rect so the click
+        // handler can switch focus to Browse.
+        let gap_y = (rect.y..rect.y + rect.height)
+            .find(|&y| layout_map.region_at(rect.x, y).is_none())
+            .expect("there must be at least one unregistered gap row between the two messages");
+        assert!(rect.y <= gap_y && gap_y < rect.y + rect.height);
+    }
+
     /// Wide tables (including CJK content) must keep borders intact and never
     /// overflow the viewport: columns shrink to fit, cell text wraps, and
     /// every rendered line stays within the available width.
     #[test]
-    fn wide_table_shrinks_columns_and_keeps_borders_intact() {
-        use crate::tui::document::TableAlignment;
+    fn wide_table_shrinks_columns_and_keeps_borders_intact() {        use crate::tui::document::TableAlignment;
 
         let headers = vec![
             "工具".to_string(),
@@ -1286,7 +1519,8 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let empty: Vec<String> = Vec::new();
-        let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> = crate::tui::fuzzy::rank(&empty, "");
+        let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> =
+            crate::tui::fuzzy::rank(&empty, "");
         terminal
             .draw(|f| {
                 draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);

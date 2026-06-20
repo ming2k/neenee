@@ -30,7 +30,7 @@ Every capability below follows from that shift.
 
 ## Terminal underpinnings
 
-`crates/neenee-tui/src/lib.rs` puts the terminal into application mode on
+`crates/neenee-cli/src/tui/mod.rs` puts the terminal into application mode on
 startup and undoes it on exit:
 
 ```rust
@@ -119,7 +119,7 @@ This is the single biggest difference from terminal text. A line-oriented
 program emits a string; the terminal wraps it and the user can only copy
 the wrapped result. neenee keeps a **structured document** instead.
 
-`crates/neenee-tui/src/document.rs` parses each message with
+`crates/neenee-cli/src/tui/document.rs` parses each message with
 [pulldown-cmark] into a `Vec<Block>` and tags it with a `MessageKind`:
 
 ```rust

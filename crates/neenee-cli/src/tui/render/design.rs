@@ -39,25 +39,20 @@ pub(super) const REASONING_TRACE_BODY_TOP_GAP_ROWS: usize = 1;
 pub(super) const REASONING_TRACE_BLOCK_GAP_ROWS: usize = 1;
 
 /// Hint bar: a single-line status strip pinned directly below the input box
-/// that surfaces workspace + model + goal + MCP + context-usage info that the
-/// old top header used to carry. Always one row tall when visible (hidden only
-/// while an overlay modal replaces the chrome).
+/// that surfaces model + goal + MCP + context-usage info that the old top
+/// header used to carry. Always one row tall when visible (hidden only while
+/// an overlay modal replaces the chrome).
 pub(super) const HINT_BAR_ROWS: u16 = 1;
 /// Internal left indent of hint-bar content, matching the composer's prompt
 /// prefix feel.
 pub(super) const HINT_BAR_INNER_PADDING: usize = 1;
-/// Gap between the cwd and the right-aligned cluster (model/goal/MCP/ctx).
+/// Minimum gap between the left cluster (focus / auto-approve pills) and the
+/// right-aligned cluster (model/goal/MCP/context).
 pub(super) const HINT_BAR_GAP_MIN: usize = 2;
 /// Gap between adjacent right-aligned hint segments.
 pub(super) const HINT_BAR_SEGMENT_GAP: usize = 2;
 /// Upper bound on the displayed goal objective excerpt shown in the hint bar.
 pub(super) const HINT_BAR_GOAL_MAX_CHARS: usize = 28;
-/// Upper bound on the displayed cwd. When the working directory is deeper than
-/// this, the leading path components collapse to `…` so the leaf and the
-/// right-side cluster both stay visible.
-pub(super) const HINT_BAR_PATH_MAX_CHARS: usize = 32;
-/// Fill-cell count of the context-usage bar (`[██░░░░░░░░]`).
-pub(super) const CONTEXT_USAGE_BAR_CELLS: usize = 10;
 
 pub(super) const STATUS_BAR_ROWS: u16 = 1;
 pub(super) const SUBAGENT_BAR_ROWS: u16 = 1;

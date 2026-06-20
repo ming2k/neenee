@@ -120,12 +120,12 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
         let mut row = String::new();
         for x in 0..width as usize {
             let cell = &buf.content[y * bw + x];
-            let sym: &str = cell.symbol().as_ref();
+            let sym: &str = cell.symbol();
             row.push_str(sym);
         }
         rows.push(row.trim_end().to_string());
     }
-    while rows.last().map_or(false, |r| r.is_empty()) {
+    while rows.last().is_some_and(|r| r.is_empty()) {
         rows.pop();
     }
     let grid = rows.join("\n");
@@ -352,12 +352,12 @@ fn tool_step_detail_overlay_renders_full_shell_output() {
     for y in 0..buf.area.height as usize {
         let mut row = String::new();
         for x in 0..bw {
-            let sym: &str = buf.content[y * bw + x].symbol().as_ref();
+            let sym: &str = buf.content[y * bw + x].symbol();
             row.push_str(sym);
         }
         rows.push(row.trim_end().to_string());
     }
-    while rows.last().map_or(false, |r| r.is_empty()) {
+    while rows.last().is_some_and(|r| r.is_empty()) {
         rows.pop();
     }
     insta::assert_snapshot!(rows.join("\n"));
@@ -375,6 +375,7 @@ fn edit_file_diff_renders_from_structured_patch() {
             op: neenee_core::PatchOp::Edit,
             old: "let x = 1;".into(),
             new: "let x = 2;".into(),
+            start_line: 0,
         },
         true,
     );

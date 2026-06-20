@@ -51,7 +51,7 @@ carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
 `OpenAiCompatProvider` declares schemas natively. The OpenAI-compatible registry
-presets (`kimi-code`, `deepseek-flash`, `deepseek-pro`, `qwen`, `glm`) and
+presets (`kimi-k2.7-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `qwen`, `glm`) and
 the bespoke `openai` entry all inherit the same path: each is built by
 `OpenAiProviderSpec::build` (or `OpenAiCompatProvider::with_base_url` for
 `openai`) into an `OpenAiCompatProvider`, so they delegate to its
@@ -65,7 +65,7 @@ The harness never declares reasoning support and never sends a flag that
 requests it. Providers passively read `reasoning_content` from stream deltas
 (`parse_openai_stream_data`) and complete messages (`chat`), forwarding it as
 `ProviderStreamEvent::ReasoningDelta`. Only models that emit the field
-(`deepseek-reasoner`, reasoning-tuned GLM and Qwen variants) surface
+(`deepseek-v4-flash` thinking mode, reasoning-tuned GLM and Qwen variants) surface
 reasoning; other models produce no `ReasoningDelta` events.
 
 Reasoning is rendering metadata. It is not summarized, not re-injected as

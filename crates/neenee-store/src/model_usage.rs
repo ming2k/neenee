@@ -6,14 +6,11 @@
 //! sort order — never configuration. Favorites and the default-model pointer
 //! belong in `config.toml` and are not stored here.
 //!
-//! The store is a flat map of canonical model id → [`UsageEntry`]. Ids are
-//! canonicalized through [`neenee_core::catalog::canonical_id`] before recording
-//! so a legacy `default_provider = "deepseek"` is attributed to the canonical
-//! `"deepseek-flash"` entry, matching what the picker displays.
+//! The store is a flat map of model id → [`UsageEntry`]. Ids are stored as
+//! given; preset ids are unique and there is no alias mapping.
 
 use crate::fsutil;
 use crate::paths;
-use neenee_core::catalog::canonical_id;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,14 +45,11 @@ impl ModelUsage {
         serde_json::from_str(&content).unwrap_or_default()
     }
 
-    /// Record an activation of `id`. Canonicalizes the id first, bumps
-    /// `last_used_ms` to now, and increments `use_count`.
+    /// Record an activation of `id`. Bumps `last_used_ms` to now, and
+    /// increments `use_count`.
     pub fn record(&mut self, id: &str) {
         let now = now_ms();
-        let entry = self
-            .entries
-            .entry(canonical_id(id).to_string())
-            .or_default();
+        let entry = self.entries.entry(id.to_string()).or_default();
         // `now` is monotonic-ish per wall clock; only advance the timestamp so
         // a clock skew backwards does not erase a more recent activation.
         entry.last_used_ms = entry.last_used_ms.max(now);
@@ -68,10 +62,10 @@ impl ModelUsage {
         fsutil::atomic_write_json(&paths::get().model_usage_file(), self)
     }
 
-    /// Last-used timestamp (epoch ms) for a model id, canonicalized. `None`
-    /// when the model has never been activated, which sorts as "oldest".
+    /// Last-used timestamp (epoch ms) for a model id. `None` when the model
+    /// has never been activated, which sorts as "oldest".
     pub fn last_used_ms(&self, id: &str) -> Option<u64> {
-        self.entries.get(canonical_id(id)).map(|e| e.last_used_ms)
+        self.entries.get(id).map(|e| e.last_used_ms)
     }
 
     /// Number of times `id` was activated. `0` for unknown ids.
@@ -80,9 +74,7 @@ impl ModelUsage {
     /// views (ADR-0002 phase 3).
     #[allow(dead_code)]
     pub fn use_count(&self, id: &str) -> u64 {
-        self.entries
-            .get(canonical_id(id))
-            .map_or(0, |e| e.use_count)
+        self.entries.get(id).map_or(0, |e| e.use_count)
     }
 }
 
@@ -116,15 +108,14 @@ mod tests {
     }
 
     #[test]
-    fn record_canonicalizes_legacy_alias() {
+    fn record_stores_id_verbatim() {
         let mut usage = ModelUsage::default();
-        // A legacy "deepseek" id is recorded under the canonical
-        // "deepseek-flash" key, so the picker (which lists "deepseek-flash")
-        // sees the activation.
-        usage.record("deepseek");
-        assert_eq!(usage.use_count("deepseek-flash"), 1);
-        assert_eq!(usage.use_count("deepseek"), 1);
-        assert!(usage.last_used_ms("deepseek").is_some());
+        // Ids are stored as given; there is no alias canonicalization.
+        usage.record("deepseek-v4-flash");
+        assert_eq!(usage.use_count("deepseek-v4-flash"), 1);
+        // A stale id does not get merged into the current entry.
+        assert_eq!(usage.use_count("deepseek"), 0);
+        assert!(usage.last_used_ms("deepseek").is_none());
     }
 
     #[test]

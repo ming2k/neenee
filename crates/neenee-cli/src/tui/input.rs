@@ -8,17 +8,16 @@ use crate::tui::selection::SelectionDrag;
 /// Which surface currently owns keyboard focus.
 ///
 /// The TUI splits keyboard input into two zones so the same key (arrows,
-/// Enter) has a single, unambiguous meaning per zone. `Tab` is reserved as the
-/// symmetric toggle between the two zones:
+/// Enter) has a single, unambiguous meaning per zone:
 ///
 /// - [`FocusZone::Compose`] — the input box owns the keys. Typing inserts into
 ///   the prompt, `↑`/`↓` walk input history or slash suggestions, `Tab`
-///   accepts a slash suggestion (when one is open) or toggles into Browse.
-///   This is the default.
+///   accepts a slash suggestion (when one is open). `Ctrl+B` switches to
+///   [`FocusZone::Browse`]. This is the default.
 /// - [`FocusZone::Browse`] — the conversation stream owns the keys. `↑` / `↓`
-///   cycle the keyboard-focused step, `Enter` / `Space` activate it, `Tab`
-///   toggles back to Compose, and any other printable character drops back
-///   into [`FocusZone::Compose`] and inserts itself.
+///   cycle the keyboard-focused step, `Enter` / `Space` activate it, and any
+///   printable character (typically `p` for "prompt") drops back into
+///   [`FocusZone::Compose`] and inserts itself.
 ///
 /// Transitions are explicit so the meaning of every key is derivable from the
 /// current zone, and a visible indicator (input border + hint-bar label) tells
@@ -61,6 +60,10 @@ pub struct InputContext {
     pub has_focused_target: bool,
     /// Which surface (input box vs conversation stream) owns keyboard focus.
     pub focus_zone: FocusZone,
+    /// Whether the send queue holds at least one staged user message. While
+    /// true, `↑` in the compose zone recalls the most-recently-queued
+    /// message instead of walking input history.
+    pub has_queued: bool,
 }
 
 /// Result of processing an input event.
@@ -74,6 +77,10 @@ pub enum InputAction {
     SendChat(String),
     /// Send a slash command.
     SendSlash(String),
+    /// Run a shell command directly (the `!` prefix path). The `!` is
+    /// stripped and the remaining text is executed through the `bash` tool
+    /// without an LLM roundtrip.
+    SendShell(String),
     /// Activate a model from the `/models` picker: the default model when the
     /// filter is empty (fast path), otherwise the highlighted filtered row.
     /// Falls through to the API-key setup modal when the target has no key.
@@ -97,6 +104,19 @@ pub enum InputAction {
     OpenCommands,
     /// Open the help / keybindings modal.
     OpenHelp,
+    /// Open the session-context modal (Ctrl+I): tabbed overview of the live
+    /// session's model, MCP servers, and (later) permissions / tools / skills.
+    OpenSession,
+    /// Cycle the active pane inside the session-context modal. `forward` picks
+    /// the direction so Left/Right (and later Tab/Shift+Tab) share one action.
+    SessionTabCycle { forward: bool },
+    /// Move the row cursor inside the session-context modal's list panes
+    /// (Skills / Permissions / Tools). `forward` = down, else up.
+    SessionSelect { forward: bool },
+    /// Tab-aware primary action on the selected row: revoke the selected
+    /// permission rule, or toggle the selected tool's enabled flag. No-op on
+    /// read-only panes (Model / MCP / Skills). Bound to `Space`.
+    SessionActivate,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
     /// Delete the currently-selected session in the sessions picker.
@@ -128,8 +148,8 @@ pub enum InputAction {
     /// Activate the current keyboard-focused target.
     ActivateFocusedTarget,
     /// Switch the keyboard focus zone to the conversation stream (Browse).
-    /// One half of the Tab toggle: `backward` is `true` for Shift+Tab (lands
-    /// on the last step) and `false` for Tab (lands on the first step).
+    /// Triggered by `Ctrl+B` in Compose. `backward` is reserved for future
+    /// use; currently always `false`.
     EnterBrowseZone { backward: bool },
     /// Switch the keyboard focus zone back to the input box (Compose).
     ReturnToComposeZone,
@@ -148,12 +168,26 @@ pub enum InputAction {
     SuggestNext,
     /// Cycle suggestion backward.
     SuggestPrev,
-    /// Accept suggestion.
+    /// Accept the next/previous completion item by index without closing the
+    /// popup. Used by `Tab`, which cycles through candidates one splice at a
+    /// time. The popup re-renders against the spliced input so the user can
+    /// keep cycling.
     AcceptSuggestion(String),
+    /// Like [`AcceptSuggestion`] but the popup is closed afterwards. Used by
+    /// `Enter` (both the slash-prefix auto-accept and the highlighted-item
+    /// path). The harness latches a `completion_dismissed` flag so the popup
+    /// stays hidden until the next `InsertChar` / `Backspace`, matching the
+    /// expectation that pressing Enter "finishes" the current completion.
+    CommitSuggestion(String),
     /// Navigate history up.
     HistoryPrev,
     /// Navigate history down.
     HistoryNext,
+    /// Recall the most-recently-queued message: pop it off the send queue,
+    /// remove its transcript marker, and load its text (and any pasted
+    /// images) back into the input box for editing. Only dispatched while
+    /// the queue is non-empty; otherwise `HistoryPrev` is used.
+    RecallQueued,
     /// Accept the highlighted fuzzy match from the Ctrl+R history-search modal:
     /// insert the selected entry into the input box (replacing the query) and
     /// close the modal. The message is not sent — the user can edit and press
@@ -413,6 +447,11 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Note: the session-context modal is opened via the
+                // `/session` slash command (see the Enter submit path), not a
+                // Ctrl+ combo — Ctrl+I collides byte-for-byte with Tab on most
+                // terminals, so a Ctrl+I binding would fire as Tab (completion
+                // accept or no-op) on terminals without Kitty protocol support.
                 // Ctrl+M: open the models modal. In a raw terminal Ctrl+M is
                 // byte-identical to Enter, so this only fires when the Kitty
                 // enhanced-keyboard protocol is active (enabled in `run_tui`).
@@ -448,6 +487,7 @@ pub fn process_event(
                     super::Modal::Question => InputAction::QuestionSubmit,
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
+                    super::Modal::Session => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
                             return InputAction::ActivateFocusedTarget;
@@ -461,7 +501,22 @@ pub fn process_event(
                             && context.suggestion_index.is_none()
                             && !context.has_exact_suggestion
                         {
-                            return InputAction::AcceptSuggestion("0".to_string());
+                            return InputAction::CommitSuggestion("0".to_string());
+                        }
+                        // If a completion menu is open and the user has
+                        // highlighted an item (via ↑/↓ or Tab cycling),
+                        // Enter accepts that item rather than sending the
+                        // partial input. Applies to both slash commands and
+                        // `@path` mentions. An explicit highlight is a
+                        // stronger signal than the raw text in the box, so
+                        // this wins over the exact-match slash fast path
+                        // below.
+                        if let Some(i) = context.suggestion_index {
+                            if context.completion_kind != super::CompletionKind::None
+                                && context.suggestion_count > 0
+                            {
+                                return InputAction::CommitSuggestion(i.to_string());
+                            }
                         }
                         let text = std::mem::take(input);
                         *cursor_position = 0;
@@ -472,8 +527,20 @@ pub fn process_event(
                             // arm and silently no-op in the backend.
                             match text.trim() {
                                 "/models" => InputAction::OpenModels,
+                                "/session" => InputAction::OpenSession,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
+                            }
+                        } else if let Some(rest) = text.strip_prefix('!') {
+                            // `!<command>` runs the rest directly through the
+                            // bash tool, bypassing the LLM. Leading whitespace
+                            // after the bang is tolerated so `! ls` matches
+                            // the shell convention. A bare `!` is a no-op.
+                            let command = rest.trim_start().to_string();
+                            if command.is_empty() {
+                                InputAction::None
+                            } else {
+                                InputAction::SendShell(command)
                             }
                         } else if !text.is_empty() {
                             InputAction::SendChat(text)
@@ -488,7 +555,7 @@ pub fn process_event(
                         && context.suggestion_count > 0
                     {
                         // A slash/path suggestion menu is open: accept the
-                        // next entry rather than toggling zones.
+                        // next entry.
                         let next = match context.suggestion_index {
                             Some(i) => (i + 1) % context.suggestion_count,
                             None => 0,
@@ -498,33 +565,16 @@ pub fn process_event(
                         // Tab cycles focus between the editor's API-key and
                         // model-id fields.
                         InputAction::ModelEditorNextField
-                    } else if context.active_modal != super::Modal::None
-                        && context.active_modal != super::Modal::Permission
-                    {
-                        InputAction::None
-                    } else if context.focus_zone.is_browse() {
-                        // Browse → Compose: Tab is a symmetric zone toggle.
-                        InputAction::ReturnToComposeZone
                     } else {
-                        // Compose → Browse: hand the keyboard over to the
-                        // conversation stream and focus the first step.
-                        // Works with or without text in the prompt (the draft
-                        // is preserved in the buffer).
-                        InputAction::EnterBrowseZone { backward: false }
+                        // No completion open and no modal field to cycle: Tab
+                        // is a no-op. Zone switching is Ctrl+B / `p`, not Tab.
+                        InputAction::None
                     }
                 }
                 KeyCode::BackTab => {
-                    if context.active_modal != super::Modal::None
-                        && context.active_modal != super::Modal::Permission
-                    {
-                        InputAction::None
-                    } else if context.focus_zone.is_browse() {
-                        // Browse → Compose: Shift+Tab mirrors Tab's toggle.
-                        InputAction::ReturnToComposeZone
-                    } else {
-                        // Compose → Browse, focusing the last step.
-                        InputAction::EnterBrowseZone { backward: true }
-                    }
+                    // Shift+Tab mirrors Tab in modals (no-op outside model
+                    // editor). Zone switching uses Ctrl+B / `p`, not Tab.
+                    InputAction::None
                 }
                 // Ctrl+J: alias for Alt+Enter — insert a literal newline.
                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -542,6 +592,18 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
+                // Ctrl+B: switch from Compose to Browse (B = Browse). Dedicated
+                // zone-switch key so Tab is free for completion-only duty.
+                // No-op outside the main prompt (modals, Browse zone).
+                KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if context.active_modal == super::Modal::None
+                        && context.focus_zone.is_compose()
+                    {
+                        InputAction::EnterBrowseZone { backward: false }
+                    } else {
+                        InputAction::None
+                    }
+                }
                 // Ctrl+A: move the caret to the start of the current line
                 // (readline convention). Works wherever free text is being
                 // edited — the main prompt in Compose zone and the free-text
@@ -552,7 +614,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
                     }
@@ -564,7 +627,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
                     }
@@ -587,9 +651,15 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Question && c == ' ' {
                         return InputAction::QuestionToggle;
                     }
+                    // Space inside the session modal is the tab-aware primary
+                    // action: revoke the selected permission / toggle the
+                    // selected tool. No-op on read-only panes.
+                    if context.active_modal == super::Modal::Session && c == ' ' {
+                        return InputAction::SessionActivate;
+                    }
                     if context.active_modal == super::Modal::Question {
                         if let Some(d) = c.to_digit(10) {
-                            if d >= 1 && d <= 9 {
+                            if (1..=9).contains(&d) {
                                 return InputAction::QuestionSelect(d as usize);
                             }
                         }
@@ -641,7 +711,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) {
                         let byte_pos = input
                             .char_indices()
@@ -662,7 +733,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -681,11 +753,15 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalUp;
                     }
+                    if context.active_modal == super::Modal::Session {
+                        return InputAction::SessionTabCycle { forward: false };
+                    }
                     if matches!(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -696,11 +772,15 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalDown;
                     }
+                    if context.active_modal == super::Modal::Session {
+                        return InputAction::SessionTabCycle { forward: true };
+                    }
                     if matches!(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) && *cursor_position < input.chars().count()
                     {
                         *cursor_position += 1;
@@ -726,8 +806,8 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
-                    super::Modal::ModelEditor
-                    | super::Modal::Help => InputAction::None,
+                    super::Modal::Session => InputAction::SessionSelect { forward: false },
+                    super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
                             InputAction::FocusPrevTarget
@@ -735,6 +815,12 @@ pub fn process_event(
                             && context.suggestion_count > 0
                         {
                             InputAction::SuggestPrev
+                        } else if context.has_queued {
+                            // A queued message is waiting to ship; ↑ recalls
+                            // the most-recently-queued one into the input for
+                            // editing instead of walking input history. Once
+                            // the queue drains, ↑ resumes its normal role.
+                            InputAction::RecallQueued
                         } else {
                             InputAction::HistoryPrev
                         }
@@ -755,8 +841,8 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
-                    super::Modal::ModelEditor
-                    | super::Modal::Help => InputAction::None,
+                    super::Modal::Session => InputAction::SessionSelect { forward: true },
+                    super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
                             InputAction::FocusNextTarget
@@ -801,7 +887,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
@@ -819,7 +906,8 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models | super::Modal::ModelEditor
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
@@ -875,6 +963,48 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        )
+    }
+
+    // Like `enter`, but exposes the full completion state so we can reproduce
+    // the "menu open + user highlighted an item" scenarios that decide
+    // whether Enter accepts the highlighted completion or sends the partial
+    // input as-is.
+    #[allow(clippy::too_many_arguments)]
+    fn enter_with_completion(
+        input: &mut String,
+        kind: crate::tui::CompletionKind,
+        suggestion_count: usize,
+        suggestion_index: Option<usize>,
+        has_exact_suggestion: bool,
+    ) -> InputAction {
+        let mut cursor = input.chars().count();
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: kind,
+                suggestion_count,
+                has_exact_suggestion,
+                suggestion_index,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         )
@@ -894,8 +1024,149 @@ mod tests {
         let mut input = "/go".to_string();
         assert_eq!(
             enter(&mut input, false),
-            InputAction::AcceptSuggestion("0".to_string())
+            InputAction::CommitSuggestion("0".to_string())
         );
+    }
+
+    #[test]
+    fn enter_accepts_a_highlighted_slash_suggestion() {
+        // User typed `/m`, menu shows `/mode` / `/mcp` / `/models`, user
+        // pressed ↓ to highlight `/mcp` (index 1). Enter must accept the
+        // highlighted item rather than sending `/m` as a (rejected) command.
+        let mut input = "/m".to_string();
+        assert_eq!(
+            enter_with_completion(
+                &mut input,
+                crate::tui::CompletionKind::Slash,
+                3,
+                Some(1),
+                false,
+            ),
+            InputAction::CommitSuggestion("1".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_accepts_a_highlighted_path_suggestion() {
+        // User typed `@src/foo`, path menu shows three candidates, user
+        // highlighted the second. Enter must accept it rather than shipping
+        // the partial `@src/foo` text in the chat message.
+        let mut input = "@src/foo".to_string();
+        assert_eq!(
+            enter_with_completion(
+                &mut input,
+                crate::tui::CompletionKind::Path,
+                3,
+                Some(2),
+                false,
+            ),
+            InputAction::CommitSuggestion("2".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_highlight_wins_over_exact_slash_match() {
+        // User typed `/mode` (exact match) but then pressed ↓ to highlight
+        // `/models`. The explicit highlight is a stronger signal than the
+        // exact-match fast path, so Enter accepts the highlight.
+        let mut input = "/mode".to_string();
+        assert_eq!(
+            enter_with_completion(
+                &mut input,
+                crate::tui::CompletionKind::Slash,
+                2,
+                Some(1),
+                true,
+            ),
+            InputAction::CommitSuggestion("1".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_without_highlight_still_sends_path_message() {
+        // No explicit highlight on a path menu → Enter keeps sending the
+        // message. Tab remains the way to accept the first path candidate
+        // without first navigating with ↓.
+        let mut input = "@src/foo".to_string();
+        assert_eq!(
+            enter_with_completion(
+                &mut input,
+                crate::tui::CompletionKind::Path,
+                3,
+                None,
+                false,
+            ),
+            InputAction::SendChat("@src/foo".to_string())
+        );
+    }
+
+    #[test]
+    fn bang_prefix_dispatches_a_shell_command() {
+        let mut input = "!git status".to_string();
+        assert_eq!(
+            enter_shell(&mut input),
+            InputAction::SendShell("git status".to_string())
+        );
+    }
+
+    #[test]
+    fn bang_prefix_tolerates_leading_whitespace() {
+        // `! ls` matches the shell convention: the bang is a mode marker,
+        // not part of the command.
+        let mut input = "!   ls -la".to_string();
+        assert_eq!(
+            enter_shell(&mut input),
+            InputAction::SendShell("ls -la".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_bang_is_a_no_op() {
+        // A bare `!` does not run an empty command.
+        let mut input = "!".to_string();
+        assert_eq!(enter_shell(&mut input), InputAction::None);
+        // The input is still consumed (mirrors how `/` on its own is
+        // swallowed), so the user does not get stuck with a stray `!`.
+        assert_eq!(input, "");
+    }
+
+    #[test]
+    fn bang_only_with_whitespace_is_a_no_op() {
+        let mut input = "!   ".to_string();
+        assert_eq!(enter_shell(&mut input), InputAction::None);
+    }
+
+    // Like `enter`, but with `completion_kind: None` and no suggestions, the
+    // production state for `!`-prefixed input (slash completion only opens
+    // when the input starts with `/`).
+    fn enter_shell(input: &mut String) -> InputAction {
+        let mut cursor = input.chars().count();
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        )
     }
 
     #[test]
@@ -924,6 +1195,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -951,6 +1223,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -978,6 +1251,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1007,6 +1281,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1038,6 +1313,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1061,6 +1337,7 @@ mod tests {
             in_subagent_view: false,
             has_focused_target: false,
             focus_zone: FocusZone::Compose,
+            has_queued: false,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -1095,6 +1372,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1120,6 +1398,7 @@ mod tests {
                 in_subagent_view,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         )
@@ -1145,46 +1424,72 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
+                has_queued: false,
             },
             &mut drag,
         )
     }
 
     #[test]
-    fn tab_toggles_between_compose_and_browse() {
-        // Compose + Tab hands focus to the conversation stream (forward =
-        // first step). Tab is a pure zone toggle, so it fires whether or not
-        // the prompt has text — the draft stays in the buffer.
+    fn tab_in_compose_without_suggestions_is_noop() {
+        // Tab is completion-only: with no suggestion menu open, it does
+        // nothing. Zone switching is Ctrl+B, not Tab.
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::Tab, false, &mut input),
-            InputAction::EnterBrowseZone { backward: false }
+            InputAction::None
         );
         let mut input = String::from("draft");
         assert_eq!(
             key_in_view(KeyCode::Tab, false, &mut input),
-            InputAction::EnterBrowseZone { backward: false }
+            InputAction::None
         );
-        // Shift+Tab enters Browse as well, but lands on the last step.
+        // Shift+Tab is also a no-op (no zone switching).
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::BackTab, false, &mut input),
-            InputAction::EnterBrowseZone { backward: true }
+            InputAction::None
         );
     }
 
     #[test]
-    fn tab_toggles_back_to_compose_in_browse_zone() {
-        // In Browse, Tab / Shift+Tab hand focus back to the prompt. Only the
-        // arrow keys still walk across the interactive targets.
-        assert_eq!(
-            key_with_focus(KeyCode::Tab),
-            InputAction::ReturnToComposeZone
+    fn ctrl_b_switches_compose_to_browse() {
+        // Ctrl+B in Compose enters Browse, focusing the first step.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+            )),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
         );
-        assert_eq!(
-            key_with_focus(KeyCode::BackTab),
-            InputAction::ReturnToComposeZone
-        );
+        assert_eq!(action, InputAction::EnterBrowseZone { backward: false });
+    }
+
+    #[test]
+    fn tab_in_browse_is_noop() {
+        // Tab / Shift+Tab in Browse are no-ops. Arrows still walk targets.
+        // Return to Compose via any printable char (typically `p`).
+        assert_eq!(key_with_focus(KeyCode::Tab), InputAction::None);
+        assert_eq!(key_with_focus(KeyCode::BackTab), InputAction::None);
         assert_eq!(key_with_focus(KeyCode::Up), InputAction::FocusPrevTarget);
         assert_eq!(key_with_focus(KeyCode::Down), InputAction::FocusNextTarget);
     }
@@ -1203,10 +1508,9 @@ mod tests {
 
     #[test]
     fn escape_in_browse_does_not_switch_zone() {
-        // Zone switching (Browse ↔ Compose) is Tab-only. Esc in Browse no
-        // longer returns to the input box — that overloaded Esc with too many
-        // meanings. Idle Browse + Esc is a no-op; Esc still exits sub-agent
-        // views, interrupts a running turn, and closes modals on its own.
+        // Zone switching uses Ctrl+B (compose → browse) and printable chars
+        // (browse → compose). Esc in Browse is a no-op; Esc still exits
+        // sub-agent views, interrupts a running turn, and closes modals.
         assert_eq!(key_with_focus(KeyCode::Esc), InputAction::None);
     }
 
@@ -1239,6 +1543,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1274,6 +1579,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1352,6 +1658,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: zone,
+                has_queued: false,
             },
             &mut drag,
         )
@@ -1453,7 +1760,10 @@ mod tests {
     fn home_and_end_move_caret_in_free_text_modals() {
         // The unified model editor borrows the input line for one field at a
         // time; Home/End should edit there too, not be swallowed.
-        for modal in [crate::tui::Modal::ModelEditor, crate::tui::Modal::HistorySearch] {
+        for modal in [
+            crate::tui::Modal::ModelEditor,
+            crate::tui::Modal::HistorySearch,
+        ] {
             let mut input = "abc".to_string();
             let mut cursor = 2;
             let action = run_key(
@@ -1625,6 +1935,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         )
@@ -1712,6 +2023,7 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
@@ -1738,9 +2050,85 @@ mod tests {
                 in_subagent_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
+                has_queued: false,
             },
             &mut drag,
         );
         assert_eq!(action, InputAction::None);
+    }
+
+    /// Helper: send `code` in the compose zone with explicit `has_queued`.
+    fn up_with_queued(has_queued: bool) -> InputAction {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Key(crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn up_arrow_recalls_queued_when_queue_nonempty() {
+        // While at least one message is staged in the send queue, ↑ recalls
+        // the most-recently-queued one into the composer for editing instead
+        // of walking input history. This is the user-facing undo for a
+        // queued send: the user pressed Enter too eagerly while the AI was
+        // still responding, and ↑ is the natural "go back" gesture.
+        assert_eq!(up_with_queued(true), InputAction::RecallQueued);
+    }
+
+    #[test]
+    fn up_arrow_walks_history_when_queue_empty() {
+        // Once the queue drains (or was never populated), ↑ resumes its
+        // normal role of walking the input history.
+        assert_eq!(up_with_queued(false), InputAction::HistoryPrev);
+    }
+
+    #[test]
+    fn up_arrow_in_browse_does_not_recall_queued() {
+        // Browse zone owns ↑ for step navigation; the queued-message recall
+        // only fires from Compose (where the user can actually edit the
+        // recalled draft). In Browse, ↑ keeps walking activatable targets.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: true,
+                focus_zone: FocusZone::Browse,
+                has_queued: true,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::FocusPrevTarget);
     }
 }

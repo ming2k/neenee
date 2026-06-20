@@ -174,6 +174,26 @@ pub fn estimate_context_tokens(messages: &[TranscriptMessage]) -> usize {
     (context_chars_of(messages) / 4).max(1)
 }
 
+/// Lifecycle of a user-authored message from the user's point of view.
+///
+/// All other roles are inherently "delivered" (the harness only renders them
+/// once they exist), so this only matters on `Role::User` messages. The TUI
+/// uses it to draw a distinct "⏸ Queued" panel while a message is waiting for
+/// the in-flight turn to finish, and the event loop flips it back to
+/// [`DeliveryStatus::Delivered`] once the queued message is actually shipped
+/// to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeliveryStatus {
+    /// The message has been handed off to the agent (or is an assistant /
+    /// tool / system message that doesn't go through the queue).
+    #[default]
+    Delivered,
+    /// The user pressed Enter while a turn was still running, so the message
+    /// is staged in the TUI's send queue and will be dispatched automatically
+    /// when the harness returns to idle.
+    Queued,
+}
+
 /// A structured transcript message.
 #[derive(Debug, Clone)]
 pub struct TranscriptMessage {
@@ -182,6 +202,11 @@ pub struct TranscriptMessage {
     /// The original raw markdown/text, preserved for exact copy.
     pub raw: String,
     pub kind: MessageKind,
+    /// Lifecycle of this message from the send queue's point of view. Only
+    /// `Role::User` messages ever carry [`DeliveryStatus::Queued`]; everything
+    /// else stays at the default [`DeliveryStatus::Delivered`]. The renderer
+    /// and the queue dispatch/recall paths key off this.
+    pub delivery: DeliveryStatus,
     /// Provider/solution id that produced this message, mirrored from the
     /// core [`Message`] so the transcript stays traceable across model
     /// switches. `None` for messages that don't carry attribution.
@@ -199,9 +224,18 @@ impl TranscriptMessage {
             blocks,
             raw,
             kind: MessageKind::Text,
+            delivery: DeliveryStatus::default(),
             provider: None,
             model: None,
         }
+    }
+
+    /// Mark this message as queued in the send queue (waiting for the
+    /// in-flight turn to finish before it is dispatched). Only meaningful on
+    /// `Role::User` messages; the renderer and dispatch logic key off this.
+    pub fn queued(mut self) -> Self {
+        self.delivery = DeliveryStatus::Queued;
+        self
     }
 
     /// Stamp the provider/solution id and model that produced this message.
@@ -247,6 +281,7 @@ impl TranscriptMessage {
                 started_at: Some(std::time::Instant::now()),
                 children: Vec::new(),
             },
+            delivery: DeliveryStatus::default(),
             provider: None,
             model: None,
         };
@@ -676,6 +711,7 @@ impl TranscriptMessage {
                 expanded: false,
                 user_pinned: false,
             },
+            delivery: DeliveryStatus::default(),
             provider: None,
             model: None,
         };
@@ -686,6 +722,14 @@ impl TranscriptMessage {
 
     pub fn is_thinking(&self) -> bool {
         matches!(self.kind, MessageKind::Thinking { .. })
+    }
+
+    /// A reasoning trace that has not yet been stamped with a duration — i.e.
+    /// its stream is still open. The renderer treats this as the "spinner
+    /// should keep breathing" state, and `finalize_streaming_reasoning` uses
+    /// it to find orphaned traces to freeze after an interrupt.
+    pub fn is_thinking_streaming(&self) -> bool {
+        matches!(self.kind, MessageKind::Thinking { duration_ms: None, .. })
     }
 
     pub fn thinking_expanded(&self) -> Option<bool> {

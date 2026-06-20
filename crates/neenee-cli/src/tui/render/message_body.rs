@@ -12,7 +12,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::document::{Block, TranscriptMessage};
+use crate::tui::document::{Block, DeliveryStatus, TranscriptMessage};
 use crate::tui::layout::{BlockRegion, LayoutMap, TableCellHit};
 use crate::tui::selection::SelectionState;
 
@@ -55,6 +55,8 @@ pub(super) fn draw_message_body(
         match block {
             Block::Text { content } => {
                 let is_user = msg.role == neenee_core::Role::User;
+                let is_queued =
+                    is_user && msg.delivery == DeliveryStatus::Queued;
                 let base = match msg.role {
                     neenee_core::Role::User => Style::default().fg(theme.user_text()),
                     neenee_core::Role::System => Style::default().fg(theme.system_text()),
@@ -86,7 +88,13 @@ pub(super) fn draw_message_body(
                 // User messages get top/bottom padding rows (matching the input
                 // box's breathing room).  The padding is a blank `user_panel_bg`
                 // row with the `┃` bar so the message reads as a solid panel.
-                let user_bg = theme.user_surface();
+                // Queued messages swap in the dimmer `user_surface_queued` so a
+                // pending send reads as more "pending" than delivered.
+                let user_bg = if is_queued {
+                    theme.user_surface_queued()
+                } else {
+                    theme.user_surface()
+                };
                 let user_gutter = " ".repeat(USER_MESSAGE_OUTER_GUTTER_COLS);
                 let user_content_w = full_width.saturating_sub(2 * USER_MESSAGE_OUTER_GUTTER_COLS);
 
@@ -114,6 +122,56 @@ pub(super) fn draw_message_body(
                             ]);
                             let rect = Rect::new(area.x, *current_y, area.width, 1);
                             frame.render_widget(Paragraph::new(pad), rect);
+                            *current_y += 1;
+                        }
+                    }
+                    // Queued badge: render a single-row "⏸ Queued" label inside
+                    // the panel before the first text line, so the user can tell
+                    // at a glance the message is staged in the send queue. Only
+                    // the first text block carries the badge — multi-block
+                    // markdown user messages are rare and the dimmer bg still
+                    // conveys the state on the remaining blocks.
+                    if is_queued && bi == 0 {
+                        *content_lines += 1;
+                        if *skip_rows > 0 {
+                            *skip_rows = skip_rows.saturating_sub(1);
+                        } else if *current_y < area.y + area.height {
+                            let badge = "⏸ Queued";
+                            let badge_w = badge.width();
+                            // Reserve a 2-col gap after the badge so it does
+                            // not run into any wrapped text on the same row
+                            // (the badge row has no text — text starts on the
+                            // next row — but the cushion reads cleaner).
+                            let used = USER_MESSAGE_TEXT_GAP_COLS + badge_w;
+                            let mut spans = vec![
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.surface()),
+                                ),
+                                Span::styled(
+                                    " ".repeat(USER_MESSAGE_TEXT_GAP_COLS),
+                                    Style::default().bg(user_bg),
+                                ),
+                                Span::styled(
+                                    badge.to_string(),
+                                    Style::default()
+                                        .bg(user_bg)
+                                        .fg(theme.warn())
+                                        .add_modifier(Modifier::ITALIC),
+                                ),
+                                Span::styled(
+                                    padded_tail(user_content_w, used),
+                                    Style::default().bg(user_bg),
+                                ),
+                                Span::styled(
+                                    user_gutter.clone(),
+                                    Style::default().bg(theme.surface()),
+                                ),
+                            ];
+                            spans.shrink_to_fit();
+                            let line = Line::from(spans);
+                            let rect = Rect::new(area.x, *current_y, area.width, 1);
+                            frame.render_widget(Paragraph::new(line), rect);
                             *current_y += 1;
                         }
                     }

@@ -15,18 +15,14 @@ pub fn build_skills_index(skills: &[Skill]) -> String {
     ];
     for skill in enabled {
         let scope = format!("[{}]", skill.scope);
-        let desc = skill
-            .description
-            .as_str()
-            .trim()
-            .is_empty()
-            .then_some(
-                skill
-                    .short_description
-                    .as_deref()
-                    .unwrap_or("No description"),
-            )
-            .unwrap_or(skill.description.as_str());
+        let desc = if skill.description.as_str().trim().is_empty() {
+            skill
+                .short_description
+                .as_deref()
+                .unwrap_or("No description")
+        } else {
+            skill.description.as_str()
+        };
         lines.push(format!("  - {} {}: {}", scope, skill.name, desc));
     }
     lines.join("\n")
@@ -42,13 +38,11 @@ pub fn format_skill_list(skills: &[Skill]) -> String {
             skill.scope,
             skill.name,
             state,
-            skill
-                .description
-                .as_str()
-                .trim()
-                .is_empty()
-                .then_some("No description")
-                .unwrap_or(skill.description.as_str())
+            if skill.description.as_str().trim().is_empty() {
+                "No description"
+            } else {
+                skill.description.as_str()
+            }
         ));
     }
     lines.join("\n")

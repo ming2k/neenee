@@ -13,7 +13,7 @@ uses to call tools, see [Tool rounds](tool-rounds.md).
 
 | Layer | Owns | Examples |
 |-------|------|----------|
-| Model weights | Behavior under tool-use prompts; whether reasoning is emitted at all | `deepseek-reasoner`, `glm-4-plus`, `qwen-coder-plus`, `gemini-2.0-flash` |
+| Model weights | Behavior under tool-use prompts; whether reasoning is emitted at all | `deepseek-v4-flash`, `glm-4-plus`, `qwen-coder-plus`, `gemini-2.0-flash` |
 | Serving runtime | HTTP API shape, `tools` / `tool_choice` field parsing, guided JSON decoding, SSE chunking, `reasoning_content` field passthrough | vLLM, SGLang, TGI, TensorRT-LLM, and the hosted gateways (`api.openai.com`, `dashscope.aliyuncs.com`, `open.bigmodel.cn`, Moonshot, Volcengine Ark) |
 | Client (neenee) | Schema declaration, delta reconstruction, fallback parsing, registry, permission brokering | `crates/neenee-core` |
 A tool call only succeeds when all three layers agree. A model whose weights
@@ -57,7 +57,7 @@ mechanics of constrained decoding and chat templates, see
 
 The `reasoning_content` field that some models emit is not requested through
 an API flag. It is produced by the model weights (reasoning-tuned variants
-such as `deepseek-reasoner`, Qwen reasoning models, GLM reasoning models)
+such as DeepSeek V4 thinking mode, Qwen reasoning models, GLM reasoning models)
 and passed through verbatim by the serving runtime as a sibling of `content`
 in the response object.
 
@@ -68,8 +68,8 @@ forward it as `ProviderStreamEvent::ReasoningDelta`. A non-reasoning model
 produces no such events; no capability negotiation is involved.
 
 This makes reasoning cheap to consume but also impossible to enable from the
-client side. Switching the same provider from `deepseek-chat` to
-`deepseek-reasoner` is what turns reasoning on, not any neenee setting.
+client side. Using a reasoning-tuned model variant (e.g. DeepSeek V4 with
+thinking mode enabled) is what turns reasoning on, not any neenee setting.
 
 ## Streaming is a runtime contract
 
@@ -95,8 +95,8 @@ tool-call deltas even when the underlying service might support them.
 neenee's provider adapters encode an opinionated mapping between the three
 layers:
 
-- **OpenAI-compatible registry presets** (`kimi-code`, `deepseek-flash`,
-  `deepseek-pro`, `qwen`, `glm`, plus the bespoke `openai`
+- **OpenAI-compatible registry presets** (`kimi-k2.7-code`, `deepseek-v4-flash`,
+  `deepseek-v4-pro`, `qwen`, `glm`, plus the bespoke `openai`
   entries, all backed by `OpenAiCompatProvider`) assume a runtime that fully
   implements the OpenAI Chat Completions contract including `tools`,
   `tool_choice`, `reasoning_content`, and SSE tool-call deltas. The

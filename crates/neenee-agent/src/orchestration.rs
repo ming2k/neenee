@@ -23,20 +23,19 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentResponse, Goal, GoalAccountingResult, GoalService, GoalStatus, HarnessError,
     HarnessSnapshot, ImagePart, Message, Provider, ProviderStreamEvent, Role, TurnTimer,
     GOAL_COMPLETE_MARKER,
 };
 use neenee_store::{
-    session::{
-        estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision,
-        CompactionHooks, CompactionResult, LoopCheckpoint, SessionStore,
-    },
     config::Config,
+    session::{
+        estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision, CompactionHooks,
+        CompactionResult, LoopCheckpoint, SessionStore,
+    },
 };
-use crate::Agent;
-
 
 pub struct ProxyProvider {
     pub holder: Arc<RwLock<Arc<dyn Provider>>>,
@@ -138,7 +137,7 @@ impl From<&Config> for CompactionSettings {
 }
 
 /// Mid-turn context-relief gate: prunes old tool results durably when the
-
+/// active turn is approaching the model's context budget.
 pub struct MidTurnCompactionGate {
     pub session: Arc<SessionStore>,
     pub prune_protect_chars: usize,
@@ -172,7 +171,6 @@ impl neenee_core::CompactionGate for MidTurnCompactionGate {
     }
 }
 
-
 pub struct RelayCompactionHooks {
     pub tx: mpsc::UnboundedSender<AgentResponse>,
 }
@@ -193,9 +191,8 @@ impl CompactionHooks for RelayCompactionHooks {
     }
 }
 
-/// One-time migration for the pre-SQLite `harness_goal*` config fields.
-/// Returns a `Goal` if the old config had one, so the caller can store it in
-
+/// Emit the current harness snapshot (mode, goal, loop status, auto-approve)
+/// to the UI.
 pub fn send_harness_state(
     tx: &mpsc::UnboundedSender<AgentResponse>,
     agent: &Agent,
@@ -205,6 +202,7 @@ pub fn send_harness_state(
         mode: agent.get_mode(),
         goal: agent.get_goal(),
         loop_status: loop_status.into(),
+        auto_approve: agent.get_auto_approve(),
     }));
 }
 
@@ -544,7 +542,12 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     Ok(completed)
 }
 
-pub fn retry_delay_ms(attempt: usize, retry_after_ms: Option<u64>, base_ms: u64, max_ms: u64) -> u64 {
+pub fn retry_delay_ms(
+    attempt: usize,
+    retry_after_ms: Option<u64>,
+    base_ms: u64,
+    max_ms: u64,
+) -> u64 {
     let exponent = attempt.saturating_sub(1).min(20) as u32;
     retry_after_ms
         .unwrap_or_else(|| base_ms.saturating_mul(2u64.saturating_pow(exponent)))
@@ -610,6 +613,7 @@ pub fn relay_agent_event(
         AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
         AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
+        AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
         AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),
         AgentEvent::SubTask {
@@ -682,7 +686,10 @@ pub async fn prune_and_commit(
     Ok(())
 }
 
-pub fn send_compaction(tx: &mpsc::UnboundedSender<AgentResponse>, checkpoint: &CompactionCheckpoint) {
+pub fn send_compaction(
+    tx: &mpsc::UnboundedSender<AgentResponse>,
+    checkpoint: &CompactionCheckpoint,
+) {
     let _ = tx.send(AgentResponse::Compacted {
         archived_messages: checkpoint.archived_messages,
         before_chars: checkpoint.before_chars,

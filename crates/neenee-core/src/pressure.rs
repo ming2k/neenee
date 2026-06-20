@@ -13,8 +13,10 @@ use crate::{Message, Role};
 pub const PRUNED_TOOL_PLACEHOLDER: &str = "[Old tool result content cleared]";
 
 /// Character-size estimate of a message list: byte length of `content` +
-/// `reasoning_content` + tool-call `name`+`arguments`. A cheap context-pressure
-/// proxy used when a provider does not report token usage.
+/// tool-call `name`+`arguments`. A cheap context-pressure proxy used when a
+/// provider does not report token usage. `reasoning_content` is **not**
+/// included because it is never sent to providers and therefore does not
+/// consume the context window.
 pub fn estimate_chars(messages: &[Message]) -> usize {
     messages.iter().map(message_chars).sum()
 }
@@ -26,11 +28,6 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 
 pub(crate) fn message_chars(message: &Message) -> usize {
     let own = message.content.len()
-        + message
-            .reasoning_content
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0)
         + message
             .tool_calls
             .as_ref()
@@ -175,12 +172,7 @@ fn prune_tool_results_inner(messages: &mut [Message], protect_recent_chars: usiz
 }
 
 pub fn estimate_message_tokens(message: &Message) -> i64 {
-    let text_len = message.content.len()
-        + message
-            .reasoning_content
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
+    let text_len = message.content.len();
     let tool_text: usize = message
         .tool_calls
         .as_ref()

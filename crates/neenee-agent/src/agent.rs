@@ -20,10 +20,21 @@ struct AskUserState {
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Session-level disabled-tool mask. Names here are hidden from the model
+    /// (their schemas are dropped before `prepare_tools`) and rejected at
+    /// dispatch, but the tool stays installed so it can be re-enabled without
+    /// rebuilding the agent. Toggled from the session modal via
+    /// `set_tool_enabled` / `ToggleTool`.
+    disabled_tools: Arc<std::sync::Mutex<HashSet<String>>>,
     mode: Arc<std::sync::Mutex<AgentMode>>,
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
+    /// When true, write tools execute without a `PermissionRequest`. Set by
+    /// `--auto-approve` or `/auto-approve on`. Bypasses the per-call prompt
+    /// entirely (the `always` allowlist is also short-circuited because the
+    /// prompt block is skipped wholesale).
+    auto_approve: Arc<std::sync::Mutex<bool>>,
     ask_user: std::sync::Mutex<AskUserState>,
     pub(crate) skills_registry: skills::SkillRegistry,
     goal_service: GoalService,
@@ -90,9 +101,11 @@ impl Agent {
         Self {
             provider,
             tools,
+            disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
             mode,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
+            auto_approve: Arc::new(std::sync::Mutex::new(false)),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
             goal_service,
@@ -175,6 +188,22 @@ impl Agent {
         if let Ok(mut guard) = self.mode.lock() {
             *guard = mode;
         }
+    }
+
+    /// Whether write-tool permission prompts are currently bypassed.
+    pub fn get_auto_approve(&self) -> bool {
+        *self
+            .auto_approve
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Enable or disable auto-approve for this session.
+    pub fn set_auto_approve(&self, enabled: bool) {
+        *self
+            .auto_approve
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     pub fn get_goal(&self) -> Option<Goal> {
@@ -322,6 +351,146 @@ impl Agent {
             .clear();
     }
 
+    /// Revoke a single cached "always allow" rule. Returns whether a rule was
+    /// actually removed (false if the rule was never cached). Powers the
+    /// session modal's per-row revoke.
+    pub fn revoke_allowed_tool(&self, tool: &str, scope: &str) -> bool {
+        let rule = PermissionRule {
+            tool: tool.to_string(),
+            scope: scope.to_string(),
+        };
+        self.permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .always
+            .remove(&rule)
+    }
+
+    /// Structured view of the cached "always allow" rules, for the session
+    /// modal's Permissions pane. Unlike [`Agent::allowed_tools`] (which collapses
+    /// each rule to a single formatted string), this keeps the tool/scope pair
+    /// intact so the modal can target an individual rule for revocation.
+    pub fn allowed_tools_structured(&self) -> Vec<neenee_core::PermissionRuleInfo> {
+        let mut rules: Vec<neenee_core::PermissionRuleInfo> = self
+            .permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .always
+            .iter()
+            .map(|rule| neenee_core::PermissionRuleInfo {
+                tool: rule.tool.clone(),
+                scope: rule.scope.clone(),
+            })
+            .collect();
+        rules.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| a.scope.cmp(&b.scope)));
+        rules
+    }
+
+    /// Set the session-level enabled flag for a tool. No-op when the name is
+    /// unknown (so a stale toggle from the modal cannot poison the dispatch
+    /// table). Returns whether the flag actually changed.
+    pub fn set_tool_enabled(&self, name: &str, enabled: bool) -> bool {
+        let known = self.tools.iter().any(|t| t.name() == name);
+        if !known {
+            return false;
+        }
+        let mut guard = self
+            .disabled_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let currently_enabled = !guard.contains(name);
+        if enabled == currently_enabled {
+            return false;
+        }
+        if enabled {
+            guard.remove(name);
+        } else {
+            guard.insert(name.to_string());
+        }
+        true
+    }
+
+    /// Whether `name` is currently enabled (i.e. visible to the model and
+    /// dispatchable). Unknown tools report `false`.
+    pub fn is_tool_enabled(&self, name: &str) -> bool {
+        let guard = self
+            .disabled_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        !guard.contains(name)
+    }
+
+    /// All installed tools that the model may see this turn: every tool whose
+    /// name is not in the disabled mask. Used at the schema-build choke points
+    /// so a disabled tool's definition never reaches the provider.
+    fn visible_tools(&self) -> Vec<Arc<dyn Tool>> {
+        let disabled = self
+            .disabled_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.tools
+            .iter()
+            .filter(|t| !disabled.contains(t.name()))
+            .cloned()
+            .collect()
+    }
+
+    /// Structured view of every installed tool, for the session modal's Tools
+    /// pane. `enabled` reflects the disabled mask; `source` classifies origin
+    /// (`builtin` / `mcp:<server>` / `goal` / `plan`) from the tool's name.
+    pub fn snapshot_tools(&self) -> Vec<neenee_core::ToolInfo> {
+        let disabled = self
+            .disabled_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let goal = ["goal_checklist", "get_goal", "create_goal", "update_goal"];
+        let plan = ["plan_enter", "plan_exit"];
+        let mut infos: Vec<neenee_core::ToolInfo> = self
+            .tools
+            .iter()
+            .map(|t| {
+                let name = t.name();
+                let source = if let Some(rest) = name.strip_prefix("mcp__") {
+                    let server = rest.split("__").next().unwrap_or(rest);
+                    format!("mcp:{}", server)
+                } else if goal.contains(&name) {
+                    "goal".to_string()
+                } else if plan.contains(&name) {
+                    "plan".to_string()
+                } else {
+                    "builtin".to_string()
+                };
+                neenee_core::ToolInfo {
+                    name: name.to_string(),
+                    description: t.description().to_string(),
+                    access: t.access(),
+                    enabled: !disabled.contains(name),
+                    source,
+                }
+            })
+            .collect();
+        infos.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.name.cmp(&b.name)));
+        infos
+    }
+
+    /// Structured view of the skills registry, for the session modal's Skills
+    /// pane. Mirrors [`RegistryGuard::list`] into the render-friendly DTO.
+    pub fn snapshot_skills(&self) -> Vec<neenee_core::SkillInfo> {
+        let guard = self.skills_registry.lock();
+        guard
+            .list()
+            .into_iter()
+            .map(|skill| neenee_core::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                version: skill.version.clone(),
+                enabled: skill.enabled,
+                source: skill.scope.to_string(),
+                tags: skill.tags.clone(),
+            })
+            .collect()
+    }
+
     pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
         // Non-interactive convenience path: not cancellable from the outside.
         self.run_with_events(messages, &CancellationToken::new(), |event| match event {
@@ -346,7 +515,11 @@ impl Agent {
     where
         F: FnMut(AgentEvent) + Send,
     {
-        self.provider.prepare_tools(&self.tools);
+        // Only enabled tools are advertised to the model: the disabled mask is
+        // applied here so a toggled-off tool's schema never reaches the
+        // provider, which keeps the model from naming it in the first place.
+        let visible = self.visible_tools();
+        self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState::default();
         let mut tool_rounds = 0;
@@ -409,7 +582,11 @@ impl Agent {
     where
         F: FnMut(AgentEvent) + Send,
     {
-        self.provider.prepare_tools(&self.tools);
+        // Only enabled tools are advertised to the model: the disabled mask is
+        // applied here so a toggled-off tool's schema never reaches the
+        // provider, which keeps the model from naming it in the first place.
+        let visible = self.visible_tools();
+        self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState::default();
         let mut tool_rounds = 0;
@@ -855,6 +1032,18 @@ impl Agent {
             None => return ToolOutput::Text(format!("Error: Tool '{}' not found", call.name)),
         };
 
+        // Defense in depth: even though disabled tools are dropped from the
+        // schema build, a model that still names one (e.g. from an older
+        // turn's tool list still in context) is rejected here rather than
+        // silently executed.
+        if !self.is_tool_enabled(call.name.as_str()) {
+            tracing::warn!(tool = %call.name, "tool disabled this session");
+            return ToolOutput::Text(format!(
+                "Tool '{}' is disabled for this session. Re-enable it in the session modal (Ctrl+I).",
+                call.name
+            ));
+        }
+
         if self.get_mode() == AgentMode::Plan && !tool.allowed_in_plan_mode(&call.arguments) {
             tracing::warn!(tool = %call.name, "tool blocked in plan mode");
             return ToolOutput::Text(format!(
@@ -873,12 +1062,14 @@ impl Agent {
                 tool: tool.name().to_string(),
                 scope: scope.clone(),
             };
-            let always_allowed = self
-                .permissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .always
-                .contains(&rule);
+            let auto_approved = self.get_auto_approve();
+            let always_allowed = auto_approved
+                || self
+                    .permissions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .always
+                    .contains(&rule);
             if !always_allowed {
                 let request = PermissionRequest {
                     id: format!("permission_{}", uuid::Uuid::new_v4()),
@@ -915,6 +1106,8 @@ impl Agent {
                         };
                     }
                 }
+            } else if auto_approved {
+                tracing::info!(tool = %tool.name(), scope = %scope, "auto-approved");
             }
         }
 

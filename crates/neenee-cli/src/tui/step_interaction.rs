@@ -14,7 +14,9 @@
 
 use crate::tui::config::{tool_default_expanded, TuiConfig};
 use crate::tui::document::ToolStepStatus;
-use crate::tui::layout::{InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX};
+use crate::tui::layout::{
+    InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,
+};
 
 /// Which kind of step a pointer hit resolved to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

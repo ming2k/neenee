@@ -60,23 +60,24 @@ pub use neenee_core::*;
 // the Agent struct expects at the crate root have to be listed here by name.
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
-    Goal, GoalAccountingResult, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus,
-    GoalStore, TokenUsage, TurnOutcome, TurnTimer, is_context_overflow,
-    parse_retryable_error, public_error_message, retryable_error, HarnessError, RetryableError,
-    ImagePart, Message, Role, ToolCall, ToolResult, PatchOp, ToolOutput, ToolStream,
-    CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess, Catalog, Channel, ModelEntry,
-    Transport, AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot,
-    ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest, SessionOverview,
-    SubTaskEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
-    estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
-    WebSearchConfig, McpConnectionStatus, McpServerConfig, SkillsConfig, truncate_utf8,
+    estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
+    prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
+    AgentMode, AgentRequest, AgentResponse, Catalog, Channel, CompactionGate, Goal,
+    GoalAccountingResult, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus,
+    GoalStore, HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig,
+    Message, ModelEntry, ModelPickerRow, ModelPickerSnapshot, PatchOp, PermissionDecision,
+    PermissionRequest, Provider, ProviderStreamEvent, PruneOutcome, RetryableError, Role,
+    SessionOverview, SkillsConfig, SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall,
+    ToolOutput, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion,
+    UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
+    PRUNED_TOOL_PLACEHOLDER,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
 // `neenee-core`'s lib.rs (`use super::*`).
+use futures::{future::join_all, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use futures::{future::join_all, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 

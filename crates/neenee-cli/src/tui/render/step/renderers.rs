@@ -57,6 +57,7 @@ pub(super) struct RenderCtx<'a, 'f: 'a> {
 
 impl<'a, 'f: 'a> RenderCtx<'a, 'f> {
     /// Assemble a render context from the raw cursor state owned by a caller.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_cursor(
         frame: &'a mut Frame<'f>,
         area: Rect,
@@ -738,6 +739,7 @@ fn draw_bash_content(
 /// `wrap_w`, all rows in `style`, anchoring selection byte ranges at
 /// `*byte_offset` (advanced past the section). Shared by the structured and
 /// legacy bash renderers.
+#[allow(clippy::too_many_arguments)]
 fn emit_bash_lines(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
@@ -823,10 +825,15 @@ fn draw_tool_result(
             // Prefer the structured Patch payload (old/new from the result);
             // fall back to parsing the arguments for legacy/restored steps.
             let diff: Vec<DiffLine> = match structured {
-                Some(neenee_core::ToolOutput::Patch { old, new, .. }) => {
-                    crate::tui::render::tools::line_diff(old, new)
+                Some(neenee_core::ToolOutput::Patch { old, new, start_line, .. }) => {
+                    let offset = start_line.saturating_sub(1);
+                    let full = crate::tui::render::tools::line_diff(old, new, offset);
+                    crate::tui::render::tools::collapse_context_runs(&full)
                 }
-                _ => crate::tui::render::tools::diff_lines_for(name, arguments),
+                _ => {
+                    let full = crate::tui::render::tools::diff_lines_for(name, arguments);
+                    crate::tui::render::tools::collapse_context_runs(&full)
+                }
             };
             draw_diff_content(ctx, &diff, indent, inner_w);
         }
@@ -886,10 +893,39 @@ fn draw_diff_content(
             DiffOp::Add => ('+', add_row_bg, ctx.theme.ok(), add_hi_bg),
             DiffOp::Remove => ('-', del_row_bg, ctx.theme.err(), del_hi_bg),
             DiffOp::Context => (' ', code_bg, ctx.theme.muted(), code_bg),
+            DiffOp::Ellipsis => (' ', code_bg, ctx.theme.muted(), code_bg),
         };
         let pad = Style::default().bg(row_bg);
-        let no = line.old_no.or(line.new_no).unwrap_or(0);
-        let gutter = format!("{:>width$} ", no, width = gutter_w);
+        let gutter = if line.op == DiffOp::Ellipsis {
+            format!("{:>width$} ", "⋯", width = gutter_w)
+        } else {
+            let no = line.old_no.or(line.new_no).unwrap_or(0);
+            format!("{:>width$} ", no, width = gutter_w)
+        };
+
+        // Ellipsis rows: just the marker, no text or word highlighting.
+        if line.op == DiffOp::Ellipsis {
+            let mut spans: Vec<Span<'static>> = vec![
+                Span::styled(" ".repeat(indent), pad),
+                Span::styled(gutter, Style::default().bg(row_bg).fg(gutter_fg)),
+                Span::styled("  ", Style::default().bg(row_bg)),
+                Span::styled("⋯", Style::default().bg(row_bg).fg(gutter_fg)),
+            ];
+            let used = indent + gutter_w + 1 + sign_w + 1;
+            spans.push(Span::styled(padded_tail(ctx.full_width, used), pad));
+            *ctx.content_lines += 1;
+            if *ctx.skip_rows > 0 {
+                *ctx.skip_rows = ctx.skip_rows.saturating_sub(1);
+                continue;
+            }
+            if *ctx.y >= ctx.area.y + ctx.area.height {
+                break;
+            }
+            let line_rect = Rect::new(ctx.area.x, *ctx.y, ctx.area.width, 1);
+            ctx.frame.render_widget(Paragraph::new(Line::from(spans)), line_rect);
+            *ctx.y += 1;
+            continue;
+        }
 
         let full = line.text();
         let wrapped = nonempty_wrapped(wrap_text(&full, text_w));
@@ -1577,7 +1613,7 @@ pub fn draw_reasoning_trace(
             &mut ctx,
             mi,
             expanded,
-            running.then(|| spinner_glyph()),
+            running.then(spinner_glyph),
             &summary,
             // While streaming the `●` marker breathes between its info tone
             // and the surface — the same liveness cue a running tool step uses

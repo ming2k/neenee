@@ -18,7 +18,8 @@ use crate::tui::layout::LayoutMap;
 use neenee_core::{ModelPickerSnapshot, PermissionRequest, UserQuestionRequest};
 
 use super::primitives::{
-    centered_rect, contrast_fg, draw_dim_backdrop, panel_block, viewport_rect,
+    centered_rect, contrast_fg, draw_dim_backdrop, modal_frame, panel_block, render_body,
+    viewport_rect,
 };
 use super::Theme;
 
@@ -58,41 +59,48 @@ pub(crate) fn draw_models_modal(
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(72, 60, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
 
     // Filter + sort once for the frame; the input handler shares the same
     // function so selection and rendering never diverge.
     let ranked = crate::tui::models_filtered_from(solutions, model_picker, query.trim());
 
-    let mut lines: Vec<Line> = vec![Line::from(vec![
-        Span::styled(
-            " Models",
-            Style::default()
-                .fg(theme.brand())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("❯ ", Style::default().fg(theme.muted())),
-        Span::styled(
-            if query.is_empty() {
-                "type to filter · enter selects default"
-            } else {
-                query
-            },
-            Style::default()
-                .fg(if query.is_empty() {
-                    theme.muted()
-                } else {
-                    theme.fg()
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
+    let header_rect = f.header;
+    if let Some(h) = header_rect {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Models",
+                    Style::default()
+                        .fg(theme.brand())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("❯ ", Style::default().fg(theme.muted())),
+                Span::styled(
+                    if query.is_empty() {
+                        "type to filter · enter selects default"
+                    } else {
+                        query
+                    },
+                    Style::default()
+                        .fg(if query.is_empty() {
+                            theme.muted()
+                        } else {
+                            theme.fg()
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            h,
+        );
+    }
 
+    let mut body: Vec<Line> = Vec::new();
     if ranked.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  (no matches — try a shorter or different query)",
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            " (no matches — try a shorter or different query)",
             Style::default().fg(theme.muted()),
         )));
     } else {
@@ -116,10 +124,8 @@ pub(crate) fn draw_models_modal(
             } else {
                 Style::default().fg(theme.muted())
             };
-            // Leading markers: favorite star, then default (current) dot.
             let star = if picker_row.favorite { "★ " } else { "  " };
             let dot = if is_current { "● " } else { "  " };
-            // Key readiness glyph.
             let (key_label, key_color) = match key_status.get(solution.id) {
                 Some(true) => ("✓", theme.ok()),
                 Some(false) => ("✗", theme.err()),
@@ -130,7 +136,6 @@ pub(crate) fn draw_models_modal(
             } else {
                 Style::default().fg(key_color)
             };
-            // Favorite star gets the accent color off the selection row.
             let star_style = if picker_row.favorite {
                 Style::default().bg(row_bg).fg(if is_selected {
                     contrast_fg(theme.brand())
@@ -140,7 +145,7 @@ pub(crate) fn draw_models_modal(
             } else {
                 dim
             };
-            lines.push(Line::from(vec![
+            body.push(Line::from(vec![
                 Span::styled(format!(" {}", star), star_style),
                 Span::styled(dot.to_string(), dim),
                 Span::styled(
@@ -153,22 +158,26 @@ pub(crate) fn draw_models_modal(
             ]));
         }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " type to filter · ↑↓ navigate · enter activate · * favorite · esc ",
-        Style::default().fg(theme.muted()),
-    )));
+    render_body(frame, f.body, body, &mut 0, Some(modal_index));
 
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "type to filter · ↑↓ navigate · enter activate · * favorite · esc",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
 
-    // Place the real terminal caret in the filter field (line 0 of the body,
-    // after the ` Models  ❯ ` prefix) so typing visibly tracks the insertion
-    // point, matching the history-search modal.
-    let prefix = " Models  ❯ ".width() as u16;
-    let cursor_x = area.x + 1 + prefix + caret_column(query, cursor_position);
-    let cursor_y = area.y;
-    frame.set_cursor(cursor_x, cursor_y);
+    // Place the real terminal caret in the filter field (the header row, after
+    // the `Models  ❯ ` prefix) so typing visibly tracks the insertion point.
+    if let Some(h) = header_rect {
+        let prefix = "Models  ❯ ".width() as u16;
+        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+        let cursor_y = h.y;
+        frame.set_cursor(cursor_x, cursor_y);
+    }
 }
 
 /// Display column of the caret within a rendered input field, given its char
@@ -201,7 +210,7 @@ pub fn draw_model_editor(
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(60, 36, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
 
     // The focused field's value lives in `input`; the unfocused one in its buf.
     let (key_display, model_display): (String, String) = if field == 0 {
@@ -220,10 +229,7 @@ pub fn draw_model_editor(
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(
-                format!(" {:<8}", label),
-                Style::default().fg(theme.muted()),
-            )
+            Span::styled(format!(" {:<8}", label), Style::default().fg(theme.muted()))
         }
     };
     let value_style = |focused: bool| {
@@ -234,14 +240,19 @@ pub fn draw_model_editor(
         }
     };
 
-    let lines = vec![
-        Line::from(Span::styled(
-            format!(" Edit · {}", title),
-            Style::default()
-                .fg(theme.brand())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
+    if let Some(h) = f.header {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("Edit · {}", title),
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
+
+    let body = vec![
         Line::from(vec![
             field_label("API key", field == 0),
             Span::styled(
@@ -264,21 +275,27 @@ pub fn draw_model_editor(
                 value_style(field == 1),
             ),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            " tab switch field · enter save & switch · esc cancel ",
-            Style::default().fg(theme.muted()),
-        )),
     ];
+    let body_rect = f.body;
+    render_body(frame, body_rect, body, &mut 0, None);
 
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "tab switch field · enter save & switch · esc cancel",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
 
     // Place the terminal caret on the focused field's value row, after its
-    // label. Key is row 2, model id is row 3 of the body.
+    // label. API key is body line 0, Model id is body line 1 (the gap below
+    // the header is provided by `modal_frame`, so the body starts at the top
+    // of the body rect).
     let prefix = format!(" {:<8}", if field == 0 { "API key" } else { "Model id" });
-    let cursor_x = area.x + 1 + prefix.width() as u16 + caret_column(input, cursor_position);
-    let cursor_y = if field == 0 { area.y + 2 } else { area.y + 3 };
+    let cursor_x = body_rect.x + prefix.width() as u16 + caret_column(input, cursor_position);
+    let cursor_y = body_rect.y + if field == 0 { 0 } else { 1 };
     frame.set_cursor(cursor_x, cursor_y);
 }
 
@@ -302,6 +319,55 @@ pub fn relative_time(ts: u64) -> String {
     }
 }
 
+/// Compact relative time for space-constrained surfaces (e.g. the sessions
+/// picker's meta column): `now` / `3m` / `2h` / `5d` / `3w` — no "ago" suffix.
+pub fn relative_time_compact(ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(ts);
+    if diff < 60 {
+        "now".to_string()
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h", diff / 3600)
+    } else if diff < 7 * 86_400 {
+        format!("{}d", diff / 86_400)
+    } else {
+        format!("{}w", diff / (7 * 86_400))
+    }
+}
+
+/// Truncate `s` to fit `max` display columns, appending `…` when it doesn't.
+/// Width-aware so CJK/wide glyphs don't break the column budget. Used by table-
+/// like modal rows to cap a long first column and leave room for the rest.
+pub fn truncate_ellipsis(s: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if max == 0 {
+        return String::new();
+    }
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0).max(1);
+        if w + cw > max - 1 {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 /// Draw the sessions picker: each row shows the session overview plus its
 /// creation and last-interaction times. Enter opens the selected session.
 pub fn draw_sessions_modal(
@@ -312,19 +378,27 @@ pub fn draw_sessions_modal(
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(80, 64, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        " Sessions",
-        Style::default()
-            .fg(theme.brand())
-            .add_modifier(Modifier::BOLD),
-    ))];
+    if let Some(h) = f.header {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Sessions",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
+
+    let body_width = f.body.width as usize;
+    let mut body: Vec<Line> = Vec::new();
 
     if sessions.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " No previous sessions yet.",
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            "No previous sessions yet.",
             Style::default().fg(theme.muted()),
         )));
     }
@@ -347,36 +421,481 @@ pub fn draw_sessions_modal(
             theme.muted()
         };
         let badge = if session.active { "● " } else { "  " };
-        let overview: String = session.overview.chars().take(48).collect();
+        // Drop the message count (low signal) and use compact relative times
+        // (no "ago" suffix) so the meta column stays narrow and predictable.
         let meta = format!(
-            "{} msgs · created {} · active {}",
-            session.message_count,
-            relative_time(session.created_at),
-            relative_time(session.updated_at)
+            "created {} · active {}",
+            relative_time_compact(session.created_at),
+            relative_time_compact(session.updated_at),
         );
-        let overview_used = 1 + badge.len() + overview.width();
-        let meta_used = 2 + meta.width();
-        // Right-align the meta on the same row when it fits.
-        let inner_width = area.width.saturating_sub(2) as usize;
-        let gap = inner_width.saturating_sub(overview_used.min(inner_width / 2) + meta_used);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {}{}", badge, overview),
-                Style::default().bg(bg).fg(fg),
-            ),
-            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
-            Span::styled(format!("  {}  ", meta), Style::default().bg(bg).fg(muted)),
-        ]));
+        let meta_w = meta.width();
+        // Guarantee a fixed gutter between the two columns by giving the
+        // overview a width budget of `body_width - meta_w - gutter`, then
+        // truncating it with an ellipsis when it overflows. That way a long
+        // overview never crowds the meta column, and the gutter is constant
+        // row-to-row instead of whatever slack is left over.
+        const COL_GUTTER: usize = 2;
+        let badge_w = badge.width();
+        let col1_budget = body_width.saturating_sub(meta_w + COL_GUTTER);
+        let overview = truncate_ellipsis(
+            &session.overview,
+            col1_budget.saturating_sub(badge_w),
+        );
+        let left = format!("{}{}", badge, overview);
+        let left_w = left.width();
+        let pad = body_width.saturating_sub(left_w + meta_w);
+        let spans = vec![
+            Span::styled(left, Style::default().bg(bg).fg(fg)),
+            Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+            Span::styled(meta, Style::default().bg(bg).fg(muted)),
+        ];
+        body.push(Line::from(spans));
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " ↑↓ navigate · Enter open · d delete · Esc close ",
-        Style::default().fg(theme.muted()),
-    )));
+    render_body(frame, f.body, body, &mut 0, Some(selected));
 
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑↓ navigate · Enter open · d delete · Esc close",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
+}
+
+/// Draw the session-context modal: a tabbed overview of the live session.
+///
+/// Layout: a borderless panel (no `┃` bar) with a 2-column left/right and
+/// 1-row top/bottom inner padding, split into three sections —
+/// **header** (`Session` title + tab labels on one row, tabs tinted to the
+/// brand color so the active pane reads as part of the session), **body**
+/// (the active pane's content, scrollable via `scroll` so long lists never get
+/// silently truncated), and **footer** (keybinding hints).
+///
+/// `session_context` is the latest snapshot from the harness; when `None`
+/// (still loading) every pane except Model/MCP shows a placeholder. Model +
+/// MCP additionally fall back to the App-level `provider`/`model`/`key_status`/
+/// `mcp_statuses` so they render immediately on open. `modal_index` is the row
+/// cursor for the list panes (Skills / Permissions / Tools); the body
+/// auto-scrolls to keep it visible. `scroll` is read AND written back (clamped
+/// to the body's real height), so the caller's stored offset stays consistent.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_session_modal(
+    frame: &mut Frame,
+    tab: crate::tui::SessionTab,
+    provider: &str,
+    model: &str,
+    key_status: &HashMap<String, bool>,
+    mcp_statuses: &[(String, neenee_core::mcp::McpConnectionStatus)],
+    session_context: Option<&neenee_core::SessionContextSnapshot>,
+    modal_index: usize,
+    scroll: &mut usize,
+    theme: &Theme,
+) {
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
+    let modal = centered_rect(76, 70, viewport_rect(frame));
+    let f = modal_frame(frame, modal, theme.panel(), true, true);
+    let header_rect = f.header;
+    let body_rect = f.body;
+
+    // ── Header: "Session" + tabs on one row ──
+    let mut header_spans: Vec<Span> = vec![
+        Span::styled(
+            "Session",
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("    "),
+    ];
+    for (i, variant) in crate::tui::SessionTab::ALL.iter().enumerate() {
+        if i > 0 {
+            header_spans.push(Span::raw("  "));
+        }
+        let active = *variant == tab;
+        let mut style = Style::default();
+        if active {
+            style = style
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        } else {
+            style = style.fg(theme.muted());
+        }
+        header_spans.push(Span::styled(variant.label(), style));
+    }
+    if let Some(h) = header_rect {
+        frame.render_widget(Paragraph::new(Line::from(header_spans)), h);
+    }
+
+    // ── Body: collect the active pane's lines, then scroll+clip ──
+    let label_w = 12usize;
+    let label = |k: &str| {
+        Span::styled(
+            format!("{:<w$}", k, w = label_w),
+            Style::default().fg(theme.muted()),
+        )
+    };
+    let window_label = |window: usize| -> String {
+        if window >= 1_000_000 {
+            format!("{:.1}M tokens", window as f64 / 1_000_000.0)
+        } else if window >= 1_000 {
+            format!("{:.0}k tokens", window as f64 / 1_000.0)
+        } else {
+            "unknown".to_string()
+        }
+    };
+
+    let mut body: Vec<Line> = Vec::new();
+    let is_list_pane = matches!(
+        tab,
+        crate::tui::SessionTab::Skills
+            | crate::tui::SessionTab::Permissions
+            | crate::tui::SessionTab::Tools
+    );
+
+    match tab {
+        crate::tui::SessionTab::Model => {
+            let (p_name, m_display, m_id, window, key_ok, desc, caps) = match session_context {
+                Some(s) => (
+                    s.model.provider.clone(),
+                    s.model.display_name.clone(),
+                    s.model.model.clone(),
+                    s.model.context_window,
+                    s.model.api_key_ready,
+                    s.model.description.clone(),
+                    s.model.capabilities.clone(),
+                ),
+                None => {
+                    let solution = crate::tui::SOLUTIONS.iter().find(|x| x.id == provider);
+                    (
+                        provider.to_string(),
+                        crate::tui::model_display_name(provider, model),
+                        model.to_string(),
+                        crate::tui::model_context_window(provider),
+                        key_status
+                            .get(&provider.to_lowercase())
+                            .copied()
+                            .unwrap_or(false),
+                        solution.map(|s| s.description.to_string()).unwrap_or_default(),
+                        Vec::new(),
+                    )
+                }
+            };
+            let (key_mark, key_fg, key_word) = if key_ok {
+                ("✓", theme.ok(), "ready")
+            } else {
+                ("✗", theme.err(), "no key")
+            };
+            body.push(Line::from(vec![
+                label("Provider"),
+                Span::styled(p_name, Style::default().fg(theme.fg())),
+            ]));
+            body.push(Line::from(vec![
+                label("Model"),
+                Span::styled(
+                    m_display,
+                    Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ({})", m_id),
+                    Style::default().fg(theme.muted()),
+                ),
+            ]));
+            body.push(Line::from(vec![
+                label("Context"),
+                Span::styled(window_label(window), Style::default().fg(theme.fg())),
+            ]));
+            body.push(Line::from(vec![
+                label("API key"),
+                Span::styled(
+                    format!("{} ", key_mark),
+                    Style::default()
+                        .fg(key_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(key_word, Style::default().fg(key_fg)),
+            ]));
+            if !caps.is_empty() {
+                body.push(Line::from(vec![
+                    label("Capabilities"),
+                    Span::styled(caps.join(" · "), Style::default().fg(theme.fg())),
+                ]));
+            }
+            if !desc.is_empty() {
+                body.push(Line::from(""));
+                body.push(Line::from(Span::styled(
+                    desc,
+                    Style::default().fg(theme.muted()),
+                )));
+            }
+        }
+        crate::tui::SessionTab::Mcp => {
+            let servers: Vec<(String, McpRow)> = match session_context {
+                Some(s) => s
+                    .mcp
+                    .iter()
+                    .map(|srv| {
+                        let row = if srv.disabled {
+                            McpRow::disabled()
+                        } else if let Some(reason) = srv.failure.as_ref() {
+                            McpRow::failed(reason.clone())
+                        } else if srv.connected {
+                            McpRow::connected(srv.tool_names.clone())
+                        } else {
+                            McpRow::disabled()
+                        };
+                        (srv.name.clone(), row)
+                    })
+                    .collect(),
+                None => mcp_statuses
+                    .iter()
+                    .map(|(name, status)| {
+                        use neenee_core::mcp::McpConnectionStatus;
+                        let row = match status {
+                            McpConnectionStatus::Connected { tools } => {
+                                McpRow::connected(vec![format!("+{} more", tools)])
+                            }
+                            McpConnectionStatus::Disabled => McpRow::disabled(),
+                            McpConnectionStatus::Failed(r) => McpRow::failed(r.clone()),
+                        };
+                        (name.clone(), row)
+                    })
+                    .collect(),
+            };
+            if servers.is_empty() {
+                body.push(Line::from(Span::styled(
+                    "No MCP servers configured.",
+                    Style::default().fg(theme.muted()),
+                )));
+                body.push(Line::from(""));
+                body.push(Line::from(Span::styled(
+                    "Add [mcp.<name>] tables to ~/.config/neenee/config.toml.",
+                    Style::default().fg(theme.muted()),
+                )));
+            } else {
+                for (name, row) in &servers {
+                    let (word, color) = row.summary(theme);
+                    body.push(Line::from(vec![
+                        Span::styled(
+                            format!("{:<18}", name),
+                            Style::default().fg(theme.fg()),
+                        ),
+                        Span::styled(word, Style::default().fg(color)),
+                    ]));
+                    if let Some(detail) = row.detail() {
+                        body.push(Line::from(Span::styled(
+                            format!("    {}", detail),
+                            Style::default().fg(theme.muted()),
+                        )));
+                    }
+                }
+            }
+        }
+        crate::tui::SessionTab::Skills => {
+            let skills = session_context.map(|s| s.skills.as_slice()).unwrap_or(&[]);
+            if skills.is_empty() {
+                body.push(placeholder(
+                    "Loading skills…",
+                    session_context.is_some(),
+                    theme.muted(),
+                ));
+            } else {
+                for (i, skill) in skills.iter().enumerate() {
+                    body.push(selectable_row(
+                        i,
+                        modal_index,
+                        &skill.name,
+                        &skill.description,
+                        skill.enabled,
+                        "enabled",
+                        "disabled",
+                        theme,
+                    ));
+                }
+            }
+        }
+        crate::tui::SessionTab::Permissions => {
+            let rules = session_context.map(|s| s.permissions.as_slice()).unwrap_or(&[]);
+            if rules.is_empty() {
+                body.push(placeholder(
+                    "No always-allow rules cached this session.",
+                    session_context.is_some(),
+                    theme.muted(),
+                ));
+            } else {
+                for (i, rule) in rules.iter().enumerate() {
+                    let summary = format!("{} {}", rule.tool, rule.scope);
+                    body.push(selectable_row(
+                        i,
+                        modal_index,
+                        &summary,
+                        "Space revokes this rule",
+                        true,
+                        "allowed",
+                        "",
+                        theme,
+                    ));
+                }
+            }
+        }
+        crate::tui::SessionTab::Tools => {
+            let tools = session_context.map(|s| s.tools.as_slice()).unwrap_or(&[]);
+            if tools.is_empty() {
+                body.push(placeholder(
+                    "Loading tools…",
+                    session_context.is_some(),
+                    theme.muted(),
+                ));
+            } else {
+                for (i, tool) in tools.iter().enumerate() {
+                    body.push(selectable_row(
+                        i,
+                        modal_index,
+                        &tool.name,
+                        &tool.source,
+                        tool.enabled,
+                        "on",
+                        "off",
+                        theme,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Scroll + clip via the shared helper. `follow` keeps the selected row in
+    // view on list panes; read-only panes scroll independently via `*scroll`.
+    let visible = body_rect.height as usize;
+    let content_lines = body.len();
+    let follow = if is_list_pane { Some(modal_index) } else { None };
+    render_body(frame, body_rect, body, scroll, follow);
+
+    // ── Footer ──
+    let interactive = matches!(
+        tab,
+        crate::tui::SessionTab::Permissions | crate::tui::SessionTab::Tools
+    );
+    let scrollable = content_lines > visible;
+    let mut hint = String::from("← → switch tab");
+    if interactive {
+        hint.push_str(" · ↑↓ select · Space act");
+    } else if scrollable {
+        hint.push_str(" · ↑↓ scroll");
+    }
+    hint.push_str(" · Esc close");
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
+}
+
+/// One MCP server row, unpacked for rendering. `Connected` carries the
+/// per-server tool names so the MCP pane can list them rather than just a count.
+enum McpRow {
+    Connected(Vec<String>),
+    Disabled,
+    Failed(String),
+}
+
+impl McpRow {
+    fn connected(tools: Vec<String>) -> Self {
+        Self::Connected(tools)
+    }
+    fn disabled() -> Self {
+        Self::Disabled
+    }
+    fn failed(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+
+    /// One-line status summary + color, shown next to the server name.
+    fn summary(&self, theme: &Theme) -> (String, Color) {
+        match self {
+            Self::Connected(tools) => (format!("Connected · {} tools", tools.len()), theme.ok()),
+            Self::Disabled => ("Disabled".to_string(), theme.muted()),
+            Self::Failed(reason) => (format!("Failed: {}", reason), theme.err()),
+        }
+    }
+
+    /// Optional second line (the tool-name list for a connected server).
+    fn detail(&self) -> Option<String> {
+        match self {
+            Self::Connected(tools) if !tools.is_empty() => {
+                let names: String = tools.join(", ");
+                Some(format!("tools: {}", names))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Build a selectable list row: `▣ name  hint` with the selected row taking
+/// the brand background. `state_on`/`state_off` label the enabled state shown
+/// at the row's right edge; an empty `state_off` hides the badge entirely.
+#[allow(clippy::too_many_arguments)]
+fn selectable_row(
+    i: usize,
+    selected: usize,
+    name: &str,
+    hint: &str,
+    enabled: bool,
+    state_on: &str,
+    state_off: &str,
+    theme: &Theme,
+) -> Line<'static> {
+    let is_selected = i == selected;
+    let bg = if is_selected {
+        theme.brand()
+    } else {
+        theme.panel()
+    };
+    let fg = if is_selected {
+        contrast_fg(theme.brand())
+    } else {
+        theme.fg()
+    };
+    let muted = if is_selected {
+        contrast_fg(theme.brand())
+    } else {
+        theme.muted()
+    };
+    let mark = if enabled { "●" } else { "○" };
+    let state = if enabled { state_on } else { state_off };
+    let mut spans = vec![
+        Span::styled(format!("{} ", mark), Style::default().bg(bg).fg(fg)),
+        Span::styled(name.to_string(), Style::default().bg(bg).fg(fg)),
+    ];
+    if !hint.is_empty() {
+        spans.push(Span::styled(
+            format!("  {}", hint),
+            Style::default().bg(bg).fg(muted),
+        ));
+    }
+    if !state.is_empty() {
+        spans.push(Span::styled(
+            format!("  [{}]", state),
+            Style::default().bg(bg).fg(muted),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Empty-list placeholder: a muted message, tuned to whether the snapshot has
+/// arrived (`loaded` = true → genuinely empty; false → still loading).
+fn placeholder(message: &str, loaded: bool, muted: Color) -> Line<'static> {
+    let text = if loaded {
+        message.to_string()
+    } else {
+        "Loading…".to_string()
+    };
+    Line::from(Span::styled(text, Style::default().fg(muted)))
 }
 
 /// Draw the history search modal.
@@ -389,6 +908,7 @@ pub fn draw_sessions_modal(
 /// Each result line highlights the matched characters of the query so the
 /// user can see why an entry surfaced. Empty query → show everything with no
 /// highlights; query with no matches → "no matches" placeholder.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_history_modal(
     frame: &mut Frame,
     _layout_map: &mut LayoutMap,
@@ -401,49 +921,53 @@ pub fn draw_history_modal(
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(70, 55, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
 
-    let mut lines: Vec<Line> = vec![Line::from(vec![
-        Span::styled(
-            " Input History",
-            Style::default()
-                .fg(theme.brand())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("❯ ", Style::default().fg(theme.muted())),
-        Span::styled(
-            if query.is_empty() {
-                "type to fuzzy-filter"
-            } else {
-                query
-            },
-            Style::default()
-                .fg(if query.is_empty() {
-                    theme.muted()
-                } else {
-                    theme.fg()
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
+    let header_rect = f.header;
+    if let Some(h) = header_rect {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Input History",
+                    Style::default()
+                        .fg(theme.brand())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("❯ ", Style::default().fg(theme.muted())),
+                Span::styled(
+                    if query.is_empty() {
+                        "type to fuzzy-filter"
+                    } else {
+                        query
+                    },
+                    Style::default()
+                        .fg(if query.is_empty() {
+                            theme.muted()
+                        } else {
+                            theme.fg()
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            h,
+        );
+    }
 
+    let mut body: Vec<Line> = Vec::new();
     if history.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  (no history yet — send a message to populate this list)",
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            " (no history yet — send a message to populate this list)",
             Style::default().fg(theme.muted()),
         )));
     } else if ranked.is_empty() {
-        // Query produced no matches.
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  (no matches — try a shorter or different query)",
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            " (no matches — try a shorter or different query)",
             Style::default().fg(theme.muted()),
         )));
     } else {
-        // Build a char-index set per row for O(1) "is this char matched?"
-        // checks during rendering.
         for (row, (orig_idx, m)) in ranked.iter().enumerate() {
             let is_selected = row == modal_index;
             let bg = if is_selected {
@@ -463,8 +987,6 @@ pub fn draw_history_modal(
             };
             let base_style = Style::default().bg(bg).fg(fg);
             let matched_style = if is_selected {
-                // On the highlighted row, keep the match underline but stay
-                // readable on the primary-color background.
                 Style::default()
                     .bg(bg)
                     .fg(contrast_fg(theme.brand()))
@@ -488,27 +1010,30 @@ pub fn draw_history_modal(
                 };
                 spans.push(Span::styled(c.to_string(), style));
             }
-            lines.push(Line::from(spans));
+            body.push(Line::from(spans));
         }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " type to filter · ↑↓ navigate · Enter insert · Esc close ",
-        Style::default().fg(theme.muted()),
-    )));
+    render_body(frame, f.body, body, &mut 0, Some(modal_index));
 
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "type to filter · ↑↓ navigate · Enter insert · Esc close",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
 
-    // Place the real terminal caret in the filter field (line 0 of the body,
-    // after the ` Input History  ❯ ` prefix) so typing visibly tracks the
-    // insertion point. The composer underneath is skipped for this modal, so
-    // without this the caret would be absent. panel_block only draws a 1-cell
-    // left border, so the body starts one column in.
-    let prefix = " Input History  ❯ ".width() as u16;
-    let cursor_x = area.x + 1 + prefix + caret_column(query, cursor_position);
-    let cursor_y = area.y;
-    frame.set_cursor(cursor_x, cursor_y);
+    // Place the real terminal caret in the filter field (the header row, after
+    // the `Input History  ❯ ` prefix). The composer underneath is skipped for
+    // this modal, so without this the caret would be absent.
+    if let Some(h) = header_rect {
+        let prefix = "Input History  ❯ ".width() as u16;
+        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+        let cursor_y = h.y;
+        frame.set_cursor(cursor_x, cursor_y);
+    }
 }
 
 /// Draw a centered user-question modal. Shows one question at a time with its
@@ -529,40 +1054,43 @@ pub fn draw_question_modal(
 ) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(78, 70, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
 
     let question = request.questions.get(current_question);
     let total = request.questions.len();
-    let mut lines: Vec<Line> = Vec::new();
 
-    // Title with progress
-    let title = if total > 1 {
-        format!(" Question {}/{}", current_question + 1, total)
-    } else {
-        " Question".to_string()
-    };
-    lines.push(Line::from(vec![Span::styled(
-        title,
-        Style::default()
-            .fg(theme.brand())
-            .add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(""));
+    if let Some(h) = f.header {
+        let title = if total > 1 {
+            format!("Question {}/{}", current_question + 1, total)
+        } else {
+            "Question".to_string()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
 
+    let mut body: Vec<Line> = Vec::new();
     if let Some(q) = question {
         if let Some(header) = &q.header {
-            lines.push(Line::from(vec![Span::styled(
+            body.push(Line::from(vec![Span::styled(
                 format!(" {}", header),
                 Style::default()
                     .fg(theme.info())
                     .add_modifier(Modifier::BOLD),
             )]));
         }
-        lines.push(Line::from(vec![Span::styled(
+        body.push(Line::from(vec![Span::styled(
             format!(" {}", q.question),
             Style::default().fg(theme.fg()),
         )]));
-        lines.push(Line::from(""));
+        body.push(Line::from(""));
 
         let q_selected = selected.get(current_question);
         let other_index = q.options.len();
@@ -573,10 +1101,10 @@ pub fn draw_question_modal(
             .unwrap_or("");
 
         for (i, option) in q.options.iter().enumerate() {
-            let is_selected = q_selected.map_or(false, |s| s.contains(&i));
+            let is_selected = q_selected.is_some_and(|s| s.contains(&i));
             let is_highlighted = i == highlighted;
             render_question_option(
-                &mut lines,
+                &mut body,
                 i,
                 &option.label,
                 option.description.as_deref(),
@@ -587,13 +1115,12 @@ pub fn draw_question_modal(
             );
         }
 
-        // Automatic "Other" option.
         render_question_option(
-            &mut lines,
+            &mut body,
             other_index,
             OTHER_OPTION_LABEL,
             Some(OTHER_OPTION_PLACEHOLDER),
-            q_selected.map_or(false, |s| s.contains(&other_index)),
+            q_selected.is_some_and(|s| s.contains(&other_index)),
             other_highlighted,
             q.multi_select,
             theme,
@@ -604,18 +1131,10 @@ pub fn draw_question_modal(
             } else {
                 other_text_value
             };
-            lines.push(Line::from(vec![
+            body.push(Line::from(vec![
                 Span::styled("   ", Style::default().fg(theme.fg())),
                 Span::styled(
-                    format!(
-                        "{} {}",
-                        if other_text_value.is_empty() {
-                            "▏"
-                        } else {
-                            "▏"
-                        },
-                        display
-                    ),
+                    format!("{} {}", "▏", display),
                     Style::default()
                         .fg(if other_text_value.is_empty() {
                             theme.muted()
@@ -627,17 +1146,20 @@ pub fn draw_question_modal(
             ]));
         }
     }
+    render_body(frame, f.body, body, &mut 0, None);
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        " ↑↓ navigate · Space/Enter toggle · 1-9 jump · Enter submit · Esc cancel ",
-        Style::default().fg(theme.muted()),
-    )]));
-
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑↓ navigate · Space/Enter toggle · 1-9 jump · Enter submit · Esc cancel",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_question_option(
     lines: &mut Vec<Line>,
     index: usize,
@@ -702,6 +1224,7 @@ fn render_question_option(
 /// plus its scope (the specific path/command being touched) — followed by a
 /// footer of inline actions. Selecting "Details" expands the body upward to
 /// reveal the full description and arguments without leaving the prompt.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_permission_sheet(
     frame: &mut Frame,
     request: &PermissionRequest,
@@ -1013,7 +1536,19 @@ pub fn draw_tool_step_detail_overlay(
 pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(58, 70, viewport_rect(frame));
-    frame.render_widget(Clear, area);
+    let f = modal_frame(frame, area, theme.panel(), true, true);
+
+    if let Some(h) = f.header {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Help",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
 
     let key = |k: &str| {
         Span::styled(
@@ -1032,14 +1567,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
     };
     let row = |k: &str, d: &str| Line::from(vec![key(k), desc(d)]);
 
-    let lines = vec![
-        Line::from(Span::styled(
-            " Help",
-            Style::default()
-                .fg(theme.brand())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
+    let body = vec![
         Line::from(section("General")),
         row("ctrl+p", "command palette"),
         row("enter", "send message"),
@@ -1062,6 +1590,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(section("Views & tools")),
         row("ctrl+h", "this help"),
+        row("/session", "session context"),
         row("ctrl+m", "switch model"),
         row("ctrl+r", "search history"),
         row("ctrl+t", "toggle tool steps"),
@@ -1073,15 +1602,18 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         row("/loop N", "bounded autonomous work"),
         Line::from(""),
         Line::from(desc("Drag to select · Ctrl+C or Ctrl+Shift+C to copy.")),
-        Line::from(""),
-        Line::from(Span::styled(
-            " esc · close ",
-            Style::default().fg(theme.muted()),
-        )),
     ];
+    render_body(frame, f.body, body, &mut 0, None);
 
-    let block = panel_block(theme.brand(), theme.panel());
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "esc · close",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
 }
 
 /// Draw a "copied to clipboard" toast.
@@ -1113,4 +1645,47 @@ fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Color, width: u
     // Vertically center the single line within the 3-row panel.
     let para = Paragraph::new(vec![Line::from(""), line]);
     frame.render_widget(para.block(block), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ellipsis_keeps_short_strings_untouched() {
+        assert_eq!(truncate_ellipsis("hi", 10), "hi");
+        assert_eq!(truncate_ellipsis("hi", 2), "hi");
+        assert_eq!(truncate_ellipsis("", 5), "");
+    }
+
+    #[test]
+    fn truncate_ellipsis_appends_ellipsis_on_overflow() {
+        // "hello world" (11 cols) capped at 6 -> 5 chars + …
+        assert_eq!(truncate_ellipsis("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_degenerate_widths() {
+        assert_eq!(truncate_ellipsis("abc", 0), "");
+        assert_eq!(truncate_ellipsis("abc", 1), "…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_is_width_aware_for_cjk() {
+        // 你好 = 4 display cols. Capped at 3 -> only 你 (2 cols) fits before the ….
+        assert_eq!(truncate_ellipsis("你好", 3), "你…");
+    }
+
+    #[test]
+    fn relative_time_compact_drops_ago_suffix() {
+        // now
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        assert_eq!(relative_time_compact(t), "now");
+        // 2 hours ago -> "2h" (no "ago")
+        let t = t.saturating_sub(2 * 3600);
+        assert_eq!(relative_time_compact(t), "2h");
+    }
 }

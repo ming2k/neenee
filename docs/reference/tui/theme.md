@@ -1,6 +1,6 @@
 # Color palette
 
-All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render/theme.rs`).
+All colors are defined in `Theme::default()` (`crates/neenee-cli/src/tui/render/theme.rs`).
 
 ## Backgrounds
 
@@ -30,10 +30,10 @@ All colors are defined in `Theme::default()` (`crates/neenee-tui/src/render/them
 | `quote_fg` | (156, 145, 118) | Blockquotes |
 | `dim_fg` | (94, 99, 94) | Line-number gutter, tool name |
 | `primary` | (142, 161, 145) | Brand / selection; hint-line keys; `┃` bars; breathing-dot indicator |
-| `success` | (117, 148, 117) | Completed tool status; context-usage bar < 70% |
+| `success` | (117, 148, 117) | Completed tool status; context-usage indicator < 70% |
 | `info` | (128, 153, 156) | Running tool status, thinking marker |
-| `warning` | (181, 149, 93) | Warnings; context-usage bar 70–90% |
-| `error_fg` | (190, 111, 104) | Failed tool status; context-usage bar > 90% |
+| `warning` | (181, 149, 93) | Warnings; context-usage indicator 70–90% |
+| `error_fg` | (190, 111, 104) | Failed tool status; context-usage indicator > 90% |
 
 ## Background hierarchy
 

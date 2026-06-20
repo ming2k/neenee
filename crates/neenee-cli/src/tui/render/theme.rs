@@ -34,6 +34,11 @@ pub struct Theme {
     /// Used for sent user messages so they read as read-only compared to the
     /// live input box.
     pub user_panel_bg: Color,
+    /// Background for user messages staged in the send queue (waiting for
+    /// the in-flight turn to finish). Dimmer than `user_panel_bg` so a
+    /// queued message reads as more "pending" than a delivered one without
+    /// losing the panel affordance.
+    pub user_panel_bg_queued: Color,
     /// Slightly raised background for footer/option bars.
     pub element_bg: Color,
     /// Background for menus / suggestion popups.
@@ -71,6 +76,7 @@ impl Default for Theme {
             panel_bg: Color::Rgb(14, 15, 15),
             input_bg: Color::Rgb(18, 19, 19),
             user_panel_bg: Color::Rgb(11, 12, 12),
+            user_panel_bg_queued: Color::Rgb(5, 6, 6),
             element_bg: Color::Rgb(21, 23, 22),
             menu_bg: Color::Rgb(17, 19, 18),
             user_bg: Color::Rgb(18, 24, 21),
@@ -112,6 +118,11 @@ impl Theme {
     /// Sent-user-message surface.
     pub fn user_surface(&self) -> Color {
         self.user_panel_bg
+    }
+    /// Surface for a user message staged in the send queue. Dimmer than
+    /// [`Theme::user_surface`] so pending reads differently from delivered.
+    pub fn user_surface_queued(&self) -> Color {
+        self.user_panel_bg_queued
     }
     /// Tint behind the user's own messages.
     pub fn user_tint(&self) -> Color {

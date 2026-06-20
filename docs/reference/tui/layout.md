@@ -11,7 +11,7 @@ like this. The transcript column always reclaims the full viewport width.
 │app_bg  ·  top viewport margin (1 row)         │
 ├──────────────────────────────────────────────┤
 │Header (chunks[0])  ▄ top transition          │
-│ model · goal · context bar  (panel_bg)       │
+│ model · goal · context indicator  (panel_bg)       │
 │Header  ▀ bottom transition                   │
 ├──────────────────────────────────────────────┤
 │Transcript viewport (chunks[1])               │
@@ -44,7 +44,7 @@ three chunks inside `draw_transcript`:
 
 | Chunk | Constraint | Contents |
 |-------|-----------|----------|
-| Header | `Length(0)` modal / `Length(3)` / `Length(4)` with checklist | Half-block `panel_bg` panel: model name, goal, context-usage bar |
+| Header | `Length(0)` modal / `Length(3)` / `Length(4)` with checklist | Half-block `panel_bg` panel: model name, goal, context-usage indicator |
 | Transcript | `Min(0)` | All message content |
 | Footer | `Length(0)` modal / `status + input + 1` | Status bar, input box, hint line |
 
@@ -53,7 +53,7 @@ three chunks inside `draw_transcript`:
 │app_bg  (top viewport margin, 1 row, outside the chunks)      │
 ├──────────────────────────────────────────────────────────────┤
 │Header  ▄ top transition                             chunks[0]│
-│ model name + goal + context-usage bar  (panel_bg)            │
+│ model name + goal + context-usage indicator  (panel_bg)            │
 │Header  ▀ bottom transition                                   │
 ├──────────────────────────────────────────────────────────────┤
 │Transcript viewport  (all message content)           chunks[1]│

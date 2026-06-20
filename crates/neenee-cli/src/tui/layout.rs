@@ -94,6 +94,14 @@ pub struct LayoutMap {
     /// to that cell (row-major index: `row * ncols + col`, header is row 0)
     /// rather than to the whole grid line.
     table_cell_hits: Vec<TableCellHit>,
+    /// The visible transcript content rect for the frame: the horizontal band
+    /// (inside the `TRANSCRIPT_H_INSET` gutters) spanning only the rows where
+    /// transcript content was actually drawn. A click that doesn't resolve to
+    /// any region but lands inside this rect still switches keyboard focus to
+    /// [`crate::tui::input::FocusZone::Browse`], so gap rows between messages
+    /// behave like the content they separate rather than dead zones. The outer
+    /// gutters are excluded on purpose: clicks there are not transcript clicks.
+    transcript_content_rect: Option<Rect>,
 }
 
 /// A clickable region belonging to one logical table cell.
@@ -115,11 +123,25 @@ impl LayoutMap {
         self.regions.push(region);
     }
 
+    /// Record the visible transcript content rect for this frame, drawn inside
+    /// the horizontal gutters. Called once at the end of `draw_transcript`.
+    pub fn set_transcript_content_rect(&mut self, rect: Rect) {
+        self.transcript_content_rect = Some(rect);
+    }
+
+    /// The visible transcript content rect, if any content was drawn this frame.
+    /// Clicks inside this rect that don't resolve to a specific region still
+    /// switch keyboard focus to Browse (see the `SelectionStart` handler).
+    pub fn transcript_content_rect(&self) -> Option<Rect> {
+        self.transcript_content_rect
+    }
+
     /// Clear all regions (call at the start of each frame).
     pub fn clear(&mut self) {
         self.regions.clear();
         self.table_grids.clear();
         self.table_cell_hits.clear();
+        self.transcript_content_rect = None;
     }
 
     /// Record the displayed grid text for a table block.
@@ -307,6 +329,18 @@ mod tests {
     fn test_hit_test_miss() {
         let map = LayoutMap::new();
         assert!(map.hit_test(0, 0).is_none());
+    }
+
+    #[test]
+    fn transcript_content_rect_round_trip_and_clears() {
+        let mut map = LayoutMap::new();
+        assert!(map.transcript_content_rect().is_none());
+        map.set_transcript_content_rect(Rect::new(2, 0, 10, 5));
+        assert_eq!(map.transcript_content_rect(), Some(Rect::new(2, 0, 10, 5)));
+        // A frame reset must drop the rect, otherwise the previous frame's
+        // bounds would keep switching focus to Browse after a resize.
+        map.clear();
+        assert!(map.transcript_content_rect().is_none());
     }
 
     #[test]

@@ -63,11 +63,14 @@ pub enum ToolOutput {
     /// A file change. The renderer derives the diff from `old` / `new`
     /// (edit) or from `""` / `new` (create) so the change view comes from
     /// the result payload, not from re-parsing the tool arguments.
+    /// `start_line` is the 1-based file line where `old` begins; `0` means
+    /// "unknown" and the renderer falls back to snippet-relative numbering.
     Patch {
         path: String,
         op: PatchOp,
         old: String,
         new: String,
+        start_line: usize,
     },
     /// A read-only sub-agent run (produced by the `task` tool). Carries the
     /// sub-agent's full internal transcript so it can be persisted on the
@@ -231,6 +234,22 @@ fn shell_to_text(stdout: &str, stderr: &str, exit: Option<i32>, truncated: bool)
     } else {
         inner
     }
+}
+
+/// Truncate `text` to at most `max_bytes` without splitting a multibyte UTF-8
+/// character. Returns a `&str` slice of `text`.
+///
+/// Shared by the structured-output formatter (in this crate) and the tool
+/// implementations (`neenee-tools`) that produce the outputs being formatted.
+pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[cfg(test)]
@@ -406,20 +425,4 @@ mod tests {
         let o = ToolOutput::text("plain");
         assert!(o.subagent_payload().is_none());
     }
-}
-
-/// Truncate `text` to at most `max_bytes` without splitting a multibyte UTF-8
-/// character. Returns a `&str` slice of `text`.
-///
-/// Shared by the structured-output formatter (in this crate) and the tool
-/// implementations (`neenee-tools`) that produce the outputs being formatted.
-pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }

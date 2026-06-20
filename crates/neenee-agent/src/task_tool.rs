@@ -29,7 +29,10 @@ pub struct TaskTool {
 impl TaskTool {
     /// `tools` should be the parent agent's full toolset; the task tool filters
     /// it down to read-only tools for the spawned sub-agent.
-    pub fn new(provider: Arc<dyn neenee_core::Provider>, tools: Vec<Arc<dyn neenee_core::Tool>>) -> Self {
+    pub fn new(
+        provider: Arc<dyn neenee_core::Provider>,
+        tools: Vec<Arc<dyn neenee_core::Tool>>,
+    ) -> Self {
         Self { provider, tools }
     }
 }
@@ -226,7 +229,10 @@ impl TaskTool {
         }
     }
 
-    fn forward_event(event: neenee_core::AgentEvent, on_event: &mut dyn FnMut(neenee_core::SubTaskEvent)) {
+    fn forward_event(
+        event: neenee_core::AgentEvent,
+        on_event: &mut dyn FnMut(neenee_core::SubTaskEvent),
+    ) {
         match event {
             neenee_core::AgentEvent::ModelRequestStarted { tool_round } => {
                 let status = if tool_round == 0 {
@@ -275,12 +281,11 @@ impl TaskTool {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neenee_core::{Message, Provider, Role};
     use futures::stream::{self, BoxStream};
+    use neenee_core::{Message, Provider, Role};
 
     struct CannedProvider;
 

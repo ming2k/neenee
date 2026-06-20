@@ -163,8 +163,8 @@ field updates config. Both paths reuse the existing
   the legacy fields ignored. `default_provider` is replaced by a
   default-model pointer keyed by canonical model id.
 - Neutral: built-in catalog entries become immutable data; user
-  customization overlays them. The legacy `"deepseek"` alias continues
-  to resolve to `"deepseek-flash"` during migration.
+  customization overlays them. Preset ids are unique; there is no alias
+  mapping layer.
 - Migration is sequenced so each step is independently shippable and
   behavior-preserving: (1) introduce `ModelEntry` / `Channel` / `Catalog`
   types and a loader that materializes them from the *existing* config

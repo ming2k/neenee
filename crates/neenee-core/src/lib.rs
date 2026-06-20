@@ -23,23 +23,24 @@ pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 pub mod capability;
 pub mod catalog;
 pub mod events;
+pub mod mcp;
 pub mod plan;
 pub mod pressure;
+pub mod skillsconfig;
 pub mod tool_call;
 pub mod webconfig;
-pub mod mcp;
-pub mod skillsconfig;
-pub use webconfig::WebSearchConfig;
-pub use mcp::{McpConnectionStatus, McpServerConfig};
-pub use skillsconfig::SkillsConfig;
-pub use tool_output::truncate_utf8;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
 pub use catalog::{Catalog, Channel, ModelEntry, Transport};
 pub use events::{
-    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, ModelPickerRow,
-    ModelPickerSnapshot, PermissionDecision, PermissionRequest, SessionOverview, SubTaskEvent,
-    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo,
+    ModelInfo, ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest,
+    PermissionRuleInfo, SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent,
+    ToolInfo, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
+pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use pressure::{
     estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
 };
+pub use skillsconfig::SkillsConfig;
+pub use tool_output::truncate_utf8;
+pub use webconfig::WebSearchConfig;

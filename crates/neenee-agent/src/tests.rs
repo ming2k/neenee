@@ -1,4 +1,3 @@
-
 use super::*;
 use futures::stream::{self, BoxStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -737,6 +736,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             }
             AgentEvent::GoalUpdated(_) => "goal-updated".to_string(),
             AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
+            AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
             AgentEvent::PermissionRequest(request) => {
                 format!("permission-request {} {}", request.tool, request.scope)
             }

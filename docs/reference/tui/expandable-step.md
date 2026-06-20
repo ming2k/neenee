@@ -50,8 +50,7 @@ the header text column 4 onward.
 
 | Trigger | Effect |
 |---------|--------|
-| `Tab` | Move keyboard focus to the next visible step |
-| `Shift+Tab` | Move keyboard focus to the previous visible step |
+| `↑` / `↓` (Browse zone) | Move keyboard focus to the previous / next visible step |
 | `Enter` / `Space` on a focused **thinking** step | Toggle that step |
 | `Enter` on a focused **tool** step | Open the [full-output detail overlay](tool-step.md#detail-overlay) (ADR-0001); click a tool-step header to toggle it inline instead |
 | Click header | Focus and toggle that step |
@@ -59,7 +58,9 @@ the header text column 4 onward.
 | Sticky pin | When an expanded step's body scrolls past the top of the viewport, its header pins under the HUD bar (rendered with `-`) |
 | Narrow terminal (`< 8` cols) | Falls back to plain block rendering via `draw_message_body` |
 
-Keyboard focus is the primary interaction path. Mouse clicks use the same
+Keyboard focus lives in the **Browse zone**. Press `Ctrl+B` in the input box
+to enter Browse, then `↑` / `↓` to walk steps. Press any printable key
+(typically `p` for "prompt") to return to the input. Mouse clicks use the same
 semantic target model and also move focus to the clicked step.
 
 ### Header pinning on toggle
@@ -99,14 +100,14 @@ Regular text blocks use 0-based indices and never collide with these
 sentinels.
 
 `LayoutMap::interactive_targets()` returns the visible tool-step and thinking
-targets in screen order for `Tab` / `Shift+Tab` navigation. Multiple hit rows
-for the same step are deduplicated into one focus target.
+targets in screen order for `↑` / `↓` navigation in Browse zone. Multiple hit
+rows for the same step are deduplicated into one focus target.
 
 ## Source
 
 Shared header rendering: `draw_expandable_step_header` and `tool_header_line`
-in `crates/neenee-tui/src/render/turn_artifacts.rs`. Sticky-pin tracking:
+in `crates/neenee-cli/src/tui/render/turn_artifacts.rs`. Sticky-pin tracking:
 `StickyStep` in the same module. `BlockRegion` is defined in
-`crates/neenee-tui/src/layout.rs`. The structured output the tool-step body
+`crates/neenee-cli/src/tui/layout.rs`. The structured output the tool-step body
 renders from is documented in
 [ADR-0001](../../adr/0001-tool-rendering-redesign.md).
