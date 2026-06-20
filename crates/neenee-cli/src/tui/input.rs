@@ -179,6 +179,11 @@ pub enum InputAction {
     /// stays hidden until the next `InsertChar` / `Backspace`, matching the
     /// expectation that pressing Enter "finishes" the current completion.
     CommitSuggestion(String),
+    /// Dismiss the completion popup without accepting anything. Used by `Esc`
+    /// when a slash/path completion menu is open. Latches the same
+    /// `completion_dismissed` flag as [`CommitSuggestion`] so the popup stays
+    /// hidden until the next edit clears the latch.
+    CloseCompletion,
     /// Navigate history up.
     HistoryPrev,
     /// Navigate history down.
@@ -418,6 +423,15 @@ pub fn process_event(
                         InputAction::QuestionCancel
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
+                    } else if context.completion_kind != super::CompletionKind::None
+                        && context.suggestion_count > 0
+                    {
+                        // A completion popup (slash command or `@path`) is
+                        // open: Esc dismisses it without touching the input
+                        // text. The popup stays hidden until the next edit
+                        // clears the dismissal latch, so Esc then ↑/↓ walks
+                        // history instead of suggestions.
+                        InputAction::CloseCompletion
                     } else if context.in_subagent_view {
                         InputAction::ExitSubAgent
                     } else if context.is_responding {
@@ -721,7 +735,12 @@ pub fn process_event(
                             .unwrap_or(input.len());
                         input.insert(byte_pos, c);
                         *cursor_position += 1;
-                        InputAction::None
+                        // Return InsertChar so the event loop can reset the
+                        // completion-dismissal latch and suggestion highlight.
+                        // The input mutation already happened above; the event
+                        // loop's InsertChar handler treats the char as a signal
+                        // only (it does not re-insert).
+                        InputAction::InsertChar(c)
                     } else {
                         InputAction::None
                     }
@@ -744,7 +763,10 @@ pub fn process_event(
                             .nth(*cursor_position)
                             .unwrap_or(input.len());
                         input.remove(byte_pos);
-                        InputAction::None
+                        // Return Backspace so the event loop resets the
+                        // completion-dismissal latch and suggestion highlight,
+                        // matching InsertChar above.
+                        InputAction::Backspace
                     } else {
                         InputAction::None
                     }
@@ -1101,6 +1123,178 @@ mod tests {
     }
 
     #[test]
+    fn esc_closes_slash_completion_menu() {
+        // When a slash completion popup is open, Esc dismisses it rather
+        // than falling through to sub-agent exit / interrupt / no-op.
+        let mut input = "/mod".to_string();
+        let mut cursor = 4;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::Slash,
+                suggestion_count: 2,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::CloseCompletion);
+        // The input text is left untouched — Esc only closes the popup.
+        assert_eq!(input, "/mod");
+    }
+
+    #[test]
+    fn esc_closes_path_completion_menu() {
+        // Same behaviour for `@path` mention completion.
+        let mut input = "@src".to_string();
+        let mut cursor = 4;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::Path,
+                suggestion_count: 3,
+                has_exact_suggestion: false,
+                suggestion_index: Some(1),
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::CloseCompletion);
+    }
+
+    #[test]
+    fn esc_falls_through_when_no_completion_is_open() {
+        // With no popup, Esc in Compose with nothing going on is a no-op;
+        // the completion-close branch only fires when a menu is visible.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::None);
+    }
+
+    #[test]
+    fn typing_in_compose_returns_insert_char() {
+        // process_event must signal InsertChar (not None) so the event loop
+        // can reset the completion-dismissal latch after an Enter commit or
+        // Esc dismiss. The char is already spliced into `input` here; the
+        // event loop treats the action as a signal only.
+        let mut input = "/mod".to_string();
+        let mut cursor = 4;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::Slash,
+                suggestion_count: 2,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::InsertChar('e'));
+        assert_eq!(input, "/mode");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn backspace_in_compose_returns_backspace_action() {
+        // Same signal contract as InsertChar: Backspace must be returned so
+        // the event loop clears completion_dismissed + suggestion_index.
+        let mut input = "/mode".to_string();
+        let mut cursor = 5;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::Slash,
+                suggestion_count: 1,
+                has_exact_suggestion: true,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "/mod");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
     fn bang_prefix_dispatches_a_shell_command() {
         let mut input = "!git status".to_string();
         assert_eq!(
@@ -1285,7 +1479,7 @@ mod tests {
             },
             &mut drag,
         );
-        assert_eq!(action, InputAction::None);
+        assert_eq!(action, InputAction::InsertChar('k'));
         assert_eq!(input, "k");
     }
 

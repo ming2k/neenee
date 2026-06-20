@@ -433,7 +433,12 @@ pub(super) async fn run_app_loop<B: Backend>(
             }
 
             // Completion menu: slash commands or `@path` file mentions.
-            if app.active_modal == Modal::None && app.completion_kind() != CompletionKind::None {
+            // Honors `completion_dismissed` so Esc / Enter-commit keep the
+            // popup hidden until the next edit clears the latch.
+            if app.active_modal == Modal::None
+                && !app.completion_dismissed
+                && app.completion_kind() != CompletionKind::None
+            {
                 let completions = app.completions();
                 if !completions.is_empty() {
                     render::draw_completion_menu(
@@ -1388,6 +1393,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // hidden until the user edits the input again. The
                     // suppression is re-checked at the top of each frame
                     // against `app.completion_dismissed`.
+                    app.suggestion_index = None;
+                    app.completion_dismissed = true;
+                }
+                input::InputAction::CloseCompletion => {
+                    // Esc dismisses the popup without accepting anything.
+                    // Same latch as Enter-commit so the popup stays hidden
+                    // until the next edit clears `completion_dismissed`.
                     app.suggestion_index = None;
                     app.completion_dismissed = true;
                 }

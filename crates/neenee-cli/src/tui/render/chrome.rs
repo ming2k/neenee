@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block as RtBlock, Borders, Clear, Paragraph},
+    widgets::{Block as RtBlock, Clear, Paragraph},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -140,7 +140,7 @@ pub fn draw_completion_menu(
     } else {
         (max_cmd + 2).max(20) as u16
     };
-    let popup_width = inner_width + 4; // left bar + right padding
+    let popup_width = inner_width + 2; // left + right padding
 
     // Position: try above the input box; if not enough room, clamp to top.
     let mut y = anchor.y.saturating_sub(popup_height);
@@ -156,11 +156,7 @@ pub fn draw_completion_menu(
     let area = Rect::new(x, y, popup_width.min(viewport.right() - x), popup_height);
     frame.render_widget(Clear, area);
 
-    let block = RtBlock::default()
-        .borders(Borders::LEFT)
-        .border_type(ratatui::widgets::BorderType::Thick)
-        .border_style(Style::default().fg(theme.brand()))
-        .style(Style::default().bg(theme.body()));
+    let block = RtBlock::default().style(Style::default().bg(theme.body()));
 
     let lines: Vec<Line> = completions
         .iter()
