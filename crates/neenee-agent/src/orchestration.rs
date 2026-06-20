@@ -613,6 +613,9 @@ pub fn relay_agent_event(
         AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
         AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
+        AgentEvent::PlanProgressUpdated(progress) => {
+            AgentResponse::PlanProgressUpdated(progress)
+        }
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
         AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),

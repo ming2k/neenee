@@ -25,6 +25,7 @@ pub mod catalog;
 pub mod events;
 pub mod mcp;
 pub mod plan;
+pub use plan::{PlanProgress, PlanSection, PlanSectionStatus};
 pub mod pressure;
 pub mod skillsconfig;
 pub mod tool_call;

@@ -116,6 +116,10 @@ pub enum AgentResponse {
     GoalUpdated(Goal),
     /// The agent mode changed via `plan_enter` / `plan_exit`.
     ModeChanged(AgentMode),
+    /// Plan progress snapshot changed (set by `plan_exit`, mutated by
+    /// `update_plan_progress`, cleared by `plan_enter`). Mirrors
+    /// [`AgentEvent::PlanProgressUpdated`].
+    PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     AutoApproveChanged(bool),
@@ -275,6 +279,10 @@ pub enum AgentEvent {
     /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
     /// uses this to refresh its mode indicator live, mid-turn.
     ModeChanged(AgentMode),
+    /// The plan progress snapshot changed (set by `plan_exit`, mutated by
+    /// `update_plan_progress`, cleared by `plan_enter`). The TUI uses this
+    /// to refresh the sticky panel above the input box.
+    PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The auto-approve toggle changed (via `/auto-approve`).
     AutoApproveChanged(bool),
     PermissionRequest(PermissionRequest),

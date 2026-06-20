@@ -736,6 +736,10 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             }
             AgentEvent::GoalUpdated(_) => "goal-updated".to_string(),
             AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
+            AgentEvent::PlanProgressUpdated(progress) => format!(
+                "plan-progress {:?}",
+                progress.as_ref().map(|p| p.sections.len())
+            ),
             AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
             AgentEvent::PermissionRequest(request) => {
                 format!("permission-request {} {}", request.tool, request.scope)

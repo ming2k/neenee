@@ -27,6 +27,15 @@ pub struct Agent {
     /// `set_tool_enabled` / `ToggleTool`.
     disabled_tools: Arc<std::sync::Mutex<HashSet<String>>>,
     mode: Arc<std::sync::Mutex<AgentMode>>,
+    /// Path to the plan file most recently approved via `plan_exit`.
+    /// Surfaced in the Build-mode system prompt so the model keeps the plan
+    /// in context without re-reading the file each turn. Cleared by
+    /// `plan_enter` and `/mode plan`. Shared with the plan tools.
+    active_plan_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    /// Live plan progress snapshot, parsed from the approved plan markdown
+    /// and updated by the `update_plan_progress` tool. Drives the sticky
+    /// TUI panel above the input box. Shared with the plan tools.
+    plan_progress: Arc<std::sync::Mutex<Option<plan::PlanProgress>>>,
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
@@ -92,17 +101,28 @@ impl Agent {
         tools.push(Arc::new(goals::tools::CreateGoalTool::new(context.clone())));
         tools.push(Arc::new(goals::tools::UpdateGoalTool::new(context.clone())));
 
-        // Plan-mode workflow tools share the mode handle so they can flip it
-        // in place; the agent emits a ModeChanged event after they run.
-        let plan_context = plan::PlanToolContext::new(Arc::clone(&mode));
+        // Plan-mode workflow tools share the mode handle, the active plan
+        // path, and the plan progress snapshot — the same `Arc`s the agent
+        // itself holds — so a tool call takes effect immediately and is
+        // reflected in the next system prompt and the TUI panel.
+        let active_plan_path = Arc::new(std::sync::Mutex::new(None));
+        let plan_progress = Arc::new(std::sync::Mutex::new(None));
+        let plan_context = plan::PlanToolContext::shared(
+            Arc::clone(&mode),
+            Arc::clone(&active_plan_path),
+            Arc::clone(&plan_progress),
+        );
         tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
-        tools.push(Arc::new(plan::PlanExitTool::new(plan_context)));
+        tools.push(Arc::new(plan::PlanExitTool::new(plan_context.clone())));
+        tools.push(Arc::new(plan::UpdatePlanProgressTool::new(plan_context)));
 
         Self {
             provider,
             tools,
             disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
             mode,
+            active_plan_path,
+            plan_progress,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
             auto_approve: Arc::new(std::sync::Mutex::new(false)),
@@ -187,6 +207,67 @@ impl Agent {
     pub fn set_mode(&self, mode: AgentMode) {
         if let Ok(mut guard) = self.mode.lock() {
             *guard = mode;
+        }
+        // `/mode plan` is the user-driven equivalent of `plan_enter`:
+        // any previously approved plan is no longer the live artifact, so
+        // drop it. `/mode build` keeps the existing plan path (if any) so a
+        // user who briefly flipped to Plan to peek and then back to Build
+        // still sees the right "you are implementing X" hint.
+        if mode == AgentMode::Plan {
+            self.clear_active_plan_path();
+            self.clear_plan_progress();
+        }
+    }
+
+    /// Path to the plan file most recently approved via `plan_exit`. `None`
+    /// when no plan is active (initial state, after re-entering Plan mode).
+    pub fn active_plan_path(&self) -> Option<std::path::PathBuf> {
+        self.active_plan_path
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Replace the active plan path. Used by session-restore code paths to
+    /// rehydrate the hint after resume; in normal operation the plan tools
+    /// own this state through their shared `PlanToolContext`.
+    pub fn set_active_plan_path(&self, path: Option<std::path::PathBuf>) {
+        if let Ok(mut guard) = self.active_plan_path.lock() {
+            *guard = path;
+        }
+    }
+
+    /// Drop the active plan path. Called when entering Plan mode by any path
+    /// (tool, slash command, or programmatic) so the Build-mode hint does
+    /// not point at a stale plan file.
+    pub fn clear_active_plan_path(&self) {
+        if let Ok(mut guard) = self.active_plan_path.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Current plan progress snapshot, if any. Read by the harness to emit
+    /// `AgentEvent::PlanProgressUpdated` and by the TUI to render the sticky
+    /// panel.
+    pub fn plan_progress(&self) -> Option<plan::PlanProgress> {
+        self.plan_progress
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Replace the plan progress snapshot. Used by session-restore paths.
+    pub fn set_plan_progress(&self, progress: Option<plan::PlanProgress>) {
+        if let Ok(mut guard) = self.plan_progress.lock() {
+            *guard = progress;
+        }
+    }
+
+    /// Drop the plan progress. Called when entering Plan mode so the panel
+    /// disappears as soon as the user starts a fresh planning cycle.
+    pub fn clear_plan_progress(&self) {
+        if let Ok(mut guard) = self.plan_progress.lock() {
+            *guard = None;
         }
     }
 
@@ -885,6 +966,7 @@ impl Agent {
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
+        self.emit_plan_progress_change(call, on_event);
         on_event(AgentEvent::ToolResult {
             id: call_id.to_string(),
             name: call.name.clone(),
@@ -962,6 +1044,23 @@ impl Agent {
         }
     }
 
+    /// Notify the harness that the plan progress snapshot changed. Emitted
+    /// after `plan_exit` (seeds the panel from the approved plan markdown),
+    /// after `plan_enter` (clears it), and after `update_plan_progress`
+    /// (mutates a section). The TUI stores the snapshot and re-renders the
+    /// sticky panel above the input box.
+    fn emit_plan_progress_change<F>(&self, call: &ToolCall, on_event: &mut F)
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        if matches!(
+            call.name.as_str(),
+            "plan_enter" | "plan_exit" | "update_plan_progress"
+        ) {
+            on_event(AgentEvent::PlanProgressUpdated(self.plan_progress()));
+        }
+    }
+
     async fn execute_ask_user(
         &self,
         call: &ToolCall,
@@ -1021,6 +1120,130 @@ impl Agent {
         }
     }
 
+    /// Run the `plan_exit` tool behind a user-approval gate.
+    ///
+    /// Builds an `ask_user` request with the plan path (and a short excerpt
+    /// of its content, if the file is readable) so the user can confirm the
+    /// plan is ready. On approval the underlying `plan_exit` tool runs and
+    /// returns the full plan body to the model. On rejection the agent stays
+    /// in Plan mode and is asked to refine the plan based on the feedback.
+    /// Cancellation is treated as rejection.
+    async fn execute_plan_exit(
+        &self,
+        tool: &Arc<dyn Tool>,
+        call: &ToolCall,
+        _call_id: &str,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> ToolOutput {
+        // Parse plan_path so we can surface it in the confirmation prompt.
+        let plan_path = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            .ok()
+            .and_then(|value| value.get("plan_path")?.as_str().map(str::to_string))
+            .filter(|value| !value.is_empty());
+
+        let excerpt = plan_path
+            .as_deref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|body| {
+                let trimmed = body.trim();
+                let chars: Vec<char> = trimmed.chars().take(280).collect();
+                let mut snippet: String = chars.into_iter().collect();
+                if trimmed.len() > 280 {
+                    snippet.push('…');
+                }
+                snippet
+            });
+
+        let header = plan_path
+            .clone()
+            .unwrap_or_else(|| "(unsaved)".to_string());
+        let question_text = match (&plan_path, &excerpt) {
+            (Some(path), Some(snippet)) => format!(
+                "Approve this plan and switch to Build mode to start implementing?\n\nPath: {}\n\n{}",
+                path, snippet
+            ),
+            (Some(path), None) => format!(
+                "Approve this plan and switch to Build mode to start implementing?\n\nPath: {}\n\n\
+                 (The plan file could not be read. Open it to review before approving.)",
+                path
+            ),
+            (None, _) => "Approve exiting Plan mode and switch to Build mode? \
+                          (No plan_path was provided.)"
+                .to_string(),
+        };
+
+        let request = UserQuestionRequest {
+            id: format!("plan_exit_{}", uuid::Uuid::new_v4()),
+            questions: vec![UserQuestion {
+                header: Some(header),
+                question: question_text,
+                options: vec![
+                    UserQuestionOption {
+                        label: "Approve".to_string(),
+                        description: Some(
+                            "Switch to Build mode with full tool access and start implementing."
+                                .to_string(),
+                        ),
+                    },
+                    UserQuestionOption {
+                        label: "Keep planning".to_string(),
+                        description: Some(
+                            "Stay in Plan mode. Tell the agent what to refine in your reply."
+                                .to_string(),
+                        ),
+                    },
+                ],
+                multi_select: false,
+            }],
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        self.ask_user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .insert(request.id.clone(), sender);
+        tracing::info!("requesting plan_exit approval");
+        let _ = event_tx.send(AgentEvent::UserQuestionRequest(request.clone()));
+
+        match receiver.await.unwrap_or(None) {
+            Some(reply) => {
+                let approved = reply
+                    .answers
+                    .first()
+                    .and_then(|labels| labels.first())
+                    .map(|label| label == "Approve")
+                    .unwrap_or(false);
+                if !approved {
+                    tracing::info!("plan_exit rejected by user");
+                    return ToolOutput::Text(
+                        "User wants to keep planning. Do NOT switch to Build mode yet. \
+                         Ask the user (or use the ask_user tool) what should change in the \
+                         plan, revise the plan file at .neenee/plans/<name>.md, then call \
+                         plan_exit again when it is ready."
+                            .to_string(),
+                    );
+                }
+                tracing::info!("plan_exit approved by user");
+            }
+            None => {
+                tracing::info!("plan_exit cancelled by user");
+                return ToolOutput::Text(
+                    "Plan approval was cancelled. Stay in Plan mode and wait for the \
+                     user's next instruction."
+                        .to_string(),
+                );
+            }
+        }
+
+        // Approved: delegate to the underlying tool to flip mode, record the
+        // plan path, seed plan progress, and return the plan content.
+        match tool.call(&call.arguments).await {
+            Ok(text) => ToolOutput::Text(text),
+            Err(err) => ToolOutput::Text(format!("Error executing plan_exit: {}", err)),
+        }
+    }
+
     async fn execute_tool(
         &self,
         call: &ToolCall,
@@ -1054,6 +1277,17 @@ impl Agent {
 
         if call.name == "ask_user" {
             return self.execute_ask_user(call, call_id, event_tx).await;
+        }
+
+        // `plan_exit` flips the agent out of Plan mode and starts
+        // implementation, so the user gets a yes/no confirmation (mirroring
+        // opencode's plan_exit and claude-code's ExitPlanMode). Manual
+        // `/mode build` skips this — when the user types the slash command
+        // they have already decided.
+        if call.name == "plan_exit" {
+            return self
+                .execute_plan_exit(tool, call, call_id, event_tx)
+                .await;
         }
 
         if tool.access() == ToolAccess::Write {

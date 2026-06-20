@@ -31,8 +31,8 @@ use crossterm::{
 };
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
-    ModelPickerSnapshot, PermissionRequest, Role, SessionContextSnapshot, SessionOverview,
-    UserQuestionRequest,
+    ModelPickerSnapshot, PermissionRequest, PlanProgress, Role, SessionContextSnapshot,
+    SessionOverview, UserQuestionRequest,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -105,6 +105,8 @@ pub async fn run_tui(
         auto_approve: false,
     }));
     let harness_clone = harness.clone();
+    let plan_progress: Arc<Mutex<Option<PlanProgress>>> = Arc::new(Mutex::new(None));
+    let plan_progress_clone = plan_progress.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
@@ -465,6 +467,9 @@ pub async fn run_tui(
                 }
                 AgentResponse::ModeChanged(mode) => {
                     harness_clone.lock().await.mode = mode;
+                }
+                AgentResponse::PlanProgressUpdated(progress) => {
+                    *plan_progress_clone.lock().await = progress;
                 }
                 AgentResponse::AutoApproveChanged(enabled) => {
                     harness_clone.lock().await.auto_approve = enabled;
