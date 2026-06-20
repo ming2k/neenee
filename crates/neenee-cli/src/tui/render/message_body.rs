@@ -773,6 +773,83 @@ pub(super) fn draw_message_body(
                     *current_y += 1;
                 }
             }
+            Block::ProposedPlan { content } => {
+                // Render the proposed-plan block as a distinct card: a top
+                // border with a "Proposed plan" label, the inner markdown
+                // wrapped to the body width, and a bottom rule. The visual
+                // cue tells the user "the model thinks the plan is ready;
+                // review it before approving plan_exit."
+                let body_wrap_width =
+                    area.width.saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + 4) as usize;
+                let wrapped = wrap_text(content, body_wrap_width);
+
+                let header_label = "Proposed plan";
+                let header_pad = body_wrap_width.saturating_sub(header_label.len() + 4);
+                let header_text = format!(
+                    "   ╭── {} {}",
+                    header_label,
+                    "─".repeat(header_pad.max(1))
+                );
+                let total_lines = 1 + wrapped.len() + 1;
+                *content_lines += total_lines;
+
+                let card_fg = theme.brand();
+                let card_bg = theme.raised();
+
+                // Header line.
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < area.y + area.height {
+                    let line = Line::from(vec![Span::styled(
+                        header_text,
+                        Style::default().fg(card_fg).bg(card_bg),
+                    )]);
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+                    *current_y += 1;
+                } else {
+                    *current_y = area.y + area.height;
+                }
+
+                // Body lines, padded so the bg fills the card row.
+                for wl in &wrapped {
+                    if *skip_rows > 0 {
+                        *skip_rows = skip_rows.saturating_sub(1);
+                        continue;
+                    }
+                    if *current_y >= area.y + area.height {
+                        break;
+                    }
+                    let body_text = format!("   │ {}", wl.text);
+                    let used = body_text.width();
+                    let pad = (area.width as usize).saturating_sub(used);
+                    let padded = format!("{}{}", body_text, " ".repeat(pad));
+                    let line = Line::from(vec![Span::styled(
+                        padded,
+                        Style::default().fg(theme.fg()).bg(card_bg),
+                    )]);
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+                    *current_y += 1;
+                }
+
+                // Bottom border.
+                if *skip_rows > 0 {
+                    *skip_rows = skip_rows.saturating_sub(1);
+                } else if *current_y < area.y + area.height {
+                    let bottom = format!(
+                        "   ╰{}",
+                        "─".repeat(area.width.saturating_sub(4) as usize)
+                    );
+                    let line = Line::from(vec![Span::styled(
+                        bottom,
+                        Style::default().fg(card_fg).bg(card_bg),
+                    )]);
+                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    frame.render_widget(Paragraph::new(line), line_rect);
+                    *current_y += 1;
+                }
+            }
         }
     }
 }
