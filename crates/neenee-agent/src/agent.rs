@@ -78,6 +78,16 @@ impl Agent {
         goal_service: GoalService,
         skills_registry: skills::SkillRegistry,
     ) -> Self {
+        // Clone the provider + read-only tool handles before they move
+        // into Self, so the VerifyPlanExecutionTool can construct its own
+        // internal TaskTool for spawning clean-context verifier sub-agents.
+        let verify_provider = provider.clone();
+        let verify_tools: Vec<Arc<dyn Tool>> = tools
+            .iter()
+            .filter(|t| t.access() == ToolAccess::Read && t.name() != "task")
+            .cloned()
+            .collect();
+
         let goal = Arc::new(std::sync::Mutex::new(None));
         let thread_id = Arc::new(std::sync::Mutex::new(None));
         let mode = Arc::new(std::sync::Mutex::new(mode));
@@ -124,8 +134,13 @@ impl Agent {
         tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
         tools.push(Arc::new(plan::PlanExitTool::new(plan_context.clone())));
         tools.push(Arc::new(plan::UpdatePlanProgressTool::new(
-            plan_context,
+            plan_context.clone(),
             Arc::clone(&turn_counter),
+        )));
+        tools.push(Arc::new(crate::plan_verify::VerifyPlanExecutionTool::new(
+            verify_provider,
+            verify_tools,
+            plan_context,
         )));
 
         Self {

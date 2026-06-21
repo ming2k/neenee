@@ -42,11 +42,11 @@ impl Agent {
                      Use the update_plan_progress tool to mark each `##` section as you work: \
                      in_progress when you start it, done when it is complete. The user sees a \
                      sticky panel with section status, so keeping it current is part of the \
-                     job. Before declaring the work complete, spawn an independent verifier \
-                     via the `task` tool with a prompt like: 'Re-read the plan at {display}. \
-                     Walk through each section and report PASS, PARTIAL, or FAIL with \
-                     concrete evidence.' The verifier has a clean context, so it is not \
-                     biased by what you wrote.",
+                     job. Before declaring the work complete, call verify_plan_execution to \
+                     spawn an independent verifier sub-agent with a clean context that \
+                     re-reads the plan and the workspace, then reports PASS / PARTIAL / FAIL \
+                     per section with concrete evidence. Address every PARTIAL and FAIL \
+                     before reporting completion to the user.",
                     display = display,
                 ));
             }

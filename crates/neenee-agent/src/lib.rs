@@ -94,10 +94,12 @@ pub use agent::Agent;
 
 pub mod catalog;
 pub mod orchestration;
+mod plan_verify;
 mod prompt;
 pub mod skills;
 pub mod task_tool;
 
+pub use plan_verify::VerifyPlanExecutionTool;
 pub use task_tool::TaskTool;
 
 #[cfg(test)]
