@@ -22,13 +22,15 @@ Lookup-oriented documentation — tables, lists, and exact values.
 
 | Component | File |
 |-----------|------|
-| Header (HUD bar) | [header.md](tui/header.md) |
 | User message | [user-message.md](tui/user-message.md) |
 | Input box | [input-box.md](tui/input-box.md) |
 | Assistant text | [assistant-text.md](tui/assistant-text.md) |
 | Code block | [code-block.md](tui/code-block.md) |
+| Expandable step | [expandable-step.md](tui/expandable-step.md) |
 | Tool step | [tool-step.md](tui/tool-step.md) |
 | Thinking step | [thinking-step.md](tui/thinking-step.md) |
+| Step state machine | [step-state.md](tui/step-state.md) |
+| Sub-agent view | [subagent-view.md](tui/subagent-view.md) |
 | Status bar | [status-bar.md](tui/status-bar.md) |
-| Hint line | [hint-line.md](tui/hint-line.md) |
+| Hint bar | [hint-line.md](tui/hint-line.md) |
 | Modals | [modals.md](tui/modals.md) |

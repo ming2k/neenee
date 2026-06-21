@@ -29,7 +29,7 @@ A dedicated tool gives three advantages:
 
 The model calls `ask_user` with a `questions` array. Each question contains the
 display text, an optional header tag, an options array, and an optional
-`multi_select` flag. The schema lives in `crates/neenee-core/src/tools.rs`.
+`multi_select` flag. The schema lives in `crates/neenee-tools/src/lib.rs`.
 
 The TUI does not trust the model to provide a catch-all option. It appends an
 **Other** option to every question and, when that option is highlighted, shows
@@ -110,6 +110,6 @@ resolve ambiguity before any implementation begins.
 
 ## See also
 
-- [How to ask the user a question](../how-to/ask-the-user.md)
-- [Built-in tools](../reference/tools.md)
+- [How to ask the user a question](../../how-to/ask-the-user.md)
+- [Built-in tools](../../reference/tools.md)
 - [Tool rounds](tool-rounds.md)

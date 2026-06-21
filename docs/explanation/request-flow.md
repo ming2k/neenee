@@ -5,8 +5,8 @@ This page documents the byte-level shape of each transaction and how the
 message array evolves across the loop.
 
 For the tool protocol that decides *when* a tool call appears in a
-response, see [Tool rounds](tool-rounds.md). For the high-level turn
-steps, see [Harness architecture](harness.md). For which providers speak
+response, see [Tool rounds](agent-design/tool-rounds.md). For the high-level turn
+steps, see [Harness architecture](agent-design/harness.md). For which providers speak
 this contract, see [Providers](../reference/providers.md).
 
 ## One HTTP transaction
@@ -46,7 +46,7 @@ The body is assembled by `OpenAiCompatProvider::request_body`
 
 When the provider has no native function calling (`GeminiProvider`,
 `LlamaServerProvider`), neither field is sent and the body uses a
-different shape. See [Tool rounds](tool-rounds.md) for the fallback.
+different shape. See [Tool rounds](agent-design/tool-rounds.md) for the fallback.
 
 Orphan `tool` messages whose `tool_call_id` has no matching preceding
 assistant `tool_calls` are filtered before the body is serialized inside
@@ -252,7 +252,7 @@ assistant message becomes the turn's final answer.
 The `tools` array is byte-identical across all three requests. The
 `messages` array grows monotonically; neenee never edits prior messages
 (except the attribution step described in
-[Tool rounds](tool-rounds.md)).
+[Tool rounds](agent-design/tool-rounds.md)).
 
 ### Exit conditions
 
@@ -278,7 +278,7 @@ Two bounds prevent runaway loops (`crates/neenee-core/src/lib.rs`):
   resets the counter.
 
 These are execution bounds, not a security sandbox. See
-[Harness architecture](harness.md) for the full safety surface.
+[Harness architecture](agent-design/harness.md) for the full safety surface.
 
 ## Fallback variant
 
@@ -301,7 +301,7 @@ plain text.
 The resulting `messages` evolution is identical to the native path. The
 only difference is whether the tool call arrives as a structured
 `tool_calls` field or is parsed out of `content`. See
-[Tool rounds](tool-rounds.md) for the parsing rules and their limits.
+[Tool rounds](agent-design/tool-rounds.md) for the parsing rules and their limits.
 
 ## Retry interaction
 
@@ -331,8 +331,8 @@ by a fresh one.
 
 ## See also
 
-- [Tool rounds](tool-rounds.md) — schema injection and fallback mechanics
+- [Tool rounds](agent-design/tool-rounds.md) — schema injection and fallback mechanics
 - [Provider capabilities](provider-capabilities.md) — why providers differ
   on streaming and tool support
-- [Harness architecture](harness.md) — turn execution, retry, safety bounds
+- [Harness architecture](agent-design/harness.md) — turn execution, retry, safety bounds
 - [Providers](../reference/providers.md) — endpoint catalog

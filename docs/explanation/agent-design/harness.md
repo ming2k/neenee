@@ -30,7 +30,7 @@ including parallel calls with identical tool names.
 The harness distinguishes two model capability surfaces. Tools are declared
 to the provider on every request; reasoning is observed from the provider
 when the model emits it. For the capability model and wire-level protocol,
-see [Provider capabilities](provider-capabilities.md) and
+see [Provider capabilities](../provider-capabilities.md) and
 [Tool rounds](tool-rounds.md).
 
 ### Declared: tools
@@ -100,42 +100,16 @@ broker, and result-message format apply to native and fallback calls.
 
 ## Goal state
 
-`/goal <objective>` creates an active goal. Goals are persisted per session in a
-SQLite store (`goals.db`) keyed by thread id, so they survive restarts and are
-restored on `/resume`; a one-time migration imports any legacy goal from the
-old config. The goal is injected on every turn. `/goal done` marks it completed,
-`/goal clear` removes it, and `/goal pause`, `/goal resume`, `/goal edit`, and
-`/goal budget` manage its lifecycle.
-
-A goal carries a status, not just a done flag. Transitions are validated by the
-goal service:
-
-| Status | Meaning |
-|--------|---------|
-| `active` | Being worked on; injected into the system prompt each turn |
-| `paused` | Suspended by the user; resumable |
-| `blocked` | Model gave up after a blocking condition recurred; resumable |
-| `usage_limited` / `budget_limited` | Stopped by a usage cap or token budget; resumable |
-| `complete` | Objective achieved |
-
-Each completed turn's token and elapsed-time cost is accounted against the
-active goal. When a token budget is set and cumulative `tokens_used` reaches it,
-the goal moves to `budget_limited` and a hidden prompt informs the model; the
-user raises the budget with `/goal budget <tokens>` or continues with
-`/goal resume`.
-
-The model also drives goals through tools: `get_goal` (read), `create_goal`
-(start a new goal on explicit request), `update_goal` (mark `complete` or
-`blocked`), and `goal_checklist` (expose progress). The legacy completion marker
-`[NEENEE_GOAL_COMPLETE]` remains a model-to-harness control signal: it is removed
-from visible output and used to end an autonomous loop early, and is deferred
-while any checklist item remains pending or in progress.
-
-Checklist updates are harness metadata: they do not require a write permission
-prompt, but they are validated, held in live goal state, injected into
-subsequent system prompts, and projected into the TUI as `done/total` progress.
-A populated active checklist cannot be replaced with an empty list; each item
-must receive a terminal completed or cancelled status.
+`/goal <objective>` creates a durable, per-session objective persisted in
+SQLite (`goals.db`) keyed by thread id, so it survives restarts and `/resume`.
+A goal carries a status machine (`active` / `paused` / `blocked` /
+`usage_limited` / `budget_limited` / `complete`); each completed turn's token
+and elapsed-time cost is accounted against it, and a token budget flips the
+status to `budget_limited` inside the accounting SQL. The model drives goals
+through `get_goal`, `create_goal`, `update_goal`, and `goal_checklist`, and
+signals completion with `[NEENEE_GOAL_COMPLETE]` — which the harness defers
+while any checklist item remains pending. See [Goals](goals.md) for the status
+transition table, the checklist rules, and the persistence model.
 
 ## Autonomous loop
 

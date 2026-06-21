@@ -93,4 +93,4 @@ why you need an answer, or stop the current branch of work.
 ## See also
 
 - [Built-in tools](../reference/tools.md)
-- [User question mechanism](../explanation/user-questions.md)
+- [User question mechanism](../explanation/agent-design/user-questions.md)

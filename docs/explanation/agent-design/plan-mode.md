@@ -19,7 +19,7 @@ execution on every ReAct round.
 | `Plan` | Read-only tools plus writes under `.neenee/plans/` only | `/mode plan`; `plan_enter` |
 
 The active mode is shown in the TUI header accent color and can be switched
-manually with the [`/mode`](../reference/commands.md) command at any time.
+manually with the [`/mode`](../../reference/commands.md) command at any time.
 
 ## Entering and exiting
 
@@ -50,7 +50,7 @@ implement the plan.
 
 The switch is automatic and unconditional; neenee does not prompt the user to
 confirm an autonomous mode change. The user stays in control through `/mode`
-and can revert at any time. See [Built-in tools](../reference/tools.md) for the
+and can revert at any time. See [Built-in tools](../../reference/tools.md) for the
 parameter schemas.
 
 ## The plan-file write exemption
@@ -143,17 +143,17 @@ Status glyphs:
 
 The progress snapshot is persisted in `session.json` via
 `SessionEvent::PlanProgressSet`, so resume restores the panel in the same
-state. See [ADR-0007](../adr/0007-plan-progress-panel.md) for the design
+state. See [ADR-0007](../../adr/0007-plan-progress-panel.md) for the design
 rationale.
 
 ## See also
 
-- [Built-in tools](../reference/tools.md) — `plan_enter`, `plan_exit`, and
+- [Built-in tools](../../reference/tools.md) — `plan_enter`, `plan_exit`, and
   `update_plan_progress` parameter schemas, and the
   `allowed_in_plan_mode` access rule
-- [Slash commands](../reference/commands.md) — the `/mode` command
+- [Slash commands](../../reference/commands.md) — the `/mode` command
 - [Harness architecture](harness.md) — the control plane that Plan mode
   plugs into, including the permission broker and safety bounds
-- [ADR-0006](../adr/0006-plan-mode-v2.md) — approval gate + active plan
+- [ADR-0006](../../adr/0006-plan-mode-v2.md) — approval gate + active plan
   path + `<proposed_plan>` rendering
-- [ADR-0007](../adr/0007-plan-progress-panel.md) — sticky progress panel
+- [ADR-0007](../../adr/0007-plan-progress-panel.md) — sticky progress panel

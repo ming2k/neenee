@@ -5,15 +5,19 @@ Transient activity indicator shown directly above the input box.
 ## Appearance
 
 ```text
- ⠹ making edits
+ ● making edits
 ```
 
 | Attribute | Value |
 |-----------|-------|
 | Location | 1 row directly above the input box |
-| Spinner | Braille: `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` cycling at 100 ms tick rate |
-| Text color | `accent` + ITALIC |
+| Glyph | `●` (`spinner_glyph`), BOLD |
+| Color | `breathing_color(phase, theme.brand(), theme.surface())` — a cosine luminance sweep between brand and surface so the dot breathes at roughly 10 fps instead of cycling braille frames |
+| Text color | `theme.brand()` + ITALIC |
 | Indent | 1 space |
+
+The breathing sweep is the same primitive per-step `Running` accents use,
+so a running tool step and the status bar share one notion of "alive".
 
 ## Visibility
 
@@ -43,5 +47,6 @@ When hidden, the row is returned to the transcript viewport.
 
 ## Source
 
-`draw_status_bar` in `render.rs`. Spinner phase driven by `app.spinner_tick`
-incremented once per frame in `lib.rs`.
+`draw_status_bar` in `render/chrome.rs`. Glyph from `spinner_glyph`;
+luminance sweep from `breathing_color` in the same module. Spinner phase
+driven by `app.spinner_tick` incremented once per frame in `lib.rs`.

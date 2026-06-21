@@ -215,7 +215,97 @@ maps each `AgentResponse` variant onto document changes — streaming text
 grows the live assistant message, tool calls become collapsible
 `ToolStep` steps, reasoning becomes `Thinking` steps, and permission
 requests open a modal that resolves a harness waiter. Streaming itself
-stays inside the harness; see [Harness architecture](harness.md).
+stays inside the harness; see [Harness architecture](agent-design/harness.md).
+
+## UX design philosophy
+
+The TUI's job is not to look impressive in a screenshot — it is to keep a
+long-running, partially-autonomous agent legible. Most visual decisions
+follow from three constraints: the agent produces output faster than the
+user can read it, many tool calls are noise once they finish, and the
+surface must never look frozen during a multi-second provider wait. The
+policies that fall out of those constraints are documented here so future
+changes do not silently regress them.
+
+### Calm defaults, loud exceptions
+
+The default weight for a collapsed step is the muted foreground tone, not
+the primary one. A finished `Ok` tool step is therefore visually inert —
+it earns attention only when the user opens it or rests the pointer on it.
+Loudness is reserved for the lifecycles the user actually has to act on or
+acknowledge: a call still `Running`, one that `Failed`, or one that was
+`Denied` permission. Those carry a steady accent that wins outright over
+the weight channel, so they stay visible even when collapsed and idle.
+This separation is enforced as an invariant of the
+[step state machine](../reference/tui/step-state.md): accent overrides
+weight, never the reverse.
+
+### Disclosure is the user's, not the lifecycle's
+
+The `user_pinned` flag on every step is the single boundary between
+automatic and manual disclosure. Lifecycle transitions may set the
+default — `Failed` expands, `Running` collapses, reasoning expands while
+streaming — but the moment the user manually toggles a step, the flag goes
+true and later transitions no-op. There is no "auto-collapse what the user
+was just reading" path; a finished reasoning trace is left exactly where
+the user had it. This is what prevents the historical class of bug where
+"the model finished thinking and yanked away the content I was reading."
+
+### Two focus zones instead of two modes
+
+The application deliberately does not have a `vi`-style modal-vs-insert
+split. Instead there are two **focus zones** — Compose (the input box) and
+Browse (the transcript) — and the same key means one thing per zone:
+`Enter` sends in Compose and toggles in Browse, `↑`/`↓` move the caret in
+Compose and walk steps in Browse. `Ctrl+B` is the explicit zone toggle and
+the hint bar carries a `[ COMPOSE ]` / `[ BROWSE ]` pill. The benefit is
+that keyboard navigation never silently changes meaning, and the user never
+has to remember "which mode am I in" to predict what a key will do.
+
+### A breathing dot, not a spinner
+
+The activity indicator is a single dot whose luminance sweeps between the
+summary background and the status accent at roughly 10 fps, not a braille
+`⠋⠙⠹` cycle. Two reasons. First, the sweep is per-step: each `Running`
+tool step carries its own breathing accent in its summary line, so the
+status of an in-flight call is visible in place rather than only in the
+status bar. Second, braille spinners read as "the program is computing"
+and are easy to mistake for an unresponsive loop; a slow luminance sweep
+reads as "the program is waiting" — which is almost always the truth
+during a provider round trip.
+
+### Sticky headers instead of scroll anchoring
+
+When an expanded step's body scrolls past the top of the viewport, the
+step's header is re-rendered pinned to the top row of the transcript area
+with a `-` marker.
+The alternative — anchor the scroll position so the header stays in view
+— would fight the user the moment they explicitly scrolled away from it.
+Pinning preserves the user's scroll intent while still answering "which
+step am I looking at the body of?" The same machinery keeps the header
+anchored to its row on toggle, so expanding a step does not push its own
+header off-screen.
+
+### Selection is a document range, not a screen rectangle
+
+Mouse selection is stored as a `SemanticCursor` range (`message_idx`,
+`block_idx`, byte range), never as terminal row/column coordinates. The
+consequence the user notices is that a selection survives a terminal
+resize, a reflow, or any number of redraws: the renderer repaints freely,
+the selection refers to the document model, and `get_selected_text` walks
+the block model to produce clean copyable text — stripping box-drawing
+borders from rendered tables, restoring the original code-block source
+rather than the wrapped projection. This is the single biggest difference
+from line-oriented terminal text.
+
+### Never block the frame
+
+The render loop is independent of provider speed and clipboard round-trip
+time by construction. The mechanism — spawned tasks for clipboard I/O, a
+snapshot-only mutex for provider state, a short poll while a copy is
+pending — is documented under [Avoiding event-loop stalls](#avoiding-event-loop-stalls);
+the design intent is simply that the cursor must keep blinking and the
+activity indicator must keep sweeping during a multi-second network wait.
 
 ## Where the details live
 
@@ -225,7 +315,9 @@ live in the lookup reference:
 
 - [Terminal UI reference](../reference/tui/) — frame layout, every
   component, color tokens, key measurements, source-file map.
-- [Harness architecture](harness.md) — the control plane whose state the
+- [Step state machine](../reference/tui/step-state.md) — the formal
+  state diagrams for the disclosure / interaction / lifecycle axes.
+- [Harness architecture](agent-design/harness.md) — the control plane whose state the
   TUI projects.
 - [Request flow](request-flow.md) — how streamed tokens reach the TUI
   over SSE.

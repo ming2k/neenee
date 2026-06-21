@@ -3,18 +3,19 @@
 This guide walks through implementing a new tool that the agent can call. It
 assumes familiarity with the `Tool` trait. For the existing tool catalog,
 see [Built-in tools](../reference/tools.md). For the protocol the model uses
-to call tools, see [Tool rounds](../explanation/tool-rounds.md).
+to call tools, see [Tool rounds](../explanation/agent-design/tool-rounds.md).
 
-All production tools live in the `neenee-core` crate. Pick the module that
-matches the tool's domain: filesystem tools go in
-`crates/neenee-core/src/tools.rs`, project scaffolding tools go in
-`crates/neenee-core/src/project.rs`, MCP integration lives in
-`crates/neenee-core/src/mcp.rs`.
+Most built-in tools live in the `neenee-tools` crate. Pick the module that
+matches the tool's domain: filesystem and web tools go in
+`crates/neenee-tools/src/lib.rs`, project scaffolding tools go in
+`crates/neenee-tools/src/project.rs`, MCP integration lives in
+`crates/neenee-tools/src/mcp.rs`. `use_skill` and `task` are the exceptions —
+they live in `crates/neenee-agent/src/` because they need orchestration state.
 
 ## Implement the `Tool` trait
 
 Define a struct and implement `Tool`
-(`crates/neenee-core/src/lib.rs`). The four required members are
+(`crates/neenee-core/src/capability.rs`). The four required members are
 `name`, `description`, `parameters`, and `call`.
 
 ```rust
@@ -61,7 +62,7 @@ every required field so the model cannot invent extra keys.
 ## Return structured output (`ToolOutput`)
 
 Implement `call()` for the model-facing string result, then override
-`call_structured()` (`crates/neenee-core/src/lib.rs`) to return a typed
+`call_structured()` (`crates/neenee-core/src/capability.rs`) to return a typed
 [`ToolOutput`](../adr/0001-tool-rendering-redesign.md) so the UI renders from
 data instead of a sniffed string. The default `call_structured()` just wraps
 `call()`'s string as `ToolOutput::Text`, so this is optional but recommended
@@ -87,7 +88,7 @@ also overrides `call_structured_with_events` to stream stdout live via
 
 ## Choose a `ToolAccess`
 
-Override `access()` (`crates/neenee-core/src/lib.rs`) only when the
+Override `access()` (`crates/neenee-core/src/capability.rs`) only when the
 tool is read-only. The default is `ToolAccess::Write`, which is the safe
 choice for any tool with side effects.
 
@@ -105,7 +106,7 @@ full gating matrix.
 ## Override `permission_scope` for write tools
 
 A `Write` tool should override `permission_scope`
-(`crates/neenee-core/src/lib.rs`) so cached `Always` rules match the
+(`crates/neenee-core/src/capability.rs`) so cached `Always` rules match the
 smallest stable resource identifier. The default `"*"` causes any approval
 to authorize all future calls to that tool, which is rarely what users
 want.
@@ -116,7 +117,7 @@ fn permission_scope(&self, arguments: &str) -> String {
 }
 ```
 
-`json_string` (`crates/neenee-core/src/tools.rs`) extracts a JSON field
+`json_string` (`crates/neenee-tools/src/lib.rs`) extracts a JSON field
 from the arguments string and falls back to `"*"`. Existing scopes: file
 tools use the `path` argument, `bash` uses the full `command` text,
 `create_project` uses `{path}/{name}`. Pick a scope that distinguishes
@@ -129,7 +130,7 @@ invocation.
 instruction prose ("Call this only when…", "Do not infer…"). That text is
 fine for the model but confusing when the user reads it in a permission
 prompt. Two trait methods control what the prompt shows instead
-(`crates/neenee-core/src/lib.rs`):
+(`crates/neenee-core/src/capability.rs`):
 
 - `permission_label()` (default: `name()`) — the header title.
 - `permission_description()` (default: `description()`) — the body shown
@@ -156,11 +157,11 @@ reach the model and are not part of the function schema.
 ## Optional: stream sub-task events
 
 If the tool spawns long-running work that should surface in the TUI,
-override `call_with_events` (`crates/neenee-core/src/lib.rs`) instead
+override `call_with_events` (`crates/neenee-core/src/capability.rs`) instead
 of `call`. The default implementation delegates to `call`, so overriding
 `call` alone is enough for synchronous tools.
 
-`TaskTool` (`crates/neenee-core/src/tools.rs`) is currently the only
+`TaskTool` (`crates/neenee-agent/src/task_tool.rs`) is currently the only
 tool that overrides `call_with_events`. It forwards `SubTaskEvent`s from
 the sub-agent so the parent harness can render live progress. Read its
 implementation before adopting the same pattern; the event surface is
@@ -168,7 +169,7 @@ narrow.
 
 ## Register the tool
 
-Add the tool to the literal registry in `crates/neenee/src/main.rs` (the
+Add the tool to the literal registry in `crates/neenee-cli/src/main.rs` (the
 `let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![ … ]` block),
 preserving the existing order (write tools first, then read tools, then
 `use_skill`, then MCP extension).
@@ -221,12 +222,12 @@ Update these surfaces in the same change:
 - If the tool introduces a new permission scope shape, document it under
   the tool's parameter table.
 - If the tool changes how the harness behaves on a turn, update
-  [Harness architecture](../explanation/harness.md).
+  [Harness architecture](../explanation/agent-design/harness.md).
 
 ## See also
 
 - [Built-in tools](../reference/tools.md) — existing tool catalog
-- [Tool rounds](../explanation/tool-rounds.md) — schema injection and
+- [Tool rounds](../explanation/agent-design/tool-rounds.md) — schema injection and
   fallback mechanics
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   tool support varies across providers

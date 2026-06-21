@@ -5,6 +5,8 @@ summary header that toggles a body region open and closed. [Tool steps](tool-ste
 and [thinking steps](thinking-step.md) are the two concrete instances. Both
 render flat on the app background — there is no band or border; the header
 is just a `+`/`-` marker plus summary text, and the body is indented content.
+The color and toggle rules summarized below are the user-visible projection of
+the formal [step state machine](step-state.md).
 
 ## Header
 
@@ -55,7 +57,7 @@ the header text column 4 onward.
 | `Enter` on a focused **tool** step | Open the [full-output detail overlay](tool-step.md#detail-overlay) (ADR-0001); click a tool-step header to toggle it inline instead |
 | Click header | Focus and toggle that step |
 | `Ctrl+T` | Expand or collapse all tool steps (bulk density toggle) |
-| Sticky pin | When an expanded step's body scrolls past the top of the viewport, its header pins under the HUD bar (rendered with `-`) |
+| Sticky pin | When an expanded step's body scrolls past the top of the viewport, its header pins to the top row of the transcript area (rendered with `-`) |
 | Narrow terminal (`< 8` cols) | Falls back to plain block rendering via `draw_message_body` |
 
 Keyboard focus lives in the **Browse zone**. Press `Ctrl+B` in the input box

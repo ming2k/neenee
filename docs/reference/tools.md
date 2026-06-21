@@ -6,12 +6,13 @@ turn. MCP server tools and the synthetic goal tools (`get_goal`, `create_goal`,
 tool name, its access class, parameter schema, permission scope, and source
 location.
 
-All production tools live in the `neenee-core` crate. The `Tool` trait is
-defined in `crates/neenee-core/src/lib.rs`.
+Most built-in tools live in the `neenee-tools` crate; `task` and `use_skill`
+live in `neenee-agent`. The `Tool` trait is defined in
+`crates/neenee-core/src/capability.rs`.
 
 ## Tool access
 
-`ToolAccess` (`crates/neenee-core/src/lib.rs`) gates two surfaces:
+`ToolAccess` (`crates/neenee-core/src/capability.rs`) gates two surfaces:
 
 | Variant | Plan mode | Permission broker |
 |---------|-----------|-------------------|
@@ -24,11 +25,11 @@ defaults to `access() == Read`; `write_file` and `edit_file` override it to
 also permit writes under `.neenee/plans/`. The Plan-mode gate in
 `Agent::execute_tool` and the permission broker both consult `ToolAccess`, so a
 tool marked `Read` is trusted in both surfaces. See
-[Plan mode](../explanation/plan-mode.md) for the exemption rationale.
+[Plan mode](../explanation/agent-design/plan-mode.md) for the exemption rationale.
 
 ## Built-in tool registry
 
-Registration order is the literal in `crates/neenee/src/main.rs`. `Agent::new`
+Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::new`
 strips any externally supplied `goal_checklist`, `get_goal`, `create_goal`,
 `update_goal`, `plan_enter`, and `plan_exit`, then appends its own goal tools
 from `crates/neenee-core/src/goals/tools.rs` and plan tools from
@@ -37,28 +38,28 @@ from `crates/neenee-core/src/goals/tools.rs` and plan tools from
 
 | Tool name | Access | Permission scope | Source |
 |-----------|--------|------------------|--------|
-| `bash` | `Write` | `command` argument | `crates/neenee-core/src/tools.rs` |
-| `read_file` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `ask_user` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
-| `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-core/src/tools.rs` |
-| `grep` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `glob` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `list_dir` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `webfetch` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `websearch` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `todo` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `create_project` | `Write` | `{path}/{name}` or `*` | `crates/neenee-core/src/project.rs` |
-| `init_config` | `Write` | `path` argument or `.` | `crates/neenee-core/src/project.rs` |
-| `use_skill` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
-| `task` | `Read` | `*` | `crates/neenee-core/src/tools.rs` |
+| `bash` | `Write` | `command` argument | `crates/neenee-tools/src/lib.rs` |
+| `read_file` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `ask_user` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-tools/src/lib.rs` |
+| `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | `crates/neenee-tools/src/lib.rs` |
+| `grep` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `glob` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `list_dir` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `webfetch` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `websearch` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `todo` | `Read` | `*` | `crates/neenee-tools/src/lib.rs` |
+| `create_project` | `Write` | `{path}/{name}` or `*` | `crates/neenee-tools/src/project.rs` |
+| `init_config` | `Write` | `path` argument or `.` | `crates/neenee-tools/src/project.rs` |
+| `use_skill` | `Read` | `*` | `crates/neenee-agent/src/skills/tools.rs` |
+| `task` | `Read` | `*` | `crates/neenee-agent/src/task_tool.rs` |
 | `get_goal` | `Read` | `*` | `crates/neenee-core/src/goals/tools.rs` |
 | `create_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
 | `update_goal` | `Write` | `*` | `crates/neenee-core/src/goals/tools.rs` |
 | `goal_checklist` | `Read` | `*` (no permission prompt) | `crates/neenee-core/src/goals/tools.rs` |
 | `plan_enter` | `Read` | `*` | `crates/neenee-core/src/plan.rs` |
 | `plan_exit` | `Read` | `*` | `crates/neenee-core/src/plan.rs` |
-| `mcp__<server>__<tool>` | `Read` if server `read_only = true`, else `Write` | `*` | `crates/neenee-core/src/mcp.rs` |
+| `mcp__<server>__<tool>` | `Read` if server `read_only = true`, else `Write` | `*` | `crates/neenee-tools/src/mcp.rs` |
 
 `permission_scope` defaults to `"*"`. Only `write_file`, `edit_file`, `bash`,
 `create_project`, and `init_config` override it; their scope string is what a
@@ -86,7 +87,7 @@ Only `create_goal` and `update_goal` currently override them.
 ## Parameters
 
 Parameters are exposed to the model as JSON Schema via
-`Tool::to_openai_function()` (`crates/neenee-core/src/lib.rs`), which
+`Tool::to_openai_function()` (`crates/neenee-core/src/capability.rs`), which
 wraps `Tool::parameters()`.
 
 ### `bash`
@@ -145,7 +146,7 @@ Backed by ripgrep.
 | `pattern` | string | yes | — | Glob, e.g. `**/*.rs` |
 | `path` | string | no | `.` | Search root |
 
-Capped at `GLOB_MAX_RESULTS = 200` (`crates/neenee-core/src/tools.rs`).
+Capped at `GLOB_MAX_RESULTS = 200` (`crates/neenee-tools/src/lib.rs`).
 
 ### `list_dir`
 
@@ -233,7 +234,7 @@ Hard rules enforced in `crates/neenee-core/src/goals/tools.rs`:
 No parameters. Switches the agent to `Plan` mode. The model calls it when a
 request would benefit from designing before implementing; it should not be
 called for simple tasks or when the user wants immediate implementation. See
-[Plan mode](../explanation/plan-mode.md).
+[Plan mode](../explanation/agent-design/plan-mode.md).
 
 ### `plan_exit`
 
@@ -248,7 +249,7 @@ the plan body is read from disk and echoed back in the tool result, and the
 markdown is parsed into `##` sections that drive the sticky progress panel
 above the input box. If the user picks **Keep planning** the agent stays in
 `Plan` mode. Manual `/mode build` skips the approval step. See
-[Plan mode](../explanation/plan-mode.md).
+[Plan mode](../explanation/agent-design/plan-mode.md).
 
 ### `update_plan_progress`
 
@@ -263,7 +264,7 @@ current state. The section argument is matched case-insensitively as a
 substring of any `##` heading, so the model does not have to echo the exact
 title. Has no effect if there is no active plan (the call returns a clear
 "no active plan" hint instead of erroring). See
-[Plan mode](../explanation/plan-mode.md).
+[Plan mode](../explanation/agent-design/plan-mode.md).
 
 ### `verify_plan_execution`
 
@@ -274,7 +275,7 @@ title. Has no effect if there is no active plan (the call returns a clear
 Spawns an independent verifier sub-agent that re-reads the active plan and
 the current workspace, then reports PASS / PARTIAL / FAIL per section with
 concrete evidence. Call this before declaring the plan complete. Blocked in
-Plan mode (no plan to verify). See [Plan mode](../explanation/plan-mode.md).
+Plan mode (no plan to verify). See [Plan mode](../explanation/agent-design/plan-mode.md).
 
 ### `use_skill`
 
@@ -306,7 +307,7 @@ Idempotent; existing files are never overwritten.
 ### `mcp__<server>__<tool>`
 
 Parameters come from the MCP server's `inputSchema`, falling back to
-`{"type":"object"}` when absent (`crates/neenee-core/src/mcp.rs`). The
+`{"type":"object"}` when absent (`crates/neenee-tools/src/mcp.rs`). The
 public name is `mcp__{sanitized_server}__{sanitized_original}`.
 
 ## Special tools
@@ -329,7 +330,7 @@ effect of the call rather than the model-facing instructions encoded in
 
 ### `task`
 
-`TaskTool` (`crates/neenee-core/src/tools.rs`) is the only tool that
+`TaskTool` (`crates/neenee-agent/src/task_tool.rs`) is the only tool that
 overrides `call_with_events` to stream sub-agent activity
 back through `SubTaskEvent`. The sub-agent:
 
@@ -347,12 +348,12 @@ same `Arc<Mutex<AgentMode>>` the `Agent` owns, so each tool flips the mode in
 place. Both are `Read` and bypass the permission broker. After either
 returns, the agent emits a `ModeChanged` event so the TUI refreshes its mode
 indicator. The Plan-mode gate exempts `.neenee/plans/` writes through
-`Tool::allowed_in_plan_mode`; see [Plan mode](../explanation/plan-mode.md).
+`Tool::allowed_in_plan_mode`; see [Plan mode](../explanation/agent-design/plan-mode.md).
 
 ### MCP tools
 
 Each MCP server's tools are wrapped in `McpTool`
-(`crates/neenee-core/src/mcp.rs`) and dispatch `tools/call` JSON-RPC over
+(`crates/neenee-tools/src/mcp.rs`) and dispatch `tools/call` JSON-RPC over
 stdio to the server child process. The wrapper inherits the server's
 `read_only` flag as its `ToolAccess`. Connect and `tools/list` are bounded
 by `MCP_CONNECT_TIMEOUT = 8s`. Configuration lives in `config.toml` under
@@ -405,10 +406,10 @@ policy allows implicit invocation.
 
 ## See also
 
-- [Tool rounds](../explanation/tool-rounds.md) — how schemas are injected,
+- [Tool rounds](../explanation/agent-design/tool-rounds.md) — how schemas are injected,
   streamed, and fell back to text
 - [Provider capabilities](../explanation/provider-capabilities.md) — which
   providers support native function calling
 - [How to add a tool](../how-to/add-a-tool.md) — implementing the `Tool` trait
-- [Harness architecture](../explanation/harness.md) — control plane around
+- [Harness architecture](../explanation/agent-design/harness.md) — control plane around
   tool execution

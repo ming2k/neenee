@@ -34,4 +34,5 @@ Character-level semantic selection — only the dragged substring gets
 
 ## Source
 
-`render_message_blocks` → `Block::Text` with `is_user == true` in `render.rs`.
+`draw_message_body` → `Block::Text` with `is_user == true` in
+`render/message_body.rs`.

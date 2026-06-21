@@ -164,5 +164,5 @@ Update these surfaces in the same change:
 - [Providers](../reference/providers.md) — existing provider matrix
 - [Provider capabilities](../explanation/provider-capabilities.md) —
   capability layering and why providers differ
-- [Tool rounds](../explanation/tool-rounds.md) — what the registry path
+- [Tool rounds](../explanation/agent-design/tool-rounds.md) — what the registry path
   inherits

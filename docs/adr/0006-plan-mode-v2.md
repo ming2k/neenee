@@ -136,7 +136,7 @@ Migration:
 
 ## References
 
-- [Plan mode](../explanation/plan-mode.md) — updated explanation of the
+- [Plan mode](../explanation/agent-design/plan-mode.md) — updated explanation of the
   end-to-end flow
 - [How to plan a change](../how-to/plan-a-change.md) — step-by-step guide
 - [Built-in tools](../reference/tools.md) — `plan_enter` and `plan_exit`

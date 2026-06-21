@@ -7,18 +7,18 @@ The neenee terminal UI is built with [ratatui] and rendered by the
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│  Header                                            (0–4)  │
-├──────────────────────────────────────────────────────────┤
 │  Transcript viewport                            (Min 0)  │
+│   (messages, expandable steps, sticky pinned summaries)  │
 ├──────────────────────────────────────────────────────────┤
 │  Status bar                                (0 or 1 row)  │
+│  Plan panel                             (0 or 3 rows)  │
 │  Input box                         (2 + wrapped lines)  │
-│  Hint line                                       (1 row)  │
+│  Hint bar                                       (1 row)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
-See [layout.md](layout.md) for chunk heights, chrome hiding, and the full
-measurements table.
+See [layout.md](layout.md) for the footer stack, the sub-agent zoom view,
+the modal overlay mode, chrome hiding, and the full measurements table.
 
 ## Focus zones
 
@@ -38,7 +38,6 @@ when one is open); it is not a zone toggle.
 
 | Component | Description |
 |-----------|-------------|
-| [Header](header.md) | Floating `panel_bg` half-block panel: model name + goal + context-usage indicator |
 | [User message](user-message.md) | Sent prompts on a dimmer panel with `┃` bar |
 | [Input box](input-box.md) | Live editable prompt on a brighter panel |
 | [Assistant text](assistant-text.md) | Regular markdown text, 4-space indent |
@@ -46,9 +45,12 @@ when one is open); it is not a zone toggle.
 | [Expandable step](expandable-step.md) | Shared shape for collapsible transcript entries |
 | [Tool step](tool-step.md) | Expandable step for tool calls |
 | [Thinking step](thinking-step.md) | Expandable step for reasoning text |
-| [Status bar](status-bar.md) | Animated braille spinner + activity label |
-| [Hint line](hint-line.md) | Right-aligned keybinding hints |
-| [Modals](modals.md) | Models, Sessions, History, Permission, API key, Help |
+| [Step state machine](step-state.md) | The three orthogonal axes (Lifecycle × Disclosure × Interaction) and the accent/weight color channels |
+| [Sub-agent view](subagent-view.md) | Inline task step + zoomed-in child stream + navigation bar + focus stack |
+| [Status bar](status-bar.md) | Breathing-dot activity indicator + label |
+| [Hint bar](hint-line.md) | Focus-zone pill + model/goal/MCP/context cluster |
+| [Plan panel](layout.md#footer-stack) | Sticky 3-row plan-progress card above the input box |
+| [Modals](modals.md) | Models, Model editor, Sessions, Session, History, Question, Permission, Tool-step detail, Help, Plan preview, Toasts |
 
 ## Other reference
 
@@ -71,7 +73,7 @@ when one is open); it is not a zone toggle.
 | `render/step/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
 | `render/chrome.rs` | `draw_status_bar`, `draw_hint`, `draw_suggestions`, `spinner_frame` |
-| `render/overlays.rs` | Modals: models, sessions, history, permission, API key, help, solution |
+| `render/overlays.rs` | Modals: models, model editor, sessions, session, history, question, permission, tool-step detail, help, plan preview, toasts |
 | `render/markdown_table.rs` | `build_table_render`, `shrink_column_widths` |
 | `document.rs` | Document model: `TranscriptMessage`, `Block` enum, `MessageKind`, markdown parsing, `parse_arguments_kv` |
 | `layout.rs` | `LayoutMap`, `BlockRegion`, `SemanticCursor`, hit-testing |

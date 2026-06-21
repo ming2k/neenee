@@ -2,7 +2,7 @@
 
 This guide shows how to use **Plan mode** to research and design a change
 before any workspace edits happen. For the design rationale, see
-[Plan mode](../explanation/plan-mode.md). For the mode command and the
+[Plan mode](../explanation/agent-design/plan-mode.md). For the mode command and the
 planning tools, see [Slash commands](../reference/commands.md) and
 [Built-in tools](../reference/tools.md).
 
@@ -87,12 +87,12 @@ The panel disappears when:
 - `/mode` shows the current mode at any time.
 - `/mode build` is the authoritative override that ends planning immediately,
   even if the agent entered Plan mode on its own.
-- Plan mode is orthogonal to [goal state](../explanation/harness.md) and the
+- Plan mode is orthogonal to [goal state](../explanation/agent-design/harness.md) and the
   autonomous loop; a goal and `/loop` can be active in either mode.
 
 ## See also
 
-- [Plan mode](../explanation/plan-mode.md) — why the mode exists and how the
+- [Plan mode](../explanation/agent-design/plan-mode.md) — why the mode exists and how the
   write exemption works
 - [Slash commands](../reference/commands.md) — the `/mode` command
 - [Built-in tools](../reference/tools.md) — `plan_enter` and `plan_exit`

@@ -22,7 +22,7 @@ collapsing is to keep noisy tool I/O out of the transcript until you ask for it.
 |-----------|-------|
 | Background | `app_bg` (flat — no band), inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD |
-| Status indicator | Conveyed by header color only — no glyph. Breathing accent while running (luminance sweep), `error_fg` on failure, `text_muted` when cancelled, neutral (`text`/`text_muted` by focus) on success |
+| Status indicator | Conveyed by header color only — no glyph. Resolved through the shared [step state machine](step-state.md): `Ok` falls through to the disclosure × interaction weight ladder; `Running` / `Failed` / `Denied` / `Cancelled` each supply a steady accent (`info` / `error_fg` / `warn` / `text_muted`) that wins outright |
 | Header text | Human-readable description + duration, BOLD |
 
 ## Expanded
@@ -63,18 +63,20 @@ needed; the result block's `code_bg` keeps the two visually distinct.
 ### Status colors
 
 Status is conveyed by the header text color (there is no status glyph).
+The full hue / luminance resolution is centralized in the
+[step state machine](step-state.md); the tool-step-specific suffix on the
+summary line is:
 
-| State | Header color | Header suffix |
-|-------|--------------|---------------|
-| Completed | neutral (`text` focused / `text_muted` otherwise) | ` · 0ms` |
-| Failed | `error_fg` (red) | ` · failed 0ms` |
-| Running | breathing `info` accent (luminance sweep) | (no suffix) |
-| Cancelled | `text_muted` | (no suffix) |
+| State | Header suffix |
+|-------|---------------|
+| Completed | ` · 0ms` |
+| Failed | ` · failed 0ms` |
+| Running | (no suffix) |
+| Cancelled | (no suffix) |
 
-Success stays neutral so the common case reads as calm; only in-flight, failed,
-and cancelled calls pick up an accent. (The child-step accents and sticky-pin
-color still use the raw status palette — `success`/`error_fg`/`info`/`text_muted`
-— derived from [`ToolStatus::color`].)
+(The child-step accents and sticky-pin color use the raw
+[`ToolStatus::color`](step-state.md#lifecycle-accent) palette directly,
+without the breathing sweep applied to the parent summary.)
 
 ## Detail overlay
 

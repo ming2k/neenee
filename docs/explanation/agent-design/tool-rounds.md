@@ -10,9 +10,9 @@ consequence of a few invariants that hold regardless of which provider
 sits on the other end of the wire. This page describes those invariants
 and the design choices they force. For the wire-level mechanics — HTTP
 transaction shape, SSE delta reassembly, the ReAct loop — see
-[Request flow](request-flow.md). For how a turn is driven around tool
+[Request flow](../request-flow.md). For how a turn is driven around tool
 rounds, see [Harness architecture](harness.md). For why providers differ,
-see [Provider capabilities](provider-capabilities.md).
+see [Provider capabilities](../provider-capabilities.md).
 
 ## The round, as a concept
 
@@ -151,7 +151,7 @@ success versus failure — is read from the typed payload, not sniffed
 from the text, so a non-zero shell exit is a real failure rather than
 something that has to be recognized by an `Error` prefix. For the
 decision history behind this split, see
-[ADR-0001](../adr/0001-tool-rendering-redesign.md).
+[ADR-0001](../../adr/0001-tool-rendering-redesign.md).
 
 A related split lives in identifiers. The wire requires a result to
 reference the call id the runtime issued; the UI wants stable steps
@@ -171,14 +171,14 @@ These are execution bounds, not a security sandbox. They keep a loop
 from running away; they do not constrain what a tool is allowed to do.
 The safety surface — authorization, plan gating — is the gates above.
 For the full bound table and how it interacts with retry, see
-[Request flow](request-flow.md) and [Harness architecture](harness.md).
+[Request flow](../request-flow.md) and [Harness architecture](harness.md).
 
 ## See also
 
-- [Built-in tools](../reference/tools.md) — the catalog that gets declared
-- [Request flow](request-flow.md) — HTTP shape, SSE reassembly, the ReAct loop
-- [Provider capabilities](provider-capabilities.md) — why the protocol splits in two
-- [Guided decoding](guided-decoding.md) — the constrained-decoding layer that produces valid native calls
+- [Built-in tools](../../reference/tools.md) — the catalog that gets declared
+- [Request flow](../request-flow.md) — HTTP shape, SSE reassembly, the ReAct loop
+- [Provider capabilities](../provider-capabilities.md) — why the protocol splits in two
+- [Guided decoding](../guided-decoding.md) — the constrained-decoding layer that produces valid native calls
 - [Harness architecture](harness.md) — turn execution, retry, and safety bounds around tool rounds
 - [Plan mode](plan-mode.md) — the read-only planning surface and its write exemption
-- [How to add a tool](../how-to/add-a-tool.md) — adding a new tool
+- [How to add a tool](../../how-to/add-a-tool.md) — adding a new tool

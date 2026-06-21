@@ -35,5 +35,5 @@ is specified, no label is shown.
 
 ## Source
 
-`render_message_blocks` → `Block::Code` in `render.rs`. Uses `code_gutter_line`
-for per-line rendering with optional left bar.
+`draw_message_body` → `Block::Code` in `render/message_body.rs`. Uses
+`code_gutter_line` for per-line rendering with optional left bar.

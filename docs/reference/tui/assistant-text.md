@@ -32,4 +32,5 @@ span, so hit-testing maps correctly to byte offsets within the block content.
 
 ## Source
 
-`render_message_blocks` → `Block::Text` with `is_user == false` in `render.rs`.
+`draw_message_body` → `Block::Text` with `is_user == false` in
+`render/message_body.rs`.

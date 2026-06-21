@@ -39,15 +39,14 @@ the display.
 
 ## Visibility
 
-Hidden when overlay modals are open (Models, Sessions, Help, Permission).
-
-## API-key modal
-
-When the API-key modal is active, the input display is masked (`•••`). Each
-character becomes `•` (U+2022). Layout-map recording is skipped because masked
-byte offsets would not map back to the real input string.
+Hidden when overlay modals are open (see [modals](modals.md)). The composer
+input is also borrowed by the [model editor](modals.md#model-editor) and
+the [history search](modals.md#history-search-modal) modals — they route
+keystrokes through the same surface but render their own framing around it.
 
 ## Source
 
-`draw_input` in `render.rs`. Rendered manually (not via a ratatui `Block`
-widget) so the `┃` bar can be half-height (`╻`/`╹`) on transition rows.
+`draw_composer` in `render/composer.rs`. Rendered manually (not via a
+ratatui `Block` widget) so the `┃` bar can be half-height (`╻`/`╹`) on
+transition rows. `INPUT_MSG_IDX = usize::MAX - 2` is the layout-map
+message index reserved for live input selection.

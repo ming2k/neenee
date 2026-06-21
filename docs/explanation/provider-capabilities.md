@@ -7,7 +7,7 @@ explains where each capability actually lives and why providers differ.
 
 For the per-provider capability matrix, see
 [Providers](../reference/providers.md). For the wire-level protocol neenee
-uses to call tools, see [Tool rounds](tool-rounds.md).
+uses to call tools, see [Tool rounds](agent-design/tool-rounds.md).
 
 ## Three layers
 
@@ -116,7 +116,7 @@ layers:
 The practical consequence: on Gemini and LlamaServer the model must emit
 `{"tool": "<name>", "arguments": {…}}` as ordinary assistant text, which
 `Agent::parse_tool_call` (`crates/neenee-core/src/lib.rs`) extracts
-after the fact. See [Tool rounds](tool-rounds.md) for the fallback
+after the fact. See [Tool rounds](agent-design/tool-rounds.md) for the fallback
 mechanics.
 
 ## Capability negotiation summary
@@ -133,7 +133,7 @@ mechanics.
 ## See also
 
 - [Providers](../reference/providers.md) — per-provider capability matrix
-- [Tool rounds](tool-rounds.md) — schema injection, streaming, fallback
+- [Tool rounds](agent-design/tool-rounds.md) — schema injection, streaming, fallback
 - [Built-in tools](../reference/tools.md) — what schemas get declared
-- [Harness architecture](harness.md) — how the harness consumes these
+- [Harness architecture](agent-design/harness.md) — how the harness consumes these
   capabilities per turn

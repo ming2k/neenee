@@ -15,8 +15,11 @@ panel.
 |-----------|-------|
 | Background | `app_bg` (flat — no band), inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | `+` (collapsed) / `-` (expanded), BOLD |
-| Header text | `text_muted` normally; brightens to `text` on hover/focus |
 | Header text column | 4 from transcript edge (after the `+ ` prefix) |
+
+The summary color is the pure weight channel from the
+[state machine](step-state.md) — reasoning never carries a text accent, so
+the lifecycle is conveyed only by the breathing `●` marker.
 
 ## Header format
 
