@@ -1,318 +1,136 @@
 # neenee
 
-<p align="center">
-  <b>A Rust-based AI coding agent with semantic TUI, tool use, on-demand skills, and bounded autonomous goals.</b>
-</p>
+**[English](#english) | [中文](#中文)**
+
+---
+
+<a name="english"></a>
+
+A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, and bounded autonomous goals.
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
-  <a href="#"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
-  <a href="https://crates.io/crates/neenee-cli"><img src="https://img.shields.io/badge/crates.io-v0.1.0-cyan" alt="Crates.io"></a>
+  <a href="#"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Architecture](#architecture)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Getting Started](#getting-started)
-- [Commands](#commands)
-- [Configuration](#configuration)
-  - [API Keys](#api-keys)
-  - [MCP Servers](#mcp-servers)
-  - [Sessions](#sessions)
-- [Customizing](#customizing)
-  - [LLM Providers](#llm-providers)
-  - [Tools](#tools)
-  - [Skills](#skills)
-  - [Custom Commands](#custom-commands)
-- [Contributing](#contributing)
-- [License](#license)
-
----
 
 ## Features
 
-- **Semantic TUI** — Ratatui-based interface with semantic selection and live status.
-- **Native & Fallback Tool Use** — Full tool-capable ReAct path; OpenAI-compatible delta reconstruction.
-- **Bounded Autonomy** — Goal checklists, autonomous loops, cancellable retries, and replay protection.
-- **Context-Aware Controls** — `Ctrl+C` copies, interrupts, or exits contextually; `Ctrl+T` toggles tool expansion.
-- **MCP Support** — Discover and use local stdio MCP servers alongside native tools.
-- **Durable Sessions** — Atomic persistence with compaction, resume, and fork support.
+- **Semantic TUI** — Ratatui-based interface with live status, expandable tool steps, and structured diffs.
+- **Tool Use** — Full ReAct loop with native and fallback tool-calling; bash, file I/O, grep, glob, web search, and MCP servers.
+- **Autonomous Goals** — Set a goal, run `/loop`, and let the agent work iteratively with a checklist until done.
+- **Plan Mode** — Read-only analysis and planning without touching the codebase.
+- **Durable Sessions** — Atomic persistence with compaction, resume, and fork.
+- **Skills** — Load domain-specific instructions on demand or automatically by mention.
 
----
-
-## Architecture
-
-Strictly-layered six-crate workspace (see ADR-0005 for the topology and renames):
-
-| Crate | Responsibility |
-|-------|----------------|
-| `neenee-core` | Pure domain types: events, messages, tools, goals, skills config, capability traits, model registry. No I/O. |
-| `neenee-providers` | Concrete LLM providers (Kimi, OpenAI-compatible, Gemini native, Mock) and the `build_provider_for_channel` factory. |
-| `neenee-tools` | Concrete `Tool` implementations (bash, read/write/edit, glob, grep, web search, MCP loader, project init). |
-| `neenee-store` | Local coding-agent persistence: event-sourced sessions, blob store, config, paths, advisory locks, embedding index. |
-| `neenee-agent` | The `Agent` struct, turn orchestration, compaction, retries, provider catalog, skills, and `TaskTool`. |
-| `neenee-cli` | The `neenee` binary: inlined Ratatui TUI, slash commands, cancellation, and autonomous loops. |
-
-Dependency direction is strict: `core` ← {`providers`, `tools`, `store`} ← `agent` ← `cli`, with no reverse edges. Provider streaming and tool-call delta reconstruction stay inside the `agent` layer, before tool execution.
-
----
-
-## Requirements
-
-- [Rust](https://rustup.rs/) (Edition 2021+)
-
----
-
-## Installation
+## Quick Start
 
 ```bash
 git clone https://github.com/ming2k/neenee.git
 cd neenee
-cargo run
-cargo build --release  # binary at ./target/release/neenee
+cargo run --release
 ```
 
----
+On first launch, press `Ctrl+M` to pick a provider and enter your API key. Then just start typing.
 
-## Getting Started
+## Key Bindings
 
-```bash
-cargo run
-cargo run -- resume
-cargo run -- resume <id>
-```
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Tab` | Switch between Build and Plan mode |
+| `Ctrl+M` | Open provider picker |
+| `Ctrl+T` | Expand / collapse tool details |
+| `Ctrl+B` | Toggle between input and conversation stream |
+| `Ctrl+C` | Copy → interrupt → close modal → clear → quit |
+| `Ctrl+V` | Paste from clipboard |
 
----
-
-## Commands
-
-### Harness Commands
+## Useful Commands
 
 | Command | Description |
 |---------|-------------|
-| `/mode build` | Switch to Build mode. |
-| `/mcp` | Inspect MCP connection state. |
-| `/permissions` | View or manage tool permissions. |
-| `/permissions clear` | Revoke all cached permission rules. |
-| `/session status` | Show current session status. |
-| `/resume` | Resume the most recent cached conversation. |
-| `/session fork` | Fork the current session. |
-| `/session list` | List all available sessions. |
-| `/session open <short-id>` | Open a specific session. |
-| `/compact` | Manually compact older turns to save context. |
-| `/export` | Export the current conversation to the clipboard as Markdown for handoff to another agent. |
-| `/goal <description>` | Create and start a new goal. |
-| `/goal done` | Mark the current goal as completed. |
-| `/loop 8` | Start an autonomous loop with up to 8 turns. |
-| `/loop resume` | Resume the last autonomous loop. |
-| `/loop status` | Show current loop status. |
-| `/loop stop` | Stop the running autonomous loop. |
+| `/goal <objective>` | Set a goal for the agent to pursue |
+| `/loop` | Start autonomous work on the active goal |
+| `/compact` | Compact context to free up space |
+| `/session list` | Browse and resume past sessions |
+| `/export` | Export conversation as Markdown |
+| `/mcp` | Inspect MCP server connections |
 
-### TUI Controls
+## Architecture
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+B` | Switch from input (Compose) to conversation stream (Browse). Press any key (typically `p`) to return. |
-| `Ctrl+T` | Expand / collapse tool arguments and output. |
-| `Ctrl+M` | Open the provider picker. |
-| `Ctrl+C` | Context-aware: copy selection → interrupt response → close modal → clear input → exit (double press). |
-| `/exit` or `q` (empty prompt) | Quit the program. |
-
-### Key Behaviors
-
-- **Goal Checklist** — Structured progress is shown as `done/total`. An autonomous loop cannot accept its completion marker while checklist work remains.
-- **Tool Rounds** — Every normal turn uses the full tool-capable ReAct path; the harness stops a turn after **32 tool rounds** or **3 identical consecutive tool calls**.
-- **Retries** — Transient provider rate limits, overloads, timeouts, and connection failures use cancellable bounded retries with visible countdown. Retries are disabled as soon as a tool call occurs to prevent side-effect replay.
-- **Permissions** — Write-capable tools pause for a blocking decision: **Allow once**, **Always allow**, or **Reject**. Run `/permissions clear` to revoke cached rules.
-
----
-
-## Configuration
-
-### API Keys
-
-Open the provider picker with `/provider` or `Ctrl+M`. Presets include:
-
-| Preset | Notes |
-|--------|-------|
-| **Kimi K2.7 Code** | Moonshot AI's strongest coding model via the Kimi Code membership platform (`api.kimi.com/coding`). 256K context. |
-| **OpenAI** | Standard OpenAI-compatible endpoint. |
-| **Gemini 2.5 Flash** | Google's Gemini 2.5 Flash model. |
-| **DeepSeek V4 Flash** | DeepSeek V4 Flash via the official `deepseek-v4-flash` model. |
-| **DeepSeek V4 Pro** | DeepSeek V4 Pro via the official `deepseek-v4-pro` model. |
-| **ZAI Code** | Zhipu AI GLM-5.2 via the Z.AI coding-plan platform. 1M context. |
-
-Each preset shows whether a usable key is configured:
-- `✓ ready` — key present
-- `✗ no key` — key missing
-
-Values are saved to `~/.config/neenee/config.toml`. Environment variables take precedence:
-
-| Variable | Description |
-|----------|-------------|
-| `MOONSHOT_API_KEY` | API key for Kimi K2.7 Code. |
-| `GEMINI_API_KEY` / `GEMINI_MODEL` | API key / model override for Gemini (default `gemini-2.5-flash`). |
-| `DEEPSEEK_API_KEY` | Shared API key for DeepSeek V4 Flash and Pro. |
-| `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` | Model override for DeepSeek V4 Flash / Pro. |
-| `ZAI_API_KEY` / `ZAI_MODEL` | API key / model override for ZAI Code (default `glm-5.2`). |
-
-### MCP Servers
-
-Local stdio MCP servers are discovered from `~/.config/neenee/config.toml`:
-
-```toml
-[mcp.filesystem]
-command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
-enabled = true
-read_only = false
-```
-
-- On startup, their tools are registered as `mcp__<server>__<tool>`.
-- A failed MCP server is isolated and does not prevent neenee from starting.
-- MCP servers default to **write-capable**; they are blocked in **Plan mode** unless explicitly configured with `read_only = true`.
-
-### Sessions
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/neenee/session.json` | Current conversation and loop checkpoint (atomic writes). |
-| `~/.config/neenee/sessions/` | Cached historical sessions. |
-
-- **Fresh session** — Starting neenee without arguments creates a new empty session while keeping the last selected provider and model.
-- **Resume** — `/resume` restores the most recent conversation; `/resume <short-id>` targets a specific one; `/session list` shows all available.
-- **Compaction** — Context pressure is relieved in layers: old tool results are pruned (between tool rounds and before turns), and when size still exceeds the configured character budget older complete turns are replaced by an anchored LLM-generated summary (with a deterministic excerpt fallback). Full history remains archived in `session.json`. `/compact` triggers a summary manually.
-- **Context Overflow** — Retried once only before any tool activity has occurred.
-
----
-
-## Customizing
-
-### LLM Providers
-
-Edit `crates/neenee-providers/src/lib.rs` to add new LLM backends (e.g., Anthropic, Ollama). See [How to add a provider](docs/how-to/add-a-provider.md).
-
-### Tools
-
-Add new tools in `crates/neenee-tools/src/lib.rs` by implementing the `Tool` trait. See [How to add a tool](docs/how-to/add-a-tool.md).
-
-### Skills
-
-Skills are domain-specific instruction files that neenee can load on demand or automatically when mentioned.
-
-#### Layout
-
-Place skills in directories named `SKILL.md`:
+Six-crate workspace with strict layering:
 
 ```
-.neenee/skills/<name>/SKILL.md
-~/.neenee/skills/<name>/SKILL.md
+neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  neenee-cli
 ```
 
-Skill files use YAML frontmatter followed by Markdown content:
-
-```markdown
----
-name: rust-expert
-description: "Use when writing or debugging Rust code"
-short-description: "Rust help"
-version: "1.0.0"
-tags: [rust, cargo]
-policy:
-  allow_implicit_invocation: true
-dependencies:
-  tools:
-    - type: mcp
-      value: rust-analyzer
----
-
-# Rust Expert
-
-... guidelines, examples, checklists ...
-```
-
-#### Discovery sources (highest priority wins)
-
-1. Project repo: `.neenee/skills/**/SKILL.md`, `.agents/skills/**/SKILL.md`, `.claude/skills/**/SKILL.md`, `.kimi-code/skills/**/SKILL.md`
-2. User global: `~/.neenee/skills/**/SKILL.md`, `~/.agents/skills/**/SKILL.md`, `~/.claude/skills/**/SKILL.md`, `~/.kimi-code/skills/**/SKILL.md`
-3. Extra local paths configured in `config.toml`
-4. Remote skill repositories configured in `config.toml`
-
-#### Configuration
-
-Add a `[skills]` table to `~/.config/neenee/config.toml`:
-
-```toml
-[skills]
-paths = ["~/.my-skills"]
-urls = ["https://example.com/skills"]
-disabled = ["old-skill"]
-bundled = true
-```
-
-Remote repositories must expose an `index.json`:
-
-```json
-{
-  "skills": [
-    { "name": "my-skill", "files": ["SKILL.md", "reference.md"] }
-  ]
-}
-```
-
-Remote files are cached under `~/.cache/neenee/skills/`.
-
-#### Using skills
-
-- `use_skill` tool — load a skill by name.
-- `list_skills` tool — list all available skills.
-- `reload_skills` tool — rescan local directories and refetch remote repos.
-- Slash commands: `/skills list`, `/skills reload`, `/skill <name>`.
-
-Skills with `policy.allow_implicit_invocation: true` are automatically injected into the context when you mention them by name, e.g. `rust-expert: review this` or `@rust-expert`.
-
-### Custom Commands
-
-Add reusable slash commands to `.neenee/commands/*.md` or `~/.neenee/commands/*.md`. Project commands override user commands with the same name and appear in slash autocomplete.
-
-**Syntax example:**
-
-```markdown
----
-description: Review the current changes
----
-Review $ARGUMENTS against $1 and report correctness risks first.
-```
-
-- `$ARGUMENTS` — expands to the raw argument string.
-- `$1` … `$9` — expand to parsed positional arguments.
-
-Commands run through the normal permissions, cancellation, retry, and durable session harness. Shell interpolation in command markdown is intentionally **not** executed outside the tool pipeline.
-
----
-
-## Contributing
-
-Contributions are welcome! Please feel free to open an issue or submit a pull request.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
-5. Open a Pull Request
-
----
+See [docs/](docs/) for detailed architecture, guides, and reference.
 
 ## License
 
-This project is dual-licensed under either:
+[MIT](LICENSE)
 
-- [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
+---
 
-at your option.
+---
 
+<a name="中文"></a>
+
+# neenee（中文）
+
+一个基于 Rust 的 AI 编码助手，提供语义化终端界面、工具调用、按需技能和有界自治目标。
+
+## 特性
+
+- **语义化终端界面** — 基于 Ratatui，支持实时状态、可展开的工具步骤、结构化 diff 展示。
+- **工具调用** — 完整的 ReAct 循环，支持原生与文本回退两种工具调用协议；内置 bash、文件读写、grep、glob、网页搜索及 MCP 服务器。
+- **自治目标** — 用 `/goal` 设定目标，`/loop` 启动循环，代理会带着检查清单迭代工作直到完成。
+- **计划模式** — 只读分析和规划，不改动代码。
+- **持久会话** — 原子写入、上下文压缩、会话恢复与分叉。
+- **技能系统** — 按需加载领域知识，或在被提及时自动注入。
+
+## 快速开始
+
+```bash
+git clone https://github.com/ming2k/neenee.git
+cd neenee
+cargo run --release
+```
+
+首次启动后按 `Ctrl+M` 选择模型供应商并填入 API Key，然后直接开始对话。
+
+## 快捷键
+
+| 按键 | 功能 |
+|------|------|
+| `Enter` | 发送消息 |
+| `Tab` | 切换 Build / Plan 模式 |
+| `Ctrl+M` | 打开模型选择器 |
+| `Ctrl+T` | 展开 / 折叠工具详情 |
+| `Ctrl+B` | 在输入框和对话流之间切换 |
+| `Ctrl+C` | 复制 → 中断 → 关闭弹窗 → 清空 → 退出 |
+| `Ctrl+V` | 粘贴剪贴板内容 |
+
+## 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `/goal <目标>` | 设定代理要完成的目标 |
+| `/loop` | 对当前目标启动自治循环 |
+| `/compact` | 压缩上下文以释放空间 |
+| `/session list` | 浏览和恢复历史会话 |
+| `/export` | 将对话导出为 Markdown |
+| `/mcp` | 查看 MCP 服务器连接状态 |
+
+## 架构
+
+六个 crate 组成的严格分层工作区：
+
+```
+neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  neenee-cli
+```
+
+详细架构、指南和参考文档见 [docs/](docs/)。
+
+## 许可证
+
+[MIT](LICENSE)
