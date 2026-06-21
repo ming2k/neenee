@@ -394,7 +394,10 @@ mod tests {
         std::env::remove_var("MOONSHOT_MODEL");
         let config = bare_config();
         let entries = build_catalog(&config);
-        let entry = entries.iter().find(|e| e.id == "kimi-code").expect("kimi-code entry");
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "kimi-code")
+            .expect("kimi-code entry");
         let channel = entry.default_channel().expect("default channel");
         // The Kimi Code platform pins the model id to kimi-for-coding.
         assert_eq!(
@@ -420,7 +423,10 @@ mod tests {
         let mut config = bare_config();
         config.gemini_model = Some("gemini-2.0-flash".to_string());
         let entries = build_catalog(&config);
-        let entry = entries.iter().find(|e| e.id == "gemini").expect("gemini entry");
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "gemini")
+            .expect("gemini entry");
         assert_eq!(entry.default_channel().unwrap().model, "gemini-2.0-flash");
     }
 
@@ -457,7 +463,10 @@ mod tests {
     #[test]
     fn keyless_providers_report_ready_without_keys() {
         let entries = build_catalog(&bare_config());
-        let llama = entries.iter().find(|e| e.id == "llama").expect("llama entry");
+        let llama = entries
+            .iter()
+            .find(|e| e.id == "llama")
+            .expect("llama entry");
         let mock = entries.iter().find(|e| e.id == "mock").expect("mock entry");
         assert!(llama.key_ready(), "llama must be keyless-ready");
         assert!(mock.key_ready(), "mock must be keyless-ready");
@@ -468,7 +477,10 @@ mod tests {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("OPENAI_API_KEY");
         let entries = build_catalog(&bare_config());
-        let openai = entries.iter().find(|e| e.id == "openai").expect("openai entry");
+        let openai = entries
+            .iter()
+            .find(|e| e.id == "openai")
+            .expect("openai entry");
         assert!(
             !openai.key_ready(),
             "openai without a key must not be ready"
@@ -506,7 +518,10 @@ mod tests {
     #[test]
     fn user_model_overrides_builtin_by_id() {
         let entries = build_catalog(&gemini_two_channel_config());
-        let gemini = entries.iter().find(|e| e.id == "gemini").expect("overridden gemini entry");
+        let gemini = entries
+            .iter()
+            .find(|e| e.id == "gemini")
+            .expect("overridden gemini entry");
         // The user-supplied name wins over the built-in "Gemini 2.5 Flash".
         assert_eq!(gemini.name, "Gemini (custom)");
         assert!(!gemini.builtin, "an override is user-owned, not read-only");
@@ -548,7 +563,10 @@ mod tests {
             ..Default::default()
         }];
         let entries = build_catalog(&config);
-        let relay = entries.iter().find(|e| e.id == "my-relay").expect("appended user model");
+        let relay = entries
+            .iter()
+            .find(|e| e.id == "my-relay")
+            .expect("appended user model");
         assert_eq!(relay.name, "My Relay");
         assert_eq!(relay.default_channel().unwrap().model, "my-model");
     }

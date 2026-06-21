@@ -58,7 +58,10 @@ pub(super) fn apply_clipboard_paste(app: &mut App, read: ClipboardRead) {
     match read {
         ClipboardRead::Image { data, mime } => {
             let encoded = clipboard::base64_image(&data);
-            app.pending_images.push(ImagePart { mime, data: encoded });
+            app.pending_images.push(ImagePart {
+                mime,
+                data: encoded,
+            });
             let n = app.pending_images.len();
             app.copy_toast_message = format!(
                 "{n} image{} attached — enter to send",

@@ -189,7 +189,10 @@ mod spec_tests {
         );
 
         let provider = spec.build("test-key".to_string(), None, None);
-        assert_eq!(provider.base_url, "https://api.kimi.com/coding/v1/chat/completions");
+        assert_eq!(
+            provider.base_url,
+            "https://api.kimi.com/coding/v1/chat/completions"
+        );
         assert_eq!(provider.model, "kimi-for-coding");
         // The Kimi Code platform requires a recognized coding-agent UA.
         assert_eq!(provider.user_agent, "opencode/0.1.0");

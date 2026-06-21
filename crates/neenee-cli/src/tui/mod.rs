@@ -34,10 +34,7 @@ use neenee_core::{
     ModelPickerSnapshot, PermissionRequest, PlanProgress, Role, SessionContextSnapshot,
     SessionOverview, UserQuestionRequest,
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -267,7 +264,8 @@ pub async fn run_tui(
                     name,
                     arguments,
                 } => {
-                    *activity_clone.lock().await = event_loop::tool_activity_status(&name).to_string();
+                    *activity_clone.lock().await =
+                        event_loop::tool_activity_status(&name).to_string();
                     let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     // A tool step starts collapsed: there's no result to show
@@ -551,6 +549,7 @@ pub async fn run_tui(
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         auto_approve: false,
+        plan_progress: None,
         pending_permission: None,
         pending_question: None,
         question_selected: Vec::new(),
@@ -611,6 +610,7 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
+            plan_progress,
         },
     )
     .await;
@@ -631,8 +631,6 @@ pub async fn run_tui(
 
     Ok(app.input_history)
 }
-
-
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_tui(

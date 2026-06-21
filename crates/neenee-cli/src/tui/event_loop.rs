@@ -13,15 +13,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossterm::event;
-use ratatui::{
-    backend::Backend,
-    Terminal,
-};
+use ratatui::{backend::Backend, Terminal};
 use tokio::sync::mpsc;
 
 use neenee_core::{
     AgentRequest, HarnessSnapshot, ModelPickerSnapshot, PermissionDecision, PermissionRequest,
-    Role, SessionOverview, UserQuestionRequest,
+    PlanProgress, Role, SessionOverview, UserQuestionRequest,
 };
 
 use crate::tui::clipboard;
@@ -62,6 +59,11 @@ pub(super) struct UiRuntime {
     /// the first `QuerySessionContext` round-trip completes. The modal renders
     /// a lightweight placeholder while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
+    /// Live plan progress snapshot, mirrored from
+    /// `AgentResponse::PlanProgressUpdated`. The render loop copies it into
+    /// `App::plan_progress` each frame so the sticky panel above the input
+    /// box stays in sync with the agent's state.
+    pub plan_progress: Arc<Mutex<Option<PlanProgress>>>,
 }
 
 pub(super) async fn run_app_loop<B: Backend>(
@@ -110,6 +112,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.auto_approve = harness.auto_approve;
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
+            app.plan_progress = runtime.plan_progress.lock().await.clone();
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
@@ -217,8 +220,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                 .iter_mut()
                 .find(|m| {
                     m.role == Role::User
-                        && m.delivery
-                            == crate::tui::document::DeliveryStatus::Queued
+                        && m.delivery == crate::tui::document::DeliveryStatus::Queued
                 })
                 .map(|m| {
                     m.delivery = crate::tui::document::DeliveryStatus::Delivered;
@@ -313,6 +315,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
+                    plan_progress: app.plan_progress.as_ref(),
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     theme: &app.theme,
@@ -339,18 +342,18 @@ pub(super) async fn run_app_loop<B: Backend>(
                 render::draw_hint_bar(
                     f,
                     hint_rect,
-                render::HintBarView {
-                    current_provider: &app.current_provider,
-                    current_model: &app.current_model,
-                    current_goal: app.current_goal.as_ref(),
-                    messages: view_messages,
-                    mcp_statuses: &app.mcp_statuses,
-                    focus_zone: app.focus_zone,
-                    shell_active: app.focus_zone.is_compose()
-                        && app.active_modal == Modal::None
-                        && app.input.starts_with('!'),
-                    auto_approve: app.auto_approve,
-                },
+                    render::HintBarView {
+                        current_provider: &app.current_provider,
+                        current_model: &app.current_model,
+                        current_goal: app.current_goal.as_ref(),
+                        messages: view_messages,
+                        mcp_statuses: &app.mcp_statuses,
+                        focus_zone: app.focus_zone,
+                        shell_active: app.focus_zone.is_compose()
+                            && app.active_modal == Modal::None
+                            && app.input.starts_with('!'),
+                        auto_approve: app.auto_approve,
+                    },
                     &app.theme,
                 )
                 .goal_rect
@@ -630,8 +633,8 @@ pub(super) async fn run_app_loop<B: Backend>(
             // entirely while that modal is open. The same suppression applies
             // right after an Enter-driven commit: the user just finished a
             // completion, so the popup should stay hidden until the next edit.
-            let suppress_completions = app.active_modal == Modal::HistorySearch
-                || app.completion_dismissed;
+            let suppress_completions =
+                app.active_modal == Modal::HistorySearch || app.completion_dismissed;
             // Pre-compute completion data to avoid borrow conflicts with process_event.
             let completions = if suppress_completions {
                 Vec::new()
@@ -708,13 +711,16 @@ pub(super) async fn run_app_loop<B: Backend>(
                             // to idle. Esc remains the explicit interrupt
                             // path; /slash and !shell commands still dispatch
                             // immediately (per the queue-scope decision).
-                            app.pending_dispatch.push_back(crate::tui::app::QueuedDispatch {
-                                text: text.clone(),
-                                images,
-                            });
-                            runtime.messages.lock().await.push(
-                                TranscriptMessage::new(Role::User, text.clone()).queued(),
-                            );
+                            app.pending_dispatch
+                                .push_back(crate::tui::app::QueuedDispatch {
+                                    text: text.clone(),
+                                    images,
+                                });
+                            runtime
+                                .messages
+                                .lock()
+                                .await
+                                .push(TranscriptMessage::new(Role::User, text.clone()).queued());
                             if !text.is_empty() && app.input_history.last() != Some(&text) {
                                 app.input_history.push(text.clone());
                             }
@@ -724,10 +730,11 @@ pub(super) async fn run_app_loop<B: Backend>(
                         } else {
                             runtime.is_responding.store(true, Ordering::SeqCst);
                             *runtime.activity_status.lock().await = "queued".to_string();
-                            runtime.messages.lock().await.push(TranscriptMessage::new(
-                                Role::User,
-                                text.clone(),
-                            ));
+                            runtime
+                                .messages
+                                .lock()
+                                .await
+                                .push(TranscriptMessage::new(Role::User, text.clone()));
                             if !text.is_empty() && app.input_history.last() != Some(&text) {
                                 app.input_history.push(text.clone());
                             }
@@ -1907,13 +1914,9 @@ pub(super) async fn run_app_loop<B: Backend>(
                         // without starting a text selection (there is no
                         // cursor to anchor one). Clicks in the outer gutters
                         // or below all content stay inert.
-                        if app
-                            .layout_map
-                            .transcript_content_rect()
-                            .is_some_and(|r| {
-                                r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-                            })
-                        {
+                        if app.layout_map.transcript_content_rect().is_some_and(|r| {
+                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                        }) {
                             app.focus_zone = input::FocusZone::Browse;
                         }
                         app.selection = SelectionState::None;
@@ -2130,7 +2133,11 @@ fn initial_editor_model(
     solution.model.to_string()
 }
 
-pub(super) fn display_status(loop_status: &str, activity: &str, awaiting_permission: bool) -> String {
+pub(super) fn display_status(
+    loop_status: &str,
+    activity: &str,
+    awaiting_permission: bool,
+) -> String {
     let activity = if awaiting_permission {
         "awaiting permission"
     } else {

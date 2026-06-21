@@ -55,8 +55,7 @@ pub(super) fn draw_message_body(
         match block {
             Block::Text { content } => {
                 let is_user = msg.role == neenee_core::Role::User;
-                let is_queued =
-                    is_user && msg.delivery == DeliveryStatus::Queued;
+                let is_queued = is_user && msg.delivery == DeliveryStatus::Queued;
                 let base = match msg.role {
                     neenee_core::Role::User => Style::default().fg(theme.user_text()),
                     neenee_core::Role::System => Style::default().fg(theme.system_text()),
@@ -785,11 +784,8 @@ pub(super) fn draw_message_body(
 
                 let header_label = "Proposed plan";
                 let header_pad = body_wrap_width.saturating_sub(header_label.len() + 4);
-                let header_text = format!(
-                    "   ╭── {} {}",
-                    header_label,
-                    "─".repeat(header_pad.max(1))
-                );
+                let header_text =
+                    format!("   ╭── {} {}", header_label, "─".repeat(header_pad.max(1)));
                 let total_lines = 1 + wrapped.len() + 1;
                 *content_lines += total_lines;
 
@@ -837,10 +833,8 @@ pub(super) fn draw_message_body(
                 if *skip_rows > 0 {
                     *skip_rows = skip_rows.saturating_sub(1);
                 } else if *current_y < area.y + area.height {
-                    let bottom = format!(
-                        "   ╰{}",
-                        "─".repeat(area.width.saturating_sub(4) as usize)
-                    );
+                    let bottom =
+                        format!("   ╰{}", "─".repeat(area.width.saturating_sub(4) as usize));
                     let line = Line::from(vec![Span::styled(
                         bottom,
                         Style::default().fg(card_fg).bg(card_bg),
@@ -852,4 +846,129 @@ pub(super) fn draw_message_body(
             }
         }
     }
+}
+
+/// Draw the sticky plan-progress panel pinned above the input box.
+///
+/// Layout (3 rows):
+/// ```text
+/// ╭── Plan: rewrite-auth.md · 1/4 done ────────────╮
+/// │ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Asm  │
+/// ╰────────────────────────────────────────────────╯
+/// ```
+///
+/// Sections that do not fit on the single content row are elided with `…`
+/// so the panel's overall height stays fixed and the input box does not
+/// jump when the section list changes.
+pub(super) fn draw_plan_panel(
+    frame: &mut Frame,
+    rect: Rect,
+    progress: &neenee_core::PlanProgress,
+    theme: &Theme,
+) {
+    use ratatui::widgets::Block as RtBlock;
+
+    if rect.height < 3 {
+        return;
+    }
+
+    let card_bg = theme.raised();
+    let card_fg = theme.brand();
+    let body_fg = theme.fg();
+    let dim_fg = theme.muted();
+
+    // Solid bg first so the whole card reads as one surface.
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(card_bg).fg(body_fg)),
+        rect,
+    );
+
+    let inner_w = rect.width as usize;
+    let path_str = progress.path.display().to_string();
+    let done = progress.done_count();
+    let total = progress.sections.len();
+    let header_label = format!("Plan: {} · {}/{} done", path_str, done, total);
+
+    // Row 1: top border + header label.
+    let header_text = format!("╭── {} ", header_label);
+    let header_used = header_text.chars().count();
+    let header_pad = inner_w.saturating_sub(header_used + 1);
+    let top_line = Line::from(vec![
+        Span::styled(header_text, Style::default().fg(card_fg).bg(card_bg)),
+        Span::styled(
+            "─".repeat(header_pad),
+            Style::default().fg(card_fg).bg(card_bg),
+        ),
+        Span::styled("╮", Style::default().fg(card_fg).bg(card_bg)),
+    ]);
+    let top_rect = Rect::new(rect.x, rect.y, rect.width, 1);
+    frame.render_widget(Paragraph::new(top_line), top_rect);
+
+    // Row 2: section list. Each entry is `<glyph> <name>` joined by `  `;
+    // glyphs are colored by status so done/in-progress pop. Elide with `…`
+    // when the next entry does not fit.
+    let mut spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(card_fg).bg(card_bg))];
+    let mut used = 2usize;
+    let separator = "  ";
+    let mut rendered_any = false;
+    let mut elided = false;
+    for section in &progress.sections {
+        let entry_chars = section.status.glyph().chars().count() + 1 + section.name.chars().count();
+        let extra = if rendered_any {
+            separator.chars().count() + entry_chars
+        } else {
+            entry_chars
+        };
+        // Reserve room for the closing `│` (and a possible `…`).
+        if used + extra + 2 > inner_w {
+            elided = true;
+            break;
+        }
+        if rendered_any {
+            spans.push(Span::styled(
+                separator,
+                Style::default().fg(body_fg).bg(card_bg),
+            ));
+            used += separator.chars().count();
+        }
+        let glyph_color = match section.status {
+            neenee_core::PlanSectionStatus::Done => theme.ok(),
+            neenee_core::PlanSectionStatus::InProgress => theme.warn(),
+            neenee_core::PlanSectionStatus::Pending => dim_fg,
+            neenee_core::PlanSectionStatus::Skipped => dim_fg,
+        };
+        spans.push(Span::styled(
+            section.status.glyph(),
+            Style::default().fg(glyph_color).bg(card_bg),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", section.name),
+            Style::default().fg(body_fg).bg(card_bg),
+        ));
+        used += entry_chars;
+        rendered_any = true;
+    }
+    let trailing_reserved = 1 + if elided { 1 } else { 0 };
+    let pad = inner_w.saturating_sub(used + trailing_reserved);
+    spans.push(Span::styled(" ".repeat(pad), Style::default().bg(card_bg)));
+    if elided {
+        spans.push(Span::styled("…", Style::default().fg(dim_fg).bg(card_bg)));
+    }
+    spans.push(Span::styled("│", Style::default().fg(card_fg).bg(card_bg)));
+    let body_line = Line::from(spans);
+    let body_rect = Rect::new(rect.x, rect.y + 1, rect.width, 1);
+    frame.render_widget(Paragraph::new(body_line), body_rect);
+
+    // Row 3: bottom border.
+    let bottom_fill = inner_w.saturating_sub(2);
+    let bottom_line = Line::from(vec![
+        Span::styled("╰", Style::default().fg(card_fg).bg(card_bg)),
+        Span::styled(
+            "─".repeat(bottom_fill),
+            Style::default().fg(card_fg).bg(card_bg),
+        ),
+        Span::styled("╯", Style::default().fg(card_fg).bg(card_bg)),
+    ]);
+    let bottom_rect = Rect::new(rect.x, rect.y + 2, rect.width, 1);
+    frame.render_widget(Paragraph::new(bottom_line), bottom_rect);
 }

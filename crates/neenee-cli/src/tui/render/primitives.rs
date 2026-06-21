@@ -85,10 +85,7 @@ pub(super) fn modal_frame(
     footer: bool,
 ) -> ModalFrame {
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        RtBlock::default().style(Style::default().bg(bg)),
-        area,
-    );
+    frame.render_widget(RtBlock::default().style(Style::default().bg(bg)), area);
     let inner = area.inner(&Margin {
         horizontal: 2,
         vertical: 1,

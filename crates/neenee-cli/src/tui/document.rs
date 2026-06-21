@@ -736,7 +736,13 @@ impl TranscriptMessage {
     /// should keep breathing" state, and `finalize_streaming_reasoning` uses
     /// it to find orphaned traces to freeze after an interrupt.
     pub fn is_thinking_streaming(&self) -> bool {
-        matches!(self.kind, MessageKind::Thinking { duration_ms: None, .. })
+        matches!(
+            self.kind,
+            MessageKind::Thinking {
+                duration_ms: None,
+                ..
+            }
+        )
     }
 
     pub fn thinking_expanded(&self) -> Option<bool> {
@@ -1554,7 +1560,8 @@ mod tests {
 
     #[test]
     fn proposed_plan_block_is_extracted_with_surrounding_markdown() {
-        let text = "before\n\n<proposed_plan>\n# Plan\n- step A\n- step B\n</proposed_plan>\n\nafter";
+        let text =
+            "before\n\n<proposed_plan>\n# Plan\n- step A\n- step B\n</proposed_plan>\n\nafter";
         let blocks = parse_blocks(text);
         let plan = blocks
             .iter()

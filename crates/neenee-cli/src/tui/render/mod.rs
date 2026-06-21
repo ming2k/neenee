@@ -26,14 +26,14 @@ pub use composer::{draw_composer, INPUT_MSG_IDX};
 use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
-    MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_BOTTOM_GAP_ROWS,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
-    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
+    MESSAGE_GAP_ROWS, PLAN_PANEL_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS,
+    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
+    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
-use message_body::draw_message_body;
+use message_body::{draw_message_body, draw_plan_panel};
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal, draw_model_editor,
@@ -105,6 +105,10 @@ pub struct TranscriptView<'a> {
     /// When set, the view is zoomed into a sub-agent task: a navigation bar is
     /// rendered and `messages` is the focused task's child stream.
     pub subagent_bar: Option<SubagentBarInfo>,
+    /// Live plan progress snapshot. When `Some`, a sticky panel is rendered
+    /// above the input box (below the status bar) showing the plan path, the
+    /// section completion ratio, and per-section status glyphs.
+    pub plan_progress: Option<&'a neenee_core::PlanProgress>,
     /// Message index of the step (tool step or reasoning trace) whose header
     /// currently rests under the mouse pointer (inline or sticky pinned), so
     /// the next draw lights it up to the intermediate hover tone as a click
@@ -173,6 +177,7 @@ pub fn draw_transcript(
         byte_cursor,
         chrome_hidden,
         subagent_bar,
+        plan_progress,
         hovered_step,
         theme,
         ..
@@ -198,6 +203,15 @@ pub fn draw_transcript(
         !chrome_hidden && !activity.is_empty() && activity != "idle" && activity != "responding";
     let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
+    // Sticky plan panel: 3-row card above the input box, shown only when an
+    // active plan exists and chrome is visible.
+    let plan_panel_active = plan_progress.is_some() && !chrome_hidden;
+    let plan_panel_height: u16 = if plan_panel_active {
+        PLAN_PANEL_ROWS
+    } else {
+        0
+    };
+
     // The input box grows with its content: the typed text wraps onto new
     // lines and the box expands to fit, up to roughly half the terminal so the
     // transcript history always stays visible. The inner text width reserves the
@@ -220,7 +234,7 @@ pub fn draw_transcript(
     let footer_height: u16 = if chrome_hidden {
         0
     } else {
-        status_height + input_box_height + hint_height
+        status_height + plan_panel_height + input_box_height + hint_height
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -410,11 +424,29 @@ pub fn draw_transcript(
         );
     }
 
-    // The input box sits directly below the status bar (when active), or at
-    // the top of the footer otherwise.
+    // Sticky plan panel sits directly below the status bar (when active)
+    // and directly above the input box.
+    if plan_panel_active {
+        if let Some(progress) = plan_progress {
+            draw_plan_panel(
+                frame,
+                Rect::new(
+                    footer_x,
+                    status_y + status_height,
+                    footer_w,
+                    PLAN_PANEL_ROWS,
+                ),
+                progress,
+                theme,
+            );
+        }
+    }
+
+    // The input box sits directly below the status bar + plan panel (when
+    // active), or at the top of the footer otherwise.
     let input_rect = Rect::new(
         footer_x,
-        status_y + status_height,
+        status_y + status_height + plan_panel_height,
         footer_w,
         input_box_height,
     );
@@ -426,7 +458,7 @@ pub fn draw_transcript(
     let hint_rect = if hint_height > 0 {
         Rect::new(
             footer_x,
-            status_y + status_height + input_box_height,
+            status_y + status_height + plan_panel_height + input_box_height,
             footer_w,
             hint_height,
         )
@@ -550,6 +582,7 @@ mod tests {
                         byte_cursor: 5,
                         chrome_hidden: false,
                         subagent_bar: None,
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -815,6 +848,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -846,6 +880,7 @@ mod tests {
                             index: 1,
                             total: 1,
                         }),
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -966,6 +1001,7 @@ mod tests {
                             byte_cursor: input.len(),
                             chrome_hidden: false,
                             subagent_bar: None,
+                            plan_progress: None,
                             hovered_step: None,
                             focused_target: None,
                             theme,
@@ -1110,6 +1146,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1249,6 +1286,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1278,10 +1316,7 @@ mod tests {
         // rows whose inner-padding cells carry the queued bg AND whose
         // first-content cell starts with the pause glyph.
         let badge_count = (0..buffer.area.height)
-            .filter(|&y| {
-                buffer.get(2, y).bg == queued_bg
-                    && buffer.get(4, y).symbol() == "⏸"
-            })
+            .filter(|&y| buffer.get(2, y).bg == queued_bg && buffer.get(4, y).symbol() == "⏸")
             .count();
         assert_eq!(
             badge_count, 2,
@@ -1326,6 +1361,7 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
+                        plan_progress: None,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1355,7 +1391,8 @@ mod tests {
     /// overflow the viewport: columns shrink to fit, cell text wraps, and
     /// every rendered line stays within the available width.
     #[test]
-    fn wide_table_shrinks_columns_and_keeps_borders_intact() {        use crate::tui::document::TableAlignment;
+    fn wide_table_shrinks_columns_and_keeps_borders_intact() {
+        use crate::tui::document::TableAlignment;
 
         let headers = vec![
             "工具".to_string(),

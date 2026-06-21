@@ -17,9 +17,9 @@ use neenee_agent::TaskTool;
 #[cfg(test)]
 use neenee_core::{async_trait, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore, Message,
-    McpConnectionStatus, McpServerInfo, ModelInfo, Provider, SessionContextSnapshot, SessionOverview,
-    Tool,
+    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore,
+    McpConnectionStatus, McpServerInfo, Message, ModelInfo, Provider, SessionContextSnapshot,
+    SessionOverview, Tool,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
@@ -153,7 +153,10 @@ fn build_session_context(
         .as_ref()
         .map(|e| e.name.clone())
         .unwrap_or_else(|| model.clone());
-    let description = entry.as_ref().map(|e| e.description.clone()).unwrap_or_default();
+    let description = entry
+        .as_ref()
+        .map(|e| e.description.clone())
+        .unwrap_or_default();
     let context_window = entry.as_ref().map(|e| e.context_window).unwrap_or(0);
     let api_key_ready = entry.as_ref().map(|e| e.key_ready()).unwrap_or(false);
 
@@ -459,8 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if auto_approve_at_start {
         agent.set_auto_approve(true);
         let _ = resp_tx.send(AgentResponse::Text(
-            "Auto-approve ON: write tools will execute without permission prompts."
-                .to_string(),
+            "Auto-approve ON: write tools will execute without permission prompts.".to_string(),
         ));
     }
 
@@ -633,12 +635,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "gemini" => config.gemini_model = Some(model.clone()),
                         "kimi-code" => config.moonshot_model = Some(model.clone()),
                         "llama" => config.llama_model = Some(model.clone()),
-                        "deepseek-v4-flash" => {
-                            config.deepseek_flash_model = Some(model.clone())
-                        }
-                        "deepseek-v4-pro" => {
-                            config.deepseek_pro_model = Some(model.clone())
-                        }
+                        "deepseek-v4-flash" => config.deepseek_flash_model = Some(model.clone()),
+                        "deepseek-v4-pro" => config.deepseek_pro_model = Some(model.clone()),
                         "qwen" => config.qwen_model = Some(model.clone()),
                         "glm" => config.glm_model = Some(model.clone()),
                         _ => {}
@@ -739,23 +737,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 AgentRequest::QuerySessionContext => {
-                    let snapshot = build_session_context(
-                        &agent,
-                        &skills_registry,
-                        &mcp_statuses,
-                        &config,
-                    );
+                    let snapshot =
+                        build_session_context(&agent, &skills_registry, &mcp_statuses, &config);
                     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
                 }
                 AgentRequest::RevokePermission { tool, scope } => {
                     let removed = agent.revoke_allowed_tool(&tool, &scope);
                     if removed {
-                        let snapshot = build_session_context(
-                            &agent,
-                            &skills_registry,
-                            &mcp_statuses,
-                            &config,
-                        );
+                        let snapshot =
+                            build_session_context(&agent, &skills_registry, &mcp_statuses, &config);
                         let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
                     } else {
                         let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -766,12 +756,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AgentRequest::ToggleTool { name, enabled } => {
                     let changed = agent.set_tool_enabled(&name, enabled);
-                    let snapshot = build_session_context(
-                        &agent,
-                        &skills_registry,
-                        &mcp_statuses,
-                        &config,
-                    );
+                    let snapshot =
+                        build_session_context(&agent, &skills_registry, &mcp_statuses, &config);
                     if !changed {
                         // Even a no-op (unknown tool, or already in the target
                         // state) refreshes the snapshot so the modal settles
@@ -815,8 +801,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let agent_plan = agent.active_plan_path();
                                 let stored_plan = session.active_plan_path().await;
                                 if agent_plan != stored_plan {
-                                    if let Err(err) =
-                                        session.set_active_plan_path(agent_plan).await
+                                    if let Err(err) = session.set_active_plan_path(agent_plan).await
                                     {
                                         let _ = resp_tx.send(AgentResponse::Error(format!(
                                             "could not persist plan path: {err}"
@@ -897,8 +882,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if enabled { "ON" } else { "OFF" },
                                 if enabled { "will" } else { "won't" },
                             )));
-                            let _ =
-                                resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
+                            let _ = resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
                         "/search" => {

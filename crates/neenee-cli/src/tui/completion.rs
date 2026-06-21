@@ -16,7 +16,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Compact older complete turns now"),
     ("/clear", "Clear the conversation history"),
     ("/permissions", "Show or clear always-allowed tool rules"),
-    ("/auto-approve", "Toggle bypassing write-tool permission prompts (on/off)"),
+    (
+        "/auto-approve",
+        "Toggle bypassing write-tool permission prompts (on/off)",
+    ),
     ("/session", "Manage durable sessions"),
     ("/sessions", "Browse past sessions"),
     ("/resume", "Resume the most recent or selected session"),

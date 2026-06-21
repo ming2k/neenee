@@ -179,10 +179,18 @@ pub fn line_diff(old: &str, new: &str, line_offset: usize) -> Vec<DiffLine> {
                 });
             }
             for &(old_no, old_text) in del.iter().skip(pair) {
-                out.push(DiffLine::plain(DiffOp::Remove, old_text, old_no + 1 + line_offset));
+                out.push(DiffLine::plain(
+                    DiffOp::Remove,
+                    old_text,
+                    old_no + 1 + line_offset,
+                ));
             }
             for &(new_no, new_text) in ins.iter().skip(pair) {
-                out.push(DiffLine::plain(DiffOp::Add, new_text, new_no + 1 + line_offset));
+                out.push(DiffLine::plain(
+                    DiffOp::Add,
+                    new_text,
+                    new_no + 1 + line_offset,
+                ));
             }
             del.clear();
             ins.clear();
@@ -388,7 +396,10 @@ mod tests {
         let collapsed = collapse_context_runs(&diff);
 
         // Should contain exactly one Ellipsis line.
-        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        let ellipsis_count = collapsed
+            .iter()
+            .filter(|l| l.op == DiffOp::Ellipsis)
+            .count();
         assert_eq!(ellipsis_count, 1, "one ellipsis for the gap");
 
         // The change lines survive.
@@ -406,7 +417,10 @@ mod tests {
         let collapsed = collapse_context_runs(&diff);
 
         // No ellipsis needed — the gap fits within COLLAPSE_CONTEXT.
-        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        let ellipsis_count = collapsed
+            .iter()
+            .filter(|l| l.op == DiffOp::Ellipsis)
+            .count();
         assert_eq!(ellipsis_count, 0);
     }
 
@@ -419,7 +433,10 @@ mod tests {
         let collapsed = collapse_context_runs(&diff);
 
         // Two ellipses: one before, one after the change.
-        let ellipsis_count = collapsed.iter().filter(|l| l.op == DiffOp::Ellipsis).count();
+        let ellipsis_count = collapsed
+            .iter()
+            .filter(|l| l.op == DiffOp::Ellipsis)
+            .count();
         assert_eq!(ellipsis_count, 2, "leading + trailing ellipsis");
     }
 }

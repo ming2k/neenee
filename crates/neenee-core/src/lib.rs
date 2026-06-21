@@ -33,10 +33,10 @@ pub mod webconfig;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
 pub use catalog::{Channel, ModelEntry, Transport};
 pub use events::{
-    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo,
-    ModelInfo, ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest,
-    PermissionRuleInfo, SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent,
-    ToolInfo, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
+    ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest, PermissionRuleInfo,
+    SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent, ToolInfo, UserQuestion,
+    UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use pressure::{

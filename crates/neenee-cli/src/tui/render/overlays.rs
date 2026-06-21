@@ -437,10 +437,7 @@ pub fn draw_sessions_modal(
         const COL_GUTTER: usize = 2;
         let badge_w = badge.width();
         let col1_budget = body_width.saturating_sub(meta_w + COL_GUTTER);
-        let overview = truncate_ellipsis(
-            &session.overview,
-            col1_budget.saturating_sub(badge_w),
-        );
+        let overview = truncate_ellipsis(&session.overview, col1_budget.saturating_sub(badge_w));
         let left = format!("{}{}", badge, overview);
         let left_w = left.width();
         let pad = body_width.saturating_sub(left_w + meta_w);
@@ -578,7 +575,9 @@ pub fn draw_session_modal(
                             .get(&provider.to_lowercase())
                             .copied()
                             .unwrap_or(false),
-                        solution.map(|s| s.description.to_string()).unwrap_or_default(),
+                        solution
+                            .map(|s| s.description.to_string())
+                            .unwrap_or_default(),
                         Vec::new(),
                     )
                 }
@@ -598,10 +597,7 @@ pub fn draw_session_modal(
                     m_display,
                     Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("  ({})", m_id),
-                    Style::default().fg(theme.muted()),
-                ),
+                Span::styled(format!("  ({})", m_id), Style::default().fg(theme.muted())),
             ]));
             body.push(Line::from(vec![
                 label("Context"),
@@ -611,9 +607,7 @@ pub fn draw_session_modal(
                 label("API key"),
                 Span::styled(
                     format!("{} ", key_mark),
-                    Style::default()
-                        .fg(key_fg)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(key_fg).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(key_word, Style::default().fg(key_fg)),
             ]));
@@ -678,10 +672,7 @@ pub fn draw_session_modal(
                 for (name, row) in &servers {
                     let (word, color) = row.summary(theme);
                     body.push(Line::from(vec![
-                        Span::styled(
-                            format!("{:<18}", name),
-                            Style::default().fg(theme.fg()),
-                        ),
+                        Span::styled(format!("{:<18}", name), Style::default().fg(theme.fg())),
                         Span::styled(word, Style::default().fg(color)),
                     ]));
                     if let Some(detail) = row.detail() {
@@ -717,7 +708,9 @@ pub fn draw_session_modal(
             }
         }
         crate::tui::SessionTab::Permissions => {
-            let rules = session_context.map(|s| s.permissions.as_slice()).unwrap_or(&[]);
+            let rules = session_context
+                .map(|s| s.permissions.as_slice())
+                .unwrap_or(&[]);
             if rules.is_empty() {
                 body.push(placeholder(
                     "No always-allow rules cached this session.",
@@ -769,7 +762,11 @@ pub fn draw_session_modal(
     // view on list panes; read-only panes scroll independently via `*scroll`.
     let visible = body_rect.height as usize;
     let content_lines = body.len();
-    let follow = if is_list_pane { Some(modal_index) } else { None };
+    let follow = if is_list_pane {
+        Some(modal_index)
+    } else {
+        None
+    };
     render_body(frame, body_rect, body, scroll, follow);
 
     // ── Footer ──

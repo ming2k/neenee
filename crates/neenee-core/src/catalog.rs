@@ -126,11 +126,7 @@ impl ModelEntry {
 /// the migration is intentional and documented.
 pub fn builtin_metadata(id: &str) -> Option<(&'static str, &'static str, usize)> {
     let (name, description, context_window) = match id {
-        "kimi-code" => (
-            "Kimi Code",
-            "Moonshot AI coding model",
-            256_000,
-        ),
+        "kimi-code" => ("Kimi Code", "Moonshot AI coding model", 256_000),
         "openai" => ("OpenAI GPT-4o", "OpenAI API", 128_000),
         "gemini" => ("Gemini 2.5 Flash", "Google Gemini 2.5 Flash", 1_000_000),
         "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash", 1_000_000),
@@ -150,7 +146,7 @@ mod tests {
 
     #[test]
     fn catalog_lookup_is_exact_match() {
-        let entries = vec![ModelEntry {
+        let entries = [ModelEntry {
             id: "deepseek-v4-flash".to_string(),
             name: "DeepSeek V4 Flash".to_string(),
             description: String::new(),

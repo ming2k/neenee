@@ -561,12 +561,7 @@ fn format_token_count(n: usize) -> String {
 /// green → yellow → red threshold color so a nearly full window is
 /// unmissable; the token count stays muted. `bg` is applied to every span so
 /// the indicator reads on a solid background.
-fn context_usage_spans(
-    used: usize,
-    max: usize,
-    theme: &Theme,
-    bg: Color,
-) -> Vec<Span<'static>> {
+fn context_usage_spans(used: usize, max: usize, theme: &Theme, bg: Color) -> Vec<Span<'static>> {
     let ratio = if max == 0 {
         0.0
     } else {
@@ -586,10 +581,7 @@ fn context_usage_spans(
             format_token_count(used),
             Style::default().fg(theme.muted()).bg(bg),
         ),
-        Span::styled(
-            format!(" ({}%)", pct),
-            Style::default().fg(color).bg(bg),
-        ),
+        Span::styled(format!(" ({}%)", pct), Style::default().fg(color).bg(bg)),
     ]
 }
 

@@ -653,10 +653,7 @@ mod tests {
         .unwrap();
 
         let relative = ".neenee/plans/echo-content.md";
-        let args = format!(
-            "{{\"plan_path\":\"{}\"}}",
-            relative.replace('\\', "\\\\")
-        );
+        let args = format!("{{\"plan_path\":\"{}\"}}", relative.replace('\\', "\\\\"));
         let body = PlanExitTool::new(context.clone())
             .call(&args)
             .await
@@ -664,10 +661,7 @@ mod tests {
         assert!(body.contains("## Approved Plan:"));
         assert!(body.contains("step A"));
         assert_eq!(*mode.lock().unwrap(), AgentMode::Build);
-        assert_eq!(
-            context.active_plan_path(),
-            Some(PathBuf::from(relative))
-        );
+        assert_eq!(context.active_plan_path(), Some(PathBuf::from(relative)));
 
         let progress = context.plan_progress().expect("plan progress seeded");
         let names: Vec<_> = progress.sections.iter().map(|s| s.name.as_str()).collect();

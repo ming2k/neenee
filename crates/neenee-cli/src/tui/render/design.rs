@@ -57,6 +57,11 @@ pub(super) const HINT_BAR_GOAL_MAX_CHARS: usize = 28;
 pub(super) const STATUS_BAR_ROWS: u16 = 1;
 pub(super) const SUBAGENT_BAR_ROWS: u16 = 1;
 
+/// Plan progress sticky panel: a 3-row card pinned above the input box
+/// whenever an active plan is set. Top border + content + bottom border.
+/// Hidden in sub-agent view and while overlay chrome is hidden.
+pub(super) const PLAN_PANEL_ROWS: u16 = 3;
+
 /// Horizontal inset applied to the footer area containing status/composer/hints.
 pub(super) const FOOTER_H_INSET: u16 = TRANSCRIPT_H_INSET;
 

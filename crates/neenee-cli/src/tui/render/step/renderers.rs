@@ -825,7 +825,12 @@ fn draw_tool_result(
             // Prefer the structured Patch payload (old/new from the result);
             // fall back to parsing the arguments for legacy/restored steps.
             let diff: Vec<DiffLine> = match structured {
-                Some(neenee_core::ToolOutput::Patch { old, new, start_line, .. }) => {
+                Some(neenee_core::ToolOutput::Patch {
+                    old,
+                    new,
+                    start_line,
+                    ..
+                }) => {
                     let offset = start_line.saturating_sub(1);
                     let full = crate::tui::render::tools::line_diff(old, new, offset);
                     crate::tui::render::tools::collapse_context_runs(&full)
@@ -922,7 +927,8 @@ fn draw_diff_content(
                 break;
             }
             let line_rect = Rect::new(ctx.area.x, *ctx.y, ctx.area.width, 1);
-            ctx.frame.render_widget(Paragraph::new(Line::from(spans)), line_rect);
+            ctx.frame
+                .render_widget(Paragraph::new(Line::from(spans)), line_rect);
             *ctx.y += 1;
             continue;
         }

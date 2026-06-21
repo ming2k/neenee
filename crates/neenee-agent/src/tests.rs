@@ -480,10 +480,7 @@ async fn plan_exit_asks_user_and_implements_when_approved() {
     ));
 
     let relative = ".neenee/plans/approval-approve.md";
-    let arguments = format!(
-        "{{\"plan_path\":\"{}\"}}",
-        relative.replace('\\', "\\\\")
-    );
+    let arguments = format!("{{\"plan_path\":\"{}\"}}", relative.replace('\\', "\\\\"));
     let call = ToolCall {
         id: "call".to_string(),
         name: "plan_exit".to_string(),
@@ -514,10 +511,7 @@ async fn plan_exit_asks_user_and_implements_when_approved() {
         "approval option missing"
     );
 
-    assert!(agent.reply_user_question(
-        &request.id,
-        vec![vec!["Approve".to_string()]],
-    ));
+    assert!(agent.reply_user_question(&request.id, vec![vec!["Approve".to_string()]],));
 
     let output = task.await.unwrap().unwrap().to_text();
     assert!(output.contains("Plan approved."), "{}", output);
@@ -548,8 +542,7 @@ async fn plan_exit_keeps_planning_when_rejected() {
     let call = ToolCall {
         id: "call".to_string(),
         name: "plan_exit".to_string(),
-        arguments: r#"{"plan_path":".neenee/plans/missing-but-ok.md"}"#
-            .to_string(),
+        arguments: r#"{"plan_path":".neenee/plans/missing-but-ok.md"}"#.to_string(),
     };
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -568,10 +561,7 @@ async fn plan_exit_keeps_planning_when_rejected() {
     };
 
     // User picks "Keep planning".
-    assert!(agent.reply_user_question(
-        &request.id,
-        vec![vec!["Keep planning".to_string()]],
-    ));
+    assert!(agent.reply_user_question(&request.id, vec![vec!["Keep planning".to_string()]],));
 
     let output = task.await.unwrap().unwrap().to_text();
     assert!(output.contains("User wants to keep planning"), "{}", output);
@@ -589,9 +579,7 @@ async fn manual_mode_switch_to_plan_clears_plan_state() {
         test_goal_service(),
         crate::skills::SkillRegistry::empty(),
     );
-    agent.set_active_plan_path(Some(std::path::PathBuf::from(
-        ".neenee/plans/was-here.md",
-    )));
+    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/was-here.md")));
     agent.set_plan_progress(Some(plan::PlanProgress::from_markdown(
         std::path::PathBuf::from(".neenee/plans/was-here.md"),
         "## X\n",

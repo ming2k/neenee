@@ -273,18 +273,12 @@ impl Agent {
 
     /// Whether write-tool permission prompts are currently bypassed.
     pub fn get_auto_approve(&self) -> bool {
-        *self
-            .auto_approve
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        *self.auto_approve.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Enable or disable auto-approve for this session.
     pub fn set_auto_approve(&self, enabled: bool) {
-        *self
-            .auto_approve
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = enabled;
+        *self.auto_approve.lock().unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     pub fn get_goal(&self) -> Option<Goal> {
@@ -1154,9 +1148,7 @@ impl Agent {
                 snippet
             });
 
-        let header = plan_path
-            .clone()
-            .unwrap_or_else(|| "(unsaved)".to_string());
+        let header = plan_path.clone().unwrap_or_else(|| "(unsaved)".to_string());
         let question_text = match (&plan_path, &excerpt) {
             (Some(path), Some(snippet)) => format!(
                 "Approve this plan and switch to Build mode to start implementing?\n\nPath: {}\n\n{}",
@@ -1285,9 +1277,7 @@ impl Agent {
         // `/mode build` skips this — when the user types the slash command
         // they have already decided.
         if call.name == "plan_exit" {
-            return self
-                .execute_plan_exit(tool, call, call_id, event_tx)
-                .await;
+            return self.execute_plan_exit(tool, call, call_id, event_tx).await;
         }
 
         if tool.access() == ToolAccess::Write {

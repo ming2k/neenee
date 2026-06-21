@@ -555,10 +555,7 @@ impl SessionStore {
     /// Replace the active plan path. Pass `None` to clear (used when the
     /// agent re-enters Plan mode). Persists both the snapshot and the event
     /// log so resume restores the same path.
-    pub async fn set_active_plan_path(
-        &self,
-        path: Option<PathBuf>,
-    ) -> Result<(), String> {
+    pub async fn set_active_plan_path(&self, path: Option<PathBuf>) -> Result<(), String> {
         let mut data = self.data.lock().await;
         data.active_plan_path = path.clone();
         data.updated_at = unix_timestamp();
@@ -2059,8 +2056,10 @@ mod tests {
         // The picker should only surface the active session once it has
         // real content (messages, archived messages, a loop checkpoint, or
         // a compaction marker).
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-session-list-empty-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!(
+            "neenee-session-list-empty-{}",
+            uuid::Uuid::new_v4()
+        ));
         let path = directory.join("session.json");
         let store = SessionStore {
             project_root: directory.clone(),
@@ -2103,8 +2102,8 @@ mod tests {
 
     #[tokio::test]
     async fn plan_state_round_trips_through_disk() {
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-plan-state-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-plan-state-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore {
             project_root: directory.clone(),
@@ -2118,12 +2117,13 @@ mod tests {
         assert_eq!(store.plan_progress().await, None);
 
         let plan = PathBuf::from(".neenee/plans/feature-x.md");
-        store.set_active_plan_path(Some(plan.clone())).await.unwrap();
+        store
+            .set_active_plan_path(Some(plan.clone()))
+            .await
+            .unwrap();
 
-        let progress = neenee_core::PlanProgress::from_markdown(
-            plan.clone(),
-            "## Summary\n## Key Changes\n",
-        );
+        let progress =
+            neenee_core::PlanProgress::from_markdown(plan.clone(), "## Summary\n## Key Changes\n");
         store
             .set_plan_progress(Some(progress.clone()))
             .await

@@ -610,8 +610,7 @@ pub fn process_event(
                 // zone-switch key so Tab is free for completion-only duty.
                 // No-op outside the main prompt (modals, Browse zone).
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if context.active_modal == super::Modal::None
-                        && context.focus_zone.is_compose()
+                    if context.active_modal == super::Modal::None && context.focus_zone.is_compose()
                     {
                         InputAction::EnterBrowseZone { backward: false }
                     } else {
@@ -1111,13 +1110,7 @@ mod tests {
         // without first navigating with ↓.
         let mut input = "@src/foo".to_string();
         assert_eq!(
-            enter_with_completion(
-                &mut input,
-                crate::tui::CompletionKind::Path,
-                3,
-                None,
-                false,
-            ),
+            enter_with_completion(&mut input, crate::tui::CompletionKind::Path, 3, None, false,),
             InputAction::SendChat("@src/foo".to_string())
         );
     }
@@ -2257,7 +2250,10 @@ mod tests {
         let mut cursor = 0;
         let mut drag = SelectionDrag::default();
         process_event(
-            Event::Key(crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )),
             &mut input,
             &mut cursor,
             InputContext {
@@ -2304,7 +2300,10 @@ mod tests {
         let mut cursor = 0;
         let mut drag = SelectionDrag::default();
         let action = process_event(
-            Event::Key(crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )),
             &mut input,
             &mut cursor,
             InputContext {

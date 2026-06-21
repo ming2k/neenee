@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
     mcp::McpConnectionStatus, AgentRequest, Goal, ImagePart, ModelPickerRow, ModelPickerSnapshot,
-    PermissionRequest, Role, SessionOverview, UserQuestionRequest,
+    PermissionRequest, PlanProgress, Role, SessionOverview, UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -116,10 +116,7 @@ impl SessionTab {
 
     /// Step to the neighbouring pane. `forward` = right, else left. Wraps.
     pub fn cycle(self, forward: bool) -> SessionTab {
-        let idx = Self::ALL
-            .iter()
-            .position(|t| *t == self)
-            .unwrap_or(0);
+        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
         let n = Self::ALL.len();
         let next = if forward {
             (idx + 1) % n
@@ -211,6 +208,11 @@ pub struct App {
     /// snapshot; shown as a badge in the hint bar so the elevated state is
     /// always visible.
     pub auto_approve: bool,
+    /// Live plan progress snapshot, mirrored from the harness. When `Some`,
+    /// a sticky panel renders above the input box so the user can see at a
+    /// glance which sections of the approved plan are done, in progress, or
+    /// still pending. `None` outside Build mode with an active plan.
+    pub plan_progress: Option<PlanProgress>,
     pub pending_permission: Option<PermissionRequest>,
     pub pending_question: Option<UserQuestionRequest>,
     /// Selected option indices per question. Outer vec parallels
@@ -424,7 +426,11 @@ impl App {
     ///
     /// Returns `true` when a step was actually toggled, so callers can gate
     /// side effects like clearing the text selection.
-    pub(crate) fn toggle_step_pinned(&mut self, messages: &mut [TranscriptMessage], mi: usize) -> bool {
+    pub(crate) fn toggle_step_pinned(
+        &mut self,
+        messages: &mut [TranscriptMessage],
+        mi: usize,
+    ) -> bool {
         let pinned_to_top = self.sticky_step == Some(mi);
         let sticky_summary_line = self.sticky_summary_line;
         let toggled = resolve_focused_mut(messages, &self.focus_stack, mi)
