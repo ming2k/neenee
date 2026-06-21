@@ -213,6 +213,10 @@ pub struct App {
     /// glance which sections of the approved plan are done, in progress, or
     /// still pending. `None` outside Build mode with an active plan.
     pub plan_progress: Option<PlanProgress>,
+    /// Harness turn counter, mirrored each frame. Used by the plan panel's
+    /// stale detector: if `turn_count - plan_progress.updated_at_turn`
+    /// exceeds the threshold the panel renders dimmed.
+    pub turn_count: u64,
     pub pending_permission: Option<PermissionRequest>,
     pub pending_question: Option<UserQuestionRequest>,
     /// Selected option indices per question. Outer vec parallels

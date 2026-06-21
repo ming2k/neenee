@@ -109,6 +109,10 @@ pub struct TranscriptView<'a> {
     /// above the input box (below the status bar) showing the plan path, the
     /// section completion ratio, and per-section status glyphs.
     pub plan_progress: Option<&'a neenee_core::PlanProgress>,
+    /// Current harness turn counter, used by the plan panel's stale
+    /// detector (turns since `plan_progress.updated_at_turn` exceeded the
+    /// threshold ⇒ dimmed header + suffix).
+    pub turn_count: u64,
     /// Message index of the step (tool step or reasoning trace) whose header
     /// currently rests under the mouse pointer (inline or sticky pinned), so
     /// the next draw lights it up to the intermediate hover tone as a click
@@ -178,6 +182,7 @@ pub fn draw_transcript(
         chrome_hidden,
         subagent_bar,
         plan_progress,
+        turn_count,
         hovered_step,
         theme,
         ..
@@ -437,6 +442,7 @@ pub fn draw_transcript(
                     PLAN_PANEL_ROWS,
                 ),
                 progress,
+                turn_count,
                 theme,
             );
         }
@@ -583,6 +589,7 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -849,6 +856,7 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -881,6 +889,7 @@ mod tests {
                             total: 1,
                         }),
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1002,6 +1011,7 @@ mod tests {
                             chrome_hidden: false,
                             subagent_bar: None,
                             plan_progress: None,
+                        turn_count: 0,
                             hovered_step: None,
                             focused_target: None,
                             theme,
@@ -1147,6 +1157,7 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1287,6 +1298,7 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1362,6 +1374,7 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,

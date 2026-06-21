@@ -5,10 +5,9 @@
 </p>
 
 <p align="center">
-  <!-- 如已配置 CI / crates.io，可取消注释以下徽章 -->
-  <!-- <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a> -->
-  <!-- <a href="#"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a> -->
-  <!-- <a href="#"><img src="https://img.shields.io/badge/crates.io-v0.1.0-cyan" alt="Crates.io"></a> -->
+  <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
+  <a href="https://crates.io/crates/neenee-cli"><img src="https://img.shields.io/badge/crates.io-v0.1.0-cyan" alt="Crates.io"></a>
 </p>
 
 ---
@@ -72,7 +71,7 @@ Dependency direction is strict: `core` ← {`providers`, `tools`, `store`} ← `
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/neenee.git
+git clone https://github.com/ming2k/neenee.git
 cd neenee
 cargo run
 cargo build --release  # binary at ./target/release/neenee

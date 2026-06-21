@@ -734,9 +734,10 @@ pub(super) fn draw_message_body(
                 let indent = "  ".repeat(*depth);
                 let prefix = format!("   {}{} ", indent, marker);
                 let prefix_cols = display_width_u16(&prefix);
+                let continuation = " ".repeat(prefix_cols as usize);
                 let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
-                for wl in &lines {
+                for (line_index, wl) in lines.iter().enumerate() {
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
                         continue;
@@ -747,7 +748,7 @@ pub(super) fn draw_message_body(
 
                     let base = Style::default().fg(theme.fg());
                     let line = line_spans(
-                        &prefix,
+                        if line_index == 0 { &prefix } else { &continuation },
                         Style::default().fg(theme.brand()),
                         &wl.text,
                         line_selection(sel_range, wl),
@@ -859,11 +860,15 @@ pub(super) fn draw_message_body(
 ///
 /// Sections that do not fit on the single content row are elided with `…`
 /// so the panel's overall height stays fixed and the input box does not
-/// jump when the section list changes.
+/// jump when the section list changes. When `current_turn` exceeds
+/// `progress.updated_at_turn + PLAN_STALE_TURN_THRESHOLD` the header gets
+/// a dimmed `· not updated for N turns` suffix so the user knows the
+/// model has not called `update_plan_progress` recently.
 pub(super) fn draw_plan_panel(
     frame: &mut Frame,
     rect: Rect,
     progress: &neenee_core::PlanProgress,
+    current_turn: u64,
     theme: &Theme,
 ) {
     use ratatui::widgets::Block as RtBlock;
@@ -877,6 +882,9 @@ pub(super) fn draw_plan_panel(
     let body_fg = theme.fg();
     let dim_fg = theme.muted();
 
+    let stale_turns = current_turn.saturating_sub(progress.updated_at_turn);
+    let is_stale = stale_turns > neenee_core::plan::PLAN_STALE_TURN_THRESHOLD;
+
     // Solid bg first so the whole card reads as one surface.
     frame.render_widget(
         RtBlock::default().style(Style::default().bg(card_bg).fg(body_fg)),
@@ -887,19 +895,29 @@ pub(super) fn draw_plan_panel(
     let path_str = progress.path.display().to_string();
     let done = progress.done_count();
     let total = progress.sections.len();
-    let header_label = format!("Plan: {} · {}/{} done", path_str, done, total);
+    let header_label = if is_stale {
+        format!(
+            "Plan: {} · {}/{} done · not updated for {} turns",
+            path_str, done, total, stale_turns
+        )
+    } else {
+        format!("Plan: {} · {}/{} done", path_str, done, total)
+    };
 
     // Row 1: top border + header label.
     let header_text = format!("╭── {} ", header_label);
     let header_used = header_text.chars().count();
     let header_pad = inner_w.saturating_sub(header_used + 1);
+    // When stale, dim the whole header so the user notices something is off
+    // before they read the suffix.
+    let header_fg = if is_stale { dim_fg } else { card_fg };
     let top_line = Line::from(vec![
-        Span::styled(header_text, Style::default().fg(card_fg).bg(card_bg)),
+        Span::styled(header_text, Style::default().fg(header_fg).bg(card_bg)),
         Span::styled(
             "─".repeat(header_pad),
-            Style::default().fg(card_fg).bg(card_bg),
+            Style::default().fg(header_fg).bg(card_bg),
         ),
-        Span::styled("╮", Style::default().fg(card_fg).bg(card_bg)),
+        Span::styled("╮", Style::default().fg(header_fg).bg(card_bg)),
     ]);
     let top_rect = Rect::new(rect.x, rect.y, rect.width, 1);
     frame.render_widget(Paragraph::new(top_line), top_rect);

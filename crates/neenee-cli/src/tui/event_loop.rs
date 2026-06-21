@@ -64,6 +64,10 @@ pub(super) struct UiRuntime {
     /// `App::plan_progress` each frame so the sticky panel above the input
     /// box stays in sync with the agent's state.
     pub plan_progress: Arc<Mutex<Option<PlanProgress>>>,
+    /// Live harness turn counter, mirrored from the harness snapshot so the
+    /// plan panel can compute "not updated for N turns" without an extra
+    /// event channel.
+    pub turn_count: Arc<Mutex<u64>>,
 }
 
 pub(super) async fn run_app_loop<B: Backend>(
@@ -113,6 +117,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
             app.plan_progress = runtime.plan_progress.lock().await.clone();
+            app.turn_count = *runtime.turn_count.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
@@ -316,6 +321,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     chrome_hidden,
                     subagent_bar,
                     plan_progress: app.plan_progress.as_ref(),
+                    turn_count: app.turn_count,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     theme: &app.theme,

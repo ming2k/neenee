@@ -32,6 +32,14 @@ use crate::{AgentMode, Tool, ToolAccess};
 /// plan documents live. Mirrors opencode's `.opencode/plans/` convention.
 pub const PLANS_DIR: &str = ".neenee/plans";
 
+/// Number of harness turns the plan progress panel may go without an
+/// `update_plan_progress` call before the TUI renders it dimmed with a
+/// "not updated for N turns" hint. Calibrated so a normal "explore + edit +
+/// edit + verify + update" cadence never trips it, but a model that abandons
+/// the panel after the first section does. Tunable in future; this is the
+/// initial conservative value.
+pub const PLAN_STALE_TURN_THRESHOLD: u64 = 5;
+
 /// Shared handle injected into the plan tools so they can flip the agent's
 /// mode, record the active plan path, and track per-section progress. The
 /// same `Arc`s are held by the [`crate::Agent`], so mutations are visible
@@ -47,6 +55,9 @@ pub struct PlanToolContext {
     /// and updated by the `update_plan_progress` tool. Drives the sticky
     /// TUI panel above the input box.
     plan_progress: Arc<Mutex<Option<PlanProgress>>>,
+    /// Harness turn counter shared with the `Agent`. Used to stamp
+    /// `PlanProgress::updated_at_turn` so the TUI stale detector works.
+    turn_counter: Arc<Mutex<u64>>,
 }
 
 impl PlanToolContext {
@@ -55,6 +66,7 @@ impl PlanToolContext {
             mode,
             active_plan_path: Arc::new(Mutex::new(None)),
             plan_progress: Arc::new(Mutex::new(None)),
+            turn_counter: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -65,11 +77,13 @@ impl PlanToolContext {
         mode: Arc<Mutex<AgentMode>>,
         active_plan_path: Arc<Mutex<Option<PathBuf>>>,
         plan_progress: Arc<Mutex<Option<PlanProgress>>>,
+        turn_counter: Arc<Mutex<u64>>,
     ) -> Self {
         Self {
             mode,
             active_plan_path,
             plan_progress,
+            turn_counter,
         }
     }
 
@@ -106,6 +120,10 @@ impl PlanToolContext {
         if let Ok(mut guard) = self.plan_progress.lock() {
             *guard = progress;
         }
+    }
+
+    fn current_turn(&self) -> u64 {
+        self.turn_counter.lock().map(|g| *g).unwrap_or(0)
     }
 }
 
@@ -214,6 +232,14 @@ pub struct PlanProgress {
     /// `Agent::active_plan_path`.
     pub path: PathBuf,
     pub sections: Vec<PlanSection>,
+    /// Harness turn counter value the last time any section's status
+    /// changed. The TUI compares this against the current turn counter to
+    /// detect a stale panel ("not updated for N turns") — a signal that
+    /// the model may have forgotten to call `update_plan_progress` and the
+    /// user should not trust the green checks at face value. Bumped by
+    /// `plan_exit` (initial seed) and `update_plan_progress` (every call).
+    #[serde(default)]
+    pub updated_at_turn: u64,
 }
 
 impl PlanProgress {
@@ -237,7 +263,11 @@ impl PlanProgress {
                 })
                 .collect()
         };
-        Self { path, sections }
+        Self {
+            path,
+            sections,
+            updated_at_turn: 0,
+        }
     }
 
     pub fn done_count(&self) -> usize {
@@ -248,8 +278,14 @@ impl PlanProgress {
     }
 
     /// Update the first section whose name matches (case-insensitive
-    /// substring). Returns `true` if a section was updated.
-    pub fn update(&mut self, section: &str, status: PlanSectionStatus) -> bool {
+    /// substring). Returns `true` if a section was updated. Stamps
+    /// `updated_at_turn` so the stale detector resets.
+    pub fn update(
+        &mut self,
+        section: &str,
+        status: PlanSectionStatus,
+        current_turn: u64,
+    ) -> bool {
         let needle = section.trim().to_lowercase();
         if needle.is_empty() {
             return false;
@@ -260,6 +296,9 @@ impl PlanProgress {
                 s.status = status;
                 updated = true;
             }
+        }
+        if updated {
+            self.updated_at_turn = current_turn;
         }
         updated
     }
@@ -446,8 +485,9 @@ impl Tool for PlanExitTool {
         // Parse the plan into sections and seed the progress panel.
         if let Some(text) = &content {
             if let Some(path) = recorded.clone() {
-                self.context
-                    .set_plan_progress(Some(PlanProgress::from_markdown(path, text)));
+                let mut progress = PlanProgress::from_markdown(path, text);
+                progress.updated_at_turn = self.context.current_turn();
+                self.context.set_plan_progress(Some(progress));
             }
         } else {
             self.context.set_plan_progress(None);
@@ -481,11 +521,26 @@ impl Tool for PlanExitTool {
 /// not have to echo the exact heading.
 pub struct UpdatePlanProgressTool {
     context: PlanToolContext,
+    /// Shared harness turn counter, used to stamp `updated_at_turn` on
+    /// every successful update so the TUI stale detector can tell whether
+    /// the panel has been neglected. The same `Arc` is owned by the
+    /// `Agent`, which bumps it at the start of each `execute_turn`.
+    turn_counter: Arc<Mutex<u64>>,
 }
 
 impl UpdatePlanProgressTool {
-    pub fn new(context: PlanToolContext) -> Self {
-        Self { context }
+    pub fn new(context: PlanToolContext, turn_counter: Arc<Mutex<u64>>) -> Self {
+        Self {
+            context,
+            turn_counter,
+        }
+    }
+
+    fn current_turn(&self) -> u64 {
+        self.turn_counter
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(0)
     }
 }
 
@@ -566,7 +621,8 @@ impl Tool for UpdatePlanProgressTool {
                 "No active plan to update. Call plan_exit to approve a plan first.".to_string(),
             );
         };
-        if progress.update(section, status) {
+        let current_turn = self.current_turn();
+        if progress.update(section, status, current_turn) {
             Ok(format!("Updated '{}' to {}.", section, status_str))
         } else {
             Ok(format!(
@@ -695,24 +751,30 @@ mod tests {
             PathBuf::from(".neenee/plans/x.md"),
             "## Key Changes\n## Test Plan\n",
         );
-        assert!(progress.update("key changes", PlanSectionStatus::Done));
+        assert!(progress.update("key changes", PlanSectionStatus::Done, 1));
         assert_eq!(progress.sections[0].status, PlanSectionStatus::Done);
         assert_eq!(progress.sections[1].status, PlanSectionStatus::Pending);
         assert_eq!(progress.done_count(), 1);
         // No match returns false and leaves state untouched.
-        assert!(!progress.update("nonexistent", PlanSectionStatus::Done));
+        assert!(!progress.update("nonexistent", PlanSectionStatus::Done, 1));
     }
 
     #[tokio::test]
     async fn update_plan_progress_tool_updates_active_plan() {
         let mode = Arc::new(Mutex::new(AgentMode::Build));
-        let context = PlanToolContext::new(Arc::clone(&mode));
+        let turn_counter = Arc::new(Mutex::new(7u64));
+        let context = PlanToolContext::shared(
+            Arc::clone(&mode),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::clone(&turn_counter),
+        );
         context.set_plan_progress(Some(PlanProgress::from_markdown(
             PathBuf::from(".neenee/plans/x.md"),
             "## Summary\n## Key Changes\n",
         )));
 
-        let tool = UpdatePlanProgressTool::new(context.clone());
+        let tool = UpdatePlanProgressTool::new(context.clone(), Arc::clone(&turn_counter));
         let body = tool
             .call(r#"{"section":"summary","status":"done"}"#)
             .await
@@ -721,13 +783,22 @@ mod tests {
         let progress = context.plan_progress().unwrap();
         assert_eq!(progress.sections[0].status, PlanSectionStatus::Done);
         assert_eq!(progress.sections[1].status, PlanSectionStatus::Pending);
+        // The update stamps the current turn counter so the stale detector
+        // resets on every successful call.
+        assert_eq!(progress.updated_at_turn, 7);
     }
 
     #[tokio::test]
     async fn update_plan_progress_tool_no_active_plan_returns_hint() {
         let mode = Arc::new(Mutex::new(AgentMode::Build));
-        let context = PlanToolContext::new(mode);
-        let tool = UpdatePlanProgressTool::new(context);
+        let turn_counter = Arc::new(Mutex::new(0u64));
+        let context = PlanToolContext::shared(
+            mode,
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::clone(&turn_counter),
+        );
+        let tool = UpdatePlanProgressTool::new(context, turn_counter);
         let body = tool
             .call(r#"{"section":"x","status":"done"}"#)
             .await

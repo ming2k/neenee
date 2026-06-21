@@ -333,6 +333,11 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         retry_base_ms,
         retry_max_ms,
     } = context;
+    // Bump the harness turn counter first thing so anything that reads it
+    // during this turn (e.g. `update_plan_progress` stamping
+    // `updated_at_turn`) sees the new value. The TUI's stale detector
+    // compares this against `PlanProgress::updated_at_turn`.
+    agent.bump_turn();
     let _ = tx.send(AgentResponse::Activity("saving request".to_string()));
     let admitted_session_id = session.id().await;
     let thread_id = admitted_session_id.clone();

@@ -104,6 +104,8 @@ pub async fn run_tui(
     let harness_clone = harness.clone();
     let plan_progress: Arc<Mutex<Option<PlanProgress>>> = Arc::new(Mutex::new(None));
     let plan_progress_clone = plan_progress.clone();
+    let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let turn_count_clone = turn_count.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
@@ -437,6 +439,16 @@ pub async fn run_tui(
                 AgentResponse::HarnessState(snapshot) => {
                     let running = snapshot.loop_status != "idle";
                     *harness_clone.lock().await = snapshot;
+                    // Each "running" HarnessState marks the start of a new
+                    // turn; bump the local turn counter mirror so the plan
+                    // panel's stale detector has a frame-current value
+                    // without needing a dedicated event channel. This is
+                    // approximate (one bump per turn start) which matches
+                    // `Agent::bump_turn`'s semantics in the harness.
+                    if running {
+                        let mut tc = turn_count_clone.lock().await;
+                        *tc = tc.saturating_add(1);
+                    }
                     ir_clone.store(running, Ordering::SeqCst);
                     if !running {
                         activity_clone.lock().await.clear();
@@ -550,6 +562,7 @@ pub async fn run_tui(
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        turn_count: 0,
         pending_permission: None,
         pending_question: None,
         question_selected: Vec::new(),
@@ -611,6 +624,7 @@ pub async fn run_tui(
             open_sessions,
             session_context,
             plan_progress,
+            turn_count,
         },
     )
     .await;

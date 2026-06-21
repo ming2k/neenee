@@ -36,6 +36,11 @@ pub struct Agent {
     /// and updated by the `update_plan_progress` tool. Drives the sticky
     /// TUI panel above the input box. Shared with the plan tools.
     plan_progress: Arc<std::sync::Mutex<Option<plan::PlanProgress>>>,
+    /// Harness turn counter, bumped at the start of every `execute_turn`.
+    /// Shared with `PlanToolContext` and `UpdatePlanProgressTool` so the
+    /// latter can stamp `PlanProgress::updated_at_turn` for the TUI stale
+    /// detector.
+    turn_counter: Arc<std::sync::Mutex<u64>>,
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
@@ -104,17 +109,24 @@ impl Agent {
         // Plan-mode workflow tools share the mode handle, the active plan
         // path, and the plan progress snapshot — the same `Arc`s the agent
         // itself holds — so a tool call takes effect immediately and is
-        // reflected in the next system prompt and the TUI panel.
+        // reflected in the next system prompt and the TUI panel. The turn
+        // counter is shared so `update_plan_progress` can stamp
+        // `PlanProgress::updated_at_turn` for the stale detector.
         let active_plan_path = Arc::new(std::sync::Mutex::new(None));
         let plan_progress = Arc::new(std::sync::Mutex::new(None));
+        let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let plan_context = plan::PlanToolContext::shared(
             Arc::clone(&mode),
             Arc::clone(&active_plan_path),
             Arc::clone(&plan_progress),
+            Arc::clone(&turn_counter),
         );
         tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
         tools.push(Arc::new(plan::PlanExitTool::new(plan_context.clone())));
-        tools.push(Arc::new(plan::UpdatePlanProgressTool::new(plan_context)));
+        tools.push(Arc::new(plan::UpdatePlanProgressTool::new(
+            plan_context,
+            Arc::clone(&turn_counter),
+        )));
 
         Self {
             provider,
@@ -123,6 +135,7 @@ impl Agent {
             mode,
             active_plan_path,
             plan_progress,
+            turn_counter,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
             auto_approve: Arc::new(std::sync::Mutex::new(false)),
@@ -268,6 +281,22 @@ impl Agent {
     pub fn clear_plan_progress(&self) {
         if let Ok(mut guard) = self.plan_progress.lock() {
             *guard = None;
+        }
+    }
+
+    /// Current harness turn counter — bumped at the start of every
+    /// `execute_turn`. Used by the TUI to detect a stale plan panel (one
+    /// whose `updated_at_turn` lags the current turn by more than
+    /// `PLAN_STALE_TURN_THRESHOLD`).
+    pub fn turn_count(&self) -> u64 {
+        self.turn_counter.lock().map(|g| *g).unwrap_or(0)
+    }
+
+    /// Advance the turn counter. Called once per `execute_turn`. The TUI
+    /// reads the resulting value to compute "not updated for N turns".
+    pub fn bump_turn(&self) {
+        if let Ok(mut g) = self.turn_counter.lock() {
+            *g = g.saturating_add(1);
         }
     }
 

@@ -517,6 +517,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        turn_count: 0,
         pending_permission: None,
         pending_question: None,
         question_selected: Vec::new(),
