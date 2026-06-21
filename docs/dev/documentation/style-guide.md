@@ -8,12 +8,12 @@ Use American English: `behavior`, `color`, `organize`, and
 - Use second person for tutorials and how-to guides.
 - Use imperative mood for how-to steps: "Run `ninja`", not "You should
   run `ninja`".
-- Use third person for explanation and reference: "the daemon", not "we"
+- Use third person for explanation and reference: "the component", not "we"
   or "I".
 - Be direct. Avoid hedging. If something depends on conditions, name the
   conditions.
-- Do not anthropomorphize: "the daemon forwards the key", not "the daemon
-  decides to forward the key".
+- Do not anthropomorphize: "the component forwards the request", not "the
+  component decides to forward the request".
 - Prefer present tense for current behavior. Use future tense only for
   planned work in roadmap or release planning documents.
 
@@ -41,6 +41,14 @@ Use American English: `behavior`, `color`, `organize`, and
 - Split long code blocks with prose when a block exceeds about 15 lines.
 - Show commands from the repository root unless the surrounding text states
   another working directory.
+
+## Line length
+
+- Wrap prose at approximately 75 columns.
+- Tables and fenced code blocks are exempt; let their rows and lines run as
+  wide as the content needs.
+- When editing, avoid reflowing entire paragraphs; touch only the lines that
+  change so diffs stay readable.
 
 ## Terminology
 
