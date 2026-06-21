@@ -10,8 +10,9 @@ The neenee terminal UI is built with [ratatui] and rendered by the
 │  Transcript viewport                            (Min 0)  │
 │   (messages, expandable steps, sticky pinned summaries)  │
 ├──────────────────────────────────────────────────────────┤
-│  Status bar                                (0 or 1 row)  │
 │  Plan panel                             (0 or 3 rows)  │
+│  Goal bar                                (0 or 1 row)  │
+│  Status bar                              (0 or 1 row)  │
 │  Input box                         (2 + wrapped lines)  │
 │  Hint bar                                       (1 row)  │
 └──────────────────────────────────────────────────────────┘
@@ -48,7 +49,8 @@ when one is open); it is not a zone toggle.
 | [Step state machine](step-state.md) | The three orthogonal axes (Lifecycle × Disclosure × Interaction) and the accent/weight color channels |
 | [Sub-agent view](subagent-view.md) | Inline task step + zoomed-in child stream + navigation bar + focus stack |
 | [Status bar](status-bar.md) | Breathing-dot activity indicator + label |
-| [Hint bar](hint-line.md) | Focus-zone pill + model/goal/MCP/context cluster |
+| [Hint bar](hint-line.md) | Focus-zone pill + model/context cluster |
+| [Goal bar](goal-bar.md) | Active-goal indicator with objective + checklist progress; clickable to surface `/goal status` |
 | [Plan panel](layout.md#footer-stack) | Sticky 3-row plan-progress card above the input box |
 | [Modals](modals.md) | Models, Model editor, Sessions, Session, History, Question, Permission, Tool-step detail, Help, Plan preview, Toasts |
 
@@ -72,7 +74,7 @@ when one is open); it is not a zone toggle.
 | `render/step/renderers.rs` | Tool-step (`draw_tool_step`), thinking (`draw_reasoning_trace`), and sub-agent step renderers |
 | `render/step/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
-| `render/chrome.rs` | `draw_status_bar`, `draw_hint`, `draw_suggestions`, `spinner_frame` |
+| `render/chrome.rs` | `draw_status_bar`, `draw_goal_bar` / `GoalBarView`, `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/overlays.rs` | Modals: models, model editor, sessions, session, history, question, permission, tool-step detail, help, plan preview, toasts |
 | `render/markdown_table.rs` | `build_table_render`, `shrink_column_widths` |
 | `document.rs` | Document model: `TranscriptMessage`, `Block` enum, `MessageKind`, markdown parsing, `parse_arguments_kv` |

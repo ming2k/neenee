@@ -25,7 +25,7 @@ pub mod embedding;
 pub mod events;
 pub mod fsutil;
 pub mod lock;
-pub mod model_usage;
 pub mod paths;
+pub mod provider_usage;
 pub mod search_tool;
 pub mod session;

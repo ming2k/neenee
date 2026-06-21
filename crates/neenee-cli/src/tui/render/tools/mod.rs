@@ -43,8 +43,11 @@ pub enum ToolStatus {
     Running,
     /// Output present and not an error.
     Ok,
-    /// Output present and starting with `Error` (matches the convention used
-    /// by `core` tools, which return `Err(String)` rendered as `Error: …`).
+    /// Output present and the call failed. Failure is determined by the
+    /// structured [`ToolStepStatus`] (set from `ToolOutput::is_error()` in
+    /// `document.rs`), not by string-sniffing the output text — sub-agent
+    /// failures carry an explicit `failed` flag and tool errors use
+    /// `ToolOutput::Error`.
     Failed,
     /// The user explicitly denied permission for this call.
     Denied,

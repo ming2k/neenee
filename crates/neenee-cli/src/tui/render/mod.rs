@@ -6,6 +6,7 @@ mod composer;
 mod design;
 mod markdown_table;
 mod message_body;
+mod notice;
 mod overlays;
 mod primitives;
 mod step;
@@ -20,20 +21,23 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod snapshot_tests;
 
-pub use chrome::{draw_completion_menu, draw_status_bar};
+pub use chrome::draw_goal_bar;
+pub use chrome::{draw_activity_bar, draw_completion_menu};
 pub use chrome::{draw_hint_bar, HintBarView};
 pub use composer::{draw_composer, INPUT_MSG_IDX};
 use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
-    COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
-    MESSAGE_GAP_ROWS, PLAN_PANEL_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS,
-    TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
-    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
+    COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, GOAL_BAR_ROWS,
+    HINT_BAR_ROWS, MESSAGE_GAP_ROWS, PLAN_PANEL_COLLAPSED_ROWS, PLAN_PANEL_EXPANDED_MAX_ROWS,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STATUS_BAR_ROWS,
+    STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_BOTTOM_GAP_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
+    TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::{draw_message_body, draw_plan_panel};
+use notice::draw_notice;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal, draw_model_editor,
@@ -65,7 +69,7 @@ use crate::tui::document::TranscriptMessage;
 use crate::tui::layout::{InteractiveTarget, LayoutMap};
 use crate::tui::selection::SelectionState;
 #[cfg(test)]
-use neenee_core::{ModelPickerSnapshot, PermissionRequest, UserQuestionRequest};
+use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest};
 #[cfg(test)]
 use std::collections::HashMap;
 
@@ -109,6 +113,13 @@ pub struct TranscriptView<'a> {
     /// above the input box (below the status bar) showing the plan path, the
     /// section completion ratio, and per-section status glyphs.
     pub plan_progress: Option<&'a neenee_core::PlanProgress>,
+    /// Whether the sticky plan panel is expanded to list every section. When
+    /// false the panel is a single row showing the active section.
+    pub plan_panel_expanded: bool,
+    /// Current goal. When `Some` and `Active`, a goal bar is rendered above
+    /// the activity bar showing the objective and checklist progress. The bar
+    /// is clickable to surface the full goal via `/goal status`.
+    pub current_goal: Option<&'a neenee_core::Goal>,
     /// Current harness turn counter, used by the plan panel's stale
     /// detector (turns since `plan_progress.updated_at_turn` exceeded the
     /// threshold ⇒ dimmed header + suffix).
@@ -140,6 +151,14 @@ pub struct TranscriptRender {
     pub input_rect: Rect,
     /// The hint-bar area pinned below the input box (zero-sized when hidden).
     pub hint_rect: Rect,
+    /// Screen rect of the goal bar for the current frame, so clicks inside it
+    /// route to `/goal status`. `None` when no goal bar is shown (goal absent,
+    /// not `Active`, or chrome hidden).
+    pub goal_rect: Option<Rect>,
+    /// Screen rect of the sticky plan panel for the current frame, so clicks
+    /// inside it toggle the panel's expand state. `None` when no plan panel is
+    /// shown (no active plan, chrome hidden, or sub-agent view).
+    pub plan_rect: Option<Rect>,
     /// Total height (in lines) of the rendered message stream, ignoring the
     /// viewport clip. Used by the app loop to pin the view to the bottom.
     pub content_lines: usize,
@@ -182,6 +201,8 @@ pub fn draw_transcript(
         chrome_hidden,
         subagent_bar,
         plan_progress,
+        plan_panel_expanded,
+        current_goal,
         turn_count,
         hovered_step,
         theme,
@@ -216,14 +237,32 @@ pub fn draw_transcript(
         && activity != "responding";
     let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
-    // Sticky plan panel: 3-row card above the input box, shown only when an
-    // active plan exists and chrome is visible.
+    // Sticky plan panel: a card above the input box, shown only when an active
+    // plan exists and chrome is visible. Collapsed it is one row (plan name +
+    // total progress + the active section); expanded it adds one row per
+    // section in file order, capped so a long plan cannot eat the transcript.
     let plan_panel_active = plan_progress.is_some() && !chrome_hidden && !in_subagent;
     let plan_panel_height: u16 = if plan_panel_active {
-        PLAN_PANEL_ROWS
+        if plan_panel_expanded {
+            let sections = plan_progress
+                .map(|p| p.sections.len() as u16)
+                .unwrap_or(0)
+                .saturating_add(1);
+            sections.min(PLAN_PANEL_EXPANDED_MAX_ROWS)
+        } else {
+            PLAN_PANEL_COLLAPSED_ROWS
+        }
     } else {
         0
     };
+
+    // Goal bar: single-line strip above the activity bar, shown only while a
+    // goal is present and in the `Active` state. The visibility guard mirrors
+    // `draw_goal_bar`'s own early-return so the reserved row is never empty.
+    let goal_bar_active = current_goal.is_some_and(|g| g.status == neenee_core::GoalStatus::Active)
+        && !chrome_hidden
+        && !in_subagent;
+    let goal_bar_height: u16 = if goal_bar_active { GOAL_BAR_ROWS } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new
     // lines and the box expands to fit, up to roughly half the terminal so the
@@ -244,9 +283,8 @@ pub fn draw_transcript(
         desired_input_height.min(max_input_height)
     };
     // The hint bar is a single-line status strip pinned directly below the
-    // input box. It carries the workspace / model / goal / MCP / context info
-    // that the old top header showed. Hidden alongside the rest of the chrome
-    // while an overlay modal is open.
+    // input box. It carries the model + context-usage info. Hidden alongside
+    // the rest of the chrome while an overlay modal is open.
     let hint_height: u16 = if chrome_hidden || in_subagent {
         0
     } else {
@@ -255,7 +293,7 @@ pub fn draw_transcript(
     let footer_height: u16 = if chrome_hidden || in_subagent {
         0
     } else {
-        status_height + plan_panel_height + input_box_height + hint_height
+        goal_bar_height + status_height + plan_panel_height + input_box_height + hint_height
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -317,7 +355,17 @@ pub fn draw_transcript(
         }
 
         // Render blocks
-        if msg.is_subagent_task() {
+        if msg.is_notice() {
+            draw_notice(
+                frame,
+                transcript_area,
+                msg,
+                &mut skip_rows,
+                &mut current_y,
+                &mut content_lines,
+                theme,
+            );
+        } else if msg.is_subagent_task() {
             draw_subagent_inline_step(
                 frame,
                 transcript_area,
@@ -424,63 +472,98 @@ pub fn draw_transcript(
         draw_subagent_bar(frame, rect, bar, theme);
     }
 
-    // The footer stacks, from top to bottom: the transient status bar (when
-    // active), the input box, and the persistent hint bar. The status bar
-    // anchors the top of the footer when present; the input box always sits
-    // directly beneath it; the hint bar pins the bottom of the footer.
+    // The footer stacks, from top to bottom: the sticky plan panel (when
+    // active), the goal bar (when a goal is Active), the transient activity bar
+    // (when active), the input box, and the persistent hint bar. The activity
+    // bar sits directly above the input so the live transcript progress reads
+    // as "what is happening right now" right next to where the user types.
     let footer_x = chunks[1].x + FOOTER_H_INSET;
     let footer_w = chunks[1].width.saturating_sub(2 * FOOTER_H_INSET);
 
-    // The transient running status lives directly above the input box. Hidden
-    // while text is actively streaming ("responding"), since the streamed
-    // response is itself the feedback in that phase, and hidden when idle.
     let status_y = chunks[1].y;
+
+    // Sticky plan panel anchors the top of the footer. The returned rect is
+    // reported back for click hit-testing (toggle expand/collapse).
+    let plan_rect = if plan_panel_active {
+        if let Some(progress) = plan_progress {
+            draw_plan_panel(
+                frame,
+                Rect::new(footer_x, status_y, footer_w, plan_panel_height),
+                progress,
+                plan_panel_expanded,
+                turn_count,
+                theme,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // The goal bar sits directly below the plan panel (when active) and
+    // directly above the activity bar. Only rendered while a goal is Active.
+    // The returned rect is reported back for click hit-testing.
+    let goal_rect = if goal_bar_active {
+        if let Some(goal) = current_goal {
+            let rect = Rect::new(
+                footer_x,
+                status_y + plan_panel_height,
+                footer_w,
+                GOAL_BAR_ROWS,
+            );
+            draw_goal_bar(
+                frame,
+                rect,
+                chrome::GoalBarView {
+                    goal,
+                    spinner_phase,
+                },
+                theme,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // The transient activity bar sits directly below the goal bar (when
+    // active) and directly above the input box. Hidden while text is actively
+    // streaming ("responding"), since the streamed response is itself the
+    // feedback in that phase, and hidden when idle.
     if status_active {
-        draw_status_bar(
+        draw_activity_bar(
             frame,
-            Rect::new(footer_x, status_y, footer_w, STATUS_BAR_ROWS),
+            Rect::new(
+                footer_x,
+                status_y + plan_panel_height + goal_bar_height,
+                footer_w,
+                STATUS_BAR_ROWS,
+            ),
             activity,
             spinner_phase,
             theme,
         );
     }
 
-    // Sticky plan panel sits directly below the status bar (when active)
-    // and directly above the input box.
-    if plan_panel_active {
-        if let Some(progress) = plan_progress {
-            draw_plan_panel(
-                frame,
-                Rect::new(
-                    footer_x,
-                    status_y + status_height,
-                    footer_w,
-                    PLAN_PANEL_ROWS,
-                ),
-                progress,
-                turn_count,
-                theme,
-            );
-        }
-    }
-
-    // The input box sits directly below the status bar + plan panel (when
-    // active), or at the top of the footer otherwise.
+    // The input box sits directly below the plan panel + goal bar + activity
+    // bar (when active), or at the top of the footer otherwise.
     let input_rect = Rect::new(
         footer_x,
-        status_y + status_height + plan_panel_height,
+        status_y + plan_panel_height + goal_bar_height + status_height,
         footer_w,
         input_box_height,
     );
 
-    // The hint bar sits directly below the input box and carries the workspace
-    // / model / goal / MCP / context info that the old top header showed.
-    // Rendered last so its click-target rect is computed even though its draw
-    // call is delegated to the app loop (which owns the masked input state).
+    // The hint bar sits directly below the input box and carries the model
+    // and context-usage info. Rendered last so its rect is computed even
+    // though its draw call is delegated to the app loop (which owns the
+    // masked input state).
     let hint_rect = if hint_height > 0 {
         Rect::new(
             footer_x,
-            status_y + status_height + plan_panel_height + input_box_height,
+            status_y + plan_panel_height + goal_bar_height + status_height + input_box_height,
             footer_w,
             hint_height,
         )
@@ -497,6 +580,8 @@ pub fn draw_transcript(
     TranscriptRender {
         input_rect,
         hint_rect,
+        goal_rect,
+        plan_rect,
         content_lines,
         view_height: transcript_area.height,
         sticky: sticky_info,
@@ -605,6 +690,8 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
@@ -658,7 +745,7 @@ mod tests {
                     "mock",
                     0,
                     &HashMap::new(),
-                    &ModelPickerSnapshot::default(),
+                    &ProviderPickerSnapshot::default(),
                     "",
                     0,
                     &theme,
@@ -873,6 +960,8 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
@@ -906,6 +995,8 @@ mod tests {
                             total: 1,
                         }),
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
@@ -1028,6 +1119,8 @@ mod tests {
                             chrome_hidden: false,
                             subagent_bar: None,
                             plan_progress: None,
+                            plan_panel_expanded: false,
+                            current_goal: None,
                             turn_count: 0,
                             hovered_step: None,
                             focused_target: None,
@@ -1174,6 +1267,8 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
@@ -1315,6 +1410,8 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,
@@ -1391,6 +1488,8 @@ mod tests {
                         chrome_hidden: false,
                         subagent_bar: None,
                         plan_progress: None,
+                        plan_panel_expanded: false,
+                        current_goal: None,
                         turn_count: 0,
                         hovered_step: None,
                         focused_target: None,

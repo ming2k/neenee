@@ -42,7 +42,7 @@ scroll directly. The two [toasts](#toasts) are non-modal and use a different
 
 | Modal | Trigger | `centered_rect` | Source |
 |-------|---------|-----------------|--------|
-| [Models](#models-modal) | `Ctrl+M` / `/models` | 72 × 60 | `draw_models_modal` |
+| [Models](#models-modal) | `Ctrl+M` / `/provider` | 72 × 60 | `draw_models_modal` |
 | [Model editor](#model-editor) | Models modal `e` | 60 × 36 | `draw_model_editor` |
 | [Sessions](#sessions-modal) | `/sessions` | 80 × 64 | `draw_sessions_modal` |
 | [Session](#session-modal) | `/session` | 76 × 70 | `draw_session_modal` |
@@ -90,7 +90,7 @@ fuzzy filter. Rows are ranked favorites-first, then last-used, then name.
 
 `Ctrl+M` opens this modal only on terminals that support the Kitty enhanced
 keyboard protocol. In a raw terminal `Ctrl+M` is byte-identical to `Enter`,
-so on unsupported terminals the key falls through to `Enter` and `/models`
+so on unsupported terminals the key falls through to `Enter` and `/provider`
 is the reliable trigger.
 
 ## Model editor

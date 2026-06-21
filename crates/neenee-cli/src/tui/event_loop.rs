@@ -17,8 +17,8 @@ use ratatui::{backend::Backend, Terminal};
 use tokio::sync::mpsc;
 
 use neenee_core::{
-    AgentRequest, HarnessSnapshot, ModelPickerSnapshot, PermissionDecision, PermissionRequest,
-    PlanProgress, Role, SessionOverview, UserQuestionRequest,
+    AgentRequest, HarnessSnapshot, PermissionDecision, PermissionRequest, PlanProgress,
+    ProviderPickerSnapshot, Role, SessionOverview, UserQuestionRequest,
 };
 
 use crate::tui::clipboard;
@@ -33,7 +33,7 @@ use crate::tui::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionState,
 };
 use crate::tui::step_interaction;
-use crate::tui::{App, Modal, SessionTab, SOLUTIONS};
+use crate::tui::{App, Modal, SessionTab, PROVIDERS};
 
 use tokio::sync::Mutex;
 
@@ -52,7 +52,7 @@ pub(super) struct UiRuntime {
     pub messages: Arc<Mutex<Vec<TranscriptMessage>>>,
     pub key_status: Arc<Mutex<HashMap<String, bool>>>,
     /// Model-picker snapshot shared with the response listener.
-    pub model_picker: Arc<Mutex<ModelPickerSnapshot>>,
+    pub provider_picker: Arc<Mutex<ProviderPickerSnapshot>>,
     /// Sessions picker rows + a one-shot request to open the picker modal.
     pub sessions_overview: Arc<Mutex<Vec<SessionOverview>>>,
     pub open_sessions: Arc<AtomicBool>,
@@ -129,7 +129,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
-            app.model_picker = runtime.model_picker.lock().await.clone();
+            app.provider_picker = runtime.provider_picker.lock().await.clone();
             if app.pending_permission.is_some() && app.active_modal == Modal::None {
                 app.active_modal = Modal::Permission;
                 app.modal_index = 0;
@@ -359,6 +359,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                     chrome_hidden,
                     subagent_bar,
                     plan_progress: app.plan_progress.as_ref(),
+                    plan_panel_expanded: app.plan_panel_expanded,
+                    current_goal: app.current_goal.as_ref(),
                     turn_count: app.turn_count,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
@@ -367,31 +369,27 @@ pub(super) async fn run_app_loop<B: Backend>(
             );
             let input_rect = transcript_render.input_rect;
             let hint_rect = transcript_render.hint_rect;
+            let goal_rect = transcript_render.goal_rect;
+            let plan_rect = transcript_render.plan_rect;
             let content_lines = transcript_render.content_lines;
             let view_height = transcript_render.view_height;
             let sticky = transcript_render.sticky;
 
-            // The hint bar (workspace / model / goal / MCP / context) lives
-            // directly below the input box and carries the info the old top
-            // header showed. Rendered only when the chrome is visible. It is
-            // drawn before the composer because it borrows `view_messages`
-            // (an immutable borrow of `app`) while `draw_composer` needs a
-            // mutable borrow of `app.input_scroll`.
+            // The hint bar (model / context) lives directly below the input
+            // box. Rendered only when the chrome is visible. It is drawn before
+            // the composer because it borrows `view_messages` (an immutable
+            // borrow of `app`) while `draw_composer` needs a mutable borrow of
+            // `app.input_scroll`.
             // The permission sheet takes over the hint line as well as the
             // input box, so suppress the hint bar while it is open.
-            let hint_goal_rect = if !chrome_hidden
-                && hint_rect.height > 0
-                && app.active_modal != Modal::Permission
-            {
+            if !chrome_hidden && hint_rect.height > 0 && app.active_modal != Modal::Permission {
                 render::draw_hint_bar(
                     f,
                     hint_rect,
                     render::HintBarView {
                         current_provider: &app.current_provider,
                         current_model: &app.current_model,
-                        current_goal: app.current_goal.as_ref(),
                         messages: view_messages,
-                        mcp_statuses: &app.mcp_statuses,
                         focus_zone: app.focus_zone,
                         shell_active: app.focus_zone.is_compose()
                             && app.active_modal == Modal::None
@@ -399,11 +397,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                         auto_approve: app.auto_approve,
                     },
                     &app.theme,
-                )
-                .goal_rect
-            } else {
-                None
-            };
+                );
+            }
 
             // The input box is only shown when no overlay modal is open. The
             // `focused` flag drops the panel to its dim "blurred" palette and
@@ -465,7 +460,8 @@ pub(super) async fn run_app_loop<B: Backend>(
             // and for click routing.
             app.content_lines = content_lines;
             app.view_height = view_height;
-            app.hint_goal_rect = hint_goal_rect;
+            app.goal_rect = goal_rect;
+            app.plan_rect = plan_rect;
             match sticky {
                 Some(info) => {
                     app.sticky_step = Some(info.message_idx);
@@ -501,15 +497,15 @@ pub(super) async fn run_app_loop<B: Backend>(
 
             // Modals
             match app.active_modal {
-                Modal::Models => {
+                Modal::Provider => {
                     render::draw_models_modal(
                         f,
                         &mut layout_map,
-                        SOLUTIONS,
+                        PROVIDERS,
                         &app.current_provider,
                         app.modal_index,
                         &app.key_status,
-                        &app.model_picker,
+                        &app.provider_picker,
                         &app.input,
                         app.cursor_position,
                         &app.theme,
@@ -545,7 +541,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                 Modal::ModelEditor => {
                     let title = app
                         .editor_target
-                        .and_then(|idx| SOLUTIONS.get(idx))
+                        .and_then(|idx| PROVIDERS.get(idx))
                         .map(|s| s.name)
                         .unwrap_or("model");
                     render::draw_model_editor(
@@ -886,28 +882,28 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.history_index = None;
                     let _ = app.tx.send(AgentRequest::ShellCommand { command });
                 }
-                input::InputAction::ModelPickerActivate => {
-                    if app.active_modal == Modal::Models {
+                input::InputAction::ProviderPickerActivate => {
+                    if app.active_modal == Modal::Provider {
                         // Always activate the highlighted row of the filtered
                         // list. The cursor starts on the default model when the
-                        // picker opens (see `OpenModels`), so the "open + Enter"
+                        // picker opens (see `OpenProvider`), so the "open + Enter"
                         // fast path still re-activates the default — but arrow-
                         // key navigation is now respected even when the user
                         // never typed a filter. Previously an empty filter
                         // forced `default_id`, so navigating to another row and
                         // pressing Enter silently re-activated the default.
-                        let filtered = app.models_filtered();
+                        let filtered = app.providers_filtered();
                         let target_id = filtered
                             .get(app.modal_index)
                             .or_else(|| filtered.first())
-                            .map(|(i, _)| SOLUTIONS[*i].id.to_string());
+                            .map(|(i, _)| PROVIDERS[*i].id.to_string());
                         if let Some(id) = target_id {
                             if let Some((sol_idx, _)) = filtered
                                 .iter()
-                                .find(|(i, _)| SOLUTIONS[*i].id == id)
+                                .find(|(i, _)| PROVIDERS[*i].id == id)
                                 .copied()
                             {
-                                let solution = SOLUTIONS[sol_idx];
+                                let solution = PROVIDERS[sol_idx];
                                 if app.key_status.get(solution.id).copied().unwrap_or(true) {
                                     let _ = app.tx.send(AgentRequest::SwitchProvider {
                                         provider_type: solution.id.to_string(),
@@ -943,19 +939,19 @@ pub(super) async fn run_app_loop<B: Backend>(
                         }
                     }
                 }
-                input::InputAction::ModelPickerToggleFavorite => {
-                    if app.active_modal == Modal::Models {
+                input::InputAction::ProviderPickerToggleFavorite => {
+                    if app.active_modal == Modal::Provider {
                         // Toggle the favorite on the highlighted filtered row
                         // (falling back to the first visible row). Sending the
                         // request is enough; the backend pushes a fresh
                         // snapshot that flips the ★ next frame. As with
                         // activation, always honor the cursor — never override
                         // it with the default when the filter is empty.
-                        let filtered = app.models_filtered();
+                        let filtered = app.providers_filtered();
                         let target = filtered
                             .get(app.modal_index)
                             .or_else(|| filtered.first())
-                            .map(|(i, _)| SOLUTIONS[*i].id.to_string());
+                            .map(|(i, _)| PROVIDERS[*i].id.to_string());
                         if let Some(id) = target {
                             let _ = app.tx.send(AgentRequest::ToggleFavorite { id });
                         }
@@ -965,15 +961,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // `e` in the picker: open the unified editor for the
                     // highlighted filtered row. The picker filter is discarded
                     // (transient search); the original chat draft stays stashed.
-                    if app.active_modal == Modal::Models {
-                        let filtered = app.models_filtered();
+                    if app.active_modal == Modal::Provider {
+                        let filtered = app.providers_filtered();
                         if let Some(&(idx, _)) =
                             filtered.get(app.modal_index).or_else(|| filtered.first())
                         {
                             app.editor_target = Some(idx);
                             app.editor_field = 0;
                             app.editor_key.clear();
-                            app.editor_model = SOLUTIONS
+                            app.editor_model = PROVIDERS
                                 .get(idx)
                                 .map(|solution| {
                                     initial_editor_model(
@@ -1015,7 +1011,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                             } else {
                                 app.editor_model = app.input.clone();
                             }
-                            if let Some(solution) = SOLUTIONS.get(idx) {
+                            if let Some(solution) = PROVIDERS.get(idx) {
                                 let key = app.editor_key.trim();
                                 let model = if app.editor_model.trim().is_empty() {
                                     solution.model.to_string()
@@ -1052,22 +1048,22 @@ pub(super) async fn run_app_loop<B: Backend>(
                         app.esc_armed_ticks = 20;
                     }
                 }
-                input::InputAction::OpenModels => {
+                input::InputAction::OpenProvider => {
                     // Stash whatever the user was composing so Esc restores it;
                     // the input box is reused as the fuzzy filter while the
                     // picker is open (same pattern as HistorySearch).
                     app.stashed_input = std::mem::take(&mut app.input);
                     app.cursor_position = 0;
                     app.input_scroll = 0;
-                    app.active_modal = Modal::Models;
+                    app.active_modal = Modal::Provider;
                     // Land the cursor on the current default so the "open picker
                     // + Enter" fast path still re-activates it. Activation always
-                    // honors the highlighted row (see `ModelPickerActivate`), so
+                    // honors the highlighted row (see `ProviderPickerActivate`), so
                     // this initial position is what makes the fast path work.
-                    let filtered = app.models_filtered();
+                    let filtered = app.providers_filtered();
                     app.modal_index = filtered
                         .iter()
-                        .position(|(i, _)| SOLUTIONS[*i].id == app.model_picker.default_id)
+                        .position(|(i, _)| PROVIDERS[*i].id == app.provider_picker.default_id)
                         .unwrap_or(0);
                     app.suggestion_index = None;
                 }
@@ -1200,7 +1196,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                         app.input_scroll = 0;
                         app.suggestion_index = None;
                         app.modal_index = 0;
-                    } else if app.active_modal == Modal::Models {
+                    } else if app.active_modal == Modal::Provider {
                         // The input box was borrowed as the fuzzy filter; hand
                         // the in-progress draft back so Esc cancels cleanly.
                         app.input = std::mem::take(&mut app.stashed_input);
@@ -1216,7 +1212,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                         app.editor_target = None;
                         app.input.clear();
                         app.cursor_position = 0;
-                        app.active_modal = Modal::Models;
+                        app.active_modal = Modal::Provider;
                     }
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_message_idx = None;
@@ -1558,11 +1554,11 @@ pub(super) async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::ModalUp => match app.active_modal {
-                    Modal::Models => {
+                    Modal::Provider => {
                         // Walk the fuzzy-filtered list, not the raw catalog, so
                         // the cursor never lands on a hidden row (same rule as
                         // the history-search modal).
-                        let count = app.models_filtered().len();
+                        let count = app.providers_filtered().len();
                         app.modal_index = if count == 0 {
                             0
                         } else if app.modal_index == 0 {
@@ -1611,8 +1607,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
-                    Modal::Models => {
-                        let count = app.models_filtered().len().max(1);
+                    Modal::Provider => {
+                        let count = app.providers_filtered().len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::HistorySearch => {
@@ -1898,10 +1894,10 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    // Hint bar's goal segment: surface the full goal via the
-                    // existing `/goal status` command. Acts as the
-                    // click-to-expand affordance promised by the hint bar.
-                    if app.hint_goal_rect.is_some_and(|r| {
+                    // Goal bar: surface the full goal via the existing
+                    // `/goal status` command. Acts as the click-to-expand
+                    // affordance promised by the goal bar.
+                    if app.goal_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         let cmd = "/goal status".to_string();
@@ -1915,6 +1911,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                             .await
                             .push(TranscriptMessage::new(Role::User, cmd.clone()));
                         let _ = app.tx.send(AgentRequest::SlashCommand(cmd));
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.plan_rect.is_some_and(|r| {
+                        // Plan panel: toggle between the single-row summary and
+                        // the full per-section list.
+                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                    }) {
+                        app.plan_panel_expanded = !app.plan_panel_expanded;
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();
@@ -2221,7 +2226,7 @@ pub(super) fn extract_selection_text(
 }
 
 fn initial_editor_model(
-    solution: &crate::tui::ModelSolution,
+    solution: &crate::tui::ProviderPreset,
     current_provider: &str,
     current_model: &str,
 ) -> String {

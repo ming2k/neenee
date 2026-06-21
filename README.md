@@ -51,11 +51,11 @@ Strictly-layered six-crate workspace (see ADR-0005 for the topology and renames)
 
 | Crate | Responsibility |
 |-------|----------------|
-| `neenee-core` | Pure domain types: events, messages, tools, goals, skills config, capability traits. No I/O. |
+| `neenee-core` | Pure domain types: events, messages, tools, goals, skills config, capability traits, model registry. No I/O. |
 | `neenee-providers` | Concrete LLM providers (Kimi, OpenAI-compatible, Gemini native, Mock) and the `build_provider_for_channel` factory. |
 | `neenee-tools` | Concrete `Tool` implementations (bash, read/write/edit, glob, grep, web search, MCP loader, project init). |
 | `neenee-store` | Local coding-agent persistence: event-sourced sessions, blob store, config, paths, advisory locks, embedding index. |
-| `neenee-agent` | The `Agent` struct, turn orchestration, compaction, retries, model/channel catalog, skills, and `TaskTool`. |
+| `neenee-agent` | The `Agent` struct, turn orchestration, compaction, retries, provider catalog, skills, and `TaskTool`. |
 | `neenee-cli` | The `neenee` binary: inlined Ratatui TUI, slash commands, cancellation, and autonomous loops. |
 
 Dependency direction is strict: `core` ← {`providers`, `tools`, `store`} ← `agent` ← `cli`, with no reverse edges. Provider streaming and tool-call delta reconstruction stay inside the `agent` layer, before tool execution.
@@ -105,6 +105,7 @@ cargo run -- resume <id>
 | `/session list` | List all available sessions. |
 | `/session open <short-id>` | Open a specific session. |
 | `/compact` | Manually compact older turns to save context. |
+| `/export` | Export the current conversation to the clipboard as Markdown for handoff to another agent. |
 | `/goal <description>` | Create and start a new goal. |
 | `/goal done` | Mark the current goal as completed. |
 | `/loop 8` | Start an autonomous loop with up to 8 turns. |
@@ -118,7 +119,7 @@ cargo run -- resume <id>
 |----------|--------|
 | `Ctrl+B` | Switch from input (Compose) to conversation stream (Browse). Press any key (typically `p`) to return. |
 | `Ctrl+T` | Expand / collapse tool arguments and output. |
-| `Ctrl+M` | Open the model selection modal. |
+| `Ctrl+M` | Open the provider picker. |
 | `Ctrl+C` | Context-aware: copy selection → interrupt response → close modal → clear input → exit (double press). |
 | `/exit` or `q` (empty prompt) | Quit the program. |
 
@@ -135,17 +136,16 @@ cargo run -- resume <id>
 
 ### API Keys
 
-Open the solution modal with `/models` or `Ctrl+M`. Presets include:
+Open the provider picker with `/provider` or `Ctrl+M`. Presets include:
 
 | Preset | Notes |
 |--------|-------|
-| **Kimi K2.7 Code** | Moonshot AI's strongest coding model via the official `api.moonshot.ai` endpoint. 256K context. |
+| **Kimi K2.7 Code** | Moonshot AI's strongest coding model via the Kimi Code membership platform (`api.kimi.com/coding`). 256K context. |
 | **OpenAI** | Standard OpenAI-compatible endpoint. |
 | **Gemini 2.5 Flash** | Google's Gemini 2.5 Flash model. |
 | **DeepSeek V4 Flash** | DeepSeek V4 Flash via the official `deepseek-v4-flash` model. |
 | **DeepSeek V4 Pro** | DeepSeek V4 Pro via the official `deepseek-v4-pro` model. |
-| **Qwen Plus** | Alibaba DashScope. |
-| **GLM 4 Plus** | Zhipu AI. |
+| **ZAI Code** | Zhipu AI GLM-5.2 via the Z.AI coding-plan platform. 1M context. |
 
 Each preset shows whether a usable key is configured:
 - `✓ ready` — key present
@@ -159,6 +159,7 @@ Values are saved to `~/.config/neenee/config.toml`. Environment variables take p
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | API key / model override for Gemini (default `gemini-2.5-flash`). |
 | `DEEPSEEK_API_KEY` | Shared API key for DeepSeek V4 Flash and Pro. |
 | `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` | Model override for DeepSeek V4 Flash / Pro. |
+| `ZAI_API_KEY` / `ZAI_MODEL` | API key / model override for ZAI Code (default `glm-5.2`). |
 
 ### MCP Servers
 

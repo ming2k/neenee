@@ -763,10 +763,9 @@ impl Agent {
 
         loop {
             if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(HarnessError::Other(format!(
-                    "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
-                    MAX_TOOL_ROUNDS
-                )));
+                return Err(HarnessError::TurnLimitReached {
+                    rounds: MAX_TOOL_ROUNDS,
+                });
             }
             if cancel.is_cancelled() {
                 return Err(HarnessError::Interrupted);
@@ -852,12 +851,11 @@ impl Agent {
             if tool_rounds >= MAX_TOOL_ROUNDS {
                 tracing::warn!(
                     max_rounds = MAX_TOOL_ROUNDS,
-                    "turn aborted: tool-round limit"
+                    "turn paused: tool-round limit"
                 );
-                return Err(HarnessError::Other(format!(
-                    "Agent stopped after {} tool rounds. Refine the goal or continue with /loop.",
-                    MAX_TOOL_ROUNDS
-                )));
+                return Err(HarnessError::TurnLimitReached {
+                    rounds: MAX_TOOL_ROUNDS,
+                });
             }
             if cancel.is_cancelled() {
                 return Err(HarnessError::Interrupted);
@@ -1109,7 +1107,16 @@ impl Agent {
                 .any(|(result, _)| matches!(result, ToolOutput::PermissionDenied { .. }));
             for ((call, id), (result, duration_ms)) in tool_calls.iter().zip(&call_ids).zip(results)
             {
-                self.record_tool_result(call, id, &result, duration_ms, messages, state, on_event);
+                self.record_tool_result(
+                    call,
+                    id,
+                    &result,
+                    duration_ms,
+                    messages,
+                    state,
+                    false,
+                    on_event,
+                );
             }
             // If the user denied permission for any call, stop the turn here
             // instead of feeding the (possibly partial) results back to the
@@ -1143,6 +1150,7 @@ impl Agent {
                 duration_ms,
                 messages,
                 state,
+                true,
                 on_event,
             );
             return Ok(!denied);
@@ -1163,6 +1171,7 @@ impl Agent {
         duration_ms: u64,
         messages: &mut Vec<Message>,
         state: &mut TurnState,
+        emit_event: bool,
         on_event: &mut F,
     ) where
         F: FnMut(AgentEvent) + Send,
@@ -1189,13 +1198,15 @@ impl Agent {
         self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
         self.emit_plan_progress_change(call, on_event);
-        on_event(AgentEvent::ToolResult {
-            id: call_id.to_string(),
-            name: call.name.clone(),
-            output: text.clone(),
-            structured: result.clone(),
-            duration_ms,
-        });
+        if emit_event {
+            on_event(AgentEvent::ToolResult {
+                id: call_id.to_string(),
+                name: call.name.clone(),
+                output: text.clone(),
+                structured: result.clone(),
+                duration_ms,
+            });
+        }
         // For sub-agent results, attach the nested transcript as `children` on
         // the persisted Tool-role message so resume can rebuild the sub-agent
         // view without a live event stream. The nested `Message`s already
@@ -1460,7 +1471,10 @@ impl Agent {
         // plan path, seed plan progress, and return the plan content.
         match tool.call(&call.arguments).await {
             Ok(text) => ToolOutput::Text(text),
-            Err(err) => ToolOutput::Text(format!("Error executing plan_exit: {}", err)),
+            Err(err) => ToolOutput::Error {
+                message: format!("Error executing plan_exit: {err}"),
+                detail: None,
+            },
         }
     }
 
@@ -1472,7 +1486,12 @@ impl Agent {
     ) -> ToolOutput {
         let tool = match self.tools.iter().find(|t| t.name() == call.name) {
             Some(t) => t,
-            None => return ToolOutput::Text(format!("Error: Tool '{}' not found", call.name)),
+            None => {
+                return ToolOutput::Error {
+                    message: format!("Tool '{}' not found", call.name),
+                    detail: None,
+                }
+            }
         };
 
         // Defense in depth: even though disabled tools are dropped from the
@@ -1594,7 +1613,10 @@ impl Agent {
             .await
         {
             Ok(output) => output,
-            Err(err) => ToolOutput::Text(format!("Error executing {}: {}", call.name, err)),
+            Err(err) => ToolOutput::Error {
+                message: format!("Error executing {}: {}", call.name, err),
+                detail: None,
+            },
         }
     }
 
@@ -1671,10 +1693,26 @@ impl Agent {
             .zip(call_ids.iter())
             .map(|(call, call_id)| {
                 let tx = tx.clone();
+                let name = call.name.clone();
+                let call_id = call_id.to_string();
                 async move {
                     let started = std::time::Instant::now();
-                    let result = self.execute_tool(call, call_id, &tx).await;
-                    (result, started.elapsed().as_millis() as u64)
+                    let result = self.execute_tool(call, &call_id, &tx).await;
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    // Emit ToolResult immediately through the channel so the TUI
+                    // transitions this step from Running to Completed without
+                    // waiting for sibling tools to finish. Without this, a
+                    // finished sub-agent task stays "Running" until the slowest
+                    // sibling in the batch completes.
+                    let output = result.to_text();
+                    let _ = tx.send(AgentEvent::ToolResult {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        output,
+                        structured: result.clone(),
+                        duration_ms,
+                    });
+                    (result, duration_ms)
                 }
             })
             .collect();

@@ -24,6 +24,7 @@ pub mod capability;
 pub mod catalog;
 pub mod events;
 pub mod mcp;
+pub mod model;
 pub mod plan;
 pub use plan::{PlanProgress, PlanSection, PlanSectionStatus};
 pub mod pressure;
@@ -31,14 +32,15 @@ pub mod skillsconfig;
 pub mod tool_call;
 pub mod webconfig;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
-pub use catalog::{Channel, ModelEntry, Transport};
+pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
-    ModelPickerRow, ModelPickerSnapshot, PermissionDecision, PermissionRequest, PermissionRuleInfo,
-    SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent, ToolInfo, UserQuestion,
-    UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
+    ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent,
+    ToolInfo, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
 pub use mcp::{McpConnectionStatus, McpServerConfig};
+pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
     estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
 };

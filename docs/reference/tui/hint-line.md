@@ -1,8 +1,8 @@
 # Hint line
 
 Single-row status strip below the input box. Left side carries the focus-zone
-pill and optional auto-approve badge; right side carries the model name, MCP
-summary, and context-usage indicator.
+pill and optional auto-approve badge; right side carries the model name and
+context-usage indicator.
 
 ## Appearance
 

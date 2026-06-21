@@ -64,12 +64,13 @@ pub use neenee_core::{
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
     AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal, GoalAccountingResult,
     GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus, GoalStore, HarnessError,
-    HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, ModelEntry,
-    ModelPickerRow, ModelPickerSnapshot, PatchOp, PermissionDecision, PermissionRequest, Provider,
-    ProviderStreamEvent, PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig,
-    SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolResult, ToolStream,
-    Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply,
-    UserQuestionRequest, WebSearchConfig, PRUNED_TOOL_PLACEHOLDER,
+    HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp,
+    PermissionDecision, PermissionRequest, Provider, ProviderEntry, ProviderPickerRow,
+    ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, RetryableError, Role,
+    SessionOverview, SkillsConfig, SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall,
+    ToolOutput, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion,
+    UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
+    PRUNED_TOOL_PLACEHOLDER,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from

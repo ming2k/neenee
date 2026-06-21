@@ -1,6 +1,6 @@
 //! Per-model usage telemetry, persisted under XDG state.
 //!
-//! Drives recency ordering in the model picker (ADR-0002 phase 2). This is
+//! Drives recency ordering in the provider picker This is
 //! program-generated usage signal, not user preference: it lives under
 //! `$XDG_STATE_HOME` next to `history.json`, and losing it only flattens the
 //! sort order — never configuration. Favorites and the default-model pointer
@@ -27,18 +27,18 @@ struct UsageEntry {
     use_count: u64,
 }
 
-/// The on-disk usage map. Serialized as `model_usage.json`.
+/// The on-disk usage map. Serialized as `provider_usage.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ModelUsage {
+pub struct ProviderUsage {
     #[serde(default)]
     entries: HashMap<String, UsageEntry>,
 }
 
-impl ModelUsage {
+impl ProviderUsage {
     /// Load from the well-known state file. Returns an empty store when the
     /// file is missing or unreadable, since the data is fully rebuildable.
     pub fn load() -> Self {
-        let path = paths::get().model_usage_file();
+        let path = paths::get().provider_usage_file();
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -59,7 +59,7 @@ impl ModelUsage {
     /// Persist atomically. Best-effort: callers ignore the result since usage
     /// tracking is non-critical.
     pub fn save(&self) -> Result<(), String> {
-        fsutil::atomic_write_json(&paths::get().model_usage_file(), self)
+        fsutil::atomic_write_json(&paths::get().provider_usage_file(), self)
     }
 
     /// Last-used timestamp (epoch ms) for a model id. `None` when the model
@@ -70,8 +70,8 @@ impl ModelUsage {
 
     /// Number of times `id` was activated. `0` for unknown ids.
     ///
-    /// Consumed by the model picker's tie-breaking and future "most used"
-    /// views (ADR-0002 phase 3).
+    /// Consumed by the provider picker's tie-breaking and future "most used"
+    /// views
     #[allow(dead_code)]
     pub fn use_count(&self, id: &str) -> u64 {
         self.entries.get(id).map_or(0, |e| e.use_count)
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn record_sets_last_used_and_increments_count() {
-        let mut usage = ModelUsage::default();
+        let mut usage = ProviderUsage::default();
         assert_eq!(usage.use_count("gemini"), 0);
         assert!(usage.last_used_ms("gemini").is_none());
 
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn record_stores_id_verbatim() {
-        let mut usage = ModelUsage::default();
+        let mut usage = ProviderUsage::default();
         // Ids are stored as given; there is no alias canonicalization.
         usage.record("deepseek-v4-flash");
         assert_eq!(usage.use_count("deepseek-v4-flash"), 1);
@@ -120,14 +120,14 @@ mod tests {
 
     #[test]
     fn unknown_id_has_no_last_used_and_zero_count() {
-        let usage = ModelUsage::default();
+        let usage = ProviderUsage::default();
         assert!(usage.last_used_ms("never-used").is_none());
         assert_eq!(usage.use_count("never-used"), 0);
     }
 
     #[test]
     fn record_never_moves_clock_backwards() {
-        let mut usage = ModelUsage::default();
+        let mut usage = ProviderUsage::default();
         usage.record("glm");
         let real_now = usage.last_used_ms("glm").unwrap();
         // Inject an artificially older timestamp directly, then record again:
@@ -142,12 +142,12 @@ mod tests {
 
     #[test]
     fn usage_round_trips_through_json() {
-        let mut usage = ModelUsage::default();
+        let mut usage = ProviderUsage::default();
         usage.record("qwen");
         usage.record("qwen");
         usage.record("glm");
         let json = serde_json::to_string(&usage).unwrap();
-        let restored: ModelUsage = serde_json::from_str(&json).unwrap();
+        let restored: ProviderUsage = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.use_count("qwen"), 2);
         assert_eq!(restored.use_count("glm"), 1);
         assert!(restored.last_used_ms("qwen").is_some());

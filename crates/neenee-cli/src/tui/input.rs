@@ -81,15 +81,15 @@ pub enum InputAction {
     /// stripped and the remaining text is executed through the `bash` tool
     /// without an LLM roundtrip.
     SendShell(String),
-    /// Activate a model from the `/models` picker: the default model when the
+    /// Activate a model from the `/provider` picker: the default model when the
     /// filter is empty (fast path), otherwise the highlighted filtered row.
     /// Falls through to the API-key setup modal when the target has no key.
-    ModelPickerActivate,
+    ProviderPickerActivate,
     /// Toggle the favorite flag on the highlighted picker row.
-    ModelPickerToggleFavorite,
-    /// Open the unified model editor (`e`) for the highlighted picker row.
+    ProviderPickerToggleFavorite,
+    /// Open the unified provider editor (`e`) for the highlighted picker row.
     OpenModelEditor,
-    /// Submit the unified model editor: persist the entered key / model-id and
+    /// Submit the unified provider editor: persist the entered key / model-id and
     /// activate the target model.
     SubmitModelEditor,
     /// Cycle focus between the editor's fields (API key ↔ model id).
@@ -97,7 +97,7 @@ pub enum InputAction {
     /// Interrupt current operation.
     Interrupt,
     /// Open models modal.
-    OpenModels,
+    OpenProvider,
     /// Open history search modal.
     OpenHistory,
     /// Open the command palette (slash commands).
@@ -535,7 +535,7 @@ pub fn process_event(
                 // input behavior untouched — no regression.
                 KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if context.active_modal == super::Modal::None {
-                        InputAction::OpenModels
+                        InputAction::OpenProvider
                     } else {
                         InputAction::None
                     }
@@ -555,7 +555,7 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Enter => match context.active_modal {
-                    super::Modal::Models => InputAction::ModelPickerActivate,
+                    super::Modal::Provider => InputAction::ProviderPickerActivate,
                     super::Modal::ModelEditor => InputAction::SubmitModelEditor,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
@@ -600,10 +600,10 @@ pub fn process_event(
                         if text.starts_with('/') {
                             // Match on the trimmed text: accepting a slash
                             // completion appends a trailing space, which would
-                            // otherwise make "/models " miss the exact-match
+                            // otherwise make "-----" miss the exact-match
                             // arm and silently no-op in the backend.
                             match text.trim() {
-                                "/models" => InputAction::OpenModels,
+                                "/provider" => InputAction::OpenProvider,
                                 "/session" => InputAction::OpenSession,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
@@ -690,7 +690,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
@@ -703,7 +703,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
@@ -722,7 +722,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         let start = prev_word_start(input, *cursor_position);
@@ -753,7 +753,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         let mut start = *cursor_position;
@@ -784,7 +784,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         let mut end = *cursor_position;
@@ -812,7 +812,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         *cursor_position = prev_word_start(input, *cursor_position);
@@ -825,7 +825,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         *cursor_position = next_word_end(input, *cursor_position);
@@ -839,7 +839,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         let end = next_word_end(input, *cursor_position);
@@ -913,14 +913,14 @@ pub fn process_event(
                         *cursor_position += 1;
                         return InputAction::ReturnToComposeZone;
                     }
-                    if context.active_modal == super::Modal::Models && c == '*' {
+                    if context.active_modal == super::Modal::Provider && c == '*' {
                         // Star a model as a favorite. `*` is chosen over `f`
                         // because every letter collides with the fuzzy filter
                         // (you could never start a query for "flash" or
                         // "deepseek"). `*` evokes the favorite star and never
                         // begins a model-name query.
-                        InputAction::ModelPickerToggleFavorite
-                    } else if context.active_modal == super::Modal::Models
+                        InputAction::ProviderPickerToggleFavorite
+                    } else if context.active_modal == super::Modal::Provider
                         && c == 'e'
                         && input.is_empty()
                     {
@@ -937,7 +937,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         let byte_pos = input
@@ -964,7 +964,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
@@ -1045,7 +1045,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
@@ -1074,7 +1074,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) && *cursor_position < input.chars().count()
                     {
@@ -1091,7 +1091,7 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Up => match context.active_modal {
-                    super::Modal::Models => InputAction::ModalUp,
+                    super::Modal::Provider => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
                     super::Modal::Question => InputAction::QuestionUp,
@@ -1131,7 +1131,7 @@ pub fn process_event(
                     }
                 },
                 KeyCode::Down => match context.active_modal {
-                    super::Modal::Models => InputAction::ModalDown,
+                    super::Modal::Provider => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
                     super::Modal::Question => InputAction::QuestionDown,
@@ -1192,7 +1192,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         cursor_line_start(input, cursor_position);
@@ -1211,7 +1211,7 @@ pub fn process_event(
                         context.active_modal,
                         super::Modal::None
                             | super::Modal::HistorySearch
-                            | super::Modal::Models
+                            | super::Modal::Provider
                             | super::Modal::ModelEditor
                     ) {
                         cursor_line_end(input, cursor_position);
@@ -1335,7 +1335,7 @@ mod tests {
 
     #[test]
     fn enter_accepts_a_highlighted_slash_suggestion() {
-        // User typed `/m`, menu shows `/mode` / `/mcp` / `/models`, user
+        // User typed `/m`, menu shows `/mode` / `/mcp` / `/provider`, user
         // pressed ↓ to highlight `/mcp` (index 1). Enter must accept the
         // highlighted item rather than sending `/m` as a (rejected) command.
         let mut input = "/m".to_string();
@@ -1372,7 +1372,7 @@ mod tests {
     #[test]
     fn enter_highlight_wins_over_exact_slash_match() {
         // User typed `/mode` (exact match) but then pressed ↓ to highlight
-        // `/models`. The explicit highlight is a stronger signal than the
+        // `/provider`. The explicit highlight is a stronger signal than the
         // exact-match fast path, so Enter accepts the highlight.
         let mut input = "/mode".to_string();
         assert_eq!(
@@ -1814,7 +1814,7 @@ mod tests {
             &mut input,
             &mut cursor,
             InputContext {
-                active_modal: crate::tui::Modal::Models,
+                active_modal: crate::tui::Modal::Provider,
                 is_responding: false,
                 completion_kind: crate::tui::CompletionKind::None,
                 suggestion_count: 0,
@@ -1829,7 +1829,7 @@ mod tests {
             },
             &mut drag,
         );
-        assert_eq!(action, InputAction::ModelPickerToggleFavorite);
+        assert_eq!(action, InputAction::ProviderPickerToggleFavorite);
     }
 
     #[test]
@@ -1844,7 +1844,7 @@ mod tests {
             &mut input,
             &mut cursor,
             InputContext {
-                active_modal: crate::tui::Modal::Models,
+                active_modal: crate::tui::Modal::Provider,
                 is_responding: false,
                 completion_kind: crate::tui::CompletionKind::None,
                 suggestion_count: 0,
@@ -1923,7 +1923,7 @@ mod tests {
             context,
             &mut drag,
         );
-        assert_eq!(action, InputAction::OpenModels);
+        assert_eq!(action, InputAction::OpenProvider);
 
         // While a modal is already open, Ctrl+M is ignored so it cannot yank
         // the user out of another modal mid-interaction.
@@ -2332,7 +2332,7 @@ mod tests {
 
     #[test]
     fn home_and_end_move_caret_in_free_text_modals() {
-        // The unified model editor borrows the input line for one field at a
+        // The unified provider editor borrows the input line for one field at a
         // time; Home/End should edit there too, not be swallowed.
         for modal in [
             crate::tui::Modal::ModelEditor,
@@ -2774,7 +2774,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_works_in_history_modal() {
-        // Free-text modals (history search, models, model editor) accept the
+        // Free-text modals (history search, models, provider editor) accept the
         // same line-editing vocabulary as the main prompt so the user is
         // never trapped mid-query.
         let mut input = "fuzzy query".to_string();

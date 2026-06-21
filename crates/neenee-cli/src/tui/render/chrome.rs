@@ -1,4 +1,4 @@
-//! Transient chrome around the input box: the activity status bar with an
+//! Transient chrome around the input box: the activity bar with an
 //! animated breathing-dot indicator shown above the input, the completion menu
 //! anchored above the input, and the persistent hint bar pinned below the
 //! input.
@@ -18,7 +18,7 @@ use crate::tui::layout::LayoutMap;
 use neenee_core::{Goal, GoalStatus};
 
 use super::design::{
-    HINT_BAR_GAP_MIN, HINT_BAR_GOAL_MAX_CHARS, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP,
+    GOAL_OBJECTIVE_MAX_CHARS, HINT_BAR_GAP_MIN, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP,
 };
 use super::primitives::{contrast_fg, viewport_rect};
 use super::Theme;
@@ -62,7 +62,7 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// Replaces the old inline `┃ neenee ⟳ <status>` indicator: the brand prefix
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
-pub fn draw_status_bar(
+pub fn draw_activity_bar(
     frame: &mut Frame,
     rect: Rect,
     status: &str,
@@ -93,6 +93,90 @@ pub fn draw_status_bar(
     frame.render_widget(Paragraph::new(line), rect);
 }
 
+/// Inputs for [`draw_goal_bar`]. The bar is shown only while the goal is in the
+/// `Active` state (see the early-return guard inside the draw function), so the
+/// caller may pass `Some(goal)` unconditionally and let the renderer decide
+/// visibility.
+pub struct GoalBarView<'a> {
+    pub goal: &'a Goal,
+    pub spinner_phase: usize,
+}
+
+/// Draw the single-line goal bar pinned directly above the activity bar. The
+/// bar surfaces the active goal's objective and checklist progress against a
+/// subtly raised background so the user can tell at a glance it is clickable.
+/// Clicking anywhere inside the returned rect surfaces the full goal via
+/// `/goal status`.
+///
+/// Only rendered when `goal.status == Active`. Returns `Some(rect)` (the full
+/// bar rect, for hit-testing) when drawn, `None` otherwise.
+pub fn draw_goal_bar(
+    frame: &mut Frame,
+    rect: Rect,
+    view: GoalBarView<'_>,
+    theme: &Theme,
+) -> Option<Rect> {
+    let GoalBarView {
+        goal,
+        spinner_phase,
+    } = view;
+
+    if goal.status != GoalStatus::Active {
+        return None;
+    }
+
+    let accent_bg = theme.raised();
+
+    // Breathing spinner — same calm luminance sweep as the activity bar, so the
+    // goal bar reads as a sibling indicator while the goal is actively in
+    // progress.
+    let spinner = spinner_glyph();
+    let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
+
+    let objective: String = goal
+        .objective
+        .chars()
+        .take(GOAL_OBJECTIVE_MAX_CHARS)
+        .collect();
+    let suffix = if goal.objective.chars().count() > GOAL_OBJECTIVE_MAX_CHARS {
+        "..."
+    } else {
+        ""
+    };
+
+    let progress = goal_checklist_summary(goal)
+        .map(|(done, total, _)| format!(" [{}/{}]", done, total))
+        .unwrap_or_default();
+
+    let label = format!("{}{}{}", objective, suffix, progress);
+
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            spinner,
+            Style::default()
+                .fg(spinner_color)
+                .bg(accent_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(label, Style::default().fg(theme.muted()).bg(accent_bg)),
+    ]);
+
+    // Fill the rest of the row with the raised background so the entire bar
+    // reads as a clickable surface, not just the text portion.
+    let mut spans: Vec<Span<'static>> = line.spans;
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let full_w = rect.width as usize;
+    spans.push(Span::styled(
+        " ".repeat(full_w.saturating_sub(used)),
+        Style::default().bg(accent_bg),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+    Some(rect)
+}
+
 /// Draw a completion menu anchored above the input box. Renders each
 /// candidate as `label · description` with the selected row highlighted; no
 /// title or operating instructions are shown so the menu reads as a plain
@@ -113,13 +197,41 @@ pub fn draw_completion_menu(
 
     const MAX_VISIBLE: usize = 6;
 
-    let visible_count = completions.len().min(MAX_VISIBLE);
+    // Windowing: `suggestion_index` is the global index into the full list,
+    // but only `MAX_VISIBLE` rows fit on screen. Without a scroll offset the
+    // highlight would scroll off the bottom (and the up-arrow wrap path
+    // would land on a row that is never rendered). The offset is recomputed
+    // every frame from `selected_idx` so it tracks the cursor live:
+    //   - when the cursor moves below the visible window, scroll down one
+    //     row at a time so it stays on the last visible line;
+    //   - when the cursor moves above (e.g. ↑ wraps from 0 to len-1), jump
+    //     the window so the cursor sits on the last visible line;
+    //   - otherwise leave it alone so short up/down moves inside the window
+    //     don't jitter the list.
+    let total = completions.len();
+    let scroll_offset = match selected_idx {
+        // Once the cursor passes the first page (sel >= MAX_VISIBLE), pin it
+        // to the last visible row and slide the window up under it — that way
+        // every ↓ just brings the next candidate into view at the bottom.
+        // For the wrap path (↑ from 0 to len-1), `sel - (MAX_VISIBLE - 1)`
+        // also yields the correct bottom-anchored window. Below MAX_VISIBLE,
+        // the window stays at the top so short moves don't jitter the list.
+        Some(sel) if sel >= MAX_VISIBLE && total > MAX_VISIBLE => {
+            (sel - (MAX_VISIBLE - 1)).min(total - MAX_VISIBLE)
+        }
+        _ => 0,
+    };
+    let window_end = (scroll_offset + MAX_VISIBLE).min(total);
+    let visible_rows = completions[scroll_offset..window_end].to_vec();
+    let visible_count = visible_rows.len();
     let popup_height = visible_count as u16;
 
     // Compute width from content. The description column is dropped entirely
     // (separator + padding) when no candidate carries a description — the
     // `@path` menu uses empty descriptions for a plain list of paths,
-    // matching opencode's minimal aesthetic.
+    // matching opencode's minimal aesthetic. Width is derived from the full
+    // candidate list (not just the visible window) so the popup doesn't
+    // resize as the user scrolls.
     let any_desc = completions.iter().any(|c| !c.description.is_empty());
     let max_cmd = completions
         .iter()
@@ -158,12 +270,15 @@ pub fn draw_completion_menu(
 
     let block = RtBlock::default().style(Style::default().bg(theme.body()));
 
-    let lines: Vec<Line> = completions
+    let lines: Vec<Line> = visible_rows
         .iter()
-        .take(MAX_VISIBLE)
         .enumerate()
-        .map(|(i, c)| {
-            let is_selected = Some(i) == selected_idx;
+        .map(|(row, c)| {
+            // `row` is the on-screen position (0..MAX_VISIBLE); recover the
+            // global index by adding the scroll offset so the highlight
+            // check matches the value passed in `selected_idx`.
+            let global_idx = row + scroll_offset;
+            let is_selected = Some(global_idx) == selected_idx;
             let style = if is_selected {
                 Style::default()
                     .bg(theme.brand())
@@ -202,24 +317,12 @@ pub fn draw_completion_menu(
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Layout info returned by [`draw_hint_bar`] for hit-testing. The goal segment
-/// is the only interactive piece (clicking it surfaces the full checklist via
-/// `/goal status`), so its screen rect is reported back to the app.
-#[derive(Default, Clone, Copy)]
-pub struct HintBarLayout {
-    /// Screen rect of the goal/checklist segment, when one is rendered.
-    pub goal_rect: Option<Rect>,
-}
-
-/// Inputs for [`draw_hint_bar`]. Mirrors the data the old top header carried so
-/// the same model / goal / MCP / context-usage info survives the move to the
-/// bottom strip.
+/// Inputs for [`draw_hint_bar`]. Carries the model + context-usage info that
+/// the old top header showed, now collapsed onto one row.
 pub struct HintBarView<'a> {
     pub current_provider: &'a str,
     pub current_model: &'a str,
-    pub current_goal: Option<&'a Goal>,
     pub messages: &'a [TranscriptMessage],
-    pub mcp_statuses: &'a [(String, neenee_core::mcp::McpConnectionStatus)],
     /// Which surface owns keyboard focus this frame. Rendered as a colored
     /// pill at the start of the bar so the user can always tell whether the
     /// next keypress lands in the input box (Compose) or the conversation
@@ -237,27 +340,17 @@ pub struct HintBarView<'a> {
     pub auto_approve: bool,
 }
 
-/// Draw the single-line hint bar pinned below the input box. Carries the same
-/// model / goal / MCP / context-usage info that the old top header showed, now
-/// collapsed onto one row so the transcript reclaims the vertical space.
+/// Draw the single-line hint bar pinned below the input box. Carries the model
+/// name and context-usage info that the old top header showed, now collapsed
+/// onto one row so the transcript reclaims the vertical space.
 ///
 /// Layout: focus-zone pill (and optional auto-approve pill) on the left,
-/// right-aligned cluster of `model · goal · MCP · context-usage` on the right.
-/// The goal segment is rendered against a subtly raised background so the user
-/// can tell it is clickable; clicking anywhere inside that rect surfaces the
-/// full goal via `/goal status`.
-pub fn draw_hint_bar(
-    frame: &mut Frame,
-    rect: Rect,
-    view: HintBarView<'_>,
-    theme: &Theme,
-) -> HintBarLayout {
+/// right-aligned cluster of `model · context-usage` on the right.
+pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme: &Theme) {
     let HintBarView {
         current_provider,
         current_model,
-        current_goal,
         messages,
-        mcp_statuses,
         focus_zone,
         shell_active,
         auto_approve,
@@ -328,40 +421,10 @@ pub fn draw_hint_bar(
         0
     };
 
-    // --- Right cluster: model name, goal (clickable), MCP, context bar.
-    // Build each segment separately so we can drop optional ones (MCP, goal)
-    // when the terminal is too narrow, and so we can record the goal rect for
-    // hit-testing.
-    let checklist = current_goal.and_then(goal_checklist_summary);
-    let goal_segment: Option<(String, usize)> = current_goal.map(|goal| {
-        let objective: String = goal
-            .objective
-            .chars()
-            .take(HINT_BAR_GOAL_MAX_CHARS)
-            .collect();
-        let suffix = if goal.objective.chars().count() > HINT_BAR_GOAL_MAX_CHARS {
-            "..."
-        } else {
-            ""
-        };
-        let mark = if goal.status == GoalStatus::Complete {
-            "✓"
-        } else {
-            "◎"
-        };
-        let progress = checklist
-            .as_ref()
-            .map(|(done, total, _)| format!(" [{}/{}]", done, total))
-            .unwrap_or_default();
-        let label = format!("{} {}{}{}", mark, objective, suffix, progress);
-        let width = label.width();
-        (label, width)
-    });
-
-    let mcp_summary = format_mcp_summary(mcp_statuses);
-    let mcp_width = mcp_summary.width();
-
-    let context_max = crate::tui::model_context_window(current_provider);
+    // --- Right cluster: model name and context bar.
+    // Build each segment separately so we can drop optional ones when the
+    // terminal is too narrow.
+    let context_max = crate::tui::provider_context_window(current_provider);
 
     // Left side: focus-zone pill and optional auto-approve pill. Computed now
     // so the gap to the right cluster can hug the right edge.
@@ -369,21 +432,19 @@ pub fn draw_hint_bar(
     let left_used = inner + zone_pill_width + auto_segment_width;
 
     // Reserve the right-side segments from the inside out: model is always
-    // shown; then goal; then MCP; then context bar. Each preceding segment is
-    // separated by `HINT_BAR_SEGMENT_GAP`. The context bar is appended last so
-    // we can shrink it to fit the row (see below). We then compute the gap
-    // between cwd and the right cluster so the cluster hugs the right edge.
+    // shown; then context bar. Each preceding segment is separated by
+    // `HINT_BAR_SEGMENT_GAP`. The context bar is appended last so we can
+    // shrink it to fit the row (see below). We then compute the gap between
+    // the left cluster and the right cluster so the cluster hugs the right
+    // edge.
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     let mut right_width = 0usize;
 
-    let mut goal_start_x: Option<usize> = None;
-    let mut goal_end_x: Option<usize> = None;
-
     // Model name (always present). Resolve the friendly preset name (e.g.
-    // `DeepSeek Pro (R1)`) from the provider id so the always-visible indicator
-    // matches the `/models` picker instead of leaking the raw model id
-    // (`deepseek-reasoner`); fall back to the model id for non-preset providers.
-    let model_label = crate::tui::model_display_name(current_provider, current_model);
+    // `DeepSeek V4 Pro`) from the provider id so the always-visible indicator
+    // matches the `/provider` picker instead of leaking the raw model id
+    // (`deepseek-v4-pro`); fall back to the model id for non-preset providers.
+    let model_label = crate::tui::model_display_name(current_model);
     right_width += model_label.width();
     right_spans.push(Span::styled(
         model_label,
@@ -392,36 +453,6 @@ pub fn draw_hint_bar(
             .add_modifier(Modifier::BOLD)
             .bg(bg),
     ));
-
-    // Goal (clickable). Rendered against `accent_bg` so the user can tell it
-    // is interactive; we track its absolute x-range for hit-testing.
-    if let Some((label, w)) = goal_segment.as_ref() {
-        right_spans.push(Span::styled(
-            " ".repeat(HINT_BAR_SEGMENT_GAP),
-            Style::default().bg(bg),
-        ));
-        right_width += HINT_BAR_SEGMENT_GAP;
-        goal_start_x = Some(right_width);
-        right_spans.push(Span::styled(
-            label.clone(),
-            Style::default().fg(theme.muted()).bg(accent_bg),
-        ));
-        right_width += *w;
-        goal_end_x = Some(right_width);
-        right_spans.push(Span::styled(
-            " ".repeat(HINT_BAR_SEGMENT_GAP),
-            Style::default().bg(bg),
-        ));
-        right_width += HINT_BAR_SEGMENT_GAP;
-    }
-
-    if !mcp_summary.is_empty() {
-        right_spans.push(Span::styled(
-            mcp_summary,
-            Style::default().fg(theme.muted()).bg(bg),
-        ));
-        right_width += mcp_width;
-    }
 
     // Context-usage segment: `89.2k (8%)`. Always shown when the model
     // reports a context window; the percentage takes the threshold color so
@@ -463,25 +494,6 @@ pub fn draw_hint_bar(
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-
-    // Map the goal segment's in-cluster offset to absolute screen coordinates
-    // for hit-testing. `goal_start_x` is measured from the start of the right
-    // cluster; the cluster begins at `inner + zone_pill_width +
-    // auto_segment_width + gap`.
-    let goal_rect = if let (Some(start), Some(end)) = (goal_start_x, goal_end_x) {
-        let cluster_x = rect.x as usize + left_used + gap;
-        let x0 = (cluster_x + start).min(rect.x as usize + full_w);
-        let x1 = (cluster_x + end).min(rect.x as usize + full_w);
-        if x1 > x0 {
-            Some(Rect::new(x0 as u16, rect.y, (x1 - x0) as u16, 1))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    HintBarLayout { goal_rect }
 }
 
 fn goal_checklist_summary(goal: &Goal) -> Option<(usize, usize, String)> {
@@ -512,30 +524,6 @@ fn goal_checklist_summary(goal: &Goal) -> Option<(usize, usize, String)> {
         .map(|item| item.content.clone())
         .unwrap_or_default();
     Some((done, goal.checklist.len(), current))
-}
-
-fn format_mcp_summary(statuses: &[(String, neenee_core::mcp::McpConnectionStatus)]) -> String {
-    if statuses.is_empty() {
-        return String::new();
-    }
-    let total = statuses.len();
-    let connected = statuses
-        .iter()
-        .filter(|(_, status)| {
-            matches!(
-                status,
-                neenee_core::mcp::McpConnectionStatus::Connected { .. }
-            )
-        })
-        .count();
-    let tools: usize = statuses
-        .iter()
-        .filter_map(|(_, status)| match status {
-            neenee_core::mcp::McpConnectionStatus::Connected { tools } => Some(*tools),
-            _ => None,
-        })
-        .sum();
-    format!("MCP {}/{} · {} tools", connected, total, tools)
 }
 
 /// Context-usage ratio at which the usage bar turns from green to yellow.
@@ -590,30 +578,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_summary_counts_connected_servers_and_tools() {
-        use neenee_core::mcp::McpConnectionStatus;
-        let statuses = vec![
-            (
-                "fs".to_string(),
-                McpConnectionStatus::Connected { tools: 3 },
-            ),
-            (
-                "git".to_string(),
-                McpConnectionStatus::Failed("not found".to_string()),
-            ),
-        ];
-        assert_eq!(
-            format_mcp_summary(&statuses),
-            "MCP 1/2 · 3 tools".to_string()
-        );
-    }
-
-    #[test]
-    fn mcp_summary_is_empty_when_no_servers() {
-        assert!(format_mcp_summary(&[]).is_empty());
-    }
-
-    #[test]
     fn format_token_count_uses_si_suffixes() {
         assert_eq!(format_token_count(0), "0");
         assert_eq!(format_token_count(999), "999");
@@ -657,12 +621,10 @@ mod tests {
         );
     }
 
-    /// The hint bar must render the model, goal, MCP, and context bar on
-    /// a single line below the input without panicking, and must report a
-    /// non-empty goal rect when a goal is present so click handling can route
-    /// to `/goal status`.
+    /// The hint bar must render the model and context bar on a single line
+    /// below the input without panicking.
     #[test]
-    fn hint_bar_renders_all_segments_and_reports_goal_rect() {
+    fn hint_bar_renders_model_and_context() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -670,36 +632,117 @@ mod tests {
         let backend = TestBackend::new(80, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         let messages = vec![TranscriptMessage::new(neenee_core::Role::User, "hi")];
-        let goal = Goal {
-            objective: "ship the hint bar".to_string(),
-            status: GoalStatus::Active,
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
-            checklist: vec![],
-        };
-        let mut goal_rect = None;
         terminal
             .draw(|f| {
-                goal_rect = draw_hint_bar(
+                draw_hint_bar(
                     f,
                     Rect::new(0, 2, 80, 1),
                     HintBarView {
                         current_provider: "mock",
                         current_model: "mock-model",
-                        current_goal: Some(&goal),
                         messages: &messages,
-                        mcp_statuses: &[],
                         focus_zone: crate::tui::input::FocusZone::Compose,
                         shell_active: false,
                         auto_approve: false,
                     },
                     &theme,
-                )
-                .goal_rect;
+                );
             })
             .unwrap();
-        assert!(goal_rect.is_some(), "goal rect should be reported");
+    }
+
+    /// The goal bar renders only when the goal is `Active`, reports a rect for
+    /// hit-testing, and includes the checklist progress `[done/total]`.
+    #[test]
+    fn goal_bar_renders_when_active_and_reports_rect() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Active goal with a checklist → bar shown, progress rendered.
+        let active_goal = Goal {
+            objective: "ship the goal bar".to_string(),
+            status: GoalStatus::Active,
+            tokens_used: 0,
+            token_budget: None,
+            time_used_seconds: 0,
+            checklist: vec![
+                neenee_core::GoalChecklistItem {
+                    content: "done".to_string(),
+                    status: neenee_core::GoalChecklistStatus::Completed,
+                },
+                neenee_core::GoalChecklistItem {
+                    content: "pending".to_string(),
+                    status: neenee_core::GoalChecklistStatus::Pending,
+                },
+            ],
+        };
+        let mut rect = None;
+        terminal
+            .draw(|f| {
+                rect = draw_goal_bar(
+                    f,
+                    Rect::new(0, 0, 80, 1),
+                    GoalBarView {
+                        goal: &active_goal,
+                        spinner_phase: 0,
+                    },
+                    &theme,
+                );
+            })
+            .unwrap();
+        assert!(rect.is_some(), "goal bar should report a rect when Active");
+
+        // Verify the progress suffix `[1/2]` appears in the rendered buffer.
+        let buf = terminal.backend().buffer();
+        let row: String = (0..80)
+            .map(|x| buf.content[x].symbol().to_string())
+            .collect();
+        assert!(
+            row.contains("[1/2]"),
+            "checklist progress should render: {row}"
+        );
+    }
+
+    /// The goal bar is hidden (returns `None`) for non-active goals so it does
+    /// not linger after completion or while paused.
+    #[test]
+    fn goal_bar_hidden_for_non_active_status() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let complete_goal = Goal {
+            objective: "done".to_string(),
+            status: GoalStatus::Complete,
+            tokens_used: 0,
+            token_budget: None,
+            time_used_seconds: 0,
+            checklist: vec![],
+        };
+        let mut rect = Some(Rect::new(0, 0, 1, 1));
+        terminal
+            .draw(|f| {
+                rect = draw_goal_bar(
+                    f,
+                    Rect::new(0, 0, 80, 1),
+                    GoalBarView {
+                        goal: &complete_goal,
+                        spinner_phase: 0,
+                    },
+                    &theme,
+                );
+            })
+            .unwrap();
+        assert!(
+            rect.is_none(),
+            "goal bar should be hidden for Complete status"
+        );
     }
 
     #[test]
@@ -723,9 +766,7 @@ mod tests {
                     let view = HintBarView {
                         current_provider: "",
                         current_model: "",
-                        current_goal: None,
                         messages: &Vec::<TranscriptMessage>::new(),
-                        mcp_statuses: &[],
                         focus_zone,
                         shell_active,
                         auto_approve: false,

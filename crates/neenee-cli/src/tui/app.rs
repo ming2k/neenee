@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, Goal, ImagePart, ModelPickerRow, ModelPickerSnapshot,
-    PermissionRequest, PlanProgress, Role, SessionOverview, UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentRequest, Goal, ImagePart, PermissionRequest, PlanProgress,
+    ProviderPickerRow, ProviderPickerSnapshot, Role, SessionOverview, UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -28,7 +28,7 @@ use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
 use crate::tui::input;
 use crate::tui::layout::{InteractiveTarget, LayoutMap};
-use crate::tui::models::{models_filtered_from, SOLUTIONS};
+use crate::tui::providers::{providers_filtered_from, PROVIDERS};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 
@@ -65,11 +65,11 @@ pub struct QueuedDispatch {
 #[derive(PartialEq, Clone, Copy)]
 pub enum Modal {
     None,
-    Models,
+    Provider,
     HistorySearch,
     Permission,
     Question,
-    /// Unified model editor (ADR-0002 phase 4): edit the API key and model-id
+    /// Unified provider editor: edit the API key and model-id
     /// of a catalog entry in one place. Reached via `e` in the picker or
     /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
     /// ModelName modal chain.
@@ -154,10 +154,10 @@ pub struct App {
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
     pub sticky_step: Option<usize>,
     pub sticky_rect: Option<ratatui::layout::Rect>,
-    /// Screen rect of the goal segment in the hint bar for the current frame,
-    /// so clicks inside it route to `/goal status`. `None` when no goal is
-    /// shown or the hint bar is hidden (overlay modal open).
-    pub hint_goal_rect: Option<ratatui::layout::Rect>,
+    /// Screen rect of the goal bar for the current frame, so clicks inside it
+    /// route to `/goal status`. `None` when no goal bar is shown (goal absent,
+    /// not `Active`, or chrome hidden).
+    pub goal_rect: Option<ratatui::layout::Rect>,
     /// Content-line index of the sticky step's real summary. Used to re-anchor
     /// the scroll offset when the user collapses the pinned step so the summary
     /// lands at the top of the viewport instead of jumping to unrelated content.
@@ -224,6 +224,14 @@ pub struct App {
     /// glance which sections of the approved plan are done, in progress, or
     /// still pending. `None` outside Build mode with an active plan.
     pub plan_progress: Option<PlanProgress>,
+    /// Whether the sticky plan panel is expanded to show every section. Toggled
+    /// by clicking inside [`App::plan_rect`]. Collapsed (the default) shows a
+    /// single row with the active section so the panel stays compact.
+    pub plan_panel_expanded: bool,
+    /// Screen rect of the sticky plan panel for the current frame, so clicks
+    /// inside it toggle [`App::plan_panel_expanded`]. `None` when no panel is
+    /// shown (no active plan, chrome hidden, or sub-agent view).
+    pub plan_rect: Option<ratatui::layout::Rect>,
     /// Harness turn counter, mirrored each frame. Used by the plan panel's
     /// stale detector: if `turn_count - plan_progress.updated_at_turn`
     /// exceeds the threshold the panel renders dimmed.
@@ -324,7 +332,7 @@ pub struct App {
     pub spinner_tick: usize,
     /// Input stashed while the API-key modal borrows the input line.
     pub stashed_input: String,
-    /// Target `SOLUTIONS` index for the unified model editor.
+    /// Target `PROVIDERS` index for the unified provider editor.
     pub editor_target: Option<usize>,
     /// Which editor field is focused: `0` = API key, `1` = model id.
     pub editor_field: u8,
@@ -336,9 +344,9 @@ pub struct App {
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
     /// Live model-picker snapshot (default id + per-model favorite / key-ready
-    /// / last-used). Drives the `/models` picker's rendering and sort order
-    /// (ADR-0002 phase 3). Refreshed from the response listener each frame.
-    pub model_picker: ModelPickerSnapshot,
+    /// / last-used). Drives the `/provider` picker's rendering and sort order
+    /// Refreshed from the response listener each frame.
+    pub provider_picker: ProviderPickerSnapshot,
     /// Theme.
     pub theme: Theme,
     /// MCP server statuses loaded at startup. Mirrored into the header as a
@@ -684,11 +692,11 @@ impl App {
         ranked
     }
 
-    /// Compute the filtered, sorted model rows for the `/models` picker.
-    /// Delegates to [`models_filtered_from`] so the input handler and the
+    /// Compute the filtered, sorted model rows for the `/provider` picker.
+    /// Delegates to [`providers_filtered_from`] so the input handler and the
     /// renderer share one filter+sort implementation.
-    pub fn models_filtered(&self) -> Vec<(usize, &ModelPickerRow)> {
-        models_filtered_from(SOLUTIONS, &self.model_picker, self.input.trim())
+    pub fn providers_filtered(&self) -> Vec<(usize, &ProviderPickerRow)> {
+        providers_filtered_from(PROVIDERS, &self.provider_picker, self.input.trim())
     }
 
     /// Number of selectable rows in the session modal's active pane. Used to

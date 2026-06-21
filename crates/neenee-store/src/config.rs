@@ -35,7 +35,7 @@ pub struct TuiConfig {
     pub default_expanded: HashMap<String, bool>,
 }
 
-/// Transport kind for a user-defined channel (ADR-0002 phase 5). Selects which
+/// Transport kind for a user-defined channel Selects which
 /// `Provider` implementation the catalog builds. Mirrors the built-in
 /// `neenee_core::catalog::Transport` variants but stays a plain serializable
 /// enum so it round-trips through TOML.
@@ -45,7 +45,6 @@ pub enum UserTransport {
     OpenAiCompat,
     GeminiNative,
     Llama,
-    Mock,
 }
 
 /// One delivery channel for a user-defined model. Channels are fully
@@ -80,7 +79,7 @@ pub struct UserChannelConfig {
 /// model. A model with multiple `channels` finally enables multi-channel
 /// delivery paths per ADR-0002.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct UserModelConfig {
+pub struct UserProviderConfig {
     /// Canonical model id. Matches a built-in id to override it.
     pub id: String,
     #[serde(default)]
@@ -120,37 +119,29 @@ pub struct Config {
     // Llama (local)
     pub llama_base_url: Option<String>,
     pub llama_model: Option<String>,
-    // Moonshot / Kimi Code (membership platform). `kimi-code` and its
-    // `kimi-code-plan` sibling route share one API key (mirroring the
-    // DeepSeek flash/pro split) but carry independent model overrides.
+    // Moonshot / Kimi Code (membership platform). The `kimi-code` preset pins
+    // its model id via the provider registry, so the model override is kept
+    // only for config/schema compatibility.
     pub moonshot_api_key: Option<String>,
     pub moonshot_model: Option<String>,
-    pub moonshot_plan_model: Option<String>,
     // DeepSeek V4 (Flash + Pro); shared API key.
     pub deepseek_api_key: Option<String>,
     pub deepseek_flash_model: Option<String>,
     pub deepseek_pro_model: Option<String>,
-    // Qwen (DashScope)
-    pub qwen_api_key: Option<String>,
-    pub qwen_model: Option<String>,
-    // GLM (Zhipu)
-    pub glm_api_key: Option<String>,
-    pub glm_model: Option<String>,
-    /// Favorite model ids for quick access in the picker (ADR-0002). Stored as
-    /// a flat list of canonical ids; phase 5 migrates this into `[[models]]`
-    /// entries. Backward-compatible via `#[serde(default)]`.
+    // ZAI Code (Z.AI coding-plan platform / Zhipu GLM-5 family). Shares the
+    // Zhipu key with the broader ecosystem in practice, but carries its own
+    // config field so the z.ai endpoint can be keyed independently.
+    pub zai_api_key: Option<String>,
+    pub zai_model: Option<String>,
+    /// Favorite provider ids for quick access in the picker. Stored as a flat
+    /// list of canonical provider ids.
     #[serde(default)]
     pub favorites: Vec<String>,
-    /// User-defined models that override built-ins or add new ones, each with
-    /// one or more channels (ADR-0002 phase 5). Empty by default — the
+    /// User-defined providers that override built-ins or add new ones, each with
+    /// one or more channels Empty by default — the
     /// scattered per-provider fields above remain the source for built-ins.
     #[serde(default)]
-    pub models: Vec<UserModelConfig>,
-    /// Canonical default-model pointer (ADR-0002). Preferred over
-    /// `default_provider` when set; `default_provider` is retained as the
-    /// legacy fallback so existing configs keep working.
-    #[serde(default)]
-    pub default_model: Option<String>,
+    pub providers: Vec<UserProviderConfig>,
     /// Skill configuration ([skills] table).
     #[serde(default)]
     pub skills: SkillsConfig,
@@ -165,7 +156,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_provider: "mock".to_string(),
+            default_provider: "kimi-code".to_string(),
             mcp: HashMap::new(),
             compaction_max_chars: 120_000,
             compaction_preserve_turns: 6,
@@ -182,18 +173,14 @@ impl Default for Config {
             llama_base_url: Some("http://localhost:8080".to_string()),
             llama_model: Some("local-model".to_string()),
             moonshot_api_key: None,
-            moonshot_model: Some("kimi-for-coding".to_string()),
-            moonshot_plan_model: Some("kimi-for-coding".to_string()),
+            moonshot_model: Some("kimi-k2.7-code".to_string()),
             deepseek_api_key: None,
             deepseek_flash_model: Some("deepseek-v4-flash".to_string()),
             deepseek_pro_model: Some("deepseek-v4-pro".to_string()),
-            qwen_api_key: None,
-            qwen_model: Some("qwen-plus".to_string()),
-            glm_api_key: None,
-            glm_model: Some("glm-4-plus".to_string()),
+            zai_api_key: None,
+            zai_model: Some("glm-5.2".to_string()),
             favorites: Vec::new(),
-            models: Vec::new(),
-            default_model: None,
+            providers: Vec::new(),
             skills: SkillsConfig::default(),
             websearch: WebSearchConfig::default(),
             tui: TuiConfig::default(),

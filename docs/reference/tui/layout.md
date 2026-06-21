@@ -48,48 +48,51 @@ The default. A two-chunk vertical split inside `draw_transcript`:
 │   (messages, expandable steps, sticky pinned summaries)      │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│  Status bar (optional, 0 or 1 row)                ┐          │
-│  Plan panel (optional, 0 or 3 rows)               │          │
-│  Input box (grows with text, capped)              │ chunks[1]│
+│  Plan panel (optional, 0 or 3 rows)               ┐          │
+│  Goal bar (optional, 0 or 1 row)                   │          │
+│  Status bar (optional, 0 or 1 row)                 │ chunks[1]│
+│  Input box (grows with text, capped)               │          │
 │  Hint bar (1 row, persistent)                     ┘          │
 ├──────────────────────────────────────────────────────────────┤
 │app_bg  (bottom viewport margin, 1 row)                       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-There is **no top header**. The model name, goal, MCP summary, and
-context-usage indicator that a header would carry live in the
-[hint bar](hint-line.md) at the bottom, so the transcript reclaims the full
-vertical space above the footer.
+There is **no top header**. The model name and context-usage indicator that
+a header would carry live in the [hint bar](hint-line.md) at the bottom, so
+the transcript reclaims the full vertical space above the footer.
 
 ### Footer stack
 
-The footer's height is the sum of its four rows. Each row is independently
+The footer's height is the sum of its rows. Each row is independently
 optional and the stack collapses from the top when a row is hidden:
 
 | Row | Height | When present |
 |-----|--------|--------------|
-| Status bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle` / `responding`; not in sub-agent view; chrome visible |
 | Plan panel | `PLAN_PANEL_ROWS = 3` | A plan is active; not in sub-agent view; chrome visible |
+| Goal bar | `GOAL_BAR_ROWS = 1` | A goal is in the `Active` state; not in sub-agent view; chrome visible |
+| Status bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle` / `responding`; not in sub-agent view; chrome visible |
 | Input box | `COMPOSER_VERTICAL_CHROME_ROWS + wrapped_lines`, capped at `terminal_height / 2`, min `COMPOSER_MIN_HEIGHT = 3` | Not in sub-agent view; chrome visible |
 | Hint bar | `HINT_BAR_ROWS = 1` | Chrome visible (always, when no modal is open) |
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ ● making edits                                  ← status bar│
-├────────────────────────────────────────────────────────────┤
-│ ╭── Plan: docs/plan.md · 2/5 done ───────────────────╮     │
+│ ╭── Plan: docs/plan.md · 2/5 done ───────────────────╮     │  ← plan panel
 │ │ ✓ extract session store   ▸ migrate tests   · pending │     │
-│ ╰────────────────────────────────────────────────────╯     │  ← plan panel
+│ ╰────────────────────────────────────────────────────╯     │
 ├────────────────────────────────────────────────────────────┤
-│  > type here…                                              │  ← input box
+│ ● ship the goal bar  [1/2]                                  │  ← goal bar
+├────────────────────────────────────────────────────────────┤
+│ ● making edits                                              │  ← status bar
+├────────────────────────────────────────────────────────────┤
+│  > type here…                                               │  ← input box
 ├────────────────────────────────────────────────────────────┤
 │ [ COMPOSE ]            Kimi K2.7 Code   89.2k (8%)         │  ← hint bar
 └────────────────────────────────────────────────────────────┘
 ```
 
 The footer is inset by `FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols on
-each side; all four rows share the same horizontal extent so their left and
+each side; all rows share the same horizontal extent so their left and
 right edges line up.
 
 ### Sticky pinned step summary
@@ -129,15 +132,15 @@ not the root conversation.
 | Transcript (children) | `Min(0)` | fills |
 | Sub-agent bar | `Length(SUBAGENT_BAR_ROWS = 1)` | 1 |
 
-Status bar, plan panel, input box, and hint bar all collapse to 0 — the
-zoomed view is read-only, with the navigation bar as its only chrome. See
+Status bar, plan panel, goal bar, input box, and hint bar all collapse to 0 —
+the zoomed view is read-only, with the navigation bar as its only chrome. See
 [Sub-agent view](subagent-view.md) for the focus stack that drives this
 mode and the bar's contents.
 
 ## Modal overlay view
 
 When an overlay modal is open, `chrome_hidden = true` collapses the entire
-footer (status bar, plan panel, input box, hint bar) to 0 height. The
+footer (plan panel, goal bar, status bar, input box, hint bar) to 0 height. The
 modal takes over the viewport with a dim backdrop painted over whatever
 the transcript was showing. The one exception is the
 [permission sheet](modals.md#permission-sheet), which is inline (no
@@ -154,8 +157,8 @@ backdrop, no `chrome_hidden`) and replaces only the input-box area.
 │            │                                    │            │
 │            ╰────────────────────────────────────╯            │
 │                                                              │
-│footer = 0 (status bar, plan panel, input box, hint bar all   │
-│           hidden)                                            │
+│footer = 0 (plan panel, goal bar, status bar, input box,     │
+│           hint bar all hidden)                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -188,7 +191,7 @@ wraps with `TRANSCRIPT_H_INSET` cells of slack on the right.
 ```
 
 The footer shares the same inset (`FOOTER_H_INSET = TRANSCRIPT_H_INSET`),
-so the status bar, plan panel, input box, and hint bar all line up with
+so the plan panel, goal bar, status bar, input box, and hint bar all line up with
 the transcript content above.
 
 ## Transcript viewport behavior
@@ -210,6 +213,7 @@ the transcript content above.
 | Left/right gutter (all content) | 2 cols `app_bg` | `TRANSCRIPT_H_INSET`, applied via `transcript_band_rect` (steps) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
 | Footer side inset | 2 cols (matches `TRANSCRIPT_H_INSET`) | `FOOTER_H_INSET` |
 | Status bar height | 1 row | `STATUS_BAR_ROWS` |
+| Goal bar height | 1 row | `GOAL_BAR_ROWS` |
 | Plan panel height | 3 rows (top border + content + bottom border) | `PLAN_PANEL_ROWS` |
 | Hint bar height | 1 row | `HINT_BAR_ROWS` |
 | Sub-agent bar height | 1 row | `SUBAGENT_BAR_ROWS` |
@@ -234,9 +238,9 @@ the transcript content above.
 | File | Responsibility |
 |------|----------------|
 | `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, sub-agent split, sticky summary overlay |
-| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `STATUS_BAR_ROWS`, `PLAN_PANEL_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
+| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `GOAL_BAR_ROWS`, `STATUS_BAR_ROWS`, `PLAN_PANEL_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop` |
-| `render/chrome.rs` | `draw_status_bar`, `draw_hint_bar` / `HintBarView` |
+| `render/chrome.rs` | `draw_status_bar`, `draw_goal_bar` / `GoalBarView`, `draw_hint_bar` / `HintBarView` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
 | `render/message_body.rs` | `draw_plan_panel` |
 | `render/step/renderers.rs` | `draw_subagent_bar`, `draw_sticky_summary_if_needed` |

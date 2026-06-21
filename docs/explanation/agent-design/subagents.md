@@ -136,7 +136,7 @@ showing that step's children.
 
 When zoomed in (`crates/neenee-cli/src/tui/render/mod.rs:204`):
 
-- The entire footer — status bar, plan panel, input box, hint bar — is hidden.
+- The entire footer — plan panel, goal bar, status bar, input box, hint bar — is hidden.
   The sub-agent view is read-only chrome.
 - A one-row navigation band at the bottom shows `Task <description> (N of M)`
   on the left and `Esc back   [ prev   ] next` on the right

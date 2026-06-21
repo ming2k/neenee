@@ -51,7 +51,7 @@ carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
 `OpenAiCompatProvider` declares schemas natively. The OpenAI-compatible registry
-presets (`kimi-k2.7-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `qwen`, `glm`) and
+presets (`kimi-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `zai-code`) and
 the bespoke `openai` entry all inherit the same path: each is built by
 `OpenAiProviderSpec::build` (or `OpenAiCompatProvider::with_base_url` for
 `openai`) into an `OpenAiCompatProvider`, so they delegate to its

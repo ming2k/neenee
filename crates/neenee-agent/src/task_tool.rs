@@ -91,16 +91,21 @@ impl Tool for TaskTool {
         // cost truthfully.
         //
         // Failure path: a sub-agent that hit the 32-round limit, repeated-call
-        // guard, or a provider error returns a Subagent payload too — its
-        // `summary` is prefixed with `Error:` (so the existing failure
-        // classification catches it) and the partial transcript is preserved
-        // so the user can resume into the half-finished work and so the actual
-        // token cost is accounted. Only input-validation errors (bad JSON,
-        // missing fields) propagate as `Err`, because they have no partial
-        // transcript worth keeping.
+        // guard, or a provider error returns a Subagent payload too — the
+        // structured `failed` flag is set so the UI classifies it as Failed
+        // without text-sniffing, and the partial transcript is preserved so
+        // the user can resume into the half-finished work and the real token
+        // cost is accounted. The summary still carries an `Error:` prefix so
+        // the parent *model* understands the sub-task did not succeed. Only
+        // input-validation errors (bad JSON, missing fields) propagate as
+        // `Err`, because they have no partial transcript worth keeping.
         let outcome = self.run_sub_agent_outcome(arguments, on_event).await?;
         let summary = if outcome.final_content.trim().is_empty() {
-            "(sub-agent returned no answer)".to_string()
+            if outcome.failed {
+                "(sub-agent failed before producing an answer)".to_string()
+            } else {
+                "(sub-agent returned no answer)".to_string()
+            }
         } else {
             outcome.final_content.trim().to_string()
         };
@@ -108,6 +113,7 @@ impl Tool for TaskTool {
             summary,
             messages: outcome.messages,
             usage: outcome.token_usage,
+            failed: outcome.failed,
         })
     }
 }
@@ -120,6 +126,11 @@ struct SubAgentOutcome {
     /// Final assistant content, mirrored for convenience so the parent doesn't
     /// have to scan `messages` for the last Assistant turn.
     final_content: String,
+    /// Whether the sub-agent terminated abnormally (hit the tool-round cap,
+    /// repeated-call guard, or a provider error). Drives the structured
+    /// `failed` flag on the returned [`neenee_core::ToolOutput::Subagent`]
+    /// instead of the old `summary.starts_with("Error")` text sniff.
+    failed: bool,
 }
 
 impl TaskTool {
@@ -201,6 +212,7 @@ impl TaskTool {
                     messages,
                     token_usage: result.token_usage,
                     final_content,
+                    failed: false,
                 })
             }
             Err(error) => {
@@ -210,6 +222,7 @@ impl TaskTool {
                     messages,
                     token_usage: neenee_core::TokenUsage::default(),
                     final_content: format!("Error: {error_string}"),
+                    failed: true,
                 })
             }
         }

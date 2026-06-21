@@ -1,4 +1,4 @@
-//! Overlay modal renderers: model picker, sessions, history search, the
+//! Overlay modal renderers: provider picker, sessions, history search, the
 //! permission sheet, API-key / endpoint / model-name prompts, the help overlay,
 //! and the copy / armed toasts. Plus the relative-time formatter used by the
 //! sessions list.
@@ -15,7 +15,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::layout::LayoutMap;
-use neenee_core::{ModelPickerSnapshot, PermissionRequest, UserQuestionRequest};
+use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest};
 
 use super::primitives::{
     centered_rect, contrast_fg, draw_dim_backdrop, modal_frame, panel_block, render_body,
@@ -35,24 +35,24 @@ const PERMISSION_COLLAPSED_BODY_CAP: u16 = 2;
 /// Max body rows when "Details" is expanded; the rest is scrollable.
 const PERMISSION_MAX_BODY_ROWS: u16 = 14;
 
-/// Draw the models picker (ADR-0002 phase 3). The input line is borrowed as a
+/// Draw the provider picker The input line is borrowed as a
 /// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
 /// activates (the default on an empty filter, the highlighted row otherwise);
 /// `*` toggles a favorite.
 ///
 /// `query` / `cursor_position` are the borrowed filter (the composer input
 /// while the modal is open). `key_status` is the legacy per-provider key map,
-/// retained for the readiness glyph. `model_picker` carries the favorite /
+/// retained for the readiness glyph. `provider_picker` carries the favorite /
 /// last-used / default signals.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_models_modal(
     frame: &mut Frame,
     _layout_map: &mut LayoutMap,
-    solutions: &[crate::tui::ModelSolution],
+    solutions: &[crate::tui::ProviderPreset],
     current_provider: &str,
     modal_index: usize,
     key_status: &HashMap<String, bool>,
-    model_picker: &ModelPickerSnapshot,
+    provider_picker: &ProviderPickerSnapshot,
     query: &str,
     cursor_position: usize,
     theme: &Theme,
@@ -63,7 +63,7 @@ pub(crate) fn draw_models_modal(
 
     // Filter + sort once for the frame; the input handler shares the same
     // function so selection and rendering never diverge.
-    let ranked = crate::tui::models_filtered_from(solutions, model_picker, query.trim());
+    let ranked = crate::tui::providers_filtered_from(solutions, provider_picker, query.trim());
 
     let header_rect = f.header;
     if let Some(h) = header_rect {
@@ -193,7 +193,7 @@ fn caret_column(display: &str, cursor_position: usize) -> u16 {
     display[..byte].width() as u16
 }
 
-/// Draw the unified model editor (ADR-0002 phase 4). Two fields — API key
+/// Draw the unified provider editor Two fields — API key
 /// (masked) and model id — with `Tab` cycling focus. The composer input line
 /// is borrowed for the focused field's value; `key_buf` / `model_buf` hold the
 /// other field while it is unfocused. `field` is `0` for key, `1` for model id.
@@ -565,12 +565,12 @@ pub fn draw_session_modal(
                     s.model.capabilities.clone(),
                 ),
                 None => {
-                    let solution = crate::tui::SOLUTIONS.iter().find(|x| x.id == provider);
+                    let solution = crate::tui::PROVIDERS.iter().find(|x| x.id == provider);
                     (
                         provider.to_string(),
-                        crate::tui::model_display_name(provider, model),
+                        crate::tui::model_display_name(model),
                         model.to_string(),
-                        crate::tui::model_context_window(provider),
+                        crate::tui::provider_context_window(provider),
                         key_status
                             .get(&provider.to_lowercase())
                             .copied()

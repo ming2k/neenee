@@ -10,21 +10,15 @@
 //! per-provider fields. The on-disk schema is unchanged; later phases add
 //! multi-channel entries, favorites, and recency.
 
-use neenee_core::catalog::{builtin_metadata, Channel, ModelEntry, Transport};
-use neenee_core::{ModelPickerRow, ModelPickerSnapshot};
+use neenee_core::catalog::{builtin_provider_metadata, Channel, ProviderEntry, Transport};
+use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot};
 use neenee_providers::{OpenAiProviderSpec, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS};
-use neenee_store::config::{Config, UserChannelConfig, UserModelConfig, UserTransport};
-use neenee_store::model_usage::ModelUsage;
+use neenee_store::config::{Config, UserChannelConfig, UserProviderConfig, UserTransport};
+use neenee_store::provider_usage::ProviderUsage;
 
-/// Resolve the effective default-model id: `config.default_model` when set,
-/// otherwise the legacy `config.default_provider`. Canonicalized by the caller
-/// where it matters (catalog lookup already canonicalizes).
-pub fn default_model_id(config: &Config) -> &str {
-    config
-        .default_model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&config.default_provider)
+/// The effective default provider id from `config.default_provider`.
+pub fn default_provider_id(config: &Config) -> &str {
+    &config.default_provider
 }
 
 /// Convert a user-defined channel config into a resolved [`Channel`].
@@ -41,7 +35,6 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
         .clone()
         .unwrap_or_else(|| fallback_model.to_string());
     let transport = match uc.transport {
-        UserTransport::Mock => Transport::Mock,
         UserTransport::GeminiNative => Transport::GeminiNative,
         UserTransport::Llama => Transport::Llama {
             base_url: uc
@@ -69,42 +62,30 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
     }
 }
 
-/// Convert a user-defined model config into a resolved [`ModelEntry`]. Reuses
+/// Convert a user-defined model config into a resolved [`ProviderEntry`]. Reuses
 /// built-in display metadata (name / description / context window) when the id
 /// matches a built-in, so overriding e.g. `gemini` inherits its friendly name
-/// unless the user supplies their own. A model with no channels is degenerate;
-/// it gets a single mock channel so it still renders and selects safely.
-fn user_model_to_entry(um: &UserModelConfig) -> ModelEntry {
-    let builtin = builtin_metadata(&um.id);
+/// unless the user supplies their own. A model with no channels renders but is
+/// not usable until the user supplies one.
+fn user_provider_to_entry(um: &UserProviderConfig) -> ProviderEntry {
+    let builtin = builtin_provider_metadata(&um.id);
     let name = um
         .name
         .clone()
-        .or_else(|| builtin.map(|(n, _, _)| n.to_string()))
+        .or_else(|| builtin.map(|(n, _)| n.to_string()))
         .unwrap_or_else(|| um.id.clone());
-    let (description, context_window) = builtin
-        .map(|(_, d, c)| (d.to_string(), c))
-        .unwrap_or_default();
+    let description = builtin.map(|(_, d)| d.to_string()).unwrap_or_default();
     let fallback_model = um.id.clone();
-    let channels: Vec<Channel> = if um.channels.is_empty() {
-        vec![Channel {
-            id: "default".to_string(),
-            label: name.clone(),
-            transport: Transport::Mock,
-            api_key: String::new(),
-            model: fallback_model,
-        }]
-    } else {
-        um.channels
-            .iter()
-            .map(|c| user_channel_to_channel(c, &fallback_model))
-            .collect()
-    };
+    let channels: Vec<Channel> = um
+        .channels
+        .iter()
+        .map(|c| user_channel_to_channel(c, &fallback_model))
+        .collect();
     let default_channel = um.default_channel.min(channels.len().saturating_sub(1));
-    ModelEntry {
+    ProviderEntry {
         id: um.id.clone(),
         name,
         description,
-        context_window,
         channels,
         default_channel,
         builtin: false,
@@ -131,8 +112,7 @@ fn config_key_for(config: &Config, id: &str) -> Option<String> {
         "gemini" => config.gemini_api_key.clone(),
         "kimi-code" => config.moonshot_api_key.clone(),
         "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key.clone(),
-        "qwen" => config.qwen_api_key.clone(),
-        "glm" => config.glm_api_key.clone(),
+        "zai-code" => config.zai_api_key.clone(),
         _ => None,
     }
 }
@@ -147,28 +127,23 @@ fn config_model_for(config: &Config, id: &str) -> Option<String> {
         "kimi-code" => config.moonshot_model.clone(),
         "deepseek-v4-flash" => config.deepseek_flash_model.clone(),
         "deepseek-v4-pro" => config.deepseek_pro_model.clone(),
-        "qwen" => config.qwen_model.clone(),
-        "glm" => config.glm_model.clone(),
+        "zai-code" => config.zai_model.clone(),
         _ => None,
     }
 }
 
-/// Attach the built-in display metadata (name, description, context window) to
-/// a raw `(id, channels)` pair. Falls back to the raw id as the name when no
-/// metadata is registered, so user-defined entries still render.
-fn entry_with_metadata(id: &str, channels: Vec<Channel>, builtin: bool) -> ModelEntry {
-    let (name, description, context_window) = builtin_metadata(id)
-        .map(|(n, d, c)| {
-            let owned_name: String = n.to_string();
-            let owned_desc: String = d.to_string();
-            (owned_name, owned_desc, c)
-        })
-        .unwrap_or_else(|| (id.to_string(), String::new(), 0));
-    ModelEntry {
+/// Attach the built-in display metadata (name, description) to a raw `(id,
+/// channels)` pair. Model-level metadata (context window, capabilities) is
+/// resolved on demand from the model registry via [`ProviderEntry::context_window`].
+/// Falls back to the raw id as the name when no metadata is registered.
+fn entry_with_metadata(id: &str, channels: Vec<Channel>, builtin: bool) -> ProviderEntry {
+    let (name, description) = builtin_provider_metadata(id)
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .unwrap_or_else(|| (id.to_string(), String::new()));
+    ProviderEntry {
         id: id.to_string(),
         name,
         description,
-        context_window,
         channels,
         default_channel: 0,
         builtin,
@@ -176,7 +151,7 @@ fn entry_with_metadata(id: &str, channels: Vec<Channel>, builtin: bool) -> Model
 }
 
 /// Build a single-channel entry for an OpenAI-compatible registry preset.
-fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> ModelEntry {
+fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> ProviderEntry {
     let api_key =
         env_or_config(Some(spec.env_api_key), config_key_for(config, spec.id)).unwrap_or_default();
     // A pinned `fixed_model` always wins; otherwise env override, then config,
@@ -191,9 +166,9 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
         .default_user_agent
         .unwrap_or(NEENEE_USER_AGENT)
         .to_string();
-    let (name, _, _) = builtin_metadata(spec.id)
-        .map(|(n, d, c)| (n.to_string(), d.to_string(), c))
-        .unwrap_or_else(|| (spec.id.to_string(), String::new(), 0));
+    let name = builtin_provider_metadata(spec.id)
+        .map(|(n, _)| n.to_string())
+        .unwrap_or_else(|| spec.id.to_string());
     let channel = Channel {
         id: "default".to_string(),
         label: name.clone(),
@@ -207,14 +182,14 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
     entry_with_metadata(spec.id, vec![channel], true)
 }
 
-/// Build the catalog by materializing every known model from `config`.
+/// Build the catalog by materializing every known provider from `config`.
 ///
 /// Order is registry presets first, then bespoke providers, then the mock
 /// fixture. Order does not affect behavior — all lookups are by id — but a
 /// stable order makes the catalog readable in debug output and (later) the
 /// picker's default pre-search listing.
-pub fn build_catalog(config: &Config) -> Vec<ModelEntry> {
-    let mut entries: Vec<ModelEntry> = Vec::new();
+pub fn build_catalog(config: &Config) -> Vec<ProviderEntry> {
+    let mut entries: Vec<ProviderEntry> = Vec::new();
 
     // OpenAI-compatible registry presets.
     for spec in OPENAI_PROVIDER_SPECS {
@@ -277,23 +252,10 @@ pub fn build_catalog(config: &Config) -> Vec<ModelEntry> {
         true,
     ));
 
-    // Mock fixture — always last, always keyless.
-    entries.push(entry_with_metadata(
-        "mock",
-        vec![Channel {
-            id: "default".to_string(),
-            label: "Mock".to_string(),
-            transport: Transport::Mock,
-            api_key: String::new(),
-            model: "mock".to_string(),
-        }],
-        true,
-    ));
-
-    // User-defined models (ADR-0002 phase 5): override built-ins by id, or
+    // User-defined models: override built-ins by id, or
     // append new models. A user entry may carry several channels, finally
     // enabling multi-channel delivery (e.g. Gemini via Studio and Vertex).
-    for user_entry in config.models.iter().map(user_model_to_entry) {
+    for user_entry in config.providers.iter().map(user_provider_to_entry) {
         if let Some(existing) = entries.iter_mut().find(|e| e.id == user_entry.id) {
             *existing = user_entry;
         } else {
@@ -336,20 +298,20 @@ pub fn resolved_model_name(config: &Config, id: &str) -> String {
 /// per catalog entry carrying the dynamic signals the picker renders and sorts
 /// by (key readiness, favorite flag, last-used timestamp). Sent to the TUI on
 /// startup and after any mutation so the picker always shows a consistent
-/// picture (ADR-0002 phase 3).
-pub fn build_picker_state(config: &Config, usage: &ModelUsage) -> ModelPickerSnapshot {
+/// picture
+pub fn build_picker_state(config: &Config, usage: &ProviderUsage) -> ProviderPickerSnapshot {
     let entries = build_catalog(config);
-    let default_id = default_model_id(config).to_string();
+    let default_id = default_provider_id(config).to_string();
     let rows = entries
         .iter()
-        .map(|entry| ModelPickerRow {
+        .map(|entry| ProviderPickerRow {
             id: entry.id.clone(),
             key_ready: entry.key_ready(),
             favorite: config.favorites.iter().any(|fav| fav == &entry.id),
             last_used_ms: usage.last_used_ms(&entry.id),
         })
         .collect();
-    ModelPickerSnapshot { default_id, rows }
+    ProviderPickerSnapshot { default_id, rows }
 }
 
 #[cfg(test)]
@@ -377,7 +339,6 @@ mod tests {
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"gemini"));
         assert!(ids.contains(&"llama"));
-        assert!(ids.contains(&"mock"));
         // Every registry preset is present.
         for spec in OPENAI_PROVIDER_SPECS {
             assert!(
@@ -399,10 +360,10 @@ mod tests {
             .find(|e| e.id == "kimi-code")
             .expect("kimi-code entry");
         let channel = entry.default_channel().expect("default channel");
-        // The Kimi Code platform pins the model id to kimi-for-coding.
+        // The Kimi Code platform pins the model id to kimi-k2.7-code.
         assert_eq!(
-            channel.model, "kimi-for-coding",
-            "model must be the pinned kimi-for-coding alias"
+            channel.model, "kimi-k2.7-code",
+            "model must be the pinned kimi-k2.7-code alias"
         );
         let (base_url, user_agent) = match &channel.transport {
             Transport::OpenAiCompat {
@@ -467,9 +428,7 @@ mod tests {
             .iter()
             .find(|e| e.id == "llama")
             .expect("llama entry");
-        let mock = entries.iter().find(|e| e.id == "mock").expect("mock entry");
         assert!(llama.key_ready(), "llama must be keyless-ready");
-        assert!(mock.key_ready(), "mock must be keyless-ready");
     }
 
     #[test]
@@ -490,7 +449,7 @@ mod tests {
     /// Build a user model override on `gemini` with two channels.
     fn gemini_two_channel_config() -> Config {
         let mut config = bare_config();
-        config.models = vec![UserModelConfig {
+        config.providers = vec![UserProviderConfig {
             id: "gemini".to_string(),
             name: Some("Gemini (custom)".to_string()),
             channels: vec![
@@ -549,7 +508,7 @@ mod tests {
     #[test]
     fn user_model_appends_when_id_is_new() {
         let mut config = bare_config();
-        config.models = vec![UserModelConfig {
+        config.providers = vec![UserProviderConfig {
             id: "my-relay".to_string(),
             name: Some("My Relay".to_string()),
             channels: vec![UserChannelConfig {
@@ -572,38 +531,17 @@ mod tests {
     }
 
     #[test]
-    fn default_model_pointer_preferred_over_default_provider() {
+    fn default_provider_id_reads_config() {
         let mut config = bare_config();
-        config.default_provider = "mock".to_string();
-        config.default_model = Some("gemini".to_string());
-        assert_eq!(default_model_id(&config), "gemini");
-    }
-
-    #[test]
-    fn default_model_falls_back_to_default_provider() {
-        let mut config = bare_config();
-        config.default_provider = "glm".to_string();
-        config.default_model = None;
-        assert_eq!(default_model_id(&config), "glm");
-    }
-
-    #[test]
-    fn empty_default_model_falls_back_to_default_provider() {
-        let mut config = bare_config();
-        config.default_provider = "qwen".to_string();
-        config.default_model = Some(String::new());
-        assert_eq!(
-            default_model_id(&config),
-            "qwen",
-            "an empty default_model must not shadow default_provider"
-        );
+        config.default_provider = "zai-code".to_string();
+        assert_eq!(default_provider_id(&config), "zai-code");
     }
 
     #[test]
     fn picker_state_reflects_user_default_and_channels() {
         let mut config = gemini_two_channel_config();
-        config.default_model = Some("gemini".to_string());
-        let usage = ModelUsage::default();
+        config.default_provider = "gemini".to_string();
+        let usage = ProviderUsage::default();
         let snapshot = build_picker_state(&config, &usage);
         assert_eq!(snapshot.default_id, "gemini");
         let gemini_row = snapshot

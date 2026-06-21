@@ -6,10 +6,11 @@ pub mod composer_attachments;
 pub mod config;
 pub mod document;
 mod event_loop;
+pub mod export;
 pub mod fuzzy;
 pub mod input;
 pub mod layout;
-pub mod models;
+pub mod providers;
 pub mod render;
 pub mod selection;
 pub mod step_interaction;
@@ -18,8 +19,8 @@ mod transcript;
 
 pub(crate) use app::{App, Modal, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
-pub(crate) use models::{
-    model_context_window, model_display_name, models_filtered_from, ModelSolution, SOLUTIONS,
+pub(crate) use providers::{
+    model_display_name, provider_context_window, providers_filtered_from, ProviderPreset, PROVIDERS,
 };
 
 use crossterm::{
@@ -32,7 +33,7 @@ use crossterm::{
 };
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
-    ModelPickerSnapshot, PermissionRequest, PlanProgress, Role, SessionContextSnapshot,
+    PermissionRequest, PlanProgress, ProviderPickerSnapshot, Role, SessionContextSnapshot,
     SessionOverview, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -45,7 +46,7 @@ use std::{
 };
 use tokio::sync::{mpsc, Mutex};
 
-use crate::tui::document::{MessageKind, TranscriptMessage};
+use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
@@ -122,8 +123,8 @@ pub async fn run_tui(
     let pending_question_clone = pending_question.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
-    let model_picker = Arc::new(Mutex::new(ModelPickerSnapshot::default()));
-    let model_picker_clone = model_picker.clone();
+    let provider_picker = Arc::new(Mutex::new(ProviderPickerSnapshot::default()));
+    let provider_picker_clone = provider_picker.clone();
     let sessions_overview = Arc::new(Mutex::new(Vec::<SessionOverview>::new()));
     let sessions_overview_clone = sessions_overview.clone();
     let open_sessions = Arc::new(AtomicBool::new(false));
@@ -414,8 +415,8 @@ pub async fn run_tui(
                 AgentResponse::ProviderKeys(status) => {
                     *key_status_clone.lock().await = status.into_iter().collect();
                 }
-                AgentResponse::ModelPicker(snapshot) => {
-                    *model_picker_clone.lock().await = snapshot;
+                AgentResponse::ProviderPicker(snapshot) => {
+                    *provider_picker_clone.lock().await = snapshot;
                 }
                 AgentResponse::ConversationCleared => {
                     messages_clone.lock().await.clear();
@@ -436,8 +437,8 @@ pub async fn run_tui(
                     before_chars,
                     after_chars,
                 } => {
-                    messages_clone.lock().await.push(TranscriptMessage::new(
-                        Role::System,
+                    messages_clone.lock().await.push(TranscriptMessage::notice(
+                        NoticeSeverity::Info,
                         format!(
                             "Compacted {} messages: {} -> {} chars.",
                             archived_messages, before_chars, after_chars
@@ -514,12 +515,23 @@ pub async fn run_tui(
                     );
                     ir_clone.store(true, Ordering::SeqCst);
                 }
+                AgentResponse::TurnPaused { rounds } => {
+                    // A planned stop (tool-round budget cap), not a runtime
+                    // failure: render amber with a "paused" glyph so it reads
+                    // as recoverable — the user can `/loop resume` to continue.
+                    let mut msgs = messages_clone.lock().await;
+                    msgs.push(TranscriptMessage::notice(
+                        NoticeSeverity::TurnLimit,
+                        format!(
+                            "Turn paused after {rounds} tool rounds. Refine the goal or continue with /loop."
+                        ),
+                    ));
+                    ir_clone.store(false, Ordering::SeqCst);
+                    activity_clone.lock().await.clear();
+                }
                 AgentResponse::Error(e) => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::new(
-                        Role::System,
-                        format!("Error: {}", e),
-                    ));
+                    msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, e));
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
                 }
@@ -528,9 +540,9 @@ pub async fn run_tui(
                 }
                 AgentResponse::ProviderSwitched { provider, model } => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::new(
-                        Role::System,
-                        format!("System: Provider switched to {} ({})", provider, model),
+                    msgs.push(TranscriptMessage::notice(
+                        NoticeSeverity::Info,
+                        format!("Provider switched to {} ({})", provider, model),
                     ));
                     *cp_clone.lock().await = provider;
                     *cm_clone.lock().await = model;
@@ -551,7 +563,7 @@ pub async fn run_tui(
         max_scroll: 0,
         sticky_step: None,
         sticky_rect: None,
-        hint_goal_rect: None,
+        goal_rect: None,
         sticky_summary_line: None,
         pin_summary_line: None,
         focus_stack: Vec::new(),
@@ -576,6 +588,8 @@ pub async fn run_tui(
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        plan_panel_expanded: false,
+        plan_rect: None,
         turn_count: 0,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
@@ -617,7 +631,7 @@ pub async fn run_tui(
         editor_key: String::new(),
         editor_model: String::new(),
         key_status: HashMap::new(),
-        model_picker: ModelPickerSnapshot::default(),
+        provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
         mcp_statuses,
     };
@@ -636,7 +650,7 @@ pub async fn run_tui(
             is_responding,
             messages: messages_for_loop,
             key_status,
-            model_picker,
+            provider_picker,
             sessions_overview,
             open_sessions,
             session_context,

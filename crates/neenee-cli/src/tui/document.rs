@@ -71,6 +71,30 @@ pub enum MessageKind {
         /// User-pinned flag — see [`MessageKind::ToolStep::user_pinned`].
         user_pinned: bool,
     },
+    /// A harness-level notice — errors, turn-pause signals, compaction
+    /// summaries, provider switches, and other status lines that previously
+    /// were smuggled through `Role::System` with hand-rolled `"Error: "`
+    /// / `"System: "` text prefixes. Carrying an explicit [`NoticeSeverity`]
+    /// lets one renderer ([`crate::tui::render::notice`]) own the
+    /// severity→color/icon mapping and lets callers stop string-sniffing.
+    Notice {
+        severity: NoticeSeverity,
+    },
+}
+
+/// Severity of a [`MessageKind::Notice`]. Drives the color, the leading icon,
+/// and (in future) the available follow-up affordances (e.g. a TurnLimit
+/// notice can offer a one-key `/loop resume`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeSeverity {
+    /// Neutral status (compaction summary, provider switch, …). Replaces the
+    /// old `Role::System` + `system_text()` rendering.
+    Info,
+    /// A recoverable harness guardrail — the turn was paused, not failed.
+    /// Distinct from [`NoticeSeverity::Error`] so it reads as amber, not red.
+    TurnLimit,
+    /// A terminal failure surfaced from the harness or a tool.
+    Error,
 }
 
 /// Table column text alignment, mirrored from pulldown-cmark so the `Block`
@@ -157,6 +181,7 @@ fn context_chars_of(messages: &[TranscriptMessage]) -> usize {
     for m in messages {
         match &m.kind {
             MessageKind::Text => chars += m.raw.len(),
+            MessageKind::Notice { .. } => chars += m.raw.len(),
             MessageKind::Thinking { content, .. } => chars += content.len(),
             MessageKind::ToolStep {
                 arguments,
@@ -318,14 +343,16 @@ impl TranscriptMessage {
             return false;
         }
         let output = output.into();
-        // Classify from the structured result first (data-level: a non-zero
-        // shell exit, an explicit `ToolOutput::Error`). Permission denial gets
-        // its own status so the UI can show it distinctly from a runtime error.
-        // The `starts_with` text fallback is kept so unmigrated tools that still
-        // embed `"Error: …"` in a `Text` result keep classifying as failed.
+        // Classify from the structured result (data-level: a non-zero shell
+        // exit, an explicit `ToolOutput::Error`, a `failed` sub-agent). The
+        // legacy `starts_with("Error")` text fallback was removed once tool
+        // error sites migrated to `ToolOutput::Error` and sub-agents carried
+        // an explicit `failed` flag — classification is now fully data-driven.
+        // Permission denial gets its own status so the UI shows it distinctly
+        // from a runtime error.
         *status = if matches!(structured, neenee_core::ToolOutput::PermissionDenied { .. }) {
             ToolStepStatus::Denied
-        } else if structured.is_error() || output.starts_with("Error") {
+        } else if structured.is_error() {
             ToolStepStatus::Failed
         } else {
             ToolStepStatus::Ok
@@ -684,7 +711,11 @@ impl TranscriptMessage {
                 let elapsed_ms = started_at
                     .map(|t| t.elapsed().as_millis() as u64)
                     .unwrap_or(0);
-                let stats = format!("· {} tool calls · {}", tool_calls, elapsed_ms);
+                let stats = format!(
+                    "· {} tool calls · {}",
+                    tool_calls,
+                    duration_text(Some(elapsed_ms))
+                );
                 match children.last() {
                     Some(child)
                         if child.is_tool_step()
@@ -729,6 +760,28 @@ impl TranscriptMessage {
 
     pub fn is_thinking(&self) -> bool {
         matches!(self.kind, MessageKind::Thinking { .. })
+    }
+
+    /// Whether this message is a harness notice (error / turn-pause / status).
+    pub fn is_notice(&self) -> bool {
+        matches!(self.kind, MessageKind::Notice { .. })
+    }
+
+    /// Construct a notice message. Replaces the ad-hoc
+    /// `TranscriptMessage::new(Role::System, format!("Error: …"))` pattern with
+    /// a typed severity so the renderer can pick color/icon from one place.
+    pub fn notice(severity: NoticeSeverity, raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let blocks = parse_blocks(&raw);
+        Self {
+            role: Role::System,
+            blocks,
+            raw,
+            kind: MessageKind::Notice { severity },
+            delivery: DeliveryStatus::default(),
+            provider: None,
+            model: None,
+        }
     }
 
     /// A reasoning trace that has not yet been stamped with a duration — i.e.
@@ -949,7 +1002,18 @@ fn duration_text(duration_ms: Option<u64>) -> String {
     match duration_ms {
         None => "...".to_string(),
         Some(ms) if ms < 1000 => format!("{}ms", ms),
-        Some(ms) => format!("{:.1}s", ms as f64 / 1000.0),
+        Some(ms) if ms < 60_000 => format!("{:.1}s", ms as f64 / 1000.0),
+        Some(ms) => {
+            let total_secs = ms / 1000;
+            let h = total_secs / 3600;
+            let m = (total_secs % 3600) / 60;
+            let s = total_secs % 60;
+            if h > 0 {
+                format!("{}h {}m", h, m)
+            } else {
+                format!("{}m {}s", m, s)
+            }
+        }
     }
 }
 
@@ -1810,12 +1874,15 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
         });
-        assert!(task.finish_tool_step(
-            "c",
-            "Error: boom",
-            neenee_core::ToolOutput::text("Error: boom"),
-            100
-        ));
+        // The sub-agent failure is now signalled by the structured `failed`
+        // flag on `ToolOutput::Subagent`, not by an "Error:" text prefix.
+        let structured = neenee_core::ToolOutput::Subagent {
+            summary: "Error: boom".into(),
+            messages: Vec::new(),
+            usage: neenee_core::TokenUsage::default(),
+            failed: true,
+        };
+        assert!(task.finish_tool_step("c", structured.to_text(), structured, 100));
         let status = task.subagent_status_line().unwrap();
         assert!(status.starts_with("↳ Failed"), "got: {status}");
     }
@@ -1942,5 +2009,23 @@ mod tests {
         // A finished step is untouched by the sweep.
         assert!(!b.cancel_all_running());
         assert_eq!(b.tool_step_status(), Some(ToolStepStatus::Ok));
+    }
+
+    #[test]
+    fn notice_carries_severity_and_is_classified_as_notice() {
+        let n = TranscriptMessage::notice(NoticeSeverity::Error, "boom");
+        assert!(n.is_notice());
+        assert!(matches!(
+            n.kind,
+            MessageKind::Notice {
+                severity: NoticeSeverity::Error
+            }
+        ));
+        // The raw text is preserved verbatim for the renderer (no "Error: "
+        // prefix injection — the glyph is the renderer's job).
+        assert_eq!(n.raw, "boom");
+        // A text message is not a notice.
+        let plain = TranscriptMessage::new(Role::Assistant, "hi");
+        assert!(!plain.is_notice());
     }
 }

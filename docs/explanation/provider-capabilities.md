@@ -13,8 +13,8 @@ uses to call tools, see [Tool rounds](agent-design/tool-rounds.md).
 
 | Layer | Owns | Examples |
 |-------|------|----------|
-| Model weights | Behavior under tool-use prompts; whether reasoning is emitted at all | `deepseek-v4-flash`, `glm-4-plus`, `qwen-coder-plus`, `gemini-2.0-flash` |
-| Serving runtime | HTTP API shape, `tools` / `tool_choice` field parsing, guided JSON decoding, SSE chunking, `reasoning_content` field passthrough | vLLM, SGLang, TGI, TensorRT-LLM, and the hosted gateways (`api.openai.com`, `dashscope.aliyuncs.com`, `open.bigmodel.cn`, Moonshot, Volcengine Ark) |
+| Model weights | Behavior under tool-use prompts; whether reasoning is emitted at all | `deepseek-v4-flash`, `glm-5.2`, `kimi-k2.7-code`, `gemini-2.0-flash` |
+| Serving runtime | HTTP API shape, `tools` / `tool_choice` field parsing, guided JSON decoding, SSE chunking, `reasoning_content` field passthrough | vLLM, SGLang, TGI, TensorRT-LLM, and the hosted gateways (`api.openai.com`, `api.deepseek.com`, `open.bigmodel.cn`, Moonshot, Volcengine Ark) |
 | Client (neenee) | Schema declaration, delta reconstruction, fallback parsing, registry, permission brokering | `crates/neenee-core` |
 A tool call only succeeds when all three layers agree. A model whose weights
 were never tool-tuned will emit free text even if the runtime accepts a
@@ -96,7 +96,7 @@ neenee's provider adapters encode an opinionated mapping between the three
 layers:
 
 - **OpenAI-compatible registry presets** (`kimi-code`, `deepseek-v4-flash`,
-  `deepseek-v4-pro`, `qwen`, `glm`, plus the bespoke `openai`
+  `deepseek-v4-pro`, `zai-code`, plus the bespoke `openai`
   entries, all backed by `OpenAiCompatProvider`) assume a runtime that fully
   implements the OpenAI Chat Completions contract including `tools`,
   `tool_choice`, `reasoning_content`, and SSE tool-call deltas. The

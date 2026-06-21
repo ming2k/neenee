@@ -1840,7 +1840,7 @@ mod tests {
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")
-            .with_attribution("kimi-code", "kimi-for-coding");
+            .with_attribution("kimi-code", "kimi-k2.7-code");
         let assistant = Message {
             tool_calls: Some(vec![call.clone()]),
             ..assistant

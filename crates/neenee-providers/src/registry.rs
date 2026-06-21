@@ -5,9 +5,7 @@ use neenee_core::catalog::{Channel, Transport};
 use neenee_core::Provider;
 use std::sync::Arc;
 
-use crate::{
-    GeminiProvider, LlamaServerProvider, MockProvider, OpenAiCompatProvider, NEENEE_USER_AGENT,
-};
+use crate::{GeminiProvider, LlamaServerProvider, OpenAiCompatProvider, NEENEE_USER_AGENT};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // OpenAI-compatible provider wrappers for popular Chinese & global services
@@ -45,16 +43,15 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
     // Kimi Code — Moonshot AI's coding model, served via the Kimi Code
     // membership platform (api.kimi.com/coding/v1). The platform requires a
     // recognized coding-agent User-Agent and pins the model id to the fixed
-    // `kimi-for-coding` alias (the backend auto-routes to the latest model,
-    // so the preset id carries no version number). API key env still uses
-    // the MOONSHOT_API_KEY legacy name for config compatibility.
+    // `kimi-k2.7-code` alias. API key env still uses the MOONSHOT_API_KEY
+    // legacy name for config compatibility.
     OpenAiProviderSpec {
         id: "kimi-code",
         base_url: "https://api.kimi.com/coding/v1/chat/completions",
-        default_model: "kimi-for-coding",
+        default_model: "kimi-k2.7-code",
         env_api_key: "MOONSHOT_API_KEY",
         env_model: "MOONSHOT_MODEL",
-        fixed_model: Some("kimi-for-coding"),
+        fixed_model: Some("kimi-k2.7-code"),
         default_user_agent: Some("opencode/0.1.0"),
     },
     // DeepSeek V4 Flash — versatile model with thinking + non-thinking modes.
@@ -77,25 +74,20 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
         fixed_model: None,
         default_user_agent: None,
     },
-    // Qwen (Tongyi / Alibaba DashScope). Models: qwen-plus, qwen-max, qwen-coder-plus.
+    // ZAI Code — Z.AI (Zhipu) coding-plan platform
+    // (api.z.ai/api/coding/paas/v4). A coding-agent membership endpoint that
+    // serves the GLM-5 family; glm-5.2 is the current flagship. Like the Kimi
+    // Code platform, it expects a recognized coding-agent User-Agent. Shares
+    // the ZHIPU_API_KEY legacy name for key compatibility with the broader
+    // Zhipu ecosystem, while ZAI_API_KEY is the preferred alias.
     OpenAiProviderSpec {
-        id: "qwen",
-        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        default_model: "qwen-plus",
-        env_api_key: "DASHSCOPE_API_KEY",
-        env_model: "QWEN_MODEL",
+        id: "zai-code",
+        base_url: "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        default_model: "glm-5.2",
+        env_api_key: "ZAI_API_KEY",
+        env_model: "ZAI_MODEL",
         fixed_model: None,
-        default_user_agent: None,
-    },
-    // GLM (Zhipu AI / 智谱). Models: glm-4-plus, glm-4, glm-4-air, glm-4-flash.
-    OpenAiProviderSpec {
-        id: "glm",
-        base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        default_model: "glm-4-plus",
-        env_api_key: "GLM_API_KEY",
-        env_model: "GLM_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
+        default_user_agent: Some("opencode/1.17.10"),
     },
 ];
 
@@ -147,7 +139,6 @@ impl OpenAiProviderSpec {
 /// attributed to the logical model even after a mid-session switch.
 pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn Provider> {
     match &channel.transport {
-        Transport::Mock => Arc::new(MockProvider),
         Transport::GeminiNative => Arc::new(GeminiProvider {
             api_key: channel.api_key.clone(),
             model: channel.model.clone(),
@@ -182,10 +173,10 @@ mod spec_tests {
     fn kimi_code_uses_kimi_code_platform() {
         let spec = openai_provider_spec("kimi-code").expect("kimi-code spec");
         // The Kimi Code platform pins the model id — overrides are ignored.
-        assert_eq!(spec.resolve_model(None), "kimi-for-coding");
+        assert_eq!(spec.resolve_model(None), "kimi-k2.7-code");
         assert_eq!(
             spec.resolve_model(Some("kimi-k2.7-code-highspeed".to_string())),
-            "kimi-for-coding"
+            "kimi-k2.7-code"
         );
 
         let provider = spec.build("test-key".to_string(), None, None);
@@ -193,14 +184,14 @@ mod spec_tests {
             provider.base_url,
             "https://api.kimi.com/coding/v1/chat/completions"
         );
-        assert_eq!(provider.model, "kimi-for-coding");
+        assert_eq!(provider.model, "kimi-k2.7-code");
         // The Kimi Code platform requires a recognized coding-agent UA.
         assert_eq!(provider.user_agent, "opencode/0.1.0");
         // The registry stamps the preset id onto the concrete provider so
         // assistant responses can be attributed to "kimi-code".
         assert_eq!(provider.id, "kimi-code");
         assert_eq!(provider.provider_id(), "kimi-code");
-        assert_eq!(provider.model(), "kimi-for-coding");
+        assert_eq!(provider.model(), "kimi-k2.7-code");
     }
 
     #[test]
@@ -232,6 +223,8 @@ mod spec_tests {
         assert!(openai_provider_spec("deepseek").is_none());
         assert!(openai_provider_spec("deepseek-flash").is_none());
         assert!(openai_provider_spec("deepseek-pro").is_none());
+        // Qwen was removed from the registry and must not resolve.
+        assert!(openai_provider_spec("qwen").is_none());
     }
 }
 
@@ -254,18 +247,5 @@ mod build_tests {
         let provider = build_provider_for_channel(&channel, "openai");
         assert_eq!(provider.provider_id(), "openai");
         assert_eq!(provider.model(), "gpt-4o");
-    }
-
-    #[test]
-    fn build_provider_returns_mock_for_mock_transport() {
-        let channel = Channel {
-            id: "default".to_string(),
-            label: "Mock".to_string(),
-            transport: Transport::Mock,
-            api_key: String::new(),
-            model: "mock".to_string(),
-        };
-        let provider = build_provider_for_channel(&channel, "mock");
-        assert_eq!(provider.provider_id(), "mock");
     }
 }

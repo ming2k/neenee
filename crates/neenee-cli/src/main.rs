@@ -24,7 +24,7 @@ use neenee_core::{
 use neenee_providers::MockProvider;
 use neenee_store::{
     config::Config,
-    embedding, lock, model_usage, paths,
+    embedding, lock, paths, provider_usage,
     search_tool::SearchHistoryTool,
     session::{self, discard_trailing_loop_prompts, SessionStore},
 };
@@ -89,6 +89,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "init",
     "skills",
     "skill",
+    "export",
     "clear",
     "help",
     "exit",
@@ -118,7 +119,7 @@ fn short_session_id(id: &str) -> &str {
 /// Whether each provider has a usable API key (env var or config).
 /// Keyless providers (local llama, mock) always report `true`.
 ///
-/// Derived from the model catalog so the readiness signal and the actual
+/// Derived from the provider catalog so the readiness signal and the actual
 /// provider construction share one resolution path.
 fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
     catalog::build_catalog(config)
@@ -141,7 +142,7 @@ fn build_session_context(
     mcp_statuses: &[(String, McpConnectionStatus)],
     config: &Config,
 ) -> SessionContextSnapshot {
-    let provider_id = catalog::default_model_id(config).to_string();
+    let provider_id = catalog::default_provider_id(config).to_string();
     let model = catalog::resolved_model_name(config, &provider_id);
 
     // Catalog entry carries the authoritative display metadata; fall back to
@@ -157,7 +158,7 @@ fn build_session_context(
         .as_ref()
         .map(|e| e.description.clone())
         .unwrap_or_default();
-    let context_window = entry.as_ref().map(|e| e.context_window).unwrap_or(0);
+    let context_window = entry.as_ref().map(|e| e.context_window()).unwrap_or(0);
     let api_key_ready = entry.as_ref().map(|e| e.key_ready()).unwrap_or(false);
 
     let model_info = ModelInfo {
@@ -211,18 +212,11 @@ fn build_session_context(
 }
 
 /// Heuristic model-capability hints for the session modal. Per-model capability
-/// data is not yet modeled in the catalog, so these are inferred from the model
-/// id: every provider supports tool calling (the harness depends on it), and
-/// reasoning models are recognised by their conventional id fragments.
+/// data is resolved from the [`neenee_core::model`] registry; the harness
+/// depends on tool calling for every provider, so it is always advertised.
 fn derive_capabilities(model: &str) -> Vec<String> {
     let mut caps = vec!["tool calling".to_string()];
-    let lower = model.to_lowercase();
-    if lower.contains("reasoner")
-        || lower.contains("r1")
-        || lower.contains("thinking")
-        || lower.contains("o1")
-        || lower.contains("o3")
-    {
+    if neenee_core::resolve_model(model).reasoning {
         caps.push("reasoning".to_string());
     }
     caps
@@ -348,7 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env-var-then-config resolution rules shared with runtime switching. See
     // `docs/adr/0002-model-channel-abstraction.md`.
     let initial_provider: Arc<dyn Provider> =
-        catalog::build_provider_for(&config, catalog::default_model_id(&config));
+        catalog::build_provider_for(&config, catalog::default_provider_id(&config));
 
     let provider_holder = Arc::new(RwLock::new(initial_provider));
     let provider_for_task = provider_holder.clone();
@@ -518,7 +512,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load per-model usage telemetry (recency signal for the picker,
     // ADR-0002 phase 2). Moved into the agent task so both the startup
     // activation and runtime switches record through one instance.
-    let model_usage = model_usage::ModelUsage::load();
+    let provider_usage = provider_usage::ProviderUsage::load();
 
     let current_task_token = Arc::new(AsyncRwLock::new(None::<CancellationToken>));
     let task_generation = Arc::new(AtomicU64::new(0));
@@ -528,7 +522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embedding_store_for_commands = embedding_store.clone();
 
     // Initial values for TUI
-    let initial_p_name = catalog::default_model_id(&config).to_string();
+    let initial_p_name = catalog::default_provider_id(&config).to_string();
     let initial_m_name = catalog::resolved_model_name(&config, &initial_p_name);
 
     // Spawn Agent Background Task
@@ -543,20 +537,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Record that the default model was activated on startup, so the
         // picker's recency ordering reflects "last used = now". Best-effort:
         // usage tracking is rebuildable state and must never block startup.
-        let mut model_usage = model_usage;
+        let mut provider_usage = provider_usage;
         {
-            let initial_id = catalog::default_model_id(&config).to_string();
-            model_usage.record(&initial_id);
-            if let Err(error) = model_usage.save() {
+            let initial_id = catalog::default_provider_id(&config).to_string();
+            provider_usage.record(&initial_id);
+            if let Err(error) = provider_usage.save() {
                 tracing::warn!(?error, "could not persist model usage telemetry");
             }
         }
         // Push the initial model-picker snapshot (default id + per-model
         // favorite / key-ready / last-used) so the picker is ready the moment
         // the user opens it.
-        let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
+        let _ = resp_tx.send(AgentResponse::ProviderPicker(catalog::build_picker_state(
             &config,
-            &model_usage,
+            &provider_usage,
         )));
         if open_picker_on_start {
             let _ = resp_tx.send(AgentResponse::SessionsOverview(
@@ -617,8 +611,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "deepseek-v4-flash" | "deepseek-v4-pro" => {
                                 config.deepseek_api_key = Some(key)
                             }
-                            "qwen" => config.qwen_api_key = Some(key),
-                            "glm" => config.glm_api_key = Some(key),
+                            "zai-code" => config.zai_api_key = Some(key),
                             _ => {}
                         }
                     }
@@ -629,10 +622,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Persist the chosen model and default-provider pointer before
                     // building so the catalog reads them back. The key/url writes
-                    // above already landed in `config`. Keep both `default_model`
-                    // and the legacy `default_provider` in sync so they never
-                    // diverge.
-                    config.default_model = Some(provider_type.clone());
+                    // above already landed in `config`.
                     config.default_provider = provider_type.clone();
                     match provider_type.as_str() {
                         "openai" => config.openai_model = Some(model.clone()),
@@ -641,8 +631,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "llama" => config.llama_model = Some(model.clone()),
                         "deepseek-v4-flash" => config.deepseek_flash_model = Some(model.clone()),
                         "deepseek-v4-pro" => config.deepseek_pro_model = Some(model.clone()),
-                        "qwen" => config.qwen_model = Some(model.clone()),
-                        "glm" => config.glm_model = Some(model.clone()),
+                        "zai-code" => config.zai_model = Some(model.clone()),
                         _ => {}
                     }
                     let _ = config.save();
@@ -672,18 +661,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
                     // Record the switch as an activation so the picker's recency
                     // ordering tracks it. Best-effort: telemetry is rebuildable.
-                    model_usage.record(&provider_type);
-                    if let Err(error) = model_usage.save() {
+                    provider_usage.record(&provider_type);
+                    if let Err(error) = provider_usage.save() {
                         tracing::warn!(?error, "could not persist model usage telemetry");
                     }
                     let _ = resp_tx.send(AgentResponse::ProviderSwitched {
                         provider: provider_type,
                         model,
                     });
-                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
-                        &config,
-                        &model_usage,
-                    )));
+                    let _ = resp_tx.send(AgentResponse::ProviderPicker(
+                        catalog::build_picker_state(&config, &provider_usage),
+                    ));
                 }
                 AgentRequest::ToggleFavorite { id } => {
                     // Toggle the id in the favorites list, persist, and push a
@@ -696,17 +684,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(error) = config.save() {
                         tracing::warn!(?error, "could not persist favorites");
                     }
-                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
-                        &config,
-                        &model_usage,
-                    )));
+                    let _ = resp_tx.send(AgentResponse::ProviderPicker(
+                        catalog::build_picker_state(&config, &provider_usage),
+                    ));
                 }
                 AgentRequest::SetDefaultModel { id } => {
                     // `d` in the picker: make `id` the default AND activate it,
                     // reusing the catalog so resolution rules stay shared. No
-                    // new key/model comes from the TUI — the model's existing
+                    // new key/model comes from the TUI — the provider's existing
                     // resolved config is used as-is.
-                    config.default_model = Some(id.clone());
                     config.default_provider = id.clone();
                     if let Err(error) = config.save() {
                         tracing::warn!(?error, "could not persist default model");
@@ -715,8 +701,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *provider_for_task
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = new_p;
-                    model_usage.record(&id);
-                    if let Err(error) = model_usage.save() {
+                    provider_usage.record(&id);
+                    if let Err(error) = provider_usage.save() {
                         tracing::warn!(?error, "could not persist model usage telemetry");
                     }
                     let model_name = catalog::resolved_model_name(&config, &id);
@@ -725,10 +711,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: model_name,
                     });
                     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
-                    let _ = resp_tx.send(AgentResponse::ModelPicker(catalog::build_picker_state(
-                        &config,
-                        &model_usage,
-                    )));
+                    let _ = resp_tx.send(AgentResponse::ProviderPicker(
+                        catalog::build_picker_state(&config, &provider_usage),
+                    ));
                 }
                 AgentRequest::DeleteSession { id } => match session.delete(&id).await {
                     Ok(()) => {
@@ -780,7 +765,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     match parts[0] {
-                        "/models" => {
+                        "/provider" => {
                             // Handled in TUI
                         }
                         "/mode" => {
@@ -1633,6 +1618,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "Conversation history cleared.".to_string(),
                             ));
                         }
+                        "/export" => {
+                            let messages = history.lock().await.clone();
+                            let session_id = session.id().await;
+                            let provider_id = agent.provider.provider_id();
+                            let model_name = agent.provider.model();
+                            let mode = match agent.get_mode() {
+                                AgentMode::Build => "build",
+                                AgentMode::Plan => "plan",
+                            };
+                            let goal = agent.get_goal();
+                            let plan_path = agent.active_plan_path();
+                            let markdown = crate::tui::export::format_export_markdown(
+                                crate::tui::export::ExportContext {
+                                    session_id: &session_id,
+                                    provider: &provider_id,
+                                    model: &model_name,
+                                    mode,
+                                    goal: goal.as_ref(),
+                                    active_plan_path: plan_path.as_deref(),
+                                },
+                                &messages,
+                            );
+                            let char_count = markdown.chars().count();
+                            match crate::tui::clipboard::copy(&markdown).await {
+                                Ok(crate::tui::clipboard::CopyOutcome::Native) => {
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Session exported to clipboard ({} messages, {} chars). \
+                                         Paste it into another agent to continue this work.",
+                                        messages.len(),
+                                        char_count
+                                    )));
+                                }
+                                Ok(crate::tui::clipboard::CopyOutcome::Osc52) => {
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Session exported via OSC52 ({} messages, {} chars). \
+                                         If your terminal did not capture it, run neenee in a \
+                                         clipboard-capable environment.",
+                                        messages.len(),
+                                        char_count
+                                    )));
+                                }
+                                Err(error) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                                        "Export built ({} chars) but clipboard copy failed: {}",
+                                        char_count, error
+                                    )));
+                                }
+                            }
+                        }
                         "/help" => {
                             let custom_help = if commands_for_task.is_empty() {
                                 String::new()
@@ -1657,7 +1691,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let _ = resp_tx.send(AgentResponse::Text(
                                 format!("Slash commands:\n\
-                                /models   — Select an LLM provider\n\
+                                /provider — Select an LLM provider\n\
                                 /mode     — Show or switch mode (build, plan)\n\
                                 /mcp      — Show configured MCP server status\n\
                                 /compact  — Compact older complete turns now\n\
@@ -1674,6 +1708,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /init [path] — Initialize a .neenee/ config tree\n\
                                 /skills [list|reload] — List or reload available skills\n\
                                 /skill <name> — Load a skill by name\n\
+                                /export   — Export this conversation to the clipboard as Markdown\n\
                                 /help     — Show available commands and keybindings\n\
                                 /exit     — Exit the program{}", custom_help)
                             ));

@@ -9,7 +9,7 @@ use crate::tui::App;
 // truth and must stay in sync with the `/help` text in `crates/neenee/src/main.rs`
 // and `docs/reference/commands.md`. Order is logical grouping, not alphabetical.
 pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/models", "Select an LLM provider"),
+    ("/provider", "Select an LLM provider"),
     ("/session", "Open the session context overview"),
     ("/mode", "Show or switch mode (build, plan)"),
     ("/plan", "Open the active plan file in a preview modal"),
@@ -30,6 +30,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/init", "Initialize a .neenee/ config tree"),
     ("/help", "Show available commands and keybindings"),
     ("/exit", "Exit the program"),
+    (
+        "/export",
+        "Export this conversation to the clipboard as Markdown",
+    ),
 ];
 
 /// Kind of completion menu the input box is currently offering. Drives the

@@ -52,7 +52,7 @@ impl Provider for ProxyProvider {
     }
 
     /// Delegate to the currently active inner provider so attribution tracks
-    /// the live provider even after a mid-session `/models` switch.
+    /// the live provider even after a mid-session `/provider` switch.
     fn provider_id(&self) -> String {
         self.holder
             .read()
@@ -306,6 +306,9 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                 let _ = context
                     .tx
                     .send(AgentResponse::Text("... [Interrupted]".to_string()));
+            }
+            Err(HarnessError::TurnLimitReached { rounds }) if is_current => {
+                let _ = context.tx.send(AgentResponse::TurnPaused { rounds });
             }
             Err(error) if is_current => {
                 let _ = context.tx.send(AgentResponse::Error(error.to_string()));

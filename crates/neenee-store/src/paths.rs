@@ -150,11 +150,11 @@ impl Dirs {
     }
 
     /// Per-model usage telemetry (`last_used`, use count) driving recency
-    /// ordering in the model picker (ADR-0002). Rebuildable: loss affects sort
+    /// ordering in the provider picker (ADR-0002). Rebuildable: loss affects sort
     /// order only, never configuration. Sits next to [`history_file`] under
     /// `$XDG_STATE_HOME` since it is the same kind of program-generated signal.
-    pub fn model_usage_file(&self) -> PathBuf {
-        self.state_dir.join("model_usage.json")
+    pub fn provider_usage_file(&self) -> PathBuf {
+        self.state_dir.join("provider_usage.json")
     }
 
     /// Cross-process advisory lock file. Lives under runtime when available,

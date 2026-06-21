@@ -99,10 +99,10 @@ pub enum AgentResponse {
     UserQuestionRequest(UserQuestionRequest),
     /// Lowercase provider name → whether a usable API key is configured.
     ProviderKeys(Vec<(String, bool)>),
-    /// Full model-picker state (default id + one row per model) for the
-    /// `/models` picker. Supersedes `ProviderKeys` for the picker's needs;
+    /// Full provider-picker state (default id + one row per provider) for the
+    /// provider picker. Supersedes `ProviderKeys` for the picker's needs;
     /// `ProviderKeys` is retained for the header key-readiness summary.
-    ModelPicker(ModelPickerSnapshot),
+    ProviderPicker(ProviderPickerSnapshot),
     ConversationCleared,
     ConversationReplaced(Vec<Message>),
     /// Replace the sessions picker contents (and open the picker).
@@ -150,6 +150,13 @@ pub enum AgentResponse {
         parent_call_id: String,
         event: SubTaskEvent,
     },
+    /// The turn was paused by a harness guardrail (tool-round budget cap),
+    /// not by a runtime failure. Distinct from [`AgentResponse::Error`] so the
+    /// UI can render it as a recoverable notice with a continue affordance
+    /// instead of a red error. `rounds` is the budget that was reached.
+    TurnPaused {
+        rounds: usize,
+    },
     Error(String),
     Exit,
     ProviderSwitched {
@@ -192,29 +199,31 @@ pub struct SessionOverview {
     pub active: bool,
 }
 
-/// One row of model-picker state sent from the harness to the TUI. Carries the
-/// dynamic per-model signals the picker needs — key readiness, favorite flag,
-/// and last-used timestamp — keyed by canonical model id. The TUI joins this
-/// with its own static display metadata (`SOLUTIONS`). See ADR-0002.
+/// One row of provider-picker state sent from the harness to the TUI. Carries
+/// the dynamic per-provider signals the picker needs — key readiness, favorite
+/// flag, and last-used timestamp — keyed by canonical provider id. The TUI
+/// joins this with its own static display metadata. See ADR-0002.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelPickerRow {
+pub struct ProviderPickerRow {
     pub id: String,
     pub key_ready: bool,
     pub favorite: bool,
-    /// Unix epoch milliseconds of the last activation. `None` if the model has
-    /// never been activated, which the picker sorts as "oldest".
+    /// Unix epoch milliseconds of the last activation. `None` if the provider
+    /// has never been activated, which the picker sorts as "oldest".
     pub last_used_ms: Option<u64>,
 }
 
-/// Full snapshot of model-picker state: which model is the current default plus
-/// one row per known model. Sent on startup and after any mutation (favorite
-/// toggle, default change, provider switch) so the TUI always renders from a
-/// fresh, consistent picture rather than merging incremental updates.
+/// Full snapshot of provider-picker state: which provider is the current
+/// default plus one row per known provider. Sent on startup and after any
+/// mutation (favorite toggle, default change, provider switch) so the TUI
+/// always renders from a fresh, consistent picture rather than merging
+/// incremental updates.
 #[derive(Debug, Clone, Default)]
-pub struct ModelPickerSnapshot {
-    /// Canonical id of the active/default model. Matches `config.default_provider`.
+pub struct ProviderPickerSnapshot {
+    /// Canonical id of the active/default provider. Matches
+    /// `config.default_provider`.
     pub default_id: String,
-    pub rows: Vec<ModelPickerRow>,
+    pub rows: Vec<ProviderPickerRow>,
 }
 
 /// Events emitted by a sub-agent spawned through the `task` tool.

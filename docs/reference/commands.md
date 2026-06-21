@@ -11,10 +11,11 @@ Project and user-defined commands are covered under
 
 | Command | Description |
 |---------|-------------|
-| `/models` | Select an LLM provider |
+| `/provider` | Select an LLM provider |
 | `/mode` | Show or switch mode (build, plan) |
 | `/mcp` | Show configured MCP server status |
 | `/compact` | Compact older complete turns now |
+| `/export` | Export the current conversation to the clipboard as Markdown |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
@@ -26,7 +27,7 @@ Project and user-defined commands are covered under
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
 
-`/models` and `/exit` are handled entirely in the TUI; the rest are dispatched
+`/provider` and `/exit` are handled entirely in the TUI; the rest are dispatched
 by the agent backend.
 
 ## Subcommands
@@ -93,6 +94,19 @@ accounted against the active goal; reaching the token budget moves the goal to
 |------|--------|
 | `/init [path]` | Initialize a `.neenee/` config tree; `path` defaults to `.` |
 
+### `/export`
+
+| Form | Effect |
+|------|--------|
+| `/export` | Render the live conversation as Markdown — metadata header (session id, provider/model, mode, goal, active plan, exported-at), goal checklist, then a chronological transcript of user prompts, assistant replies, tool calls, and inlined tool results — and copy it to the system clipboard so it can be pasted into another agent to continue the work. |
+
+The receiving agent gets the full chain of decisions and side effects: hidden
+and system messages are skipped (mirroring TUI rendering), reasoning traces
+are folded into collapsible `<details>` blocks, and sub-agent transcripts
+nested under `task` results are summarised by message counts instead of
+dumped in full. If the system clipboard is unavailable, the export falls
+back to OSC52 or surfaces the underlying clipboard error.
+
 ## Custom commands
 
 Markdown files discovered in `.neenee/commands/` (project-local, higher
@@ -117,4 +131,4 @@ are not shadowed by custom commands.
 
 - [Harness architecture](../explanation/agent-design/harness.md) — goal state, autonomous
   loop, durable session, permission broker, context compaction
-- [Modals](tui/modals.md) — the `/models` and `/sessions` pickers
+- [Modals](tui/modals.md) — the `/provider` and `/sessions` pickers

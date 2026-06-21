@@ -778,41 +778,56 @@ pub(super) fn draw_message_body(
                 }
             }
             Block::ProposedPlan { content } => {
-                // Render the proposed-plan block as a distinct card: a top
-                // border with a "Proposed plan" label, the inner markdown
-                // wrapped to the body width, and a bottom rule. The visual
-                // cue tells the user "the model thinks the plan is ready;
-                // review it before approving plan_exit."
-                let body_wrap_width =
-                    area.width.saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + 4) as usize;
+                // Render the proposed-plan block as a distinct card using the
+                // project's standard surface: a `raised()` background band
+                // with a brand-colored thick left bar (the same treatment as
+                // the sticky plan panel, modals, and the permission sheet).
+                // No `╭─╰─` frame — the bg + left bar are the visual cue that
+                // "the model thinks the plan is ready; review it before
+                // approving plan_exit." The band is inset from the transcript
+                // edges like a code block so it reads as one surface.
+                let h_inset: u16 = 2;
+                let band_x = area.x + h_inset;
+                let band_w = area.width.saturating_sub(2 * h_inset).max(1);
+                let card_fg = theme.brand();
+                let card_bg = theme.raised();
+                let body_fg = theme.fg();
+
+                // Wrap width inside the band: left bar (1) + leading space (1)
+                // + content + 1-col right pad.
+                let body_wrap_width = (band_w as usize).saturating_sub(3);
                 let wrapped = wrap_text(content, body_wrap_width);
 
                 let header_label = "Proposed plan";
-                let header_pad = body_wrap_width.saturating_sub(header_label.len() + 4);
-                let header_text =
-                    format!("   ╭── {} {}", header_label, "─".repeat(header_pad.max(1)));
-                let total_lines = 1 + wrapped.len() + 1;
+                let total_lines = 1 + wrapped.len();
                 *content_lines += total_lines;
 
-                let card_fg = theme.brand();
-                let card_bg = theme.raised();
+                let band_rect_full = |y: u16| Rect::new(band_x, y, band_w, 1);
 
-                // Header line.
+                // Header line: `┃ Proposed plan` (brand bold) + raised fill.
                 if *skip_rows > 0 {
                     *skip_rows = skip_rows.saturating_sub(1);
                 } else if *current_y < area.y + area.height {
-                    let line = Line::from(vec![Span::styled(
-                        header_text,
-                        Style::default().fg(card_fg).bg(card_bg),
-                    )]);
-                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
-                    frame.render_widget(Paragraph::new(line), line_rect);
+                    let used = 1 + 1 + header_label.width(); // bar + space + label
+                    let pad = (band_w as usize).saturating_sub(used);
+                    let line = Line::from(vec![
+                        Span::styled("┃", Style::default().fg(card_fg).bg(card_bg)),
+                        Span::styled(
+                            format!(" {}", header_label),
+                            Style::default()
+                                .fg(card_fg)
+                                .bg(card_bg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" ".repeat(pad), Style::default().bg(card_bg)),
+                    ]);
+                    frame.render_widget(Paragraph::new(line), band_rect_full(*current_y));
                     *current_y += 1;
                 } else {
                     *current_y = area.y + area.height;
                 }
 
-                // Body lines, padded so the bg fills the card row.
+                // Body lines: `┃ {wrapped markdown}` + raised fill.
                 for wl in &wrapped {
                     if *skip_rows > 0 {
                         *skip_rows = skip_rows.saturating_sub(1);
@@ -821,31 +836,17 @@ pub(super) fn draw_message_body(
                     if *current_y >= area.y + area.height {
                         break;
                     }
-                    let body_text = format!("   │ {}", wl.text);
-                    let used = body_text.width();
-                    let pad = (area.width as usize).saturating_sub(used);
-                    let padded = format!("{}{}", body_text, " ".repeat(pad));
-                    let line = Line::from(vec![Span::styled(
-                        padded,
-                        Style::default().fg(theme.fg()).bg(card_bg),
-                    )]);
-                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
-                    frame.render_widget(Paragraph::new(line), line_rect);
-                    *current_y += 1;
-                }
-
-                // Bottom border.
-                if *skip_rows > 0 {
-                    *skip_rows = skip_rows.saturating_sub(1);
-                } else if *current_y < area.y + area.height {
-                    let bottom =
-                        format!("   ╰{}", "─".repeat(area.width.saturating_sub(4) as usize));
-                    let line = Line::from(vec![Span::styled(
-                        bottom,
-                        Style::default().fg(card_fg).bg(card_bg),
-                    )]);
-                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
-                    frame.render_widget(Paragraph::new(line), line_rect);
+                    let used = 1 + 1 + wl.text.width(); // bar + space + text
+                    let pad = (band_w as usize).saturating_sub(used);
+                    let line = Line::from(vec![
+                        Span::styled("┃", Style::default().fg(card_fg).bg(card_bg)),
+                        Span::styled(
+                            format!(" {}", wl.text),
+                            Style::default().fg(body_fg).bg(card_bg),
+                        ),
+                        Span::styled(" ".repeat(pad), Style::default().bg(card_bg)),
+                    ]);
+                    frame.render_widget(Paragraph::new(line), band_rect_full(*current_y));
                     *current_y += 1;
                 }
             }
@@ -853,144 +854,232 @@ pub(super) fn draw_message_body(
     }
 }
 
+/// Foreground color for a plan-section status glyph. Done/in-progress pop in
+/// `ok`/`warn`; pending/skipped stay muted so the eye is drawn to the active
+/// work.
+fn section_glyph_color(
+    status: neenee_core::PlanSectionStatus,
+    theme: &Theme,
+    muted: ratatui::style::Color,
+) -> ratatui::style::Color {
+    use neenee_core::PlanSectionStatus;
+    match status {
+        PlanSectionStatus::Done => theme.ok(),
+        PlanSectionStatus::InProgress => theme.warn(),
+        PlanSectionStatus::Pending | PlanSectionStatus::Skipped => muted,
+    }
+}
+
 /// Draw the sticky plan-progress panel pinned above the input box.
 ///
-/// Layout (3 rows):
+/// The panel uses the project's standard card style: a solid `raised()`
+/// background with a brand-colored thick left bar — the same surface as the
+/// goal bar, permission sheet, and modals. No `╭─╰─` frame.
+///
+/// Collapsed (1 row) it shows the plan name, total progress, and the *active*
+/// section (the first `InProgress`, or if none the first `Pending` as "up
+/// next"), with a dim `▾` chevron at the right edge:
+///
 /// ```text
-/// ╭── Plan: rewrite-auth.md · 1/4 done ────────────╮
-/// │ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Asm  │
-/// ╰────────────────────────────────────────────────╯
+/// ┃ rewrite-auth.md  2/4  ● Key Changes              ▾
 /// ```
 ///
-/// Sections that do not fit on the single content row are elided with `…`
-/// so the panel's overall height stays fixed and the input box does not
-/// jump when the section list changes. When `current_turn` exceeds
-/// `progress.updated_at_turn + PLAN_STALE_TURN_THRESHOLD` the header gets
-/// a dimmed `· not updated for N turns` suffix so the user knows the
-/// model has not called `update_plan_progress` recently.
+/// When every section is done or skipped the marker reads `✓ done`. Clicking
+/// the panel toggles the expanded form, which lists every section in file
+/// order with a `▴` collapse chevron:
+///
+/// ```text
+/// ┃ rewrite-auth.md  2/4                             ▴
+///   ✓ Summary
+///   ● Key Changes
+///   ○ Test Plan
+/// ```
+///
+/// The caller caps the expanded height, so a long plan elides its tail with a
+/// `… +N more` row. When `current_turn` exceeds `progress.updated_at_turn +
+/// PLAN_STALE_TURN_THRESHOLD` the header dims and gains a `not updated for N
+/// turns` suffix. Returns the panel rect for click hit-testing.
 pub(super) fn draw_plan_panel(
     frame: &mut Frame,
     rect: Rect,
     progress: &neenee_core::PlanProgress,
+    expanded: bool,
     current_turn: u64,
     theme: &Theme,
-) {
+) -> Option<Rect> {
     use ratatui::widgets::Block as RtBlock;
 
-    if rect.height < 3 {
-        return;
+    if rect.height == 0 {
+        return None;
     }
 
     let card_bg = theme.raised();
-    let card_fg = theme.brand();
+    let bar_fg = theme.brand();
     let body_fg = theme.fg();
     let dim_fg = theme.muted();
 
     let stale_turns = current_turn.saturating_sub(progress.updated_at_turn);
     let is_stale = stale_turns > neenee_core::plan::PLAN_STALE_TURN_THRESHOLD;
+    let header_fg = if is_stale { dim_fg } else { body_fg };
 
-    // Solid bg first so the whole card reads as one surface.
+    // Solid raised bg + brand thick left bar: the project's standard card
+    // surface. The left bar occupies column 0; content is rendered offset by 1.
     frame.render_widget(
-        RtBlock::default().style(Style::default().bg(card_bg).fg(body_fg)),
+        RtBlock::default()
+            .borders(ratatui::widgets::Borders::LEFT)
+            .border_type(ratatui::widgets::BorderType::Thick)
+            .border_style(Style::default().fg(bar_fg))
+            .style(Style::default().bg(card_bg).fg(body_fg)),
         rect,
     );
 
-    let inner_w = rect.width as usize;
-    let path_str = progress.path.display().to_string();
+    let content_x = rect.x + 1;
+    let content_w = rect.width.saturating_sub(1);
+    let inner_w = content_w as usize;
+
+    // Prefer the bare file name (e.g. `rewrite-auth.md`) over the full plan
+    // path so the collapsed row stays compact in narrow terminals.
+    let path_str = progress
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| progress.path.display().to_string());
     let done = progress.done_count();
     let total = progress.sections.len();
-    let header_label = if is_stale {
-        format!(
-            "Plan: {} · {}/{} done · not updated for {} turns",
-            path_str, done, total, stale_turns
-        )
-    } else {
-        format!("Plan: {} · {}/{} done", path_str, done, total)
-    };
 
-    // Row 1: top border + header label.
-    let header_text = format!("╭── {} ", header_label);
-    let header_used = header_text.chars().count();
-    let header_pad = inner_w.saturating_sub(header_used + 1);
-    // When stale, dim the whole header so the user notices something is off
-    // before they read the suffix.
-    let header_fg = if is_stale { dim_fg } else { card_fg };
-    let top_line = Line::from(vec![
-        Span::styled(header_text, Style::default().fg(header_fg).bg(card_bg)),
-        Span::styled(
-            "─".repeat(header_pad),
-            Style::default().fg(header_fg).bg(card_bg),
-        ),
-        Span::styled("╮", Style::default().fg(header_fg).bg(card_bg)),
-    ]);
-    let top_rect = Rect::new(rect.x, rect.y, rect.width, 1);
-    frame.render_widget(Paragraph::new(top_line), top_rect);
+    // The active section for the collapsed row: first InProgress, else the
+    // first Pending ("up next"). None when everything is done/skipped.
+    let active = progress
+        .sections
+        .iter()
+        .find(|s| matches!(s.status, neenee_core::PlanSectionStatus::InProgress))
+        .or_else(|| {
+            progress
+                .sections
+                .iter()
+                .find(|s| matches!(s.status, neenee_core::PlanSectionStatus::Pending))
+        });
 
-    // Row 2: section list. Each entry is `<glyph> <name>` joined by `  `;
-    // glyphs are colored by status so done/in-progress pop. Elide with `…`
-    // when the next entry does not fit.
-    let mut spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(card_fg).bg(card_bg))];
-    let mut used = 2usize;
-    let separator = "  ";
-    let mut rendered_any = false;
-    let mut elided = false;
-    for section in &progress.sections {
-        let entry_chars = section.status.glyph().chars().count() + 1 + section.name.chars().count();
-        let extra = if rendered_any {
-            separator.chars().count() + entry_chars
-        } else {
-            entry_chars
-        };
-        // Reserve room for the closing `│` (and a possible `…`).
-        if used + extra + 2 > inner_w {
-            elided = true;
-            break;
-        }
-        if rendered_any {
-            spans.push(Span::styled(
-                separator,
+    let chevron = if expanded { "▴" } else { "▾" };
+
+    // ── Header row (row 0) ──
+    let mut header_spans: Vec<Span> = Vec::new();
+    header_spans.push(Span::styled(
+        format!(" {} ", path_str),
+        Style::default()
+            .fg(header_fg)
+            .bg(card_bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    header_spans.push(Span::styled(
+        format!("{}/{}  ", done, total),
+        Style::default()
+            .fg(bar_fg)
+            .bg(card_bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    if !expanded {
+        // Collapsed: inline the active section (or a completion marker).
+        if let Some(section) = active {
+            header_spans.push(Span::styled(
+                section.status.glyph(),
+                Style::default()
+                    .fg(section_glyph_color(section.status, theme, dim_fg))
+                    .bg(card_bg),
+            ));
+            header_spans.push(Span::styled(
+                format!(" {}", section.name),
                 Style::default().fg(body_fg).bg(card_bg),
             ));
-            used += separator.chars().count();
+        } else {
+            header_spans.push(Span::styled(
+                "✓ done",
+                Style::default().fg(theme.ok()).bg(card_bg),
+            ));
         }
-        let glyph_color = match section.status {
-            neenee_core::PlanSectionStatus::Done => theme.ok(),
-            neenee_core::PlanSectionStatus::InProgress => theme.warn(),
-            neenee_core::PlanSectionStatus::Pending => dim_fg,
-            neenee_core::PlanSectionStatus::Skipped => dim_fg,
-        };
-        spans.push(Span::styled(
-            section.status.glyph(),
-            Style::default().fg(glyph_color).bg(card_bg),
-        ));
-        spans.push(Span::styled(
-            format!(" {}", section.name),
-            Style::default().fg(body_fg).bg(card_bg),
-        ));
-        used += entry_chars;
-        rendered_any = true;
     }
-    let trailing_reserved = 1 + if elided { 1 } else { 0 };
-    let pad = inner_w.saturating_sub(used + trailing_reserved);
-    spans.push(Span::styled(" ".repeat(pad), Style::default().bg(card_bg)));
-    if elided {
-        spans.push(Span::styled("…", Style::default().fg(dim_fg).bg(card_bg)));
-    }
-    spans.push(Span::styled("│", Style::default().fg(card_fg).bg(card_bg)));
-    let body_line = Line::from(spans);
-    let body_rect = Rect::new(rect.x, rect.y + 1, rect.width, 1);
-    frame.render_widget(Paragraph::new(body_line), body_rect);
 
-    // Row 3: bottom border.
-    let bottom_fill = inner_w.saturating_sub(2);
-    let bottom_line = Line::from(vec![
-        Span::styled("╰", Style::default().fg(card_fg).bg(card_bg)),
-        Span::styled(
-            "─".repeat(bottom_fill),
-            Style::default().fg(card_fg).bg(card_bg),
-        ),
-        Span::styled("╯", Style::default().fg(card_fg).bg(card_bg)),
-    ]);
-    let bottom_rect = Rect::new(rect.x, rect.y + 2, rect.width, 1);
-    frame.render_widget(Paragraph::new(bottom_line), bottom_rect);
+    if is_stale {
+        header_spans.push(Span::styled(
+            format!(" · not updated for {} turns", stale_turns),
+            Style::default().fg(dim_fg).bg(card_bg),
+        ));
+    }
+
+    // Right-align the expand/collapse chevron.
+    let used: usize = header_spans.iter().map(|s| s.content.width()).sum();
+    let pad = inner_w.saturating_sub(used + chevron.width());
+    if pad > 0 {
+        header_spans.push(Span::styled(" ".repeat(pad), Style::default().bg(card_bg)));
+    }
+    header_spans.push(Span::styled(
+        chevron,
+        Style::default().fg(dim_fg).bg(card_bg),
+    ));
+
+    let header_rect = Rect::new(content_x, rect.y, content_w, 1);
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), header_rect);
+
+    // ── Expanded body: one row per section, in file order ──
+    if expanded && rect.height > 1 {
+        let body_rows = (rect.height as usize).saturating_sub(1);
+        let total_sections = progress.sections.len();
+        let eliding = total_sections > body_rows;
+        let show_count = if eliding {
+            body_rows.saturating_sub(1)
+        } else {
+            total_sections
+        };
+
+        for (i, section) in progress.sections.iter().take(show_count).enumerate() {
+            let y = rect.y + 1 + i as u16;
+            let glyph_color = section_glyph_color(section.status, theme, dim_fg);
+            let glyph = Span::styled(
+                section.status.glyph(),
+                Style::default().fg(glyph_color).bg(card_bg),
+            );
+            let name = Span::styled(
+                format!(" {}", section.name),
+                Style::default().fg(body_fg).bg(card_bg),
+            );
+            let used_local = 2 + 1 + section.name.width(); // "  " + glyph + " name"
+            let tail = Span::styled(
+                " ".repeat(inner_w.saturating_sub(used_local)),
+                Style::default().bg(card_bg),
+            );
+            let line_rect = Rect::new(content_x, y, content_w, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  ", Style::default().bg(card_bg)),
+                    glyph,
+                    name,
+                    tail,
+                ])),
+                line_rect,
+            );
+        }
+
+        if eliding {
+            let more = total_sections - show_count;
+            let y = rect.y + 1 + show_count as u16;
+            let label = format!("… +{} more", more);
+            let used_local = 2 + label.width();
+            let tail = Span::styled(
+                " ".repeat(inner_w.saturating_sub(used_local)),
+                Style::default().bg(card_bg),
+            );
+            let line_rect = Rect::new(content_x, y, content_w, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  ", Style::default().bg(card_bg)),
+                    Span::styled(label, Style::default().fg(dim_fg).bg(card_bg)),
+                    tail,
+                ])),
+                line_rect,
+            );
+        }
+    }
+
+    Some(rect)
 }

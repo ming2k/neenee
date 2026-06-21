@@ -17,7 +17,7 @@ use crate::tui::selection::{SelectionDrag, SelectionState};
 use crate::tui::transcript::{
     finalize_streaming_reasoning, transcript_message_from_core, transcript_messages_from_core,
 };
-use neenee_core::{AgentRequest, ModelPickerSnapshot};
+use neenee_core::{AgentRequest, ProviderPickerSnapshot};
 
 use std::collections::HashMap;
 
@@ -40,13 +40,13 @@ fn restored_assistant_carries_provider_and_model_attribution() {
     // provider/model so a resumed session that mixed models stays
     // traceable in the transcript.
     let message = Message::new(Role::Assistant, "Hello from kimi")
-        .with_attribution("kimi-code", "kimi-for-coding");
+        .with_attribution("kimi-code", "kimi-k2.7-code");
     let restored = transcript_message_from_core(message).unwrap();
     assert_eq!(restored.provider.as_deref(), Some("kimi-code"));
-    assert_eq!(restored.model.as_deref(), Some("kimi-for-coding"));
+    assert_eq!(restored.model.as_deref(), Some("kimi-k2.7-code"));
     assert_eq!(
         restored.attribution_label(),
-        Some(("kimi-code".to_string(), "kimi-for-coding".to_string()))
+        Some(("kimi-code".to_string(), "kimi-k2.7-code".to_string()))
     );
 
     // A plain user message carries no attribution.
@@ -491,7 +491,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         max_scroll: 0,
         sticky_step: None,
         sticky_rect: None,
-        hint_goal_rect: None,
+        goal_rect: None,
         sticky_summary_line: None,
         pin_summary_line: None,
         focus_stack: Vec::new(),
@@ -516,6 +516,8 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        plan_panel_expanded: false,
+        plan_rect: None,
         turn_count: 0,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
@@ -557,7 +559,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         editor_key: String::new(),
         editor_model: String::new(),
         key_status: HashMap::new(),
-        model_picker: ModelPickerSnapshot::default(),
+        provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
         mcp_statuses: Vec::new(),
     };

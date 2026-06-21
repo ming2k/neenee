@@ -77,10 +77,18 @@ pub enum ToolOutput {
     /// parent session and replayed on resume, plus the actual token usage so
     /// parent-side goal accounting no longer under-counts by 100x. `summary`
     /// is the short text the parent model sees as the tool result.
+    ///
+    /// `failed` is the structured failure flag set explicitly by the task tool
+    /// when the sub-agent hit a guardrail or errored, replacing the old
+    /// `summary.starts_with("Error")` text sniff. The summary text still
+    /// carries an `Error:` prefix for the *parent model's* benefit (so it
+    /// understands the sub-task did not succeed), but UI classification now
+    /// reads this field instead of pattern-matching the prose.
     Subagent {
         summary: String,
         messages: Vec<crate::Message>,
         usage: crate::TokenUsage,
+        failed: bool,
     },
 }
 
@@ -148,12 +156,7 @@ impl ToolOutput {
             ToolOutput::Error { .. } => true,
             ToolOutput::PermissionDenied { .. } => true,
             ToolOutput::Shell { exit, .. } => !matches!(*exit, Some(0)),
-            // Sub-agent failure is signalled by the `summary` starting with
-            // `Error:` (mirrors the legacy `Text` convention). We do not add
-            // an explicit `error` field because the failure surface is just
-            // "the agent didn't produce a useful final answer" — the partial
-            // transcript is still valuable and travels alongside.
-            ToolOutput::Subagent { summary, .. } => summary.starts_with("Error"),
+            ToolOutput::Subagent { failed, .. } => *failed,
             ToolOutput::Text(_)
             | ToolOutput::Code { .. }
             | ToolOutput::Listing { .. }
@@ -394,6 +397,7 @@ mod tests {
             summary: "external summary".into(),
             messages,
             usage,
+            failed: false,
         };
         assert_eq!(o.to_text(), "external summary");
         assert!(!o.is_error());
@@ -414,6 +418,7 @@ mod tests {
             summary: "s".into(),
             messages: messages.clone(),
             usage,
+            failed: false,
         };
         let (got_messages, got_usage) = o.subagent_payload().expect("subagent payload");
         assert_eq!(got_messages.len(), 2);
@@ -424,5 +429,27 @@ mod tests {
     fn non_subagent_payload_returns_none() {
         let o = ToolOutput::text("plain");
         assert!(o.subagent_payload().is_none());
+    }
+
+    #[test]
+    fn subagent_failed_flag_drives_is_error_not_summary_text() {
+        // Regression for the text-sniff removal: a sub-agent whose summary
+        // starts with "Error" but carries `failed: false` must NOT classify
+        // as an error, and vice versa.
+        let with_flag = ToolOutput::Subagent {
+            summary: "partial findings".into(),
+            messages: Vec::new(),
+            usage: crate::TokenUsage::default(),
+            failed: true,
+        };
+        assert!(with_flag.is_error());
+
+        let no_flag = ToolOutput::Subagent {
+            summary: "Error: legacy text".into(),
+            messages: Vec::new(),
+            usage: crate::TokenUsage::default(),
+            failed: false,
+        };
+        assert!(!no_flag.is_error());
     }
 }

@@ -1,9 +1,10 @@
-//! Model/channel catalog: the two-layer abstraction over LLM backends.
+//! Provider/channel catalog: the two-layer abstraction over LLM backends.
 //!
-//! A [`ModelEntry`] is a logical model (for example `gemini-2.0-flash`) that
-//! owns one or more [`Channel`]s — delivery paths distinguished by transport
-//! and endpoint. A [`Catalog`] is the materialized set of entries, built from
-//! configuration by the host crate (see `neenee::catalog::build_catalog`).
+//! A [`ProviderEntry`] is a configured provider preset (e.g. `zai-code`,
+//! `kimi-code`) that owns one or more [`Channel`]s — delivery paths
+//! distinguished by transport and endpoint. Each channel references a model by
+//! its wire id; intrinsic model metadata (context window, capabilities) is
+//! resolved from the [`crate::model`] registry, not duplicated per provider.
 //!
 //! This module owns the *types* and the provider *construction* path. It is
 //! deliberately decoupled from any specific config struct: a [`Channel`] already
@@ -33,22 +34,20 @@ pub enum Transport {
     GeminiNative,
     /// A local llama.cpp / compatible server at `${base_url}/v1/chat/completions`.
     Llama { base_url: String },
-    /// In-process test fixture; ignores credentials and model.
-    Mock,
 }
 
 impl Transport {
-    /// Whether this transport needs an API key at all. Local servers and the
-    /// mock fixture never do; the cloud transports do.
+    /// Whether this transport needs an API key at all. Local servers never do;
+    /// the cloud transports do.
     pub fn needs_api_key(&self) -> bool {
         match self {
-            Transport::Mock | Transport::Llama { .. } => false,
+            Transport::Llama { .. } => false,
             Transport::OpenAiCompat { .. } | Transport::GeminiNative => true,
         }
     }
 }
 
-/// One delivery path for a [`ModelEntry`].
+/// One delivery path for a [`ProviderEntry`].
 ///
 /// A channel pairs a [`Transport`] with resolved credentials (`api_key`) and
 /// the wire `model` id. Phase 1 of ADR-0002 materializes exactly one channel
@@ -82,19 +81,19 @@ impl Channel {
     }
 }
 
-/// A catalog entry: a logical model with one or more channels.
+/// A catalog entry: a provider preset with one or more channels. Each channel
+/// references a model by wire id; model metadata (context window, capabilities)
+/// is resolved from the [`crate::model`] registry.
 #[derive(Debug, Clone)]
-pub struct ModelEntry {
-    /// Canonical stable identifier. Phase 1 reuses the legacy provider id
-    /// (`"gemini"`, `"kimi-code"`, ...) so existing config keeps working.
+pub struct ProviderEntry {
+    /// Canonical stable identifier — the provider/preset id
+    /// (`"zai-code"`, `"kimi-code"`, ...).
     pub id: String,
-    /// Display name (e.g. `"Gemini"`).
+    /// Display name (e.g. `"ZAI Code"`).
     pub name: String,
     /// Short human-readable description.
     pub description: String,
-    /// Model context window in tokens. `0` means unknown.
-    pub context_window: usize,
-    /// Delivery paths for this model. Phase 1: exactly one per entry.
+    /// Delivery paths for this provider. Phase 1: exactly one per entry.
     pub channels: Vec<Channel>,
     /// Index into `channels` of the preferred path.
     pub default_channel: usize,
@@ -102,42 +101,47 @@ pub struct ModelEntry {
     pub builtin: bool,
 }
 
-impl ModelEntry {
+impl ProviderEntry {
     /// The preferred channel, or `None` if the entry has no channels.
     pub fn default_channel(&self) -> Option<&Channel> {
         self.channels.get(self.default_channel)
     }
 
     /// Whether the entry has a usable API key on its default channel. Built-in
-    /// keyless entries (local server, mock) always report ready.
+    /// keyless entries (local server) always report ready.
     pub fn key_ready(&self) -> bool {
         self.default_channel()
             .map(Channel::key_ready)
             .unwrap_or(true)
     }
+
+    /// The context window (in tokens) of the model on the default channel,
+    /// resolved from the model registry. Returns `0` when the entry has no
+    /// default channel or the model is not in the registry.
+    pub fn context_window(&self) -> usize {
+        self.default_channel()
+            .map(|ch| crate::model::resolve(&ch.model).context_window)
+            .unwrap_or(0)
+    }
 }
 
-/// Display metadata for a built-in preset. Returns `(name, description,
-/// context_window)`. Returns `None` for ids with no built-in metadata; the
-/// loader falls back to the raw id as the name in that case.
-///
-/// This is the seed of the single source of truth that replaces the parallel
-/// `SOLUTIONS` table in the TUI (ADR-0002 phase 3). The brief overlap during
-/// the migration is intentional and documented.
-pub fn builtin_metadata(id: &str) -> Option<(&'static str, &'static str, usize)> {
-    let (name, description, context_window) = match id {
-        "kimi-code" => ("Kimi Code", "Moonshot AI coding model", 256_000),
-        "openai" => ("OpenAI GPT-4o", "OpenAI API", 128_000),
-        "gemini" => ("Gemini 2.5 Flash", "Google Gemini 2.5 Flash", 1_000_000),
-        "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash", 1_000_000),
-        "deepseek-v4-pro" => ("DeepSeek V4 Pro", "DeepSeek V4 Pro", 1_000_000),
-        "qwen" => ("Qwen Plus", "Alibaba DashScope", 131_072),
-        "glm" => ("GLM 4 Plus", "Zhipu AI", 128_000),
-        "llama" => ("Llama", "Local Llama server", 0),
-        "mock" => ("Mock", "Test provider", 0),
+/// Display metadata for a built-in provider preset. Returns `(name,
+/// description)`. Model-level metadata (context window, capabilities) lives in
+/// the [`crate::model`] registry and is resolved separately. Returns `None` for
+/// ids with no built-in metadata; the loader falls back to the raw id as the
+/// name in that case.
+pub fn builtin_provider_metadata(id: &str) -> Option<(&'static str, &'static str)> {
+    let (name, description) = match id {
+        "kimi-code" => ("Kimi Code", "Moonshot AI coding model"),
+        "openai" => ("OpenAI GPT-4o", "OpenAI API"),
+        "gemini" => ("Gemini 2.5 Flash", "Google Gemini 2.5 Flash"),
+        "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash"),
+        "deepseek-v4-pro" => ("DeepSeek V4 Pro", "DeepSeek V4 Pro"),
+        "zai-code" => ("ZAI Code", "Z.AI coding plan (GLM-5.2)"),
+        "llama" => ("Llama", "Local Llama server"),
         _ => return None,
     };
-    Some((name, description, context_window))
+    Some((name, description))
 }
 
 #[cfg(test)]
@@ -146,11 +150,10 @@ mod tests {
 
     #[test]
     fn catalog_lookup_is_exact_match() {
-        let entries = [ModelEntry {
+        let entries = [ProviderEntry {
             id: "deepseek-v4-flash".to_string(),
             name: "DeepSeek V4 Flash".to_string(),
             description: String::new(),
-            context_window: 0,
             channels: vec![Channel {
                 id: "default".to_string(),
                 label: "DeepSeek V4 Flash".to_string(),
@@ -180,15 +183,6 @@ mod tests {
 
     #[test]
     fn key_ready_is_true_for_keyless_transports() {
-        let mock = Channel {
-            id: "default".to_string(),
-            label: "Mock".to_string(),
-            transport: Transport::Mock,
-            api_key: String::new(),
-            model: "mock".to_string(),
-        };
-        assert!(mock.key_ready());
-
         let llama = Channel {
             id: "default".to_string(),
             label: "Llama".to_string(),
@@ -198,7 +192,7 @@ mod tests {
             api_key: String::new(),
             model: "local-model".to_string(),
         };
-        assert!(llama.key_ready());
+        assert!(llama.key_ready(), "llama must be keyless-ready");
     }
 
     #[test]
@@ -217,25 +211,42 @@ mod tests {
     }
 
     #[test]
-    fn builtin_metadata_covers_every_preset() {
+    fn builtin_provider_metadata_covers_every_preset() {
         for id in [
             "kimi-code",
             "openai",
             "gemini",
             "deepseek-v4-flash",
             "deepseek-v4-pro",
-            "qwen",
-            "glm",
+            "zai-code",
             "llama",
-            "mock",
         ] {
-            let (name, _, context_window) =
-                builtin_metadata(id).unwrap_or_else(|| panic!("missing metadata for {id}"));
+            let (name, _) = builtin_provider_metadata(id)
+                .unwrap_or_else(|| panic!("missing metadata for {id}"));
             assert!(!name.is_empty());
-            // Context window is either a positive known value or 0 (unknown);
-            // it must never underflow / wrap.
-            let _ = context_window;
         }
-        assert!(builtin_metadata("unknown").is_none());
+        assert!(builtin_provider_metadata("unknown").is_none());
+    }
+
+    #[test]
+    fn context_window_resolves_from_model_registry() {
+        let entry = ProviderEntry {
+            id: "zai-code".to_string(),
+            name: "ZAI Code".to_string(),
+            description: String::new(),
+            channels: vec![Channel {
+                id: "default".to_string(),
+                label: "ZAI Code".to_string(),
+                transport: Transport::OpenAiCompat {
+                    base_url: "https://api.z.ai/api/coding/paas/v4/chat/completions".to_string(),
+                    user_agent: "agent".to_string(),
+                },
+                api_key: "k".to_string(),
+                model: "glm-5.2".to_string(),
+            }],
+            default_channel: 0,
+            builtin: true,
+        };
+        assert_eq!(entry.context_window(), 1_000_000);
     }
 }
