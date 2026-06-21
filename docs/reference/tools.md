@@ -246,6 +246,17 @@ title. Has no effect if there is no active plan (the call returns a clear
 "no active plan" hint instead of erroring). See
 [Plan mode](../explanation/plan-mode.md).
 
+### `verify_plan_execution`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `focus` | string | no | Section name or concern to focus the verifier on |
+
+Spawns an independent verifier sub-agent that re-reads the active plan and
+the current workspace, then reports PASS / PARTIAL / FAIL per section with
+concrete evidence. Call this before declaring the plan complete. Blocked in
+Plan mode (no plan to verify). See [Plan mode](../explanation/plan-mode.md).
+
 ### `use_skill`
 
 | Parameter | Type | Required | Notes |

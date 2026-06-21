@@ -38,6 +38,8 @@ by the agent backend.
 | `/mode` | Show the current mode |
 | `/mode build` | Full read/write tool access |
 | `/mode plan` | Read-only tools plus writes under `.neenee/plans/`; the model can also switch modes itself via `plan_enter`/`plan_exit`. See [Plan mode](../explanation/plan-mode.md). |
+| `/plan` | Open the active plan file in a read-only preview modal. |
+| `/verify` | Trigger independent plan verification — spawns a clean-context sub-agent that re-reads the plan and reports PASS/PARTIAL/FAIL per section. |
 
 ### `/goal`
 
