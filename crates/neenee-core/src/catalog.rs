@@ -8,15 +8,16 @@
 //!
 //! This module owns the *types* and the provider *construction* path. It is
 //! deliberately decoupled from any specific config struct: a [`Channel`] already
-//! carries resolved credentials and the wire model id, so [`Channel::build`] is
-//! a pure constructor for `Arc<dyn Provider>`. Resolution (environment variable
-//! then config field) lives in the loader, not here, so the same types serve
-//! both built-in presets and future user-defined entries.
+//! carries resolved credentials and the wire model id, so constructing a
+//! provider from it (see `build_provider_for_channel` in `neenee-providers`)
+//! is a pure operation. Resolution (environment variable then config field)
+//! lives in the loader, not here, so the same types serve both built-in
+//! presets and future user-defined entries.
 //!
 //! See `docs/adr/0002-model-channel-abstraction.md` for the design.
 
 /// How a [`Channel`] speaks to its model. Determines which `Provider`
-/// implementation [`Channel::build`] constructs.
+/// implementation is constructed for it (in `neenee-providers`).
 ///
 /// Variants carry only the endpoint shape intrinsic to the transport.
 /// Per-call credentials and the wire model id live on the [`Channel`] itself,
@@ -71,7 +72,7 @@ pub struct Channel {
 
 impl Channel {
     /// Whether this channel has a usable API key. Keyless transports
-    /// ([`Transport::Llama`], [`Transport::Mock`]) always report ready; the rest
+    /// ([`Transport::Llama`], the in-memory mock) always report ready; the rest
     /// require a non-empty key.
     pub fn key_ready(&self) -> bool {
         if !self.transport.needs_api_key() {

@@ -587,8 +587,7 @@ pub async fn run_tui(
                     // loop copies this into `App::stall_rounds`, which
                     // `draw_activity_bar` reads. Cast usize → u64 to
                     // match the activity bar's counter type.
-                    *stall_rounds_clone.lock().await =
-                        consecutive_rounds as u64;
+                    *stall_rounds_clone.lock().await = consecutive_rounds as u64;
                 }
             }
         }

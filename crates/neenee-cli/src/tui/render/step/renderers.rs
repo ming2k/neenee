@@ -845,9 +845,10 @@ fn draw_tool_result(
 }
 
 /// Resolve the shell command for a `bash` step: prefer the structured
-/// [`ToolOutput::Shell`] payload (set as soon as the call starts, so it is
-/// available even while streaming), falling back to parsing the JSON arguments
-/// for legacy / restored sessions without a structured payload.
+/// [`ToolOutput::Shell`](neenee_core::ToolOutput) payload (set as soon as the
+/// call starts, so it is available even while streaming), falling back to
+/// parsing the JSON arguments for legacy / restored sessions without a
+/// structured payload.
 fn bash_command_for(structured: Option<&neenee_core::ToolOutput>, arguments: &str) -> String {
     if let Some(neenee_core::ToolOutput::Shell { command, .. }) = structured {
         if !command.is_empty() {

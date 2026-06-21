@@ -1,7 +1,7 @@
 //! Event-sourced session persistence (C11 foundation).
 //!
 //! The event log is the authoritative history for each project. `SessionStore`
-//! replays the log on load to rebuild the in-memory [`SessionData`] snapshot,
+//! replays the log on load to rebuild the in-memory `SessionData` snapshot,
 //! and appends a new event for every mutation. The snapshot file is kept as a
 //! cache so readers that do not need the full replay path can still open it,
 //! but on a conflict the log wins.

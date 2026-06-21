@@ -49,7 +49,7 @@ implement the plan.
 
 The switch is automatic and unconditional; neenee does not prompt the user to
 confirm an autonomous mode change. The user stays in control through `/mode`
-and can revert at any time. See [Built-in tools](../../reference/tools.md) for
+and can revert at any time. See [Built-in tools](../../reference/tools/index.md) for
 the parameter schemas.
 
 ## The plan-file write exemption
@@ -127,7 +127,7 @@ for the design rationale.
 
 ## See also
 
-- [Built-in tools](../../reference/tools.md) — `plan_enter`, `plan_exit`, and
+- [Built-in tools](../../reference/tools/index.md) — `plan_enter`, `plan_exit`, and
   `update_plan_progress` parameter schemas, and the per-invocation plan-path
   access rule
 - [Slash commands](../../reference/commands.md) — the `/mode` command

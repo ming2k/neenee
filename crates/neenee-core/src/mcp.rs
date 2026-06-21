@@ -1,8 +1,8 @@
 //! Shared configuration schema for MCP servers.
 //!
-//! Lives in `neenee-core` for the same reason [`WebSearchConfig`] does: both
-//! the app-layer `Config` (which owns the `[mcp]` table) and the MCP loader
-//! (in `neenee-tools`) need the type, and `neenee-store` does not depend on
+//! Lives in `neenee-core` for the same reason `WebSearchConfig` does: both the
+//! app-layer `Config` (which owns the `[mcp]` table) and the MCP loader (in
+//! `neenee-tools`) need the type, and `neenee-store` does not depend on
 //! `neenee-tools`.
 
 use serde::{Deserialize, Serialize};

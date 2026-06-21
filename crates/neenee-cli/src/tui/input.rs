@@ -158,7 +158,7 @@ pub enum InputAction {
     Paste,
     /// Terminal-level bracketed paste. The text payload is already available;
     /// the app loop routes it through the same chip-or-inline logic as
-    /// [`Paste`].
+    /// [`InputAction::Paste`].
     BracketedPaste(String),
     /// Input character.
     InsertChar(char),
@@ -177,16 +177,17 @@ pub enum InputAction {
     /// time. The popup re-renders against the spliced input so the user can
     /// keep cycling.
     AcceptSuggestion(String),
-    /// Like [`AcceptSuggestion`] but the popup is closed afterwards. Used by
-    /// `Enter` (both the slash-prefix auto-accept and the highlighted-item
-    /// path). The harness latches a `completion_dismissed` flag so the popup
-    /// stays hidden until the next `InsertChar` / `Backspace`, matching the
-    /// expectation that pressing Enter "finishes" the current completion.
+    /// Like [`InputAction::AcceptSuggestion`] but the popup is closed
+    /// afterwards. Used by `Enter` (both the slash-prefix auto-accept and the
+    /// highlighted-item path). The harness latches a `completion_dismissed`
+    /// flag so the popup stays hidden until the next `InsertChar` /
+    /// `Backspace`, matching the expectation that pressing Enter "finishes"
+    /// the current completion.
     CommitSuggestion(String),
     /// Dismiss the completion popup without accepting anything. Used by `Esc`
     /// when a slash/path completion menu is open. Latches the same
-    /// `completion_dismissed` flag as [`CommitSuggestion`] so the popup stays
-    /// hidden until the next edit clears the latch.
+    /// `completion_dismissed` flag as [`InputAction::CommitSuggestion`] so the
+    /// popup stays hidden until the next edit clears the latch.
     CloseCompletion,
     /// Navigate history up.
     HistoryPrev,

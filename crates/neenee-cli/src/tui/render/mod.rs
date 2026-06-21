@@ -97,9 +97,9 @@ pub struct TranscriptView<'a> {
     /// The current input-box text (masked while the API-key modal is open). The
     /// transcript layout reads this so the input box can grow to fit its wrapped text.
     pub input: &'a str,
-    /// Byte offset of the caret inside `input` (see [`App::byte_cursor`]). The
-    /// box grows one extra row when the caret rests past the last wrapped line
-    /// (e.g. just after an inserted newline), so its height matches what
+    /// Byte offset of the caret inside `input` (mirrors `App::byte_cursor`).
+    /// The box grows one extra row when the caret rests past the last wrapped
+    /// line (e.g. just after an inserted newline), so its height matches what
     /// [`composer::draw_composer`] actually renders.
     pub byte_cursor: usize,
     /// When true, the hint bar and input box are hidden (overlay modal open).
@@ -755,7 +755,7 @@ mod tests {
                     tools: vec![neenee_core::ToolInfo {
                         name: "bash".to_string(),
                         description: "run a shell command".to_string(),
-                        access: neenee_core::ToolAccess::Write,
+                        access: neenee_core::ToolAccess::Execute,
                         enabled: true,
                         source: "builtin".to_string(),
                     }],

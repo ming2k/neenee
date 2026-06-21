@@ -18,11 +18,11 @@ variation on these themes rather than a one-off mechanism.
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
 | **Capability and access gating** | One permission surface (`ToolAccess`) feeds two gates: Plan mode and the permission broker. A tool declares `Read`/`Write` once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
-| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; goal state is per-thread. | [Sub-agents](subagents.md), [MCP servers](mcp.md), [Goals](goals.md) |
-| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity and budgets are persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents.md) |
-| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents.md), [Harness architecture](harness.md) |
+| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; goal state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Goals](goals.md) |
+| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity and budgets are persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents/index.md) |
+| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents/index.md), [Harness architecture](harness.md) |
 | **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; goal completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Tool rounds](tool-rounds.md), [MCP servers](mcp.md), [Goals](goals.md) |
-| **Control plane vs domain** | The harness owns steering (mode, goal, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents.md) |
+| **Control plane vs domain** | The harness owns steering (mode, goal, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents/index.md) |
 
 ## The canon, in reading order
 
@@ -48,7 +48,7 @@ model of one agent turn.
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
    exemption for plan files.
-6. [Sub-agents](subagents.md) — the `task` tool's isolated read-only child
+6. [Sub-agents](subagents/index.md) — the `task` tool's isolated read-only child
    agent. The reference for isolation: what is shared (the provider), what is
    fresh (history, goals, plan state), and how events stream back through one
    pipeline.

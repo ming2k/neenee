@@ -4,7 +4,7 @@ neenee discovers local stdio [Model Context Protocol][mcp] servers at startup
 and exposes their tools alongside the built-in ones, using the same execution
 path. This page covers discovery, the tool wrapper, failure isolation, and how
 MCP tools interact with [Plan mode](plan-mode.md) and the permission broker.
-For the per-tool parameter surface, see [Built-in tools](../../reference/tools.md).
+For the per-tool parameter surface, see [Built-in tools](../../reference/tools/index.md).
 
 [mcp]: https://modelcontextprotocol.io/
 
@@ -85,7 +85,7 @@ The result is `McpLoadResult { tools, statuses }` (`mcp.rs:25`), not a
 `Result`. The caller at `crates/neenee-cli/src/main.rs:363` never unwraps:
 neenee always starts, with whatever tools loaded. MCP tools are spliced into
 the agent's toolset at `main.rs:446`, after the built-ins and before
-`TaskTool`, so they are visible to [sub-agents](subagents.md) when the server
+`TaskTool`, so they are visible to [sub-agents](subagents/index.md) when the server
 is `read_only`.
 
 ## The `McpTool` wrapper
@@ -194,11 +194,11 @@ sent `SIGKILL`.
 
 ## See also
 
-- [Built-in tools](../../reference/tools.md) — `mcp__<server>__<tool>` parameter
+- [Built-in tools](../../reference/tools/index.md) — `mcp__<server>__<tool>` parameter
   surface and the MCP tools subsection
 - [Plan mode](plan-mode.md) — the `allowed_in_plan_mode` mechanism and the
   `.neenee/plans/` write exemption
-- [Sub-agents](subagents.md) — why `read_only` MCP servers are visible to
+- [Sub-agents](subagents/index.md) — why `read_only` MCP servers are visible to
   sub-agents and write servers are not
 - [Harness architecture](harness.md) — the 8-second MCP init bound and the
   tool permission broker

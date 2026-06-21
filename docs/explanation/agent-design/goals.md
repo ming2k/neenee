@@ -82,7 +82,7 @@ guarantees the budget invariant.
 Four tools are force-injected by `Agent::new`
 (`crates/neenee-agent/src/agent.rs:117`) so they share the agent's live
 `thread_id` and `goal` cells. Parameter schemas live in
-[Built-in tools](../../reference/tools.md).
+[Built-in tools](../../reference/tools/index.md).
 
 | Tool | Access | Triggers |
 |------|--------|----------|
@@ -218,7 +218,7 @@ same state textually, including a budget bar and per-item labels.
 - [Harness architecture](harness.md) — the control plane, the uncapped
   autonomous loop, and how goal accounting interleaves with retry and
   cancellation
-- [Built-in tools](../../reference/tools.md) — `get_goal`, `create_goal`,
+- [Built-in tools](../../reference/tools/index.md) — `get_goal`, `create_goal`,
   `update_goal`, `goal_checklist` parameter schemas
 - [Slash commands](../../reference/commands.md) — `/goal` and `/loop`
 - [Plan mode](plan-mode.md) — orthogonal to goal state; a goal and a loop can

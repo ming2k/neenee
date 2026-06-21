@@ -4,40 +4,50 @@
 //! [`crate::Agent`] internally: spawning a sub-agent is an orchestration
 //! concern, not a domain-tool concern. The other tools (Bash/Read/Web/…)
 //! stay in `neenee-tools` and remain pure trait implementations.
+//!
+//! Admission of tools to the sub-agent is driven by [`neenee_core::EXPLORE`]
+//! — the single source of truth for the read-only / non-interactive /
+//! non-recursive policy. See ADR-0011.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use neenee_core::{AgentMode, Tool, ToolAccess};
+use neenee_core::{AgentMode, SubagentProfile, Tool, ToolAccess};
 use serde_json::json;
 
 use crate::{agent::Agent, skills::SkillRegistry};
 
 /// Spawn a read-only exploration sub-agent to handle a research sub-task.
 ///
-/// The sub-agent runs the same provider with the read-only subset of tools,
-/// so it never prompts for permission and cannot mutate the workspace. Its
-/// final answer is returned to the calling agent, which stays in control of
-/// any write operations. Recursion is prevented by excluding `task` (and
-/// other dispatch tools) from the sub-agent's toolset.
+/// The sub-agent runs the same provider with the tools admitted by the bound
+/// [`SubagentProfile`] (today always [`EXPLORE`]): read-only, non-interactive,
+/// non-recursive. Its final answer is returned to the calling agent, which
+/// stays in control of any write operations and any questions for the user.
 pub struct TaskTool {
     provider: Arc<dyn neenee_core::Provider>,
     tools: Vec<Arc<dyn neenee_core::Tool>>,
+    profile: &'static SubagentProfile,
 }
 
 impl TaskTool {
-    /// `tools` should be the parent agent's full toolset; the task tool filters
-    /// it down to read-only tools for the spawned sub-agent.
+    /// `tools` should be the parent agent's full toolset; `profile` declares
+    /// what the spawned sub-agent may actually use (admission + framing). The
+    /// caller binds the role explicitly — `&EXPLORE` for the `task` tool,
+    /// `&VERIFY` for the plan verifier — so the dispatch surface shows the
+    /// intended sub-agent shape rather than hiding a default.
     pub fn new(
         provider: Arc<dyn neenee_core::Provider>,
         tools: Vec<Arc<dyn neenee_core::Tool>>,
+        profile: &'static SubagentProfile,
     ) -> Self {
-        Self { provider, tools }
+        Self {
+            provider,
+            tools,
+            profile,
+        }
     }
 }
-
-const TASK_MAX_ROUNDS_HINT: &str = "Run at most a handful of tool rounds, then answer.";
 
 #[async_trait]
 impl Tool for TaskTool {
@@ -62,6 +72,12 @@ impl Tool for TaskTool {
     }
     fn access(&self) -> ToolAccess {
         ToolAccess::Read
+    }
+
+    /// `task` spawns a sub-agent; sub-agent profiles exclude it to prevent
+    /// unbounded recursion.
+    fn spawns_subagent(&self) -> bool {
+        true
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.run_sub_agent(arguments, Box::new(|_| {})).await
@@ -153,13 +169,10 @@ impl TaskTool {
             return Err("'prompt' must not be empty.".to_string());
         }
 
-        // Sub-agent gets read-only tools only; never itself (no recursion).
-        let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self
-            .tools
-            .iter()
-            .filter(|tool| tool.access() == neenee_core::ToolAccess::Read && tool.name() != "task")
-            .cloned()
-            .collect();
+        // Sub-agent tools come from the bound profile's policy — the single
+        // source of truth for read-only / non-interactive / non-recursive
+        // admission. See ADR-0011.
+        let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
 
         let goal_service = neenee_core::GoalService::new(
             neenee_core::GoalStore::open_in_memory()
@@ -174,13 +187,7 @@ impl TaskTool {
             SkillRegistry::empty(),
         );
 
-        let system = format!(
-            "You are a focused research sub-agent. Your single job is to answer the assigned task \
-             accurately and concisely using read-only tools. Explore the workspace or the web as \
-             needed, then write a clear, complete final answer with the key findings (file paths, \
-             signatures, relevant snippets, conclusions). Do not modify any files. {}\n\nTask: {}",
-            TASK_MAX_ROUNDS_HINT, description,
-        );
+        let system = format!("{}\n\nTask: {}", self.profile.system_prompt, description);
         let mut messages = vec![
             neenee_core::Message::new(neenee_core::Role::System, system),
             neenee_core::Message::new(neenee_core::Role::User, prompt.to_string()),
@@ -289,6 +296,21 @@ impl TaskTool {
                     duration_ms,
                 });
             }
+            // The sub-agent has no user reachable to answer. The bound
+            // profile excludes `requires_user` tools, so this branch should
+            // be unreachable; if it fires, some interactive tool leaked past
+            // the policy and the request would otherwise deadlock silently.
+            // Log loudly so the invariant break is observable rather than
+            // turning into a hang. See ADR-0011.
+            neenee_core::AgentEvent::UserQuestionRequest(request) => {
+                tracing::error!(
+                    request_id = %request.id,
+                    questions = request.questions.len(),
+                    "sub-agent emitted a user-question request, which the task tool cannot \
+                     forward to any user; dropping. The bound profile is meant to exclude \
+                     interactive tools — this indicates a policy leak",
+                );
+            }
             _ => {}
         }
     }
@@ -298,7 +320,7 @@ impl TaskTool {
 mod tests {
     use super::*;
     use futures::stream::{self, BoxStream};
-    use neenee_core::{Message, Provider, Role};
+    use neenee_core::{Message, Provider, Role, EXPLORE};
 
     struct CannedProvider;
 
@@ -343,6 +365,7 @@ mod tests {
         let tool = TaskTool::new(
             std::sync::Arc::new(CannedProvider),
             vec![std::sync::Arc::new(EchoReadTool)],
+            &EXPLORE,
         );
 
         let output = tool
@@ -355,8 +378,86 @@ mod tests {
 
     #[tokio::test]
     async fn task_tool_rejects_missing_fields() {
-        let tool = TaskTool::new(std::sync::Arc::new(CannedProvider), Vec::new());
+        let tool = TaskTool::new(std::sync::Arc::new(CannedProvider), Vec::new(), &EXPLORE);
         assert!(tool.call(r#"{"description":"x"}"#).await.is_err());
         assert!(tool.call(r#"{"prompt":"x"}"#).await.is_err());
+    }
+
+    /// A Write-capable stub, used to prove the explore profile rejects write
+    /// tools by capability rather than by name.
+    struct StubWriteTool;
+
+    #[async_trait::async_trait]
+    impl Tool for StubWriteTool {
+        fn name(&self) -> &str {
+            "stub_write"
+        }
+        fn description(&self) -> &str {
+            "test write tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+        fn access(&self) -> ToolAccess {
+            ToolAccess::Write
+        }
+        async fn call(&self, _arguments: &str) -> Result<String, String> {
+            Ok("write".to_string())
+        }
+    }
+
+    /// Regression for the deadlock fixed in ADR-0011: the explore profile
+    /// must exclude (a) the real `ask_user` tool — Read but interactive,
+    /// (b) any write tool, and (c) `task` itself — Read but a dispatch tool
+    /// that would recurse. Built with the real tool instances the harness
+    /// registers, not stubs, so a future capability-bit regression on either
+    /// side is caught here.
+    #[test]
+    fn explore_profile_excludes_user_write_and_recursion_using_real_tools() {
+        let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
+        let task_tool = TaskTool::new(provider.clone(), Vec::new(), &EXPLORE);
+
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
+            std::sync::Arc::new(EchoReadTool),
+            std::sync::Arc::new(neenee_tools::AskUserTool),
+            std::sync::Arc::new(StubWriteTool),
+            std::sync::Arc::new(task_tool),
+        ];
+
+        let admitted = EXPLORE.select_tools(&tools);
+        let admitted_names: Vec<&str> = admitted.iter().map(|t| t.name()).collect();
+
+        assert_eq!(admitted_names, vec!["echo_read"]);
+    }
+
+    /// Cross-cut regression for ADR-0012: the real `bash` tool is now
+    /// `Execute`, so `EXPLORE` (Read ceiling) excludes it — an explorer must
+    /// not run commands — while `VERIFY` (Execute ceiling) admits it so an
+    /// independent plan verifier can run tests/builds/type-checks. `VERIFY`
+    /// still drops the same dangerous trio (`ask_user`, write, recursion).
+    #[test]
+    fn verify_profile_admits_real_bash_but_not_writes_user_or_recursion() {
+        use neenee_core::VERIFY;
+        let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
+        let task_tool = TaskTool::new(provider.clone(), Vec::new(), &VERIFY);
+
+        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
+            std::sync::Arc::new(EchoReadTool),
+            std::sync::Arc::new(neenee_tools::BashTool),
+            std::sync::Arc::new(neenee_tools::AskUserTool),
+            std::sync::Arc::new(StubWriteTool),
+            std::sync::Arc::new(task_tool),
+        ];
+
+        // EXPLORE: only the read tool survives (bash's Execute tier is above
+        // the Read ceiling).
+        let explore_selected = EXPLORE.select_tools(&tools);
+        let explore_names: Vec<&str> = explore_selected.iter().map(|t| t.name()).collect();
+        assert_eq!(explore_names, vec!["echo_read"]);
+
+        // VERIFY: read + bash admitted; write / ask_user / task excluded.
+        let verify_selected = VERIFY.select_tools(&tools);
+        let verify_names: Vec<&str> = verify_selected.iter().map(|t| t.name()).collect();
+        assert_eq!(verify_names, vec!["echo_read", "bash"]);
     }
 }

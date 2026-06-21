@@ -194,16 +194,16 @@ pub struct Config {
     /// scattered per-provider fields above remain the source for built-ins.
     #[serde(default)]
     pub providers: Vec<UserProviderConfig>,
-    /// Skill configuration ([skills] table).
+    /// Skill configuration (`[skills]` table).
     #[serde(default)]
     pub skills: SkillsConfig,
-    /// Web tool configuration ([websearch] table): search backend, proxy, timeout.
+    /// Web tool configuration (`[websearch]` table): search backend, proxy, timeout.
     #[serde(default)]
     pub websearch: WebSearchConfig,
-    /// TUI presentation ([tui] table): per-step-kind default expand state.
+    /// TUI presentation (`[tui]` table): per-step-kind default expand state.
     #[serde(default)]
     pub tui: TuiConfig,
-    /// Agent behaviour ([agent] table): stall detector threshold and the
+    /// Agent behaviour (`[agent]` table): stall detector threshold and the
     /// verify hard-nudge toggle. See [`AgentConfig`] for the per-field
     /// semantics and TOML examples.
     #[serde(default)]

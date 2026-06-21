@@ -6,7 +6,7 @@
 //! sort order — never configuration. Favorites and the default-model pointer
 //! belong in `config.toml` and are not stored here.
 //!
-//! The store is a flat map of model id → [`UsageEntry`]. Ids are stored as
+//! The store is a flat map of model id → `UsageEntry`. Ids are stored as
 //! given; preset ids are unique and there is no alias mapping.
 
 use crate::fsutil;

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use neenee_core::{Provider, Tool, ToolAccess};
+use neenee_core::{Provider, Tool, ToolAccess, VERIFY};
 
 use crate::plan::PlanToolContext;
 use crate::task_tool::TaskTool;
@@ -33,14 +33,17 @@ impl VerifyPlanExecutionTool {
     /// `provider` and `tools` should be the same values the parent
     /// `TaskTool` was constructed with, so the verifier inherits the same
     /// capabilities. `context` is the shared plan context so we can pull
-    /// the active plan path.
+    /// the active plan path. The internal `TaskTool` binds the `VERIFY`
+    /// profile so the verifier gets read tools *plus* command execution
+    /// (tests/builds/type-checks) but no file-write, no user interaction,
+    /// and no recursion. See ADR-0012.
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         context: PlanToolContext,
     ) -> Self {
         Self {
-            task: Arc::new(TaskTool::new(provider, tools)),
+            task: Arc::new(TaskTool::new(provider, tools, &VERIFY)),
             context,
         }
     }
@@ -82,6 +85,12 @@ impl Tool for VerifyPlanExecutionTool {
         ToolAccess::Read
     }
 
+    /// `verify_plan_execution` delegates to an internal `TaskTool`, i.e. it
+    /// spawns a sub-agent; profiles exclude it alongside `task`.
+    fn spawns_subagent(&self) -> bool {
+        true
+    }
+
     fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
         // Verification is a Build-mode concern (it audits implementation
         // work). In Plan mode there is nothing to verify, so block it via
@@ -106,18 +115,17 @@ impl Tool for VerifyPlanExecutionTool {
 
         let plan_display = plan_path.display().to_string();
 
-        // Build the verifier prompt. This is the contract: the sub-agent
-        // returns a structured per-section report plus an overall verdict.
-        // The parent agent is instructed (via the system prompt) to address
-        // every PARTIAL/FAIL before reporting completion.
+        // Build the verifier task prompt. The *role* framing (independent,
+        // unbiased, may run commands, must not edit, non-interactive) lives
+        // in the `VERIFY` profile's system prompt; this user prompt carries
+        // only the task-specific contract: the plan path, the per-section
+        // PASS/PARTIAL/FAIL procedure, and the final verdict line.
         let focus_clause = match &focus {
             Some(f) => format!("Focus especially on: {f}.\n\n", f = f),
             None => String::new(),
         };
         let prompt = format!(
-            "You are an independent plan verifier. Your job is to audit whether an \
-             implementation actually matches an approved plan, with no bias from whoever \
-             wrote the code.\n\n\
+            "Verify the implementation against the approved plan.\n\n\
              Step 1. Read the plan at {path}.\n\n\
              Step 2. For each `##` section in the plan, examine the current state of the \
              workspace (read_file, grep, glob, list_dir, bash for tests / builds / \

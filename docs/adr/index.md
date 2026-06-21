@@ -21,3 +21,5 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0008](0008-single-breathing-anchor.md) | Single breathing anchor for TUI liveness | Accepted |
 | [0009](0009-uncapped-agentic-loop.md) | Uncapped agentic loop (remove per-turn round cap and `/loop` iteration cap) | Accepted |
 | [0010](0010-slim-goal-primitive.md) | Slim the goal primitive (drop status machine, token budget, time accounting) | Accepted |
+| [0011](0011-subagent-profiles.md) | Sub-agent profiles: capability-axis tool admission (`requires_user` / `spawns_subagent` + `EXPLORE` profile) | Accepted |
+| [0012](0012-toolaccess-tier-split.md) | `ToolAccess` tier split (`Read < Execute < Write`) and the `VERIFY` profile | Accepted |

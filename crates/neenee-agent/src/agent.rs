@@ -133,8 +133,12 @@ pub(crate) struct TurnState {
 /// (goal checklist, plan/mode transitions, plan-section progress). Any
 /// round containing one of these is treated as making progress even
 /// though no Write tool fired.
-const PRODUCTIVE_READ_TOOLS: &[&str] =
-    &["goal_checklist", "plan_enter", "plan_exit", "update_plan_progress"];
+const PRODUCTIVE_READ_TOOLS: &[&str] = &[
+    "goal_checklist",
+    "plan_enter",
+    "plan_exit",
+    "update_plan_progress",
+];
 
 /// Whether a single tool name counts as productive for the text-fallback
 /// path, where we cannot recover the registered `Tool`'s access bit
@@ -154,15 +158,15 @@ impl Agent {
         goal_service: GoalService,
         skills_registry: skills::SkillRegistry,
     ) -> Self {
-        // Clone the provider + read-only tool handles before they move
-        // into Self, so the VerifyPlanExecutionTool can construct its own
-        // internal TaskTool for spawning clean-context verifier sub-agents.
+        // Clone the provider + tool handles before they move into Self, so
+        // the VerifyPlanExecutionTool can construct its own internal TaskTool
+        // for spawning clean-context verifier sub-agents. The verifier runs
+        // in a clean context, so we snapshot the input toolset before the
+        // goal/plan tools are layered on below; admission (read-only /
+        // non-interactive / non-recursive) is applied by the explore profile
+        // inside that TaskTool, not re-implemented here. See ADR-0011.
         let verify_provider = provider.clone();
-        let verify_tools: Vec<Arc<dyn Tool>> = tools
-            .iter()
-            .filter(|t| t.access() == ToolAccess::Read && t.name() != "task")
-            .cloned()
-            .collect();
+        let verify_tools: Vec<Arc<dyn Tool>> = tools.clone();
 
         let goal = Arc::new(std::sync::Mutex::new(None));
         let thread_id = Arc::new(std::sync::Mutex::new(None));
@@ -792,7 +796,8 @@ impl Agent {
     }
 
     /// Structured view of the skills registry, for the session modal's Skills
-    /// pane. Mirrors [`RegistryGuard::list`] into the render-friendly DTO.
+    /// pane. Mirrors [`skills::RegistryGuard::list`] into the render-friendly
+    /// DTO.
     pub fn snapshot_skills(&self) -> Vec<neenee_core::SkillInfo> {
         let guard = self.skills_registry.lock();
         guard
@@ -1392,12 +1397,12 @@ impl Agent {
     }
 
     /// Whether a round of tool calls counts as productive for stall
-    /// detection. A round is productive if any of its calls resolves to
-    /// a registered Write-access tool, or names one of the mutating Read
-    /// tools in [`PRODUCTIVE_READ_TOOLS`] (goal checklist, plan/mode
-    /// transitions, plan-section progress). Unknown tool names default to
-    /// read-only so a model hallucinating a Write-looking name cannot
-    /// bypass the detector.
+    /// detection. A round is productive if any of its calls resolves to an
+    /// above-Read tool (`Execute` or `Write` — running a command counts as
+    /// an action, not idle reading), or names one of the mutating Read tools
+    /// in [`PRODUCTIVE_READ_TOOLS`] (goal checklist, plan/mode transitions,
+    /// plan-section progress). Unknown tool names default to read-only so a
+    /// model hallucinating a Write-looking name cannot bypass the detector.
     fn round_was_productive(&self, calls: &[ToolCall]) -> bool {
         calls.iter().any(|call| {
             if call_was_productive(&call.name) {
@@ -1803,7 +1808,7 @@ impl Agent {
             return self.execute_plan_exit(tool, call, call_id, event_tx).await;
         }
 
-        if tool.access() == ToolAccess::Write {
+        if tool.access() > ToolAccess::Read {
             let scope = tool.permission_scope(&call.arguments);
             let rule = PermissionRule {
                 tool: tool.name().to_string(),

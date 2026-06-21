@@ -1499,9 +1499,9 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         "interleaved writes must keep the streak under the threshold"
     );
     assert!(
-        !events.iter().any(|event| {
-            matches!(event, AgentEvent::StallWarning { .. })
-        }),
+        !events
+            .iter()
+            .any(|event| { matches!(event, AgentEvent::StallWarning { .. }) }),
         "no convergence nudge should be injected anymore"
     );
 }
@@ -1558,11 +1558,9 @@ async fn stall_warning_fires_once_when_threshold_reached() {
         1,
         "stall warning must fire exactly once per episode, got {warnings:?}"
     );
-    assert!(messages.iter().any(|m| {
-        m.role == Role::User
-            && m.hidden
-            && m.content.contains("exploration loop")
-    }));
+    assert!(messages
+        .iter()
+        .any(|m| { m.role == Role::User && m.hidden && m.content.contains("exploration loop") }));
 }
 
 #[tokio::test]
@@ -1615,11 +1613,10 @@ async fn stall_hard_stops_after_nudge_is_ignored() {
         warnings, expected_warnings,
         "StallWarning must fire every round while stalled, but got {warnings}"
     );
-    let nudges = messages.iter().filter(|m| {
-        m.role == Role::User
-            && m.hidden
-            && m.content.contains("exploration loop")
-    }).count();
+    let nudges = messages
+        .iter()
+        .filter(|m| m.role == Role::User && m.hidden && m.content.contains("exploration loop"))
+        .count();
     assert_eq!(nudges, 1, "reflection nudge must be one-shot per episode");
 }
 
@@ -1637,9 +1634,8 @@ async fn stall_streak_resets_after_a_productive_round() {
         .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"a{i}\"}}"))]))
         .collect();
     rounds.push(tool_round(&[("cw", "writer", "{\"path\":\"x\"}")]));
-    rounds.extend((0..sub).map(|i| {
-        tool_round(&[("c", "alpha", &format!("{{\"path\":\"b{i}\"}}"))])
-    }));
+    rounds
+        .extend((0..sub).map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"b{i}\"}}"))])));
     rounds.push(text_round("done"));
 
     let agent = Agent::new(
@@ -1737,11 +1733,7 @@ async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
     assert_eq!(outcome.message.content, "really done");
     let nudge_count = messages
         .iter()
-        .filter(|m| {
-            m.role == Role::User
-                && m.hidden
-                && m.content.contains("verify_plan_execution")
-        })
+        .filter(|m| m.role == Role::User && m.hidden && m.content.contains("verify_plan_execution"))
         .count();
     assert_eq!(
         nudge_count, 1,
@@ -1786,9 +1778,7 @@ async fn stall_detection_disabled_when_threshold_is_zero() {
     );
     assert!(
         !messages.iter().any(|m| {
-            m.role == Role::User
-                && m.hidden
-                && m.content.contains("exploration loop")
+            m.role == Role::User && m.hidden && m.content.contains("exploration loop")
         }),
         "threshold = 0 must suppress the reflection nudge"
     );
@@ -1858,9 +1848,7 @@ async fn verify_nudge_disabled_when_toggle_off() {
     assert_eq!(outcome.message.content, "all done");
     assert!(
         !messages.iter().any(|m| {
-            m.role == Role::User
-                && m.hidden
-                && m.content.contains("verify_plan_execution")
+            m.role == Role::User && m.hidden && m.content.contains("verify_plan_execution")
         }),
         "verify nudge must not fire when the toggle is off"
     );

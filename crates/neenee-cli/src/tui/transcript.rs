@@ -1,8 +1,8 @@
 //! Translation between the harness's persistent [`Message`] stream and the
 //! TUI's semantic [`TranscriptMessage`] document model. Also hosts the small
-//! parsing helpers for the textual `[<tool> result]:` envelope and the
-//! matching `Calling \`<tool>\`` formatter used when no display content is
-//! available for a restored assistant turn.
+//! parsing helpers for the textual `` `[<tool> result]`: `` envelope and the
+//! matching `` `Calling \`<tool>\`` `` formatter used when no display content
+//! is available for a restored assistant turn.
 //!
 //! [`Message`]: neenee_core::Message
 

@@ -4,7 +4,7 @@ This guide shows how to use **Plan mode** to research and design a change
 before any workspace edits happen. For the design rationale, see
 [Plan mode](../explanation/agent-design/plan-mode.md). For the mode command and the
 planning tools, see [Slash commands](../reference/commands.md) and
-[Built-in tools](../reference/tools.md).
+[Built-in tools](../reference/tools/index.md).
 
 ## Pick who starts the plan
 
@@ -95,4 +95,4 @@ The panel disappears when:
 - [Plan mode](../explanation/agent-design/plan-mode.md) — why the mode exists and how the
   write exemption works
 - [Slash commands](../reference/commands.md) — the `/mode` command
-- [Built-in tools](../reference/tools.md) — `plan_enter` and `plan_exit`
+- [Built-in tools](../reference/tools/index.md) — `plan_enter` and `plan_exit`

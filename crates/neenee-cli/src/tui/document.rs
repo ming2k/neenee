@@ -58,7 +58,7 @@ pub enum MessageKind {
         status: ToolStepStatus,
         expanded: bool,
         /// Whether the user has manually pinned `expanded`. While true, the
-        /// auto/system setter ([`Self::set_tool_step_expanded`]) is a no-op so
+        /// auto/system setter (`set_tool_step_expanded`) is a no-op so
         /// lifecycle transitions can't override a deliberate user choice.
         user_pinned: bool,
         duration_ms: Option<u64>,
@@ -81,7 +81,7 @@ pub enum MessageKind {
     /// summaries, provider switches, and other status lines that previously
     /// were smuggled through `Role::System` with hand-rolled `"Error: "`
     /// / `"System: "` text prefixes. Carrying an explicit [`NoticeSeverity`]
-    /// lets one renderer ([`crate::tui::render::notice`]) own the
+    /// lets one renderer (the `render::notice` module) own the
     /// severity→color/icon mapping and lets callers stop string-sniffing.
     Notice {
         severity: NoticeSeverity,
@@ -243,8 +243,8 @@ pub struct TranscriptMessage {
     /// and the queue dispatch/recall paths key off this.
     pub delivery: DeliveryStatus,
     /// Provider/solution id that produced this message, mirrored from the
-    /// core [`Message`] so the transcript stays traceable across model
-    /// switches. `None` for messages that don't carry attribution.
+    /// core [`neenee_core::Message`] so the transcript stays traceable across
+    /// model switches. `None` for messages that don't carry attribution.
     pub provider: Option<String>,
     /// Model id that produced this message, companion to [`TranscriptMessage::provider`].
     pub model: Option<String>,

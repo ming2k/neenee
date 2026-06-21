@@ -3,9 +3,9 @@
 //! [`run_app_loop`] owns the per-frame work: sync shared runtime state into
 //! [`App`], draw the chrome via the `render` modules, drain pending input
 //! events through [`input::process_event`], and dispatch each
-//! [`InputAction`] to its handler. State mutations almost always land back
-//! on `App`; the few standalone helpers here cover status-text formatting,
-//! message-tree navigation, and selection → clipboard extraction.
+//! [`input::InputAction`] to its handler. State mutations almost always land
+//! back on `App`; the few standalone helpers here cover status-text
+//! formatting, message-tree navigation, and selection → clipboard extraction.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -327,13 +327,30 @@ pub(super) async fn run_app_loop<B: Backend>(
                 app.input.clone()
             };
 
-            // Overlay modals (Models, Sessions, Help) replace the entire
-            // chrome. Modals that type into the input line keep it. The
-            // permission sheet replaces only the input box, so the transcript
-            // stays visible and scrollable — it keeps the chrome too.
-            let chrome_hidden = !matches!(
+            // Modal chrome policy:
+            // - "Hide" group: the footer collapses to zero height so the
+            //   modal owns the whole surface. Used for full-screen entry
+            //   flows that carry their own input UI or want a clean slate
+            //   (Sessions / Provider / ModelEditor / Question).
+            // - "Blur" group: the footer keeps its height so the backdrop
+            //   layout is stable across modal open/close, but the composer
+            //   is rendered with `focused=false` so it visibly recedes while
+            //   the overlay is in front (Help / ToolStepDetail / Session /
+            //   PlanPreview / Activity).
+            // HistorySearch borrows the input line and Permission replaces
+            // only the composer with its own sheet, so neither hides the
+            // rest of the chrome.
+            let chrome_hidden = matches!(
                 app.active_modal,
-                Modal::None | Modal::HistorySearch | Modal::Permission
+                Modal::Provider | Modal::ModelEditor | Modal::Sessions | Modal::Question
+            );
+            let input_blurred = matches!(
+                app.active_modal,
+                Modal::Help
+                    | Modal::ToolStepDetail
+                    | Modal::Session
+                    | Modal::PlanPreview
+                    | Modal::Activity
             );
 
             // When zoomed into a sub-agent, render its child messages and show
@@ -455,7 +472,12 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // the editor's key field it would also panic: the masked
                     // key's byte cursor is computed against the unmasked string.
                 } else if !app.in_subagent_view() {
-                    let compose_focused = app.focus_zone.is_compose();
+                    // The composer stays mounted for the "blur" modal group
+                    // (Help / ToolStepDetail / Session / PlanPreview / Activity)
+                    // so the footer layout doesn't shift when the overlay opens
+                    // or closes; it just renders unfocused while the modal owns
+                    // the keyboard.
+                    let compose_focused = app.focus_zone.is_compose() && !input_blurred;
                     render::draw_composer(
                         f,
                         input_rect,

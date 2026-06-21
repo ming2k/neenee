@@ -139,7 +139,7 @@ Migration:
 - [Plan mode](../explanation/agent-design/plan-mode.md) — updated explanation of the
   end-to-end flow
 - [How to plan a change](../how-to/plan-a-change.md) — step-by-step guide
-- [Built-in tools](../reference/tools.md) — `plan_enter` and `plan_exit`
+- [Built-in tools](../reference/tools/index.md) — `plan_enter` and `plan_exit`
   parameter schemas
 - opencode: `packages/opencode/src/tool/plan.ts`,
   `packages/opencode/src/agent/agent.ts` (plan agent + plan_exit)

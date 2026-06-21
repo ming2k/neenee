@@ -134,7 +134,9 @@ pub enum AgentResponse {
     AutoApproveChanged(bool),
     /// Mirrors [`AgentEvent::StallWarning`]. The TUI should render a
     /// non-modal alert so the user can decide whether to interrupt.
-    StallWarning { consecutive_rounds: usize },
+    StallWarning {
+        consecutive_rounds: usize,
+    },
     RetryScheduled {
         attempt: usize,
         max_attempts: usize,
@@ -313,7 +315,9 @@ pub enum AgentEvent {
     /// visible alert so the user can decide whether to interrupt. Carries
     /// the streak length. Emitted exactly once per stall episode (a
     /// productive round resets the streak and clears the alert).
-    StallWarning { consecutive_rounds: usize },
+    StallWarning {
+        consecutive_rounds: usize,
+    },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),
     /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.
@@ -336,11 +340,11 @@ pub struct PermissionRequest {
     pub tool: String,
     /// Short human-friendly title for the prompt (e.g. `"Create goal"`).
     /// Falls back to [`tool`](Self::tool) when a tool does not override
-    /// [`Tool::permission_label`]. The TUI renders this as the header.
+    /// `Tool::permission_label`. The TUI renders this as the header.
     #[serde(default)]
     pub label: String,
     /// User-facing description shown in the prompt's "Details" section.
-    /// Populated from [`Tool::permission_description`], distinct from the
+    /// Populated from `Tool::permission_description`, distinct from the
     /// model-facing `Tool::description`.
     pub description: String,
     pub arguments: String,
@@ -450,9 +454,10 @@ pub struct SkillInfo {
 }
 
 /// One MCP server, shown in the modal's MCP pane. The connection tri-state
-/// (connected / disabled / failed) is unpacked from [`McpConnectionStatus`] so
-/// the DTO stays decoupled from the enum, and `tool_names` carries the
-/// per-server tool list that the hint bar collapses to a mere count.
+/// (connected / disabled / failed) is unpacked from
+/// [`crate::mcp::McpConnectionStatus`] so the DTO stays decoupled from the
+/// enum, and `tool_names` carries the per-server tool list that the hint bar
+/// collapses to a mere count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerInfo {
     pub name: String,

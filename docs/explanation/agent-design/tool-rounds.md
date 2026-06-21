@@ -182,7 +182,7 @@ bound table and how it interacts with retry, see
 
 ## See also
 
-- [Built-in tools](../../reference/tools.md) — the catalog that gets declared
+- [Built-in tools](../../reference/tools/index.md) — the catalog that gets declared
 - [Request flow](../request-flow.md) — HTTP shape, SSE reassembly, the ReAct loop
 - [Provider capabilities](../provider-capabilities.md) — why the protocol splits in two
 - [Guided decoding](../guided-decoding.md) — the constrained-decoding layer that produces valid native calls

@@ -92,6 +92,12 @@ impl Tool for AskUserTool {
         ToolAccess::Read
     }
 
+    /// `ask_user` blocks on a live human answer; sub-agents (which have no
+    /// user reachable) must be excluded from it by their profile.
+    fn requires_user(&self) -> bool {
+        true
+    }
+
     fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
         true
     }
@@ -324,6 +330,15 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "bash"
+    }
+    /// `bash` runs commands — its primary purpose is execution, not workspace
+    /// mutation — so it sits in the `Execute` tier between pure reads and
+    /// file-writing tools. The broker still gates it (`Execute > Read`), and
+    /// it is the tier the `VERIFY` sub-agent profile admits so an independent
+    /// verifier can run tests/builds/type-checks without gaining file-write
+    /// capability. See ADR-0012.
+    fn access(&self) -> ToolAccess {
+        ToolAccess::Execute
     }
     fn description(&self) -> &str {
         "Execute a shell command. Use for git, build, test, or any system operation."
@@ -927,7 +942,7 @@ impl Tool for WebFetchTool {
 ///
 /// This struct is a thin shell: it only parses arguments, builds the shared
 /// HTTP client (proxy/timeout), and delegates to the provider chain. All
-/// backend-specific logic lives behind the [`SearchProvider`] trait so new
+/// backend-specific logic lives behind the `SearchProvider` trait so new
 /// backends can be added without touching this tool.
 pub struct WebSearchTool {
     config: Arc<WebSearchConfig>,

@@ -1,11 +1,12 @@
 //! Pluggable web-search backends.
 //!
-//! Each backend implements [`SearchProvider`] and lives in its own module
-//! (`exa`, `parallel`, `duckduckgo`, `searxng`, `tavily`). The tool layer
+//! Each backend implements the `SearchProvider` trait and lives in its own
+//! module (`exa`, `parallel`, `duckduckgo`, `searxng`, `tavily`). The tool layer
 //! ([`crate::WebSearchTool`]) is a thin shell that delegates to a primary
 //! provider and an optional fallback, both built from `[websearch]` config via
-//! [`build_provider`]. Adding a new backend is one new module + one match arm
-//! in [`build_provider`]; the tool and the other backends never change.
+//! the `build_provider` factory. Adding a new backend is one new module + one
+//! match arm in `build_provider`; the tool and the other backends never
+//! change.
 //!
 //! Default backend is the hosted Exa MCP endpoint (`mcp.exa.ai`), used
 //! keylessly and anonymously — mirroring the approach taken by other coding

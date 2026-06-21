@@ -2,12 +2,12 @@
 //! [`build_provider_for_channel`] factory consumed by the orchestration layer.
 //!
 //! Each transport lives in its own module:
-//! - [`mock`] — trivial in-memory provider used as the default channel.
-//! - [`openai_compat`] — OpenAI-compatible chat completions with native tool
+//! - `mock` — trivial in-memory provider used as the default channel.
+//! - `openai_compat` — OpenAI-compatible chat completions with native tool
 //!   calls and a streaming filter that strips tool-call "echo" text.
-//! - [`gemini`] — Google Gemini native REST surface.
-//! - [`llama`] — local llama.cpp / llama-server HTTP provider.
-//! - [`registry`] — `OpenAiProviderSpec` table of OpenAI-compatible endpoints
+//! - `gemini` — Google Gemini native REST surface.
+//! - `llama` — local llama.cpp / llama-server HTTP provider.
+//! - `registry` — `OpenAiProviderSpec` table of OpenAI-compatible endpoints
 //!   and [`build_provider_for_channel`], which is the single place that knows
 //!   how to turn a [`neenee_core::catalog::Channel`] into a concrete
 //!   `dyn Provider`.

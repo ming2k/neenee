@@ -35,7 +35,7 @@
 //!   lifecycle only affects its marker) yield no accent, handing control to
 //!   the weight channel.
 //! - **weight** (luminance) — from Disclosure × Interaction, via
-//!   [`summary_weight`]. Decides how bright the summary reads based on
+//!   [`state::summary_weight`]. Decides how bright the summary reads based on
 //!   whether it is open or under the pointer — never which color.
 //!
 //! Keeping the channels separate is what makes the behavior consistent across

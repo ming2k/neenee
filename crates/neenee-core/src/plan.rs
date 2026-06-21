@@ -8,12 +8,13 @@
 //! to switch back to Build mode and start implementing.
 //!
 //! Mode switches are performed through a shared `Arc<Mutex<AgentMode>>` (see
-//! [`PlanToolContext`]) that is also owned by the [`crate::Agent`], so a tool
-//! call takes effect immediately and is reflected in the next system prompt.
+//! [`PlanToolContext`]) that is also owned by the host `Agent` type (in
+//! `neenee-agent`), so a tool call takes effect immediately and is reflected in
+//! the next system prompt.
 //!
 //! When `plan_exit` is approved the path to the written plan is recorded in
 //! `active_plan_path` and surfaced in the system prompt of subsequent Build
-//! rounds ("You are implementing the plan at <path>.") so the model keeps the
+//! rounds ("You are implementing the plan at `<path>`.") so the model keeps the
 //! plan in context without re-reading the file each turn. The plan markdown
 //! is also parsed into [`PlanProgress`] sections so the model can report
 //! per-section status through `update_plan_progress`, which the TUI mirrors
@@ -42,8 +43,8 @@ pub const PLAN_STALE_TURN_THRESHOLD: u64 = 5;
 
 /// Shared handle injected into the plan tools so they can flip the agent's
 /// mode, record the active plan path, and track per-section progress. The
-/// same `Arc`s are held by the [`crate::Agent`], so mutations are visible
-/// to the agent, the harness, and the TUI immediately.
+/// same `Arc`s are held by the host `Agent` type (in `neenee-agent`), so
+/// mutations are visible to the agent, the harness, and the TUI immediately.
 #[derive(Clone)]
 pub struct PlanToolContext {
     mode: Arc<Mutex<AgentMode>>,
@@ -160,8 +161,8 @@ fn resolve_path(path: &str) -> Option<PathBuf> {
 }
 
 /// True when `path` points inside the project's plan directory. Used by the
-/// write/edit tools to opt back in to Plan mode, and by the guard in
-/// [`crate::Agent`] to decide whether a write is permitted while planning.
+/// write/edit tools to opt back in to Plan mode, and by the Plan-mode guard
+/// (in `neenee-agent`) to decide whether a write is permitted while planning.
 pub fn is_plan_path(path: &str) -> bool {
     matches!((resolve_path(path), plans_dir_abs()), (Some(p), Some(base)) if p.starts_with(&base))
 }

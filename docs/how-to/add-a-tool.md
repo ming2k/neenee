@@ -2,7 +2,7 @@
 
 This guide walks through implementing a new tool that the agent can call. It
 assumes familiarity with the `Tool` trait. For the existing tool catalog,
-see [Built-in tools](../reference/tools.md). For the protocol the model uses
+see [Built-in tools](../reference/tools/index.md). For the protocol the model uses
 to call tools, see [Tool rounds](../explanation/agent-design/tool-rounds.md).
 
 Most built-in tools live in the `neenee-tools` crate. Pick the module that
@@ -100,7 +100,7 @@ fn access(&self) -> ToolAccess {
 
 `Read` tools bypass the permission broker and run in Plan mode. `Write`
 tools prompt the user once per `(tool, scope)` pair unless an `Always` rule
-is cached. See [Built-in tools](../reference/tools.md#tool-access) for the
+is cached. See [Built-in tools](../reference/tools/access.md) for the
 full gating matrix.
 
 ## Override `permission_scope` for write tools
@@ -184,11 +184,17 @@ let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
 ```
 
 Tools added before `tools.extend(mcp.tools)` are visible to the `task`
-sub-agent, which inherits the parent toolset filtered to `Read`. Tools
-added after that line are not. Place read-only tools before the MCP
-extension to make them sub-agent-callable; place write tools or tools that
-should never recurse anywhere in the list. `TaskTool` is pushed last, after
-the MCP extension, so it snapshots the fully assembled toolset.
+sub-agent, which snapshots the assembled toolset at construction and then
+admits tools via the bound `EXPLORE` profile
+(`crates/neenee-core/src/subagent.rs`). Admission is by capability axis, not
+position: a tool is sub-agent-callable when `ToolPolicy::admits` accepts it —
+`access() == Read`, not `requires_user()`, and not `spawns_subagent()`. Tools
+added after that line (the dispatch tool itself, the history tool) are not in
+the snapshot at all. Place new read-only, non-interactive tools before the MCP
+extension to make them sub-agent-callable; write tools and `requires_user()`
+tools are excluded by the profile regardless of where they sit. See
+[Sub-agents → Tool admission](../explanation/agent-design/subagents/admission.md)
+and [ADR-0011](../adr/0011-subagent-profiles.md).
 
 ## Verify
 
@@ -218,7 +224,7 @@ use and that an `Always` decision is cached against the scope returned by
 
 Update these surfaces in the same change:
 
-- Add a row to the table in [Built-in tools](../reference/tools.md).
+- Add a row to the table in [Built-in tools](../reference/tools/index.md).
 - If the tool introduces a new permission scope shape, document it under
   the tool's parameter table.
 - If the tool changes how the harness behaves on a turn, update
@@ -226,7 +232,7 @@ Update these surfaces in the same change:
 
 ## See also
 
-- [Built-in tools](../reference/tools.md) — existing tool catalog
+- [Built-in tools](../reference/tools/index.md) — existing tool catalog
 - [Tool rounds](../explanation/agent-design/tool-rounds.md) — schema injection and
   fallback mechanics
 - [Provider capabilities](../explanation/provider-capabilities.md) — why

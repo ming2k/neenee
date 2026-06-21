@@ -108,8 +108,19 @@ If the user interrupts the turn (`Ctrl+C` or the equivalent), the harness calls
 Clarifying requirements is a read-only activity, so planners can use it to
 resolve ambiguity before any implementation begins.
 
+## Sub-agents
+
+`ask_user` also overrides `requires_user() = true`, so the built-in `EXPLORE`
+profile excludes it from sub-agents. A sub-agent has no user reachable — its
+`UserQuestionRequest` events are dropped by the dispatch tool's forwarder — so
+admitting `ask_user` there would deadlock until the parent turn is cancelled.
+Keeping the question with the parent (which *can* ask) is the contract; a
+sub-agent that hits ambiguity returns it in its written answer instead. See
+[Sub-agents → Tool admission](subagents/admission.md) and
+[ADR-0011](../../adr/0011-subagent-profiles.md).
+
 ## See also
 
 - [How to ask the user a question](../../how-to/ask-the-user.md)
-- [Built-in tools](../../reference/tools.md)
+- [Built-in tools](../../reference/tools/index.md)
 - [Tool rounds](tool-rounds.md)

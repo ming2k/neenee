@@ -151,8 +151,9 @@ impl Dirs {
 
     /// Per-model usage telemetry (`last_used`, use count) driving recency
     /// ordering in the provider picker (ADR-0002). Rebuildable: loss affects sort
-    /// order only, never configuration. Sits next to [`history_file`] under
-    /// `$XDG_STATE_HOME` since it is the same kind of program-generated signal.
+    /// order only, never configuration. Sits next to [`Self::history_file`]
+    /// under `$XDG_STATE_HOME` since it is the same kind of program-generated
+    /// signal.
     pub fn provider_usage_file(&self) -> PathBuf {
         self.state_dir.join("provider_usage.json")
     }
@@ -230,14 +231,15 @@ impl Dirs {
 }
 
 /// Global process-wide [`Dirs`] instance. `main` installs it once via
-/// [`set_default`]; every other module reads via [`Dirs::get`].
+/// [`set_default`]; every other module reads via [`get`].
 ///
-/// Implementation: an [`OnceLock`] holds the production value (set exactly
-/// once at startup, never replaced, so production code can rely on stability).
-/// A separate [`RwLock`] layered on top is used **only by tests** to swap in
-/// isolated `Dirs` per test, since tests cannot reset a `OnceLock`. Production
-/// reads (`Dirs::get`) check the test override first; if it is empty they fall
-/// back to the `OnceLock`, then to a fresh [`Dirs::system`] resolution.
+/// Implementation: a `std::sync::OnceLock` holds the production value (set
+/// exactly once at startup, never replaced, so production code can rely on
+/// stability). A separate `std::sync::RwLock` layered on top is used **only
+/// by tests** to swap in isolated `Dirs` per test, since tests cannot reset a
+/// `OnceLock`. Production reads ([`get`]) check the test override first; if it
+/// is empty they fall back to the `OnceLock`, then to a fresh
+/// [`Dirs::system`] resolution.
 static DEFAULT: OnceLock<Dirs> = OnceLock::new();
 /// Test-only override. Marked `allow(dead_code)` because the non-test build
 /// compiles the static but never reads it (every accessor is `#[cfg(test)]`).
@@ -270,8 +272,8 @@ pub fn set_test_default(dirs: Option<Dirs>) {
 
 /// Access the process-wide [`Dirs`]. Falls back to [`Dirs::system`] when
 /// [`set_default`] has not been called yet (e.g. in tests, or in library code
-/// invoked outside of `main`). When a test override is installed via
-/// [`set_test_default`], that value wins over the production install.
+/// invoked outside of `main`). When a test override is installed (via the
+/// test-only `set_test_default`), that value wins over the production install.
 pub fn get() -> Dirs {
     #[cfg(test)]
     if let Some(d) = TEST_OVERRIDE.read().unwrap().clone() {

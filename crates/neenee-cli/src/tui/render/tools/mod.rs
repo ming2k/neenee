@@ -1,18 +1,17 @@
 //! Per-tool presentation registry.
 //!
-//! Each tool maps to a [`ToolPresenter`] that owns how that tool looks in the
-//! transcript: the one-line collapsed summary and the declarative
+//! Each tool maps to a `ToolPresenter` (defined below) that owns how that tool
+//! looks in the transcript: the one-line collapsed summary and the declarative
 //! classifications that drive its expanded body. This collapses the per-tool
 //! `match name { … }` branches that were previously scattered across
 //! `document.rs` (`argument_summary`) and `step/renderers.rs` (result
 //! rendering) into one place — adding a tool means adding a file and one
 //! registry arm.
 //!
-//! Each presenter owns a collapsed [`summary`](ToolPresenter::summary) and
-//! declarative [`result_kind`](ToolPresenter::result_kind) /
-//! [`arg_layout`](ToolPresenter::arg_layout) classifications that drive the
-//! expanded body (`step/renderers.rs` owns the drawing primitives; this module
-//! owns the per-tool decisions). `document.rs` and `step/renderers.rs` call the
+//! Each presenter owns a collapsed `summary` and declarative `result_kind` /
+//! `arg_layout` classifications that drive the expanded body
+//! (`step/renderers.rs` owns the drawing primitives; this module owns the
+//! per-tool decisions). `document.rs` and `step/renderers.rs` call the
 //! `*_for` entry points below instead of matching on tool names.
 
 mod ask_user;

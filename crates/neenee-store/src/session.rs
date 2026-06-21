@@ -1087,7 +1087,12 @@ pub fn build_excerpt_summary(
     let mut output = String::new();
     for index in chosen {
         let message = &archived[index];
-        let label = label_for(message.role).unwrap();
+        // Skip roles without a render label (e.g. System). Pass 1 above already
+        // filters these out of `chosen`, so this is defensive — but it keeps the
+        // two passes consistent and avoids a panic if the selection ever diverges.
+        let Some(label) = label_for(message.role) else {
+            continue;
+        };
         let content = message.content.trim();
         let remaining = max_chars.saturating_sub(output.len());
         if remaining < 64 {
@@ -1510,7 +1515,7 @@ fn session_archive_dir(path: &std::path::Path) -> PathBuf {
 /// Idempotent: a marker file (`data_dir/.migrated-v3`) is written on success
 /// and prevents re-running. Each legacy archive is routed to the bucket of its
 /// own `project_root` field (defaulting to the current cwd when missing, which
-/// matches the [`SessionData::default`] semantic for legacy snapshots). Files
+/// matches the `SessionData::default` semantic for legacy snapshots). Files
 /// already present at the destination are not overwritten.
 ///
 /// Errors are logged but non-fatal — the worst case is some legacy sessions

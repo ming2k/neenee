@@ -134,6 +134,6 @@ mechanics.
 
 - [Providers](../reference/providers.md) — per-provider capability matrix
 - [Tool rounds](agent-design/tool-rounds.md) — schema injection, streaming, fallback
-- [Built-in tools](../reference/tools.md) — what schemas get declared
+- [Built-in tools](../reference/tools/index.md) — what schemas get declared
 - [Harness architecture](agent-design/harness.md) — how the harness consumes these
   capabilities per turn

@@ -29,9 +29,11 @@ pub mod plan;
 pub use plan::{PlanProgress, PlanSection, PlanSectionStatus};
 pub mod pressure;
 pub mod skillsconfig;
+pub mod subagent;
 pub mod tool_call;
 pub mod webconfig;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
+pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, VERIFY};
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,

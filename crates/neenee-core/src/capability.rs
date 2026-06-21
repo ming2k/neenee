@@ -90,6 +90,24 @@ pub trait Tool: Send + Sync {
     fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
         matches!(self.access(), ToolAccess::Read)
     }
+
+    /// Whether executing this tool may block awaiting a live human decision
+    /// (e.g. `ask_user`, an approval-gated mode switch). Non-interactive
+    /// execution contexts — sub-agents spawned for autonomous research — have
+    /// no user reachable to answer, so a [`crate::subagent::ToolPolicy`] with
+    /// `allow_user_interaction: false` excludes these. See ADR-0011.
+    fn requires_user(&self) -> bool {
+        false
+    }
+
+    /// Whether invoking this tool spawns a nested agent. Sub-agent profiles
+    /// exclude these unconditionally to prevent unbounded recursion — the
+    /// outermost dispatch tool (`task`) and wrappers around it
+    /// (`verify_plan_execution`) override to `true`. See ADR-0011.
+    fn spawns_subagent(&self) -> bool {
+        false
+    }
+
     fn permission_scope(&self, _arguments: &str) -> String {
         "*".to_string()
     }
@@ -174,8 +192,33 @@ pub trait Tool: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A tool's capability class, ordered `Read < Execute < Write`. Each consumer
+/// of the axis expresses its rule as a threshold rather than a binary, so the
+/// three surfaces that consult it compose cleanly:
+///
+/// - **Permission broker** — prompts for any tool with `access() > Read`
+///   (i.e. `Execute` or `Write`): both have side effects the user should
+///   approve.
+/// - **Plan-mode gate** — the default `allowed_in_plan_mode` admits `Read`
+///   only; `Execute` and `Write` are blocked unless a tool explicitly exempts
+///   a scope (e.g. writes under `.neenee/plans/`).
+/// - **Sub-agent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
+///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`.
+///   `EXPLORE` (ceiling `Read`) gets pure read tools; `VERIFY` (ceiling
+///   `Execute`) additionally gets command execution for tests/builds; neither
+///   admits `Write`. See ADR-0012.
+///
+/// Variant order is load-bearing: it defines the ordering used by the derived
+/// `Ord`. Do not reorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ToolAccess {
+    /// Inspects state with no side effects (e.g. `read_file`, `grep`).
     Read,
+    /// Runs commands and may have external side effects, but the tool itself
+    /// is not a workspace-mutation primitive (e.g. `bash`). Broker-gated.
+    Execute,
+    /// The tool's purpose is to mutate the workspace (e.g. `write_file`,
+    /// `edit_file`). Broker-gated; excluded from sub-agents by every
+    /// built-in profile.
     Write,
 }

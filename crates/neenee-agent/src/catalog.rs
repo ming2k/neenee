@@ -1,10 +1,10 @@
-//! Materializes a [`Catalog`] from the host crate's [`Config`].
+//! Materializes a `Catalog` from the host crate's [`Config`].
 //!
 //! This is the single source of truth for the environment-variable-then-config
 //! resolution rules that startup and runtime provider switching share. Every
 //! [`Channel`] produced here carries fully resolved credentials and model id, so
-//! [`Channel::build`](neenee_core::catalog::Channel::build) never touches the
-//! environment or config again.
+//! provider construction (`build_provider_for_channel` in `neenee-providers`)
+//! never touches the environment or config again.
 //!
 //! Phase 1 of ADR-0002: produces one channel per entry from the legacy
 //! per-provider fields. The on-disk schema is unchanged; later phases add

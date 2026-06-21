@@ -19,6 +19,7 @@ use neenee_core::{async_trait, ProviderStreamEvent};
 use neenee_core::{
     AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStore, McpConnectionStatus,
     McpServerInfo, Message, ModelInfo, Provider, SessionContextSnapshot, SessionOverview, Tool,
+    EXPLORE,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
@@ -433,8 +434,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     tools.extend(mcp.tools);
     // TaskTool gets a snapshot of the toolset (excluding itself) so spawned
-    // sub-agents cannot recurse and inherit the live provider.
-    let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone()));
+    // sub-agents cannot recurse and inherit the live provider. It binds the
+    // EXPLORE profile (read-only / non-interactive / non-recursive).
+    let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone(), &EXPLORE));
     tools.push(task_tool);
     tools.push(Arc::new(SearchHistoryTool::new(
         embedding_store.clone(),
@@ -939,13 +941,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let value = match parsed {
                                         Ok(v) => v,
                                         Err(_) => {
-                                            let _ = resp_tx.send(AgentResponse::Error(
-                                                format!(
-                                                    "Unknown value '{raw}'. Use \
+                                            let _ = resp_tx.send(AgentResponse::Error(format!(
+                                                "Unknown value '{raw}'. Use \
                                                      `/stall-threshold N` (non-negative integer) \
                                                      or `/stall-threshold default`.",
-                                                ),
-                                            ));
+                                            )));
                                             continue;
                                         }
                                     };
