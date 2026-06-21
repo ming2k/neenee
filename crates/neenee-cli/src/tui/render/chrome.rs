@@ -137,15 +137,17 @@ pub fn draw_activity_bar(
     ));
 
     // Stall alert (ADR-0009 safety net): surfaced while the harness considers
-    // the agent stalled on consecutive read-only tool rounds. Rendered in the
-    // warning accent so it stands out from the muted structural prefix, with
-    // an `Esc to interrupt` hint so the user knows they can stop it.
+    // the agent stalled on consecutive read-only tool rounds. Rendered with
+    // the same breathing luminance sweep as the running-indicator dot so the
+    // alert pulses gently rather than sitting as a flat warning chip — the
+    // motion draws the eye without being frantic. An `Esc to interrupt`
+    // hint tells the user they can stop it.
     if stall_rounds > 0 {
-        let warn = Style::default().fg(theme.warning);
+        let warn = breathing_color(spinner_phase, theme.warning, theme.surface());
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("⚠ stalled: {stall_rounds} read-only rounds — Esc to interrupt"),
-            warn,
+            Style::default().fg(warn).add_modifier(Modifier::BOLD),
         ));
     }
 

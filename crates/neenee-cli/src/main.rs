@@ -72,6 +72,8 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "mcp",
     "permissions",
     "auto-approve",
+    "stall-threshold",
+    "verify-nudge",
     "session",
     "sessions",
     "resume",
@@ -906,6 +908,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
+                        "/stall-threshold" => {
+                            // /stall-threshold        → show current value
+                            // /stall-threshold N      → set to N (0 disables)
+                            // /stall-threshold default → restore the config default
+                            match parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                                None => {
+                                    let current = agent.get_stall_threshold();
+                                    let label = if current == 0 {
+                                        "0 (detection disabled)".to_string()
+                                    } else {
+                                        current.to_string()
+                                    };
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Stall threshold: {label}. Use `/stall-threshold N` \
+                                         to set (0 disables), `/stall-threshold default` to \
+                                         reset to the config value ({}).",
+                                        config.agent.stall_threshold
+                                    )));
+                                }
+                                Some("default") => {
+                                    let value = config.agent.stall_threshold;
+                                    agent.set_stall_threshold(value);
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Stall threshold reset to config default ({value})."
+                                    )));
+                                }
+                                Some(raw) => {
+                                    let parsed = raw.parse::<usize>();
+                                    let value = match parsed {
+                                        Ok(v) => v,
+                                        Err(_) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(
+                                                format!(
+                                                    "Unknown value '{raw}'. Use \
+                                                     `/stall-threshold N` (non-negative integer) \
+                                                     or `/stall-threshold default`.",
+                                                ),
+                                            ));
+                                            continue;
+                                        }
+                                    };
+                                    agent.set_stall_threshold(value);
+                                    let label = if value == 0 {
+                                        "0 (detection disabled)".to_string()
+                                    } else {
+                                        value.to_string()
+                                    };
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Stall threshold set to {label}."
+                                    )));
+                                }
+                            }
+                        }
+                        "/verify-nudge" => {
+                            // /verify-nudge        → show current state
+                            // /verify-nudge on|off → set explicitly
+                            let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
+                                Some("on") | Some("true") | Some("1") => Some(true),
+                                Some("off") | Some("false") | Some("0") => Some(false),
+                                Some(other) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                                        "Unknown value '{other}'. Use `/verify-nudge on|off`."
+                                    )));
+                                    continue;
+                                }
+                                None => None,
+                            };
+                            let enabled = next.unwrap_or_else(|| !agent.get_verify_nudge_enabled());
+                            agent.set_verify_nudge_enabled(enabled);
+                            let _ = resp_tx.send(AgentResponse::Text(format!(
+                                "Verify hard nudge {}: the harness {} inject a reminder when \
+                                 the model ends a turn with an approved plan but no \
+                                 verify_plan_execution call.",
+                                if enabled { "ON" } else { "OFF" },
+                                if enabled { "will" } else { "won't" },
+                            )));
+                        }
                         "/search" => {
                             let query = cmd.strip_prefix("/search").unwrap_or("").trim();
                             if query.is_empty() {
@@ -1675,6 +1754,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /clear    — Clear the conversation history\n\
                                                                 /permissions [clear] — Show or clear always-allowed tool rules
                                 /auto-approve [on|off] — Toggle bypassing write-tool permission prompts
+                                /stall-threshold [N] — Show or set the agent stall threshold (0 disables)
+                                /verify-nudge [on|off] — Toggle the verify-plan hard nudge at turn end
                                 /search <query> — Semantic search over the project's session history
 \n\
                                 /session [status|list|resume|fork|open|new] — Manage durable sessions\n\

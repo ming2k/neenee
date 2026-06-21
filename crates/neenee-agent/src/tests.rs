@@ -1876,3 +1876,27 @@ fn agent_config_defaults_match_runtime_constants() {
     assert_eq!(cfg.stall_threshold, STALL_THRESHOLD);
     assert!(cfg.verify_nudge_enabled);
 }
+
+#[test]
+fn stall_threshold_getter_round_trips_setter() {
+    // The /stall-threshold slash command reads via `get_stall_threshold`
+    // after writing via `set_stall_threshold`; the pair must round-trip
+    // exactly, including the disable sentinel.
+    let agent = agent();
+    assert_eq!(agent.get_stall_threshold(), STALL_THRESHOLD);
+    agent.set_stall_threshold(3);
+    assert_eq!(agent.get_stall_threshold(), 3);
+    agent.set_stall_threshold(0);
+    assert_eq!(agent.get_stall_threshold(), 0);
+}
+
+#[test]
+fn verify_nudge_getter_round_trips_setter() {
+    // Same contract for /verify-nudge: getter/setter pair must round-trip.
+    let agent = agent();
+    assert!(agent.get_verify_nudge_enabled());
+    agent.set_verify_nudge_enabled(false);
+    assert!(!agent.get_verify_nudge_enabled());
+    agent.set_verify_nudge_enabled(true);
+    assert!(agent.get_verify_nudge_enabled());
+}

@@ -262,6 +262,16 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) = threshold;
     }
 
+    /// Current stall-detector threshold. Read by the `/stall-threshold`
+    /// slash command to show the live value (which may differ from
+    /// `Config::agent.stall_threshold` after a runtime override).
+    pub fn get_stall_threshold(&self) -> usize {
+        *self
+            .stall_threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Override whether the verify hard-nudge gate is active. Mirrors
     /// `[agent] verify_nudge_enabled` in `config.toml` but can be flipped
     /// at runtime — useful for tests and for headless runs that do not
@@ -271,6 +281,15 @@ impl Agent {
             .verify_nudge_enabled
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = enabled;
+    }
+
+    /// Whether the verify hard-nudge gate is currently active. Read by
+    /// the `/verify-nudge` slash command to display the live state.
+    pub fn get_verify_nudge_enabled(&self) -> bool {
+        *self
+            .verify_nudge_enabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Install (or clear with `None`) the mid-turn context-relief gate.
