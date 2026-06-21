@@ -846,6 +846,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let _ = resp_tx.send(AgentResponse::Text(message));
                         }
+                        "/plan" => {
+                            // Open the plan preview modal. The TUI loads
+                            // the file content from disk on its side; the
+                            // harness just signals that the modal should
+                            // open. No-op (with a user-visible message)
+                            // when no plan is active.
+                            match agent.active_plan_path() {
+                                Some(path) => {
+                                    let _ = resp_tx.send(AgentResponse::OpenPlanPreview(path));
+                                }
+                                None => {
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "No active plan to preview.".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        "/verify" => {
+                            // Trigger plan verification by submitting a
+                            // hidden prompt that calls the
+                            // verify_plan_execution tool. The turn runs
+                            // through the normal pipeline so the verifier
+                            // result lands in the transcript and the model
+                            // can act on it.
+                            match agent.active_plan_path() {
+                                Some(_) => {
+                                    let _ = resp_tx.send(AgentResponse::TriggerVerification);
+                                }
+                                None => {
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "No active plan to verify.".to_string(),
+                                    ));
+                                }
+                            }
+                        }
                         "/permissions" => {
                             if parts.get(1) == Some(&"clear") {
                                 agent.clear_allowed_tools();

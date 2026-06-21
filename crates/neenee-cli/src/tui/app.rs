@@ -79,6 +79,12 @@ pub enum Modal {
     /// MCP servers, permissions, tools, and skills. Opened with the `/session`
     /// slash command; the active pane is [`App::session_tab`].
     Session,
+    /// Read-only preview of the active plan file. Opened by clicking the
+    /// sticky plan panel above the input box or pressing `Ctrl+P` while a
+    /// plan is active. The content is loaded from disk at open time and
+    /// stored in [`App::plan_preview_content`]; `plan_preview_scroll` holds
+    /// the overlay's own scroll offset.
+    PlanPreview,
 }
 
 /// Active pane inside the session-context modal. The variant order defines the
@@ -217,6 +223,14 @@ pub struct App {
     /// stale detector: if `turn_count - plan_progress.updated_at_turn`
     /// exceeds the threshold the panel renders dimmed.
     pub turn_count: u64,
+    /// Cached content of the plan file currently shown in `Modal::PlanPreview`.
+    /// Loaded from disk when the modal opens so the preview does not flicker
+    /// on every redraw; cleared on close so the next open re-reads the file
+    /// (the model may have updated it).
+    pub plan_preview_content: String,
+    /// Scroll offset inside `Modal::PlanPreview`. Reset to 0 each time the
+    /// modal opens.
+    pub plan_preview_scroll: u16,
     pub pending_permission: Option<PermissionRequest>,
     pub pending_question: Option<UserQuestionRequest>,
     /// Selected option indices per question. Outer vec parallels

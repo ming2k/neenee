@@ -12,6 +12,8 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/models", "Select an LLM provider"),
     ("/session", "Open the session context overview"),
     ("/mode", "Show or switch mode (build, plan)"),
+    ("/plan", "Open the active plan file in a preview modal"),
+    ("/verify", "Trigger independent plan verification"),
     ("/mcp", "Show configured MCP server status"),
     ("/compact", "Compact older complete turns now"),
     ("/clear", "Clear the conversation history"),

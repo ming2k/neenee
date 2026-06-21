@@ -106,6 +106,13 @@ pub async fn run_tui(
     let plan_progress_clone = plan_progress.clone();
     let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let turn_count_clone = turn_count.clone();
+    // One-shot signals from the response listener to the event loop. The
+    // listener can't touch App or send AgentRequests directly, so it stashes
+    // the request here and the event loop drains it next frame.
+    let open_plan_preview: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+    let open_plan_preview_clone = open_plan_preview.clone();
+    let trigger_verification = Arc::new(AtomicBool::new(false));
+    let trigger_verification_clone = trigger_verification.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
@@ -481,6 +488,12 @@ pub async fn run_tui(
                 AgentResponse::PlanProgressUpdated(progress) => {
                     *plan_progress_clone.lock().await = progress;
                 }
+                AgentResponse::OpenPlanPreview(path) => {
+                    *open_plan_preview_clone.lock().await = Some(path);
+                }
+                AgentResponse::TriggerVerification => {
+                    trigger_verification_clone.store(true, Ordering::SeqCst);
+                }
                 AgentResponse::AutoApproveChanged(enabled) => {
                     harness_clone.lock().await.auto_approve = enabled;
                 }
@@ -563,6 +576,8 @@ pub async fn run_tui(
         auto_approve: false,
         plan_progress: None,
         turn_count: 0,
+        plan_preview_content: String::new(),
+        plan_preview_scroll: 0,
         pending_permission: None,
         pending_question: None,
         question_selected: Vec::new(),
@@ -625,6 +640,8 @@ pub async fn run_tui(
             session_context,
             plan_progress,
             turn_count,
+            open_plan_preview,
+            trigger_verification,
         },
     )
     .await;

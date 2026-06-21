@@ -120,6 +120,15 @@ pub enum AgentResponse {
     /// `update_plan_progress`, cleared by `plan_enter`). Mirrors
     /// [`AgentEvent::PlanProgressUpdated`].
     PlanProgressUpdated(Option<crate::plan::PlanProgress>),
+    /// User asked the TUI to open the plan preview modal (via `/plan` or
+    /// clicking the sticky panel). Carries the active plan path; the TUI
+    /// loads the file content from disk into `App::plan_preview_content`.
+    OpenPlanPreview(std::path::PathBuf),
+    /// User asked the harness to trigger plan verification (via `/verify`).
+    /// The harness turns this into a synthetic hidden prompt that calls
+    /// `verify_plan_execution`, so the verifier result lands in the
+    /// transcript and the model can act on it.
+    TriggerVerification,
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     AutoApproveChanged(bool),

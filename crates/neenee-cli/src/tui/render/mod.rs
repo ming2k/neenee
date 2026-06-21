@@ -37,8 +37,8 @@ use message_body::{draw_message_body, draw_plan_panel};
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal, draw_model_editor,
-    draw_permission_sheet, draw_question_modal, draw_session_modal, draw_sessions_modal,
-    draw_tool_step_detail_overlay,
+    draw_permission_sheet, draw_plan_preview_modal, draw_question_modal, draw_session_modal,
+    draw_sessions_modal, draw_tool_step_detail_overlay,
 };
 use primitives::viewport_rect;
 use step::{
