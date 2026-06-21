@@ -280,12 +280,7 @@ impl PlanProgress {
     /// Update the first section whose name matches (case-insensitive
     /// substring). Returns `true` if a section was updated. Stamps
     /// `updated_at_turn` so the stale detector resets.
-    pub fn update(
-        &mut self,
-        section: &str,
-        status: PlanSectionStatus,
-        current_turn: u64,
-    ) -> bool {
+    pub fn update(&mut self, section: &str, status: PlanSectionStatus, current_turn: u64) -> bool {
         let needle = section.trim().to_lowercase();
         if needle.is_empty() {
             return false;
@@ -537,10 +532,7 @@ impl UpdatePlanProgressTool {
     }
 
     fn current_turn(&self) -> u64 {
-        self.turn_counter
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0)
+        self.turn_counter.lock().map(|g| *g).unwrap_or(0)
     }
 }
 

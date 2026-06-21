@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess, Provider};
+use neenee_core::{Provider, Tool, ToolAccess};
 
 use crate::plan::PlanToolContext;
 use crate::task_tool::TaskTool;
