@@ -696,8 +696,10 @@ impl TranscriptMessage {
 
     /// One-line live status derived from the sub-agent's children and the
     /// parent tool step's completion state, e.g. `↳ Running · 3 tool calls ·
-    /// 4.2s · Grep "foo"` or `↳ Completed · 3 tool calls · 1.2s`. Returns
-    /// `None` for non-task steps.
+    /// Grep "foo"` or `↳ Completed · 3 tool calls · 1.2s`. Returns
+    /// `None` for non-task steps. Duration is only shown once the step reaches
+    /// a terminal state; a running step surfaces progress instead of an
+    /// accumulating timer.
     pub fn subagent_status_line(&self) -> Option<String> {
         if !self.is_subagent_task() {
             return None;
@@ -705,7 +707,6 @@ impl TranscriptMessage {
         let MessageKind::ToolStep {
             status,
             duration_ms,
-            started_at,
             children,
             ..
         } = &self.kind
@@ -723,16 +724,11 @@ impl TranscriptMessage {
                 duration_text(*duration_ms)
             ),
             ToolStepStatus::Running => {
-                // Running: show accumulated stats (tool count + live elapsed)
-                // followed by the most recent child activity.
-                let elapsed_ms = started_at
-                    .map(|t| t.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                let stats = format!(
-                    "· {} tool calls · {}",
-                    tool_calls,
-                    duration_text(Some(elapsed_ms))
-                );
+                // Running: show accumulated tool-call count followed by the
+                // most recent child activity. The elapsed timer is deliberately
+                // omitted while the step is in flight; duration is surfaced only
+                // once the step reaches a terminal state.
+                let stats = format!("· {} tool calls", tool_calls);
                 match children.last() {
                     Some(child)
                         if child.is_tool_step()
