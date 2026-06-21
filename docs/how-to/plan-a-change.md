@@ -59,6 +59,29 @@ written plan, point the agent at the plan file, for example:
 Implement the plan at .neenee/plans/rewrite-auth.md
 ```
 
+## Track progress
+
+Once the plan is approved a sticky 3-row panel appears above the input
+box showing the section completion ratio and per-section status:
+
+```text
+╭── Plan: rewrite-auth.md · 1/4 done ───────────────╮
+│ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Assump… │
+╰───────────────────────────────────────────────────╯
+```
+
+The model marks sections `in_progress` → `done` via the
+`update_plan_progress` tool as it works. Sections it has not touched yet
+show as `○ Pending` — that is honest, not stale: it means "not verified
+yet." If you see the panel stay on `○` for a section the model claims is
+done, ask it to mark the section or to run the verifier.
+
+The panel disappears when:
+
+- the agent re-enters Plan mode (a new planning cycle starts), or
+- the user runs `/mode plan` manually, or
+- the session is resumed after both were cleared.
+
 ## Stay in control
 
 - `/mode` shows the current mode at any time.

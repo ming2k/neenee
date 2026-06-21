@@ -16,3 +16,5 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0003](0003-extract-neenee-app-crate.md) | Extract `neenee-app` from the binary crate | Superseded by ADR-0004 |
 | [0004](0004-six-crate-topology.md) | Six-crate topology: core / app / providers / tools / harness / cli | Superseded by ADR-0005 |
 | [0005](0005-strict-layering-and-renames.md) | Strictly-layered topology + scenario-bound store | Accepted |
+| [0006](0006-plan-mode-v2.md) | Plan mode v2: approval gate, active plan path, proposed-plan rendering | Accepted |
+| [0007](0007-plan-progress-panel.md) | Plan progress sticky panel above input box | Accepted |

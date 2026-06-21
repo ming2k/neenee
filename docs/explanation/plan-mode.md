@@ -110,10 +110,50 @@ the plan is written, and then pursues the goal with full tool access. The mode
 does not affect goal accounting, the completion marker, or loop iteration
 budgets.
 
+## Plan progress panel
+
+Once `plan_exit` is approved the agent parses the plan markdown into sections
+(one per `##` heading) and shows them in a sticky 3-row panel above the input
+box:
+
+```text
+╭── Plan: rewrite-auth.md · 1/4 done ───────────────╮
+│ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Assump… │
+╰───────────────────────────────────────────────────╯
+```
+
+The panel is hidden when no plan is active, when the view is zoomed into a
+sub-agent (the plan belongs to the parent context), and while an overlay
+modal is open. It re-appears as soon as those conditions clear.
+
+Section status is **model-driven, not inferred**. The system prompt
+instructs the model to call `update_plan_progress(section, status)`
+whenever it starts or finishes a section. A section the model forgets to
+mark stays `Pending` — which is honest (the work has not been verified)
+rather than a stale auto-progress that misleads.
+
+Status glyphs:
+
+| Glyph | Status      | Color           | Meaning                                |
+|-------|-------------|-----------------|----------------------------------------|
+| `✓`   | Done        | `theme.ok()`    | Section complete and verified          |
+| `●`   | InProgress  | `theme.warn()`  | Currently being worked on              |
+| `○`   | Pending     | `theme.muted()` | Not started yet                        |
+| `—`   | Skipped     | `theme.muted()` | Turned out not to apply                |
+
+The progress snapshot is persisted in `session.json` via
+`SessionEvent::PlanProgressSet`, so resume restores the panel in the same
+state. See [ADR-0007](../adr/0007-plan-progress-panel.md) for the design
+rationale.
+
 ## See also
 
-- [Built-in tools](../reference/tools.md) — `plan_enter` and `plan_exit`
-  parameter schemas, and the `allowed_in_plan_mode` access rule
+- [Built-in tools](../reference/tools.md) — `plan_enter`, `plan_exit`, and
+  `update_plan_progress` parameter schemas, and the
+  `allowed_in_plan_mode` access rule
 - [Slash commands](../reference/commands.md) — the `/mode` command
-- [Harness architecture](harness.md) — the control plane that Plan mode plugs
-  into, including the permission broker and safety bounds
+- [Harness architecture](harness.md) — the control plane that Plan mode
+  plugs into, including the permission broker and safety bounds
+- [ADR-0006](../adr/0006-plan-mode-v2.md) — approval gate + active plan
+  path + `<proposed_plan>` rendering
+- [ADR-0007](../adr/0007-plan-progress-panel.md) — sticky progress panel
