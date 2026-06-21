@@ -748,7 +748,11 @@ pub(super) fn draw_message_body(
 
                     let base = Style::default().fg(theme.fg());
                     let line = line_spans(
-                        if line_index == 0 { &prefix } else { &continuation },
+                        if line_index == 0 {
+                            &prefix
+                        } else {
+                            &continuation
+                        },
                         Style::default().fg(theme.brand()),
                         &wl.text,
                         line_selection(sel_range, wl),

@@ -24,6 +24,7 @@ use neenee_core::{
 use crate::tui::clipboard;
 use crate::tui::clipboard_ops;
 use crate::tui::completion::CompletionKind;
+use crate::tui::composer_attachments;
 use crate::tui::document::TranscriptMessage;
 use crate::tui::input::{self};
 use crate::tui::layout::{InteractiveTarget, InteractiveTargetKind, LayoutMap};
@@ -179,9 +180,8 @@ pub(super) async fn run_app_loop<B: Backend>(
             // and switch to the modal.
             if let Some(path) = runtime.open_plan_preview.lock().await.take() {
                 if app.active_modal == Modal::None {
-                    let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                        format!("(could not read {}: {})", path.display(), e)
-                    });
+                    let body = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| format!("(could not read {}: {})", path.display(), e));
                     app.plan_preview_content = body;
                     app.plan_preview_scroll = 0;
                     app.active_modal = Modal::PlanPreview;
@@ -190,9 +190,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             // Verifier trigger: send a synthetic Chat asking the agent to
             // call verify_plan_execution. Goes through the normal pipeline
             // so the result lands in the transcript and the model can act.
-            if runtime
-                .trigger_verification
-                .swap(false, Ordering::SeqCst)
+            if runtime.trigger_verification.swap(false, Ordering::SeqCst)
                 && app.active_modal == Modal::None
             {
                 let _ = app.tx.send(AgentRequest::Chat {
@@ -209,8 +207,11 @@ pub(super) async fn run_app_loop<B: Backend>(
             }
         }
         // While images are staged for the next message, keep a persistent
-        // indicator visible so the user knows Enter will send them.
-        if !app.pending_images.is_empty() {
+        // indicator visible so the user knows Enter will send them. Skipped
+        // while the Ctrl+C quit window is armed so a freshly-shown
+        // "input cleared — Ctrl+C again to exit" toast keeps the floor and
+        // is not immediately overwritten by the per-frame image reminder.
+        if !app.pending_images.is_empty() && app.ctrl_c_armed_ticks == 0 {
             let n = app.pending_images.len();
             app.copy_toast_message = format!(
                 "{n} image{} attached — enter to send",
@@ -270,8 +271,13 @@ pub(super) async fn run_app_loop<B: Backend>(
             let _ = flipped;
             runtime.is_responding.store(true, Ordering::SeqCst);
             *runtime.activity_status.lock().await = "queued".to_string();
+            // Expand paste chips at dispatch time so the model receives the
+            // real paste contents. Image chips stay as positional labels in
+            // the text; their payloads ship via `images`.
+            let expanded_text =
+                composer_attachments::expand_paste_chips(&dispatch.text, &dispatch.text_pastes);
             let _ = app.tx.send(AgentRequest::Chat {
-                text: dispatch.text,
+                text: expanded_text,
                 images: dispatch.images,
             });
         }
@@ -603,8 +609,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.copy_toast_failed,
                     &app.theme,
                 );
-            }
-            if app.ctrl_c_armed_ticks > 0 {
+            } else if app.ctrl_c_armed_ticks > 0 {
+                // The copy toast and the armed toast render at the same
+                // screen position, so only one shows at a time. The
+                // clearing-input path surfaces the armed state through the
+                // copy toast itself ("input cleared — Ctrl+C again to
+                // exit"); once it expires, the standalone armed toast
+                // takes over for the remainder of the quit window.
                 render::draw_armed_toast(f, "press Ctrl+C again to exit", &app.theme);
             }
             if app.esc_armed_ticks > 0 {
@@ -739,9 +750,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.suggestion_index = None;
                     app.input_scroll = 0;
 
-                    // Take any images staged by Ctrl+V so they ship with this
-                    // message and are cleared whether or not there is text.
+                    // Stage the chips' backing payloads so they ship with
+                    // this message. The text is expanded into the real paste
+                    // contents at the moment of dispatch — either inline
+                    // (immediate send) or when the queue drains (queued
+                    // send). For queue recall, the raw chip text and the
+                    // staged vectors are restored verbatim so the user can
+                    // keep editing the placeholder.
                     let images = std::mem::take(&mut app.pending_images);
+                    let text_pastes = std::mem::take(&mut app.pending_text_pastes);
                     let has_images = !images.is_empty();
 
                     if !text.is_empty() || has_images {
@@ -758,7 +775,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                             app.pending_dispatch
                                 .push_back(crate::tui::app::QueuedDispatch {
                                     text: text.clone(),
-                                    images,
+                                    images: images.clone(),
+                                    text_pastes: text_pastes.clone(),
                                 });
                             runtime
                                 .messages
@@ -772,6 +790,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                             app.follow_bottom = true;
                             app.pin_summary_line = None;
                         } else {
+                            // Expand `[Pasted text #N +M lines]` chips into
+                            // their full staged text right before dispatch so
+                            // the model receives the real paste contents
+                            // rather than the chip label. Image chips stay
+                            // in the text as positional labels.
+                            let expanded =
+                                composer_attachments::expand_paste_chips(&text, &text_pastes);
                             runtime.is_responding.store(true, Ordering::SeqCst);
                             *runtime.activity_status.lock().await = "queued".to_string();
                             runtime
@@ -785,7 +810,10 @@ pub(super) async fn run_app_loop<B: Backend>(
                             app.history_index = None;
                             app.follow_bottom = true;
                             app.pin_summary_line = None;
-                            let _ = app.tx.send(AgentRequest::Chat { text, images });
+                            let _ = app.tx.send(AgentRequest::Chat {
+                                text: expanded,
+                                images,
+                            });
                         }
                     } else if let Some((start, end)) = app.selection.normalized_range() {
                         // Enter on a selected step: navigate into a sub-agent
@@ -1293,6 +1321,21 @@ pub(super) async fn run_app_loop<B: Backend>(
                         app.cursor_position = 0;
                         app.input_scroll = 0;
                         app.suggestion_index = None;
+                        // Clearing the input also arms the quit window so
+                        // the chain is exactly two presses total (clear,
+                        // then quit). The combined toast says both what
+                        // just happened and what the next Ctrl+C will do,
+                        // removing the old "silent clear → user can't tell
+                        // if the next press will quit or do something else"
+                        // ambiguity. Pending-image reminders skip their
+                        // per-frame refresh while the quit window is armed
+                        // so this toast keeps the floor.
+                        app.copy_toast_message = "input cleared — Ctrl+C again to exit".to_string();
+                        app.copy_toast_failed = false;
+                        app.copy_toast_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(2000),
+                        );
+                        app.ctrl_c_armed_ticks = 20;
                     } else if app.ctrl_c_armed_ticks > 0 {
                         return Ok(());
                     } else {
@@ -1407,10 +1450,19 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // The user is editing again, so live completions are
                     // once again useful — clear the Enter-commit dismissal.
                     app.completion_dismissed = false;
+                    // Reconcile attachments: if the user typed inside a chip
+                    // (breaking its syntax) the backing staged entry must be
+                    // dropped, and surviving chips relabeled.
+                    app.reconcile_attachments();
                 }
                 input::InputAction::Backspace => {
                     app.suggestion_index = None;
                     app.completion_dismissed = false;
+                    // Reconcile attachments: a chip-aware backspace has
+                    // already spliced the chip out of `app.input`; this
+                    // drops the orphaned entry from `pending_images` /
+                    // `pending_text_pastes` and relabels survivors.
+                    app.reconcile_attachments();
                 }
                 input::InputAction::CursorLeft => {}
                 input::InputAction::CursorRight => {}

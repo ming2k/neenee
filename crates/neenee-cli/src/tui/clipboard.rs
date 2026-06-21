@@ -264,9 +264,38 @@ async fn read_macos_png() -> Option<Vec<u8>> {
     result
 }
 
-/// Read plain text from the system clipboard via arboard (runs in a blocking
-/// task because arboard's `Clipboard` is `!Send`).
+/// Read plain text from the system clipboard. On Linux the platform-native
+/// readers (`wl-paste` on Wayland, `xclip` on X11) are tried first because
+/// `arboard` does not reliably see selection contents set through the
+/// wl-clipboard protocol (which the copy path uses via `wl-copy`) or some
+/// X11 clipboard managers. macOS and other platforms fall through to
+/// `arboard`, which talks to NSPasteboard / Win32 directly.
 async fn read_text() -> Result<Option<String>, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Some(bytes) = read_command_output("wl-paste", &[]).await {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    if !text.is_empty() {
+                        return Ok(Some(text));
+                    }
+                }
+            }
+        }
+        if let Some(bytes) = read_command_output("xclip", &["-selection", "clipboard", "-o"]).await
+        {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if !text.is_empty() {
+                    return Ok(Some(text));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // arboard is the only option on macOS / Windows; the Linux branch
+        // above falls through to it too as a last-resort reader.
+    }
     tokio::task::spawn_blocking(|| {
         let mut clipboard = arboard::Clipboard::new().map_err(|_| ())?;
         match clipboard.get_text() {

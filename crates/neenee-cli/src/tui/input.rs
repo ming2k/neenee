@@ -311,6 +311,68 @@ fn cursor_line_end(input: &str, cursor_position: &mut usize) {
     }
 }
 
+/// Find the start char index of the previous whitespace-delimited word,
+/// stopping at the beginning of the current logical line so multi-line
+/// drafts never leak kills across newlines. Matches readline's
+/// `unix-word-rubout` (Ctrl+W) and the `backward-word` /
+/// `backward-kill-word` motions users expect from shells and editors.
+fn prev_word_start(input: &str, cursor_position: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let line_start = cursor_line_start_char(&chars, cursor_position);
+    let mut i = cursor_position.min(chars.len());
+    // Skip whitespace between caret and the previous word.
+    while i > line_start && chars[i - 1].is_whitespace() && chars[i - 1] != '\n' {
+        i -= 1;
+    }
+    // Skip the contiguous run of non-whitespace that forms the word.
+    while i > line_start && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the end char index of the next whitespace-delimited word, stopping
+/// at the end of the current logical line so the caret never crosses a
+/// newline. Matches readline's `kill-word` (Alt+D) and `forward-word`
+/// motions.
+fn next_word_end(input: &str, cursor_position: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let line_end = cursor_line_end_char(&chars, cursor_position);
+    let mut i = cursor_position.min(chars.len());
+    // Skip whitespace between caret and the next word.
+    while i < line_end && chars[i].is_whitespace() {
+        i += 1;
+    }
+    // Skip the contiguous run of non-whitespace that forms the word.
+    while i < line_end && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Char index of the start of the current logical line, mirroring
+/// [`cursor_line_start`] but operating on a borrowed char slice so the
+/// word-boundary helpers can call it without re-allocating.
+fn cursor_line_start_char(chars: &[char], cursor_position: usize) -> usize {
+    let char_pos = cursor_position.min(chars.len());
+    if let Some(rel) = chars[..char_pos].iter().rposition(|&c| c == '\n') {
+        rel + 1
+    } else {
+        0
+    }
+}
+
+/// Char index of the end of the current logical line, mirroring
+/// [`cursor_line_end`] on a borrowed char slice.
+fn cursor_line_end_char(chars: &[char], cursor_position: usize) -> usize {
+    let char_pos = cursor_position.min(chars.len());
+    if let Some(rel) = chars[char_pos..].iter().position(|&c| c == '\n') {
+        char_pos + rel
+    } else {
+        chars.len()
+    }
+}
+
 /// Process a crossterm event into a high-level action.
 ///
 /// `input` and `cursor_position` are mutable because some events modify them directly.
@@ -648,6 +710,156 @@ pub fn process_event(
                     }
                     InputAction::None
                 }
+                // Ctrl+W: delete the previous whitespace-delimited word
+                // (readline `unix-word-rubout`). Skips trailing whitespace
+                // then removes the contiguous run of non-whitespace before
+                // the caret, stopping at the start of the current logical
+                // line so multi-line drafts never leak kills across
+                // newlines. No-op outside free-text surfaces so it never
+                // closes a modal or inserts a literal 'w'.
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        let start = prev_word_start(input, *cursor_position);
+                        if start < *cursor_position {
+                            let start_byte = input
+                                .char_indices()
+                                .nth(start)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            let end_byte = input
+                                .char_indices()
+                                .nth(*cursor_position)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            input.replace_range(start_byte..end_byte, "");
+                            *cursor_position = start;
+                            return InputAction::Backspace;
+                        }
+                    }
+                    InputAction::None
+                }
+                // Ctrl+U: delete from the caret to the start of the current
+                // logical line (readline `unix-line-discard`). Multi-line
+                // drafts only lose the current line; Ctrl+C still clears the
+                // whole buffer when the user wants a full wipe.
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        let mut start = *cursor_position;
+                        cursor_line_start(input, &mut start);
+                        if start < *cursor_position {
+                            let start_byte = input
+                                .char_indices()
+                                .nth(start)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            let end_byte = input
+                                .char_indices()
+                                .nth(*cursor_position)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            input.replace_range(start_byte..end_byte, "");
+                            *cursor_position = start;
+                            return InputAction::Backspace;
+                        }
+                    }
+                    InputAction::None
+                }
+                // Ctrl+K: delete from the caret to the end of the current
+                // logical line (readline `kill-line`). Stops at the next
+                // newline so multi-line drafts keep their other lines.
+                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        let mut end = *cursor_position;
+                        cursor_line_end(input, &mut end);
+                        if end > *cursor_position {
+                            let start_byte = input
+                                .char_indices()
+                                .nth(*cursor_position)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            let end_byte = input
+                                .char_indices()
+                                .nth(end)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            input.replace_range(start_byte..end_byte, "");
+                            return InputAction::Backspace;
+                        }
+                    }
+                    InputAction::None
+                }
+                // Alt+B: jump back one word (readline `backward-word`).
+                KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        *cursor_position = prev_word_start(input, *cursor_position);
+                    }
+                    InputAction::None
+                }
+                // Alt+F: jump forward one word (readline `forward-word`).
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        *cursor_position = next_word_end(input, *cursor_position);
+                    }
+                    InputAction::None
+                }
+                // Alt+D: delete the next whitespace-delimited word (readline
+                // `kill-word`). Symmetric counterpart to Ctrl+W.
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Models
+                            | super::Modal::ModelEditor
+                    ) {
+                        let end = next_word_end(input, *cursor_position);
+                        if end > *cursor_position {
+                            let start_byte = input
+                                .char_indices()
+                                .nth(*cursor_position)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            let end_byte = input
+                                .char_indices()
+                                .nth(end)
+                                .map(|(i, _)| i)
+                                .unwrap_or(input.len());
+                            input.replace_range(start_byte..end_byte, "");
+                            return InputAction::Backspace;
+                        }
+                    }
+                    InputAction::None
+                }
                 KeyCode::Char(c) => {
                     // Sibling sub-agent navigation works in both zones (it is a
                     // sub-agent view feature, not a typing-navigation thing)
@@ -756,6 +968,57 @@ pub fn process_event(
                             | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
+                        // Alt+Backspace / Ctrl+Backspace delete the previous
+                        // whitespace-delimited word in one stroke, matching
+                        // readline's `backward-kill-word`. Plain Backspace
+                        // keeps the chip-aware atomic delete below so pasted
+                        // attachment placeholders vanish in a single tap.
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            let start = prev_word_start(input, *cursor_position);
+                            if start < *cursor_position {
+                                let start_byte = input
+                                    .char_indices()
+                                    .nth(start)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(input.len());
+                                let end_byte = input
+                                    .char_indices()
+                                    .nth(*cursor_position)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(input.len());
+                                input.replace_range(start_byte..end_byte, "");
+                                *cursor_position = start;
+                                return InputAction::Backspace;
+                            }
+                        }
+                        // Chip-aware atomic delete: when the cursor sits
+                        // immediately after an attachment placeholder (and
+                        // optionally one trailing space the paste path
+                        // inserts), one Backspace removes the whole chip in
+                        // a single keystroke — mirroring codex / claude-code
+                        // / opencode. The event loop runs the reconcile pass
+                        // on the returned `Backspace` action, which drops
+                        // the orphaned entry from `pending_images` /
+                        // `pending_text_pastes` and relabels survivors.
+                        let byte_cursor = input
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .nth(*cursor_position)
+                            .unwrap_or(input.len());
+                        if let Some((start, end)) =
+                            crate::tui::composer_attachments::chip_range_for_backspace(
+                                input,
+                                byte_cursor,
+                            )
+                        {
+                            let removed_chars = input[start..end].chars().count();
+                            input.replace_range(start..end, "");
+                            *cursor_position -= removed_chars;
+                            return InputAction::Backspace;
+                        }
                         *cursor_position -= 1;
                         let byte_pos = input
                             .char_indices()
@@ -786,7 +1049,17 @@ pub fn process_event(
                             | super::Modal::ModelEditor
                     ) && *cursor_position > 0
                     {
-                        *cursor_position -= 1;
+                        // Ctrl+Left (and Alt+Left on terminals that translate
+                        // it) jumps back one whitespace-delimited word,
+                        // matching readline's `backward-word`.
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            *cursor_position = prev_word_start(input, *cursor_position);
+                        } else {
+                            *cursor_position -= 1;
+                        }
                     }
                     InputAction::None
                 }
@@ -805,7 +1078,15 @@ pub fn process_event(
                             | super::Modal::ModelEditor
                     ) && *cursor_position < input.chars().count()
                     {
-                        *cursor_position += 1;
+                        // Ctrl+Right (and Alt+Right) jump forward one word.
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            *cursor_position = next_word_end(input, *cursor_position);
+                        } else {
+                            *cursor_position += 1;
+                        }
                     }
                     InputAction::None
                 }
@@ -1287,6 +1568,109 @@ mod tests {
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "/mod");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn backspace_atomically_deletes_an_image_chip() {
+        // Pasting an image inserts `[Image #1] ` (chip + trailing space).
+        // A single Backspace right after the space must erase both the
+        // space and the chip — mirroring codex / claude-code / opencode's
+        // atomic chip backspace. The reconcile pass in the event loop
+        // drops the orphaned `pending_images` entry.
+        let chip = crate::tui::composer_attachments::image_chip(1);
+        let mut input = format!("look {chip} ");
+        let mut cursor = input.chars().count();
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "look ");
+        assert_eq!(cursor, "look ".chars().count());
+    }
+
+    #[test]
+    fn backspace_atomically_deletes_a_paste_chip_without_trailing_space() {
+        // When the cursor lands right after `]` (no trailing space), a
+        // single Backspace still removes the whole chip rather than
+        // chipping away at the `]`.
+        let chip = crate::tui::composer_attachments::paste_chip(1, 5);
+        let mut input = format!("see {chip}!");
+        // Cursor right after `]`, before `!`.
+        let prefix_chars = "see ".chars().count() + chip.chars().count();
+        let mut cursor = prefix_chars;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "see !");
+        assert_eq!(cursor, "see ".chars().count());
+    }
+
+    #[test]
+    fn backspace_falls_through_to_single_char_outside_a_chip() {
+        // Mid-word backspace must keep deleting one character at a time.
+        let mut input = "hello".to_string();
+        let mut cursor = 5;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "hell");
         assert_eq!(cursor, 4);
     }
 
@@ -2091,6 +2475,349 @@ mod tests {
             FocusZone::Compose,
         );
         assert_eq!(cursor, 11);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_previous_word() {
+        // "hello world" with the caret after "world" (char index 11).
+        let mut input = "hello world".to_string();
+        let mut cursor = 11;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "hello ");
+        assert_eq!(cursor, 6);
+    }
+
+    #[test]
+    fn ctrl_w_eats_trailing_whitespace_and_previous_word() {
+        // Caret sits after the trailing spaces following "world"; Ctrl+W
+        // (readline `unix-word-rubout`) eats both the trailing whitespace
+        // AND the preceding word in one stroke, leaving "hello ".
+        let mut input = "hello world   ".to_string();
+        let mut cursor = 14;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "hello ");
+        assert_eq!(cursor, 6);
+    }
+
+    #[test]
+    fn ctrl_w_is_noop_at_line_start() {
+        let mut input = "hello world".to_string();
+        let mut cursor = 0;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input, "hello world");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_w_does_not_cross_newline() {
+        // Multi-line draft: Ctrl+W on the second line must not eat into the
+        // first line. "line1\nworld" -> caret at end (11 chars).
+        let mut input = "line1\nworld".to_string();
+        let mut cursor = 11;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "line1\n");
+        assert_eq!(cursor, 6);
+    }
+
+    #[test]
+    fn ctrl_w_is_noop_in_question_modal() {
+        // Ctrl+W must never leak as a literal 'w' or close the modal in the
+        // question modal; it should be a silent no-op there.
+        let mut input = "abc".to_string();
+        let mut cursor = 3;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::Question,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::None);
+        assert_eq!(input, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn ctrl_u_deletes_to_line_start() {
+        let mut input = "hello world".to_string();
+        let mut cursor = 7;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "orld");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_u_keeps_other_lines_in_multiline_draft() {
+        // Multi-line draft: Ctrl+U on line 2 only wipes the part of line 2
+        // before the caret, leaving line 1 untouched.
+        let mut input = "keep me\nwipe me".to_string();
+        let mut cursor = 15;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "keep me\n");
+        assert_eq!(cursor, 8);
+    }
+
+    #[test]
+    fn ctrl_k_deletes_to_line_end() {
+        let mut input = "hello world".to_string();
+        let mut cursor = 5;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 5, "Ctrl+K keeps the caret put");
+    }
+
+    #[test]
+    fn ctrl_k_does_not_eat_next_line() {
+        let mut input = "first\nsecond".to_string();
+        let mut cursor = 3;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "fir\nsecond");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn alt_d_deletes_next_word() {
+        // Caret at index 5 (the space); Alt+D should eat "world".
+        let mut input = "hello world".to_string();
+        let mut cursor = 5;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('d'),
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "hello");
+        assert_eq!(cursor, 5, "Alt+D keeps the caret put");
+    }
+
+    #[test]
+    fn alt_b_jumps_back_one_word() {
+        let mut input = "the quick fox".to_string();
+        let mut cursor = 13;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 10);
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn alt_f_jumps_forward_one_word() {
+        let mut input = "the quick fox".to_string();
+        let mut cursor = 0;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('f'),
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 3);
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('f'),
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 9);
+    }
+
+    #[test]
+    fn ctrl_left_right_move_word_by_word() {
+        // "alpha bravo charlie" — char indices:
+        // alpha=0..4, ' '=5, bravo=6..10, ' '=11, charlie=12..18 (len 19).
+        let mut input = "alpha bravo charlie".to_string();
+        let mut cursor = 19;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Left,
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 12, "Ctrl+Left snaps to the start of 'charlie'");
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Left,
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 6, "Ctrl+Left snaps to the start of 'bravo'");
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Right,
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(cursor, 11, "Ctrl+Right snaps to the end of 'bravo'");
+    }
+
+    #[test]
+    fn alt_backspace_deletes_previous_word() {
+        let mut input = "foo bar baz".to_string();
+        let mut cursor = 11;
+        let action = run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(action, InputAction::Backspace);
+        assert_eq!(input, "foo bar ");
+        assert_eq!(cursor, 8);
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_previous_word() {
+        // Ctrl+Backspace is the same word-rubout motion on terminals that
+        // deliver it; mirror the Alt+Backspace behaviour.
+        let mut input = "foo bar baz".to_string();
+        let mut cursor = 11;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Backspace,
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "foo bar ");
+        assert_eq!(cursor, 8);
+    }
+
+    #[test]
+    fn ctrl_w_works_in_history_modal() {
+        // Free-text modals (history search, models, model editor) accept the
+        // same line-editing vocabulary as the main prompt so the user is
+        // never trapped mid-query.
+        let mut input = "fuzzy query".to_string();
+        let mut cursor = 11;
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::HistorySearch,
+            FocusZone::Compose,
+        );
+        assert_eq!(input, "fuzzy ");
+        assert_eq!(cursor, 6);
+    }
+
+    #[test]
+    fn ctrl_keys_do_not_insert_literal_chars() {
+        // Regression guard: none of the new Ctrl/Alt shortcuts may fall
+        // through to the `Char(c)` insertion path. Each must leave the
+        // buffer text untouched when there is nothing to delete.
+        let mut input = String::new();
+        let mut cursor = 0;
+        for (code, mods) in [
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::ALT),
+            (KeyCode::Char('f'), KeyModifiers::ALT),
+            (KeyCode::Char('d'), KeyModifiers::ALT),
+        ] {
+            let action = run_key(
+                &mut input,
+                &mut cursor,
+                code,
+                mods,
+                crate::tui::Modal::None,
+                FocusZone::Compose,
+            );
+            assert_eq!(action, InputAction::None);
+            assert!(input.is_empty());
+            assert_eq!(cursor, 0);
+        }
     }
 
     /// Drive the history-search modal with `code` (+ `modifiers`) and return

@@ -2,6 +2,7 @@ pub mod app;
 pub mod clipboard;
 pub mod clipboard_ops;
 pub mod completion;
+pub mod composer_attachments;
 pub mod config;
 pub mod document;
 mod event_loop;
@@ -591,6 +592,7 @@ pub async fn run_tui(
         input_history,
         history_index: None,
         pending_images: Vec::new(),
+        pending_text_pastes: Vec::new(),
         pending_dispatch: std::collections::VecDeque::new(),
         selection: SelectionState::None,
         drag: SelectionDrag::default(),

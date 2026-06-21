@@ -1011,7 +1011,7 @@ mod tests {
                             chrome_hidden: false,
                             subagent_bar: None,
                             plan_progress: None,
-                        turn_count: 0,
+                            turn_count: 0,
                             hovered_step: None,
                             focused_target: None,
                             theme,

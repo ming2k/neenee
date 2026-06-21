@@ -1,4 +1,3 @@
-
 use super::*;
 use neenee_core::{Message, Role, ToolCall};
 
@@ -533,6 +532,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         input_history: Vec::new(),
         history_index: None,
         pending_images: Vec::new(),
+        pending_text_pastes: Vec::new(),
         pending_dispatch: std::collections::VecDeque::new(),
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
@@ -736,6 +736,7 @@ fn queued_dispatch_carries_text_and_images() {
             mime: "image/png".to_string(),
             data: "base64".to_string(),
         }],
+        text_pastes: Vec::new(),
     };
     assert_eq!(d.text, "hello");
     assert_eq!(d.images.len(), 1);
@@ -752,10 +753,12 @@ fn recall_queued_is_lifo_and_restores_input() {
     app.pending_dispatch.push_back(QueuedDispatch {
         text: "first".to_string(),
         images: Vec::new(),
+        text_pastes: Vec::new(),
     });
     app.pending_dispatch.push_back(QueuedDispatch {
         text: "second".to_string(),
         images: Vec::new(),
+        text_pastes: Vec::new(),
     });
     let mut messages = vec![queued_user_message("first"), queued_user_message("second")];
 
@@ -798,6 +801,7 @@ fn recall_queued_restores_staged_images() {
     app.pending_dispatch.push_back(QueuedDispatch {
         text: "look at this".to_string(),
         images: vec![image.clone()],
+        text_pastes: Vec::new(),
     });
     let mut messages = vec![queued_user_message("look at this")];
 
@@ -821,6 +825,7 @@ fn recall_queued_skips_delivered_markers() {
     app.pending_dispatch.push_back(QueuedDispatch {
         text: "queued".to_string(),
         images: Vec::new(),
+        text_pastes: Vec::new(),
     });
     let delivered = TranscriptMessage::new(Role::User, "already sent");
     let queued = queued_user_message("queued");

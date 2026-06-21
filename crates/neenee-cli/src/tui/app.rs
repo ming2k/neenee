@@ -21,6 +21,7 @@ use neenee_core::{
 };
 
 use crate::tui::completion::PathScan;
+use crate::tui::composer_attachments;
 use crate::tui::config;
 use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
@@ -55,6 +56,10 @@ pub struct QueuedDispatch {
     pub text: String,
     /// Pasted images staged for this message (Ctrl+V). Empty for plain text.
     pub images: Vec<ImagePart>,
+    /// Large pasted text blocks staged behind `[Pasted text #N +M lines]`
+    /// chips inside `text`. Empty for plain-text drafts. Order matches the
+    /// chip numbering, so the Nth chip expands to `pending_text_pastes[N-1]`.
+    pub text_pastes: Vec<String>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -252,7 +257,15 @@ pub struct App {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     /// Images pasted (Ctrl+V) and waiting to be sent with the next message.
+    /// Each entry is paired 1-to-1 with an `[Image #N]` chip inside
+    /// [`App::input`]; the chip's `#N` is `index + 1` after
+    /// [`App::reconcile_attachments`] has run.
     pub pending_images: Vec<ImagePart>,
+    /// Large pasted text blocks staged behind `[Pasted text #N +M lines]`
+    /// chips inside [`App::input`]. Each entry is the full original paste;
+    /// the matching chip in the input is just a short label so the input
+    /// box stays compact. Order matches the chip numbering.
+    pub pending_text_pastes: Vec<String>,
     /// FIFO of user messages staged while a turn was in flight. Each entry
     /// has a matching [`TranscriptMessage`] carrying
     /// [`crate::tui::document::DeliveryStatus::Queued`] in [`App::messages`].
@@ -342,6 +355,34 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
+    /// Reconcile [`App::pending_images`] / [`App::pending_text_pastes`]
+    /// against the chips that currently survive in [`App::input`], and
+    /// relabel the surviving chips so their `#N` matches their new 1-based
+    /// position in the truncated vectors. Cheap to run on every input
+    /// mutation: it is a single linear scan over the input string.
+    ///
+    /// This is the prune + relabel pass that drops orphaned staged entries
+    /// whenever the user deletes or edits a chip — by backspace, selection
+    /// delete, or hand-typing over the chip text. Mirrors codex's
+    /// `reconcile_deleted_elements` and claude-code's `parseReferences`
+    /// effect, adapted to neenee's "chip text lives in the input" model.
+    pub fn reconcile_attachments(&mut self) {
+        let new_input = composer_attachments::reconcile(
+            &self.input,
+            &mut self.pending_images,
+            &mut self.pending_text_pastes,
+        );
+        self.input = new_input;
+    }
+
+    /// Replace every `[Pasted text #N +M lines]` chip in `text` with the
+    /// matching staged full paste, leaving image chips in place as
+    /// positional labels for the model. Used at submit time so the agent
+    /// receives the real paste contents instead of the chip label.
+    pub fn expand_paste_chips(&self, text: &str) -> String {
+        composer_attachments::expand_paste_chips(text, &self.pending_text_pastes)
+    }
+
     /// Recall the most-recently-queued message: pop it off the back of the
     /// send queue (LIFO undo), remove its visual marker from the shared
     /// transcript, and load its text + any pasted images back into the
@@ -371,6 +412,9 @@ impl App {
         self.cursor_position = self.input.chars().count();
         if !dispatch.images.is_empty() {
             self.pending_images = dispatch.images;
+        }
+        if !dispatch.text_pastes.is_empty() {
+            self.pending_text_pastes = dispatch.text_pastes;
         }
         // Clear the history cursor so a subsequent ↓ returns to an empty
         // input rather than to the now-stale history entry.

@@ -1572,6 +1572,16 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         row("esc", "interrupt (×2) / close"),
         row("ctrl+c", "copy · interrupt · quit (×2)"),
         Line::from(""),
+        Line::from(section("Line editing")),
+        row("ctrl+a / ctrl+e", "caret to line start / end"),
+        row("home / end", "caret to line start / end"),
+        row("ctrl+u / ctrl+k", "delete to line start / end"),
+        row("ctrl+w", "delete previous word"),
+        row("alt+backspace", "delete previous word"),
+        row("alt+d", "delete next word"),
+        row("ctrl+← / ctrl+→", "move word back / forward"),
+        row("alt+b / alt+f", "move word back / forward"),
+        Line::from(""),
         Line::from(section("Focus zones")),
         Line::from(desc(
             "Two zones split the keyboard. The hint bar shows [COMPOSE] or",
@@ -1692,12 +1702,7 @@ mod tests {
 /// caller caches the file content in `App::plan_preview_content` at open
 /// time so the modal does not hit disk on every redraw; `scroll` is the
 /// overlay's own scroll offset, reset on each open.
-pub fn draw_plan_preview_modal(
-    frame: &mut Frame,
-    content: &str,
-    scroll: u16,
-    theme: &Theme,
-) {
+pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, theme: &Theme) {
     draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     // Wider than the help modal — plans are usually long. Cap at 80% x 70%
     // so the modal stays readable on small terminals.
