@@ -2,6 +2,11 @@ use super::*;
 use futures::stream::{self, BoxStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Serialises tests that mutate process-wide env vars (`NEENEE_DATA_DIR`).
+/// Tests that touch env vars MUST take this lock to avoid racing other
+/// parallel tests that read paths via [`neenee_store::paths::get`].
+static ENV_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct TestProvider;
 struct PermissionTestProvider(AtomicUsize);
 struct StreamingToolProvider(AtomicUsize);
@@ -335,6 +340,194 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
     ));
 }
 
+/// A provider whose SSE stream never yields and never ends simulates a stalled
+/// connection (server stops sending but keeps the socket open). Without an idle
+/// timeout the turn loop blocks on `stream.next()` forever — the UI spins
+/// "running · responding" and only a user interrupt can break it. The
+/// `STREAM_IDLE_TIMEOUT` guard surfaces this as a retryable error instead.
+/// `start_paused` makes tokio auto-advance the clock past the 120 s bound so
+/// the test is instantaneous.
+#[tokio::test(start_paused = true)]
+async fn stalled_provider_stream_times_out_as_retryable() {
+    struct StalledStreamProvider;
+    #[async_trait]
+    impl Provider for StalledStreamProvider {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+            unreachable!("streaming path should be used")
+        }
+        async fn stream_chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::empty()))
+        }
+        async fn stream_chat_events(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
+            Ok(Box::pin(stream::pending()))
+        }
+    }
+
+    let agent = Agent::new(
+        Arc::new(StalledStreamProvider),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    let mut messages = vec![Message::new(Role::User, "hello")];
+
+    let result = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    assert!(
+        matches!(result, Err(HarnessError::Retryable { .. })),
+        "a stalled stream should surface as a retryable error, not hang forever; got: {result:?}"
+    );
+}
+
+/// A provider whose `stream_chat_events` future never resolves simulates a
+/// server that accepts the TCP connection but never sends HTTP response
+/// headers (overloaded upstream, dropped proxy). Without the idle-timeout on
+/// the outer select the turn would hang on `.send()` forever. `start_paused`
+/// advances the clock past `STREAM_IDLE_TIMEOUT` instantly.
+#[tokio::test(start_paused = true)]
+async fn stream_request_that_never_resolves_times_out() {
+    use std::future::pending;
+
+    struct PendingStreamProvider;
+    #[async_trait]
+    impl Provider for PendingStreamProvider {
+        async fn chat(&self, _: Vec<Message>) -> Result<Message, String> {
+            unreachable!("streaming path should be used")
+        }
+        async fn stream_chat(
+            &self,
+            _: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            unreachable!("stream_chat_events should be called directly")
+        }
+        async fn stream_chat_events(
+            &self,
+            _: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
+            // Never resolves.
+            pending().await
+        }
+    }
+
+    let agent = Agent::new(
+        Arc::new(PendingStreamProvider),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    let mut messages = vec![Message::new(Role::User, "hello")];
+
+    let result = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    assert!(
+        matches!(result, Err(HarnessError::Retryable { .. })),
+        "a stream request that never resolves should time out as retryable; got: {result:?}"
+    );
+}
+
+/// A provider whose non-streaming `chat()` never resolves simulates a stalled
+/// endpoint during the non-streaming ReAct path (used by `Agent::run` and
+/// compaction). Without a timeout the call blocks forever.
+#[tokio::test(start_paused = true)]
+async fn non_streaming_chat_that_never_resolves_times_out() {
+    use std::future::pending;
+
+    struct PendingChatProvider;
+    #[async_trait]
+    impl Provider for PendingChatProvider {
+        async fn chat(&self, _: Vec<Message>) -> Result<Message, String> {
+            pending().await
+        }
+        async fn stream_chat(
+            &self,
+            _: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    let agent = Agent::new(
+        Arc::new(PendingChatProvider),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    let mut messages = vec![Message::new(Role::User, "hello")];
+
+    let result = agent
+        .run_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    assert!(
+        matches!(result, Err(HarnessError::Retryable { .. })),
+        "a non-streaming chat that never resolves should time out as retryable; got: {result:?}"
+    );
+}
+
+/// A reasoning model may emit reasoning deltas but no text and no tool call
+/// (e.g. a truncated or cut-off response). Before the fix to
+/// [`valid_assistant_response`], such a response was incorrectly classified
+/// as an empty assistant response and surfaced as a terminal error.
+/// Reasoning is a legitimate payload from reasoning-model providers, so the
+/// turn should complete normally instead of erroring.
+#[tokio::test]
+async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
+    struct ReasoningOnlyProvider;
+    #[async_trait]
+    impl Provider for ReasoningOnlyProvider {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+            unreachable!("streaming path should be used")
+        }
+        async fn stream_chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::empty()))
+        }
+        async fn stream_chat_events(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ProviderStreamEvent::ReasoningDelta("let me think...".to_string()),
+            )])))
+        }
+    }
+
+    let agent = Agent::new(
+        Arc::new(ReasoningOnlyProvider),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    let mut messages = vec![Message::new(Role::User, "hello")];
+
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    let outcome = outcome.expect("reasoning-only response should not be treated as empty");
+    assert_eq!(outcome.message.content, "");
+    assert_eq!(
+        outcome.message.reasoning_content.as_deref(),
+        Some("let me think...")
+    );
+}
+
 #[tokio::test]
 async fn cancelling_during_tool_execution_emits_tool_cancelled() {
     use std::future::pending;
@@ -632,6 +825,12 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
         AgentEvent::PermissionRequest(request) => request,
         event => panic!("unexpected event: {:?}", event),
     };
+    // The default `permission_label`/`permission_description` fall back to
+    // the tool's name/description, which the request must carry verbatim
+    // (regression for the `PermissionRequest.label` wiring).
+    assert_eq!(request.tool, "write_test");
+    assert_eq!(request.label, "write_test");
+    assert_eq!(request.description, "test write tool");
     assert!(!task.is_finished());
     assert!(agent.reply_permission(&request.id, PermissionDecision::Always));
     assert_eq!(task.await.unwrap().unwrap().to_text(), "should not run");
@@ -1116,4 +1315,140 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
     assert!(lines
         .iter()
         .any(|line| line.starts_with("tool-result ask_user") && line.contains("thiserror")));
+}
+
+// ---- Persistent permissions (cross-session) -------------------------------
+//
+// Verifies the per-project `Always` allowlist round-trips through disk:
+// approving `Always` on one agent is visible to a fresh agent constructed
+// against the same project root, and revoking is mirrored to disk too.
+// Sub-agents (no project root) stay ephemeral and never touch the file.
+
+#[tokio::test]
+async fn always_permission_persists_across_agents_for_same_project() {
+    let _guard = ENV_GUARD.lock().await;
+    let tmp = std::env::temp_dir().join(format!("neenee-perms-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).expect("create temp data dir");
+    // `paths::get()` reads `NEENEE_DATA_DIR` on every call (no caching), so
+    // pointing the env var at a tempdir redirects the project bucket there.
+    std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    let project_root = std::path::PathBuf::from("/tmp/neenee-perms-fixture-project");
+    let perms_path = neenee_store::paths::get().project_permissions(&project_root);
+
+    // First agent: prompt for a write_test permission and approve Always.
+    let agent = Arc::new(Agent::new(
+        Arc::new(TestProvider),
+        vec![Arc::new(WriteTestTool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    ));
+    agent.set_project_root(Some(project_root.clone()));
+    assert!(agent.allowed_tools().is_empty());
+
+    let call = ToolCall {
+        id: "call".to_string(),
+        name: "write_test".to_string(),
+        arguments: "{}".to_string(),
+    };
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task_agent = agent.clone();
+    let task = tokio::spawn(async move {
+        task_agent
+            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
+                let _ = event_tx.send(event);
+            })
+            .await
+    });
+    let request = match event_rx.recv().await.unwrap() {
+        AgentEvent::PermissionRequest(request) => request,
+        event => panic!("unexpected event: {:?}", event),
+    };
+    assert!(agent.reply_permission(&request.id, PermissionDecision::Always));
+    let _ = task.await;
+
+    // The Always decision should have triggered an atomic write to disk.
+    assert!(
+        perms_path.exists(),
+        "permissions file should exist at {}",
+        perms_path.display()
+    );
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&perms_path).unwrap()).unwrap();
+    assert_eq!(on_disk["version"].as_u64(), Some(1));
+    assert_eq!(on_disk["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(on_disk["rules"][0]["tool"], "write_test");
+    assert_eq!(on_disk["rules"][0]["scope"], "*");
+
+    // A brand-new agent in the same project should inherit the rule without
+    // ever prompting — that is the whole point of cross-session persistence.
+    let agent2 = Arc::new(Agent::new(
+        Arc::new(TestProvider),
+        vec![Arc::new(WriteTestTool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    ));
+    agent2.set_project_root(Some(project_root.clone()));
+    assert_eq!(
+        agent2.allowed_tools(),
+        vec!["write_test *".to_string()],
+        "fresh agent in the same project should inherit persisted Always rule"
+    );
+
+    // Revoking on agent2 must remove the rule from disk as well, so the next
+    // session doesn't silently resurrect it.
+    assert!(agent2.revoke_allowed_tool("write_test", "*"));
+    let after_revoke: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&perms_path).unwrap()).unwrap();
+    assert_eq!(after_revoke["rules"].as_array().unwrap().len(), 0);
+
+    // A different project root must NOT see the first project's rules.
+    let other_root = std::path::PathBuf::from("/tmp/neenee-perms-fixture-other-project");
+    let agent3 = Agent::new(
+        Arc::new(TestProvider),
+        vec![Arc::new(WriteTestTool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent3.set_project_root(Some(other_root));
+    assert!(
+        agent3.allowed_tools().is_empty(),
+        "unrelated project must not inherit another project's rules"
+    );
+
+    std::env::remove_var("NEENEE_DATA_DIR");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn agent_without_project_root_never_writes_permissions_file() {
+    let _guard = ENV_GUARD.lock().await;
+    let tmp = std::env::temp_dir().join(format!("neenee-perms-noset-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).expect("create temp data dir");
+    std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    let project_root = std::path::PathBuf::from("/tmp/neenee-perms-noset-fixture");
+    let perms_path = neenee_store::paths::get().project_permissions(&project_root);
+
+    // No set_project_root call: the agent stays ephemeral, so an Always
+    // approval must not write any file (sub-agents behave the same way).
+    let agent = Arc::new(Agent::new(
+        Arc::new(TestProvider),
+        vec![Arc::new(WriteTestTool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    ));
+    // Mutations of the allowlist must be no-ops on disk when no project root
+    // is set: no panic, no file created.
+    agent.clear_allowed_tools();
+    assert!(!agent.revoke_allowed_tool("anything", "*"));
+    assert!(
+        !perms_path.exists(),
+        "ephemeral agent must not create a permissions file"
+    );
+
+    std::env::remove_var("NEENEE_DATA_DIR");
+    let _ = std::fs::remove_dir_all(&tmp);
 }

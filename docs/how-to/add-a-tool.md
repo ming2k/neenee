@@ -123,6 +123,36 @@ tools use the `path` argument, `bash` uses the full `command` text,
 meaningfully different invocations but is stable across retries of the same
 invocation.
 
+## Override `permission_label` / `permission_description` when needed
+
+`Tool::description()` is sent to the model and is often written as
+instruction prose ("Call this only when…", "Do not infer…"). That text is
+fine for the model but confusing when the user reads it in a permission
+prompt. Two trait methods control what the prompt shows instead
+(`crates/neenee-core/src/lib.rs`):
+
+- `permission_label()` (default: `name()`) — the header title.
+- `permission_description()` (default: `description()`) — the body shown
+  under "Details".
+
+Override either only when the default would puzzle a user. Keep
+`permission_description()` to one or two plain sentences describing *what
+the call does*, not *when the model should call it*.
+
+```rust
+fn permission_label(&self) -> String {
+    "Create goal".to_string()
+}
+
+fn permission_description(&self) -> String {
+    "Start a new active goal for this thread, replacing any completed goal.".to_string()
+}
+```
+
+`create_goal` and `update_goal` (`crates/neenee-core/src/goals/tools.rs`)
+are the reference implementation. Both overrides are UI-only: they never
+reach the model and are not part of the function schema.
+
 ## Optional: stream sub-task events
 
 If the tool spawns long-running work that should surface in the TUI,

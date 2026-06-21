@@ -1329,7 +1329,21 @@ pub async fn summarize_with_provider(
         Message::new(Role::System, SUMMARIZATION_SYSTEM_PROMPT),
         Message::new(Role::User, user_prompt),
     ];
-    let response = provider.chat(messages).await?;
+    // Bound the summarization call so a stalled or overloaded provider
+    // triggers the excerpt fallback instead of hanging the turn (and the
+    // entire frontend) forever. Two minutes is generous for a single
+    // summarization response.
+    const SUMMARIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    let response = match tokio::time::timeout(SUMMARIZATION_TIMEOUT, provider.chat(messages)).await
+    {
+        Ok(result) => result?,
+        Err(_elapsed) => {
+            return Err(format!(
+                "Summarization timed out after {} seconds; using excerpt fallback.",
+                SUMMARIZATION_TIMEOUT.as_secs()
+            ));
+        }
+    };
     let summary = response.content.trim().to_string();
     if summary.is_empty() {
         return Err("Summarization returned an empty summary.".to_string());

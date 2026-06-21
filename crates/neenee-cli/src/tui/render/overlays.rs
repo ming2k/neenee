@@ -1148,7 +1148,7 @@ pub fn draw_question_modal(
     if let Some(fo) = f.footer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "↑↓ navigate · Space/Enter toggle · 1-9 jump · Enter submit · Esc cancel",
+                "↑↓ navigate · Space toggle · 1-9 jump · Enter submit · Esc cancel",
                 Style::default().fg(theme.muted()),
             ))),
             fo,
@@ -1185,24 +1185,32 @@ fn render_question_option(
     } else {
         " ".to_string()
     };
-    let bg = if is_highlighted {
-        theme.brand()
+    let focus_style = if is_highlighted {
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::BOLD)
     } else {
-        theme.panel()
+        Style::default().fg(theme.muted())
     };
-    let fg = if is_highlighted {
-        contrast_fg(bg)
+    let marker_style = if is_selected {
+        Style::default().fg(theme.ok()).add_modifier(Modifier::BOLD)
     } else {
+        focus_style
+    };
+    let text_style = if is_highlighted {
+        Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg())
+    };
+    let desc_style = Style::default().fg(if is_highlighted {
         theme.fg()
-    };
-    let marker_style = Style::default()
-        .bg(bg)
-        .fg(if is_selected { theme.ok() } else { fg });
-    let text_style = Style::default().bg(bg).fg(fg);
-    let desc_style = Style::default().bg(bg).fg(theme.muted());
+    } else {
+        theme.muted()
+    });
+    let focus = if is_highlighted { "❯" } else { " " };
 
     let mut spans = vec![
-        Span::styled(format!(" {:>2} ", number), text_style),
+        Span::styled(format!("{} {:>2} ", focus, number), focus_style),
         Span::styled(format!("{} ", marker), marker_style),
         Span::styled(label.to_string(), text_style),
     ];
@@ -1210,7 +1218,9 @@ fn render_question_option(
         spans.push(Span::styled(" — ", desc_style));
         spans.push(Span::styled(desc.to_string(), desc_style));
     }
-    lines.push(Line::from(vec![Span::styled(" ", text_style)]));
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
     lines.push(Line::from(spans));
 }
 
@@ -1240,12 +1250,18 @@ pub fn draw_permission_sheet(
         .unwrap_or_else(|| request.arguments.clone());
     let scope_meaningful = !request.scope.is_empty() && request.scope != "*";
 
-    // Header line: tool name, plus the concrete scope (path/command) when
-    // it adds information. The scope is the single most useful detail, so it
-    // earns a spot in the collapsed summary; everything else hides behind
-    // "Details". The left bar carries the severity cue.
+    // Header line: human-friendly label (falling back to the raw tool name
+    // for safety), plus the concrete scope (path/command) when it adds
+    // information. The scope is the single most useful detail, so it earns a
+    // spot in the collapsed summary; everything else hides behind "Details".
+    // The left bar carries the severity cue.
+    let label = if request.label.is_empty() {
+        request.tool.clone()
+    } else {
+        request.label.clone()
+    };
     let mut header = vec![Span::styled(
-        request.tool.clone(),
+        label,
         Style::default()
             .fg(theme.brand())
             .add_modifier(Modifier::BOLD),

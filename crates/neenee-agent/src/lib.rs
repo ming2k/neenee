@@ -89,6 +89,29 @@ const MAX_TOOL_ROUNDS: usize = 32;
 /// errors out.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
 
+/// Maximum interval between consecutive stream events (text/reasoning/tool-call
+/// deltas) before the stream is considered stalled. All LLM providers use
+/// `reqwest::Client::new()` which sets no read timeout, so without this guard a
+/// reasoning model whose SSE connection hangs mid-generation (server stops
+/// sending but keeps the TCP connection alive) blocks the turn loop
+/// indefinitely — the UI spins "running · responding" forever and only a user
+/// interrupt can break it. The bound is generous: reasoning models stream
+/// deltas frequently and SSE keepalives arrive every 15–30 s, so two full
+/// minutes of total silence is a genuine stall. On timeout the harness
+/// surfaces a retryable error so the turn retries with backoff instead of
+/// hanging.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Overall timeout for a single non-streaming `provider.chat()` call. The
+/// non-streaming ReAct path ([`Agent::run_with_events`]) and context-
+/// compaction summarization both call `chat()`, which blocks until the model
+/// returns the complete response. Without a bound, a stalled or overloaded
+/// endpoint hangs the turn (and, for compaction, the entire frontend) forever.
+/// Five minutes is generous enough for a reasoning model generating a full
+/// non-streaming response, while still catching a genuine stall. On timeout
+/// the caller surfaces a retryable / fallback error instead of hanging.
+const CHAT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub mod agent;
 pub use agent::Agent;
 

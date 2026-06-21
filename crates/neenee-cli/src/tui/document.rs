@@ -640,13 +640,13 @@ impl TranscriptMessage {
     /// sub-agent view's navigation bar.
     pub fn subagent_label(&self) -> String {
         let MessageKind::ToolStep { arguments, .. } = &self.kind else {
-            return "Subagent".to_string();
+            return "Task".to_string();
         };
         let label = parse_arguments_kv(arguments)
             .into_iter()
             .find(|(k, _)| k == "description")
             .map(|(_, v)| v)
-            .unwrap_or_else(|| "Subagent".to_string());
+            .unwrap_or_else(|| "Task".to_string());
         truncate(&label, 48)
     }
 

@@ -110,6 +110,14 @@ impl Tool for CreateGoalTool {
         ToolAccess::Write
     }
 
+    fn permission_label(&self) -> String {
+        "Create goal".to_string()
+    }
+
+    fn permission_description(&self) -> String {
+        "Start a new active goal for this thread, replacing any completed goal.".to_string()
+    }
+
     async fn call(&self, arguments: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
         struct Args {
@@ -172,6 +180,14 @@ impl Tool for UpdateGoalTool {
 
     fn access(&self) -> ToolAccess {
         ToolAccess::Write
+    }
+
+    fn permission_label(&self) -> String {
+        "Update goal".to_string()
+    }
+
+    fn permission_description(&self) -> String {
+        "Mark the active goal as complete or blocked.".to_string()
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -296,5 +312,52 @@ impl Tool for GoalChecklistTool {
             resolved,
             goal.checklist.len()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::store::GoalStore;
+    use super::*;
+
+    fn make_context() -> GoalToolContext {
+        GoalToolContext {
+            thread_id: Arc::new(Mutex::new(Some("test-thread".to_string()))),
+            goal_service: GoalService::new(GoalStore::open_in_memory_blocking().unwrap()),
+        }
+    }
+
+    #[test]
+    fn create_goal_exposes_user_friendly_permission_text() {
+        let tool = CreateGoalTool::new(make_context());
+        assert_eq!(tool.permission_label(), "Create goal");
+        // The model-facing description is full of model instructions; the
+        // user-facing override must stay short, non-prescriptive, and free
+        // of "do not infer..." style guidance aimed at the model.
+        let desc = tool.permission_description();
+        assert_ne!(desc, tool.description());
+        assert!(!desc.contains("do not infer"));
+        assert!(desc.split('.').count() <= 2);
+    }
+
+    #[test]
+    fn update_goal_exposes_user_friendly_permission_text() {
+        let tool = UpdateGoalTool::new(make_context());
+        assert_eq!(tool.permission_label(), "Update goal");
+        let desc = tool.permission_description();
+        assert_ne!(desc, tool.description());
+        assert!(!desc.contains("do not"));
+        assert!(!desc.contains("must"));
+        assert!(desc.split('.').count() <= 2);
+    }
+
+    #[test]
+    fn read_only_goal_tools_keep_trait_default_label() {
+        // `get_goal` is Read and does not override permission_label, so the
+        // default (the raw tool name) is used. This guards against the
+        // override accidentally leaking onto tools that never prompt.
+        let tool = GetGoalTool::new(make_context());
+        assert_eq!(tool.permission_label(), tool.name());
+        assert_eq!(tool.permission_description(), tool.description());
     }
 }

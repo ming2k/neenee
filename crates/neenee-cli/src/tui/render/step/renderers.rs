@@ -1122,7 +1122,7 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
         .add_modifier(Modifier::BOLD);
     let accent = Style::default().bg(bg).fg(theme.brand());
 
-    let left_label = format!(" {} ", "Subagent");
+    let left_label = format!(" {} ", "Task");
     let desc = bar.label.to_string();
     let count = if bar.total > 1 {
         format!(" ({} of {}) ", bar.index, bar.total)

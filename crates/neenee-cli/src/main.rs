@@ -459,6 +459,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         goal_service.clone(),
         (*skills_registry).clone(),
     ));
+    // Wire the per-project "always allow" allowlist so prior `Always`
+    // approvals survive across sessions in this project. Best-effort: a
+    // missing or unreadable permissions.json just means we re-prompt.
+    agent.set_project_root(Some(project_root.clone()));
     if auto_approve_at_start {
         agent.set_auto_approve(true);
         let _ = resp_tx.send(AgentResponse::Text(

@@ -1,9 +1,28 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct PermissionRule {
     tool: String,
     scope: String,
+}
+
+/// On-disk shape of the persisted "always allow" allowlist, versioned for
+/// future schema evolution. Written by [`Agent::persist_always_permissions`]
+/// and read back by [`Agent::load_persistent_permissions`]. Readers reject
+/// unknown future versions rather than guessing, so a downgrade silently
+/// ignores the file (rather than risking unintended approvals).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedPermissions {
+    /// Schema version. Currently `1`; future writers may bump after a
+    /// compatible reader is shipped.
+    version: u32,
+    rules: Vec<PermissionRule>,
+}
+
+impl PersistedPermissions {
+    /// Version this code writes and reads. Future-compatible readers should
+    /// accept any version they understand; unknown versions are ignored.
+    const CURRENT_VERSION: u32 = 1;
 }
 
 #[derive(Default)]
@@ -44,6 +63,13 @@ pub struct Agent {
     /// In-memory runtime view of the active goal, used for the checklist.
     goal: Arc<std::sync::Mutex<Option<Goal>>>,
     permissions: std::sync::Mutex<PermissionState>,
+    /// Optional project root. When set, the `always` permission allowlist is
+    /// persisted to `<project_dir>/permissions.json` (see
+    /// [`Agent::set_project_root`]) so subsequent sessions in the same project
+    /// inherit prior `Always` approvals instead of re-prompting. Best-effort:
+    /// I/O failures are logged, never fatal. Sub-agents (TaskTool) and tests
+    /// leave this `None` and stay ephemeral.
+    project_root: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// When true, write tools execute without a `PermissionRequest`. Set by
     /// `--auto-approve` or `/auto-approve on`. Bypasses the per-call prompt
     /// entirely (the `always` allowlist is also short-circuited because the
@@ -153,6 +179,7 @@ impl Agent {
             turn_counter,
             goal,
             permissions: std::sync::Mutex::new(PermissionState::default()),
+            project_root: std::sync::Mutex::new(None),
             auto_approve: Arc::new(std::sync::Mutex::new(false)),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
@@ -468,6 +495,7 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner())
             .always
             .clear();
+        self.persist_always_permissions();
     }
 
     /// Revoke a single cached "always allow" rule. Returns whether a rule was
@@ -478,11 +506,16 @@ impl Agent {
             tool: tool.to_string(),
             scope: scope.to_string(),
         };
-        self.permissions
+        let removed = self
+            .permissions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .always
-            .remove(&rule)
+            .remove(&rule);
+        if removed {
+            self.persist_always_permissions();
+        }
+        removed
     }
 
     /// Structured view of the cached "always allow" rules, for the session
@@ -503,6 +536,91 @@ impl Agent {
             .collect();
         rules.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| a.scope.cmp(&b.scope)));
         rules
+    }
+
+    /// Designate the project whose bucket backs the persistent "always"
+    /// allowlist, and load any rules already on disk into the in-memory set.
+    /// Pass `None` to disable persistence (sub-agents and most tests do this).
+    ///
+    /// Loading is best-effort: a missing, unreadable, or unsupported file is
+    /// silently ignored — the agent simply starts with an empty allowlist and
+    /// re-prompts the user. This is the cross-session hook: a fresh session in
+    /// the same project inherits prior `Always` approvals without re-asking.
+    pub fn set_project_root(&self, root: Option<std::path::PathBuf>) {
+        {
+            let mut guard = self.project_root.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = root.clone();
+        }
+        if let Some(root) = root {
+            self.load_persistent_permissions(&root);
+        }
+    }
+
+    /// Read the persisted allowlist (if any) into the in-memory `always` set.
+    /// Never fatal — corrupt or missing files just yield an empty allowlist.
+    fn load_persistent_permissions(&self, root: &std::path::Path) {
+        let path = neenee_store::paths::get().project_permissions(root);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // Common case on a brand-new project; not worth a log line.
+            return;
+        };
+        match serde_json::from_str::<PersistedPermissions>(&text) {
+            Ok(persisted) if persisted.version == PersistedPermissions::CURRENT_VERSION => {
+                let mut perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
+                let count = persisted.rules.len();
+                for rule in persisted.rules {
+                    perms.always.insert(rule);
+                }
+                tracing::info!(count, path = %path.display(), "loaded persistent permission rules");
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    version = other.version,
+                    path = %path.display(),
+                    "unsupported persisted permissions version; ignoring file",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not parse persistent permissions file; ignoring",
+                );
+            }
+        }
+    }
+
+    /// Atomically mirror the current `always` allowlist into the project
+    /// bucket. Best-effort: logs on failure and never propagates the error —
+    /// losing a cached approval just means the user gets re-prompted next
+    /// session, which is always the safe fallback.
+    fn persist_always_permissions(&self) {
+        let root = {
+            let guard = self.project_root.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        let Some(root) = root else {
+            return;
+        };
+        let path = neenee_store::paths::get().project_permissions(&root);
+        let snapshot = {
+            let perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rules: Vec<PermissionRule> = perms.always.iter().cloned().collect();
+            // Sort for deterministic output — harmless and makes manual
+            // inspection / diffs of the on-disk file stable across runs.
+            rules.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| a.scope.cmp(&b.scope)));
+            PersistedPermissions {
+                version: PersistedPermissions::CURRENT_VERSION,
+                rules,
+            }
+        };
+        if let Err(e) = neenee_store::fsutil::atomic_write_json(&path, &snapshot) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not persist permission rules",
+            );
+        }
     }
 
     /// Set the session-level enabled flag for a tool. No-op when the name is
@@ -658,7 +776,27 @@ impl Agent {
             self.ensure_system_prompt(messages);
             self.inject_implicit_skills(messages);
 
-            let response = self.provider.chat(messages.clone()).await?;
+            let response = match tokio::time::timeout(
+                CHAT_RESPONSE_TIMEOUT,
+                self.provider.chat(messages.clone()),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_secs = CHAT_RESPONSE_TIMEOUT.as_secs(),
+                        "non-streaming chat request timed out"
+                    );
+                    return Err(HarnessError::Retryable {
+                        message: format!(
+                            "Provider did not respond within {} seconds.",
+                            CHAT_RESPONSE_TIMEOUT.as_secs()
+                        ),
+                        retry_after_ms: None,
+                    });
+                }
+            };
             if !valid_assistant_response(&response) {
                 return Err(empty_response_error(&response));
             }
@@ -734,11 +872,33 @@ impl Agent {
             });
             // Race the model request against cancellation so an interrupt
             // while we're waiting on the network resolves promptly instead of
-            // blocking until the first stream chunk arrives.
+            // blocking until the first stream chunk arrives. The idle-timeout
+            // arm covers a provider endpoint that accepts the connection but
+            // never sends HTTP response headers (overloaded upstream, dropped
+            // proxy) — without it the select would hang forever on `.send()`.
             let mut stream = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
-                result = self.provider.stream_chat_events(messages.clone()) => result?,
+                result = tokio::time::timeout(
+                    STREAM_IDLE_TIMEOUT,
+                    self.provider.stream_chat_events(messages.clone()),
+                ) => match result {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => return Err(HarnessError::from(error)),
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            timeout_secs = STREAM_IDLE_TIMEOUT.as_secs(),
+                            "stream request timed out before any response"
+                        );
+                        return Err(HarnessError::Retryable {
+                            message: format!(
+                                "Provider did not start streaming within {} seconds.",
+                                STREAM_IDLE_TIMEOUT.as_secs()
+                            ),
+                            retry_after_ms: None,
+                        });
+                    }
+                },
             };
             let mut content = String::new();
             let mut reasoning_content = String::new();
@@ -750,8 +910,32 @@ impl Agent {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
-                    event = stream.next() => {
-                        let Some(event) = event else { break };
+                    // Guard against a stalled SSE stream: providers use
+                    // `reqwest::Client::new()` with no read timeout, so without
+                    // this bound a connection that stays open but stops sending
+                    // (common with overloaded reasoning-model endpoints) blocks
+                    // the turn forever. The idle clock resets on every chunk,
+                    // so a legitimately slow reasoning model that keeps
+                    // trickling deltas is never cut off.
+                    event = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()) => {
+                        let event = match event {
+                            Ok(Some(event)) => event,
+                            Ok(None) => break,
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    idle_timeout_secs = STREAM_IDLE_TIMEOUT.as_secs(),
+                                    "stream stalled: no data received within idle timeout"
+                                );
+                                return Err(HarnessError::Retryable {
+                                    message: format!(
+                                        "Provider stream stalled — no data received \
+                                         for {} seconds.",
+                                        STREAM_IDLE_TIMEOUT.as_secs()
+                                    ),
+                                    retry_after_ms: None,
+                                });
+                            }
+                        };
                         match event? {
                             ProviderStreamEvent::TextDelta(delta) => {
                                 content.push_str(&delta);
@@ -1342,7 +1526,8 @@ impl Agent {
                 let request = PermissionRequest {
                     id: format!("permission_{}", uuid::Uuid::new_v4()),
                     tool: tool.name().to_string(),
-                    description: tool.description().to_string(),
+                    label: tool.permission_label(),
+                    description: tool.permission_description(),
                     arguments: call.arguments.clone(),
                     scope,
                 };
@@ -1366,6 +1551,7 @@ impl Agent {
                             .unwrap_or_else(|e| e.into_inner())
                             .always
                             .insert(rule);
+                        self.persist_always_permissions();
                     }
                     PermissionDecision::Reject => {
                         tracing::warn!(tool = %tool.name(), "permission denied");
@@ -1533,6 +1719,10 @@ fn valid_assistant_response(message: &Message) -> bool {
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
+        || message
+            .reasoning_content
+            .as_ref()
+            .is_some_and(|reasoning| !reasoning.is_empty())
 }
 
 /// Build the "empty assistant response" error, after logging enough state to

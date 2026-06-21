@@ -444,7 +444,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // already shows, making it look like focus is split. For
                     // the editor's key field it would also panic: the masked
                     // key's byte cursor is computed against the unmasked string.
-                } else {
+                } else if !app.in_subagent_view() {
                     let compose_focused = app.focus_zone.is_compose();
                     render::draw_composer(
                         f,

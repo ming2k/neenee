@@ -183,6 +183,15 @@ impl Dirs {
         self.project_dir(project_root).join("neenee.lock")
     }
 
+    /// Per-project persistent "always allow" permission rules. The cached
+    /// rules from `PermissionDecision::Always` are mirrored here so a new
+    /// session in the same project inherits prior approvals instead of
+    /// re-prompting for the same operations. Best-effort; absence or parse
+    /// failure is non-fatal (the agent just asks the user again).
+    pub fn project_permissions(&self, project_root: &Path) -> PathBuf {
+        self.project_dir(project_root).join("permissions.json")
+    }
+
     /// Structured log directory with rolling appender output.
     #[allow(dead_code)]
     pub fn log_dir(&self) -> PathBuf {
@@ -558,6 +567,20 @@ mod tests {
         assert_eq!(
             dirs.project_dir(project_root),
             PathBuf::from(format!("/tmp/nd/neenee/projects/{bucket}"))
+        );
+    }
+
+    #[test]
+    fn project_permissions_under_project_bucket() {
+        let dirs = Dirs::resolve(&PathsOverride {
+            data_dir: Some(PathBuf::from("/tmp/nd")),
+            ..Default::default()
+        });
+        let project_root = Path::new("/home/me/proj");
+        let bucket = project_bucket_name(project_root);
+        assert_eq!(
+            dirs.project_permissions(project_root),
+            PathBuf::from(format!("/tmp/nd/neenee/projects/{bucket}/permissions.json"))
         );
     }
 }

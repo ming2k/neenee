@@ -64,6 +64,25 @@ from `crates/neenee-core/src/goals/tools.rs` and plan tools from
 `create_project`, and `init_config` override it; their scope string is what a
 cached `Always` rule matches against.
 
+## Permission prompt text
+
+When the broker prompts the user, it surfaces three pieces of text from the
+tool:
+
+- The header title comes from `Tool::permission_label()`, defaulting to
+  `Tool::name()`. Override when the name is a synthetic identifier that a
+  user would not recognize (e.g. `create_goal` renders as `Create goal`).
+- The body shown in the "Details" section comes from
+  `Tool::permission_description()`, defaulting to `Tool::description()`.
+  Override when `Tool::description()` is model-facing instruction prose
+  (constraints aimed at the model, not a description of the call's effect).
+- The `scope` line comes from `Tool::permission_scope(arguments)`.
+
+Both `permission_label` and `permission_description` are UI-only strings.
+They never reach the model and are not part of the function schema sent to
+providers, so they can be reworded freely without changing tool behavior.
+Only `create_goal` and `update_goal` currently override them.
+
 ## Parameters
 
 Parameters are exposed to the model as JSON Schema via
@@ -302,7 +321,11 @@ the agent's live `Arc<Mutex<Option<Goal>>>`. `get_goal` and `update_goal`/
 `create_goal` read and mutate the persisted goal; `goal_checklist` writes
 directly into live goal state and surfaces as `AgentResponse::GoalUpdated` to the
 TUI. `get_goal` and `goal_checklist` are `Read` and bypass the permission
-broker; `create_goal` and `update_goal` are `Write`.
+broker; `create_goal` and `update_goal` are `Write`. Both `Write` tools
+override `permission_label` and `permission_description` so the prompt
+header reads `Create goal` / `Update goal` and the body describes the
+effect of the call rather than the model-facing instructions encoded in
+`Tool::description`.
 
 ### `task`
 

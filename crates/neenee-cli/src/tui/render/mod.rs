@@ -201,16 +201,24 @@ pub fn draw_transcript(
 
     let size = viewport;
 
+    // When zoomed into a sub-agent task, the footer (status bar, plan panel,
+    // input box, hint bar) is hidden: the task detail page is a read-only view
+    // whose only chrome is the sub-agent navigation bar.
+    let in_subagent = subagent_bar.is_some();
+
     // The status bar (animated spinner + activity text) sits on its own line
     // directly above the input box. It is shown only for non-streaming,
     // non-idle activity so the transcript reclaims that row when nothing is running.
-    let status_active =
-        !chrome_hidden && !activity.is_empty() && activity != "idle" && activity != "responding";
+    let status_active = !chrome_hidden
+        && !in_subagent
+        && !activity.is_empty()
+        && activity != "idle"
+        && activity != "responding";
     let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
     // Sticky plan panel: 3-row card above the input box, shown only when an
     // active plan exists and chrome is visible.
-    let plan_panel_active = plan_progress.is_some() && !chrome_hidden;
+    let plan_panel_active = plan_progress.is_some() && !chrome_hidden && !in_subagent;
     let plan_panel_height: u16 = if plan_panel_active {
         PLAN_PANEL_ROWS
     } else {
@@ -230,13 +238,21 @@ pub fn draw_transcript(
     let input_wrapped_lines = composer::input_row_count(input, input_text_width, byte_cursor);
     let desired_input_height = input_wrapped_lines as u16 + COMPOSER_VERTICAL_CHROME_ROWS;
     let max_input_height = (size.height / COMPOSER_MAX_HEIGHT_DIVISOR).max(COMPOSER_MIN_HEIGHT);
-    let input_box_height = desired_input_height.min(max_input_height);
+    let input_box_height = if in_subagent {
+        0
+    } else {
+        desired_input_height.min(max_input_height)
+    };
     // The hint bar is a single-line status strip pinned directly below the
     // input box. It carries the workspace / model / goal / MCP / context info
     // that the old top header showed. Hidden alongside the rest of the chrome
     // while an overlay modal is open.
-    let hint_height: u16 = if chrome_hidden { 0 } else { HINT_BAR_ROWS };
-    let footer_height: u16 = if chrome_hidden {
+    let hint_height: u16 = if chrome_hidden || in_subagent {
+        0
+    } else {
+        HINT_BAR_ROWS
+    };
+    let footer_height: u16 = if chrome_hidden || in_subagent {
         0
     } else {
         status_height + plan_panel_height + input_box_height + hint_height
@@ -796,6 +812,7 @@ mod tests {
                 let request = PermissionRequest {
                     id: "p1".to_string(),
                     tool: "bash".to_string(),
+                    label: "bash".to_string(),
                     description: "run a command".to_string(),
                     arguments: r#"{"command":"ls"}"#.to_string(),
                     scope: "*".to_string(),

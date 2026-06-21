@@ -314,6 +314,14 @@ pub enum PermissionDecision {
 pub struct PermissionRequest {
     pub id: String,
     pub tool: String,
+    /// Short human-friendly title for the prompt (e.g. `"Create goal"`).
+    /// Falls back to [`tool`](Self::tool) when a tool does not override
+    /// [`Tool::permission_label`]. The TUI renders this as the header.
+    #[serde(default)]
+    pub label: String,
+    /// User-facing description shown in the prompt's "Details" section.
+    /// Populated from [`Tool::permission_description`], distinct from the
+    /// model-facing `Tool::description`.
     pub description: String,
     pub arguments: String,
     pub scope: String,

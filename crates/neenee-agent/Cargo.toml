@@ -24,4 +24,5 @@ dirs = "5"
 
 [dev-dependencies]
 neenee-tools = { path = "../neenee-tools" }
+tokio = { version = "1", features = ["test-util"] }
 toml = "0.8"
