@@ -1723,6 +1723,291 @@ pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, th
     }
 }
 
+/// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
+/// goal bar, plan panel, and activity bar used to show, gathered into one
+/// overlay so the footer is a single line. Fields are `Option`al so the modal
+/// simply omits a section when there is nothing to report.
+pub struct ActivityModalView<'a> {
+    /// Active goal, if any. Shown as an objective line plus one row per
+    /// checklist item.
+    pub goal: Option<&'a neenee_core::Goal>,
+    /// Live plan-progress snapshot, if any. Shown as a header (file name +
+    /// done/total) plus one row per section.
+    pub plan: Option<&'a neenee_core::PlanProgress>,
+    /// Harness turn counter (`turn N`).
+    pub turn_count: u64,
+    /// Current tool round within the turn (1-indexed; `0` before the first
+    /// model request).
+    pub current_round: u64,
+    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
+    pub stall_rounds: u64,
+    /// Display id of the currently active model.
+    pub current_model: &'a str,
+    /// Wall-clock instant the current turn started, or `None` between turns.
+    pub turn_started_at: Option<std::time::Instant>,
+    /// Live activity status string (e.g. `searching codebase`), or empty/idle.
+    pub activity: &'a str,
+}
+
+/// Glyph for a goal-checklist status, mirroring the plan-section glyphs so the
+/// two checklists read consistently inside the modal.
+fn goal_checklist_glyph(status: neenee_core::GoalChecklistStatus) -> &'static str {
+    use neenee_core::GoalChecklistStatus;
+    match status {
+        GoalChecklistStatus::Completed => "✓",
+        GoalChecklistStatus::InProgress => "●",
+        GoalChecklistStatus::Pending => "○",
+        GoalChecklistStatus::Cancelled => "—",
+    }
+}
+
+/// Foreground color for a plan-section status glyph. Done/in-progress pop in
+/// `ok`/`warn`; pending/skipped stay muted so the eye is drawn to active work.
+fn plan_section_glyph_color(
+    status: neenee_core::PlanSectionStatus,
+    theme: &Theme,
+    muted: Color,
+) -> Color {
+    use neenee_core::PlanSectionStatus;
+    match status {
+        PlanSectionStatus::Done => theme.ok(),
+        PlanSectionStatus::InProgress => theme.warn(),
+        PlanSectionStatus::Pending | PlanSectionStatus::Skipped => muted,
+    }
+}
+
+/// Foreground color for a goal-checklist status glyph. Mirrors the plan-section
+/// mapping so the two read consistently.
+fn goal_checklist_glyph_color(
+    status: neenee_core::GoalChecklistStatus,
+    theme: &Theme,
+    muted: Color,
+) -> Color {
+    use neenee_core::GoalChecklistStatus;
+    match status {
+        GoalChecklistStatus::Completed => theme.ok(),
+        GoalChecklistStatus::InProgress => theme.warn(),
+        GoalChecklistStatus::Pending | GoalChecklistStatus::Cancelled => muted,
+    }
+}
+
+/// The Activity modal: a scrollable overview of the current goal, the live
+/// plan-progress breakdown, and the running turn/round/model/elapsed/status.
+/// Replaces the always-pinned goal bar + plan panel (which have moved into the
+/// scrolling transcript as inline notices) so the footer stays a single line;
+/// the activity bar remains pinned as the click target that opens this modal.
+pub fn draw_activity_modal(
+    frame: &mut Frame,
+    view: ActivityModalView<'_>,
+    scroll: &mut usize,
+    theme: &Theme,
+) {
+    let ActivityModalView {
+        goal,
+        plan,
+        turn_count,
+        current_round,
+        stall_rounds,
+        current_model,
+        turn_started_at,
+        activity,
+    } = view;
+
+    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
+    let area = centered_rect(72, 70, viewport_rect(frame));
+    let f = modal_frame(frame, area, theme.panel(), true, true);
+
+    if let Some(h) = f.header {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Activity",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
+
+    let muted = theme.muted();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut have_section = false;
+
+    // ── Goal ──
+    if let Some(goal) = goal {
+        have_section = true;
+        lines.push(Line::from(vec![Span::styled(
+            "Goal",
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        )]));
+        let objective_label = if goal.is_complete {
+            "✓ complete · ".to_string()
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("{}{}", objective_label, goal.objective),
+                Style::default().fg(theme.fg()),
+            ),
+        ]));
+        if !goal.checklist.is_empty() {
+            let done = goal
+                .checklist
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.status,
+                        neenee_core::GoalChecklistStatus::Completed
+                            | neenee_core::GoalChecklistStatus::Cancelled
+                    )
+                })
+                .count();
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("{} of {} tasks done", done, goal.checklist.len()),
+                    Style::default().fg(muted),
+                ),
+            ]));
+            for item in &goal.checklist {
+                let glyph_color = goal_checklist_glyph_color(item.status, theme, muted);
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(
+                        goal_checklist_glyph(item.status),
+                        Style::default().fg(glyph_color),
+                    ),
+                    Span::styled(" ", Style::default()),
+                    Span::styled(item.content.clone(), Style::default().fg(theme.fg())),
+                ]));
+            }
+        }
+    }
+
+    // ── Plan ──
+    if let Some(progress) = plan {
+        if have_section {
+            lines.push(Line::from(""));
+        }
+        have_section = true;
+        let path_str = progress
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| progress.path.display().to_string());
+        let done = progress.done_count();
+        let total = progress.sections.len();
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Plan",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {path_str}  {done}/{total}"),
+                Style::default().fg(muted),
+            ),
+        ]));
+        for section in &progress.sections {
+            let glyph_color = plan_section_glyph_color(section.status, theme, muted);
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(section.status.glyph(), Style::default().fg(glyph_color)),
+                Span::styled(" ", Style::default()),
+                Span::styled(section.name.clone(), Style::default().fg(theme.fg())),
+            ]));
+        }
+    }
+
+    // ── Activity (always shown) ──
+    if have_section {
+        lines.push(Line::from(""));
+    }
+    let idle = activity.is_empty() || activity == "idle" || activity == "responding";
+    lines.push(Line::from(vec![Span::styled(
+        "Activity",
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    // Structural detail line: `turn N · round M · <model> · <elapsed>`.
+    // Omitted entirely before the first turn so the section reads as "idle".
+    if turn_count > 0 {
+        let mut detail: Vec<Span<'static>> = vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("turn {}", turn_count), Style::default().fg(muted)),
+        ];
+        if current_round >= 1 {
+            detail.push(Span::styled(" · ", Style::default().fg(muted)));
+            detail.push(Span::styled(
+                format!("round {}", current_round),
+                Style::default().fg(muted),
+            ));
+        }
+        if !current_model.is_empty() {
+            detail.push(Span::styled(" · ", Style::default().fg(muted)));
+            detail.push(Span::styled(
+                crate::tui::model_display_name(current_model),
+                Style::default().fg(muted),
+            ));
+        }
+        if let Some(started) = turn_started_at {
+            detail.push(Span::styled(" · ", Style::default().fg(muted)));
+            detail.push(Span::styled(
+                super::chrome::format_elapsed(started.elapsed()),
+                Style::default().fg(muted),
+            ));
+        }
+        lines.push(Line::from(detail));
+    }
+
+    let status_style = if idle {
+        Style::default().fg(muted)
+    } else {
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::ITALIC)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            if idle {
+                "idle".to_string()
+            } else {
+                activity.to_string()
+            },
+            status_style,
+        ),
+    ]));
+    if stall_rounds > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("⚠ stalled: {stall_rounds} read-only rounds — Esc to interrupt"),
+                Style::default().fg(theme.warn()),
+            ),
+        ]));
+    }
+
+    render_body(frame, f.body, lines, scroll, None);
+
+    if let Some(footer) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Esc to close · ↑/↓ scroll",
+                Style::default().fg(theme.muted()),
+            ))),
+            footer,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

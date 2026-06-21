@@ -1074,6 +1074,9 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 progress.as_ref().map(|p| p.sections.len())
             ),
             AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
+            AgentEvent::StallWarning { consecutive_rounds } => {
+                format!("stall-warning rounds={consecutive_rounds}")
+            }
             AgentEvent::PermissionRequest(request) => {
                 format!("permission-request {} {}", request.tool, request.scope)
             }
@@ -1461,16 +1464,75 @@ async fn agent_without_project_root_never_writes_permissions_file() {
 
 #[tokio::test]
 async fn turn_runs_uncapped_until_model_emits_text() {
-    // 64 distinct tool rounds — twice the previous hard cap — followed by a
-    // text answer. Each round uses a distinct argument so the repeated-call
-    // guard never trips.
-    let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..64)
-        .map(|i| tool_round(&[("c", "alpha", &format!("{{\"i\":{i}}}"))]))
-        .collect();
+    // 64 distinct tool rounds — well past the stall hard-stop — followed
+    // by a text answer. Each read round uses a distinct argument so the
+    // repeated-call guard never trips, and every 4th round is a Write so
+    // the stall detector's read-only streak resets before it can trip.
+    // This mirrors the new contract: the agent is bounded by *productive*
+    // rounds, not by raw round count (ADR-0009 + stalled-agent-detection).
+    let write = RecordingTool::write("writer", "WROTE");
+    let read = RecordingTool::read("alpha", "out");
+    let mut rounds: Vec<Vec<ProviderStreamEvent>> = Vec::new();
+    for i in 0..64 {
+        if i > 0 && i % 4 == 0 {
+            rounds.push(tool_round(&[("cw", "writer", &format!("{{\"i\":{i}}}"))]));
+        } else {
+            rounds.push(tool_round(&[("c", "alpha", &format!("{{\"i\":{i}}}"))]));
+        }
+    }
     rounds.push(text_round("all done"));
-    let tool = RecordingTool::read("alpha", "out");
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(rounds)),
+        vec![Arc::new(read), Arc::new(write)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
+
+    assert_eq!(outcome.unwrap().message.content, "all done");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
+        "interleaved writes must keep the streak under the threshold"
+    );
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event, AgentEvent::StallWarning { .. })
+        }),
+        "no convergence nudge should be injected anymore"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Stall detection (stalled-agent-detection.md)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Build a turn of N distinct read-only `read_file` calls (each with a
+/// different path so `guard_repeated_call` does not trip), followed by a
+/// final text round. Used to drive the streak counter without touching
+/// the exact-repeat guard.
+fn readonly_rounds(n: usize, suffix: &str) -> Vec<Vec<ProviderStreamEvent>> {
+    let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..n)
+        .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"f{i}\"}}"))]))
+        .collect();
+    rounds.push(text_round(suffix));
+    rounds
+}
+
+#[tokio::test]
+async fn stall_warning_fires_once_when_threshold_reached() {
+    // STALL_THRESHOLD read-only rounds, then the model gives a text
+    // answer. The streak trips exactly at the threshold, emitting one
+    // StallWarning and one reflection nudge message.
+    let tool = RecordingTool::read("alpha", "A-out");
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(readonly_rounds(
+            STALL_THRESHOLD,
+            "done",
+        ))),
         vec![Arc::new(tool)],
         AgentMode::Build,
         test_goal_service(),
@@ -1478,15 +1540,339 @@ async fn turn_runs_uncapped_until_model_emits_text() {
     );
 
     let mut messages = vec![Message::new(Role::User, "go")];
+    let mut events = Vec::new();
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            events.push(event);
+        })
+        .await
+        .expect("turn completes after threshold + final text");
+
+    assert_eq!(outcome.message.content, "done");
+    let warnings: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::StallWarning { .. }))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "stall warning must fire exactly once per episode, got {warnings:?}"
+    );
+    assert!(messages.iter().any(|m| {
+        m.role == Role::User
+            && m.hidden
+            && m.content.contains("exploration loop")
+    }));
+}
+
+#[tokio::test]
+async fn stall_hard_stops_after_nudge_is_ignored() {
+    // The model keeps issuing distinct read-only calls well past the
+    // hard-stop line. The harness aborts with a clear error rather than
+    // looping indefinitely. Only one reflection nudge should ever fire
+    // per episode (it's one-shot); subsequent StallWarning events do
+    // keep firing so the activity-bar counter ticks up.
+    let hard_stop = STALL_THRESHOLD + STALL_HARD_STOP_DELTA;
+    let tool = RecordingTool::read("alpha", "A-out");
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(readonly_rounds(
+            hard_stop + 1,
+            "done",
+        ))),
+        vec![Arc::new(tool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let mut events = Vec::new();
+    let error = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            events.push(event);
+        })
+        .await
+        .expect_err("hard-stop must abort the turn");
+
+    let message = match error {
+        HarnessError::Other(message) => message,
+        other => panic!("expected HarnessError::Other, got {other:?}"),
+    };
+    assert!(
+        message.contains("exploration loop"),
+        "error must explain the stall, got: {message}"
+    );
+    let warnings = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::StallWarning { .. }))
+        .count();
+    // One StallWarning fires every round at/above the threshold (so the
+    // TUI counter ticks up live), so over (hard_stop - threshold) rounds
+    // we expect that many warnings — but only one reflection-nudge
+    // message, since the nudge is one-shot.
+    let expected_warnings = (hard_stop + 1) - STALL_THRESHOLD;
+    assert_eq!(
+        warnings, expected_warnings,
+        "StallWarning must fire every round while stalled, but got {warnings}"
+    );
+    let nudges = messages.iter().filter(|m| {
+        m.role == Role::User
+            && m.hidden
+            && m.content.contains("exploration loop")
+    }).count();
+    assert_eq!(nudges, 1, "reflection nudge must be one-shot per episode");
+}
+
+#[tokio::test]
+async fn stall_streak_resets_after_a_productive_round() {
+    // STALL_THRESHOLD - 1 read-only rounds (just under the threshold),
+    // then a Write round resets the streak, then STALL_THRESHOLD - 1
+    // more read-only rounds, then a final text round. Neither half
+    // reaches the threshold on its own, so no StallWarning ever fires
+    // and the turn ends cleanly.
+    let read = RecordingTool::read("alpha", "A-out");
+    let write = RecordingTool::write("writer", "WROTE");
+    let sub = STALL_THRESHOLD - 1;
+    let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..sub)
+        .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"a{i}\"}}"))]))
+        .collect();
+    rounds.push(tool_round(&[("cw", "writer", "{\"path\":\"x\"}")]));
+    rounds.extend((0..sub).map(|i| {
+        tool_round(&[("c", "alpha", &format!("{{\"path\":\"b{i}\"}}"))])
+    }));
+    rounds.push(text_round("done"));
+
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(rounds)),
+        vec![Arc::new(read), Arc::new(write)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
+    assert_eq!(outcome.unwrap().message.content, "done");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
+        "productive round must reset the streak so neither half trips the threshold"
+    );
+}
+
+#[test]
+fn call_was_productive_recognises_mutating_read_tools() {
+    // The four mutating Read tools must count as productive for stall
+    // detection, alongside any name we don't recognise (the access-bit
+    // lookup happens elsewhere; the name list is the fallback for the
+    // text-fallback path).
+    use crate::agent::call_was_productive;
+    assert!(call_was_productive("goal_checklist"));
+    assert!(call_was_productive("plan_enter"));
+    assert!(call_was_productive("plan_exit"));
+    assert!(call_was_productive("update_plan_progress"));
+    assert!(!call_was_productive("read_file"));
+    assert!(!call_was_productive("grep"));
+    assert!(!call_was_productive("verify_plan_execution"));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Verify hard nudge
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn should_nudge_verify_only_when_build_mode_and_active_plan_and_no_prior_call() {
+    use crate::agent::TurnState;
+    let agent = agent();
+    let mut state = TurnState::default();
+
+    // No active plan → no nudge, even in Build mode.
+    assert!(!agent.should_nudge_verify(&state));
+
+    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
+    // Active plan + Build + no verify call + not nudged → nudge.
+    assert!(agent.should_nudge_verify(&state));
+
+    // Verify was called this turn → no nudge.
+    state.verify_called_this_turn = true;
+    assert!(!agent.should_nudge_verify(&state));
+
+    // Reset and flip to Plan mode → no nudge, even with an active plan
+    // (Plan mode means there is nothing to verify yet).
+    state.verify_called_this_turn = false;
+    agent.set_mode(AgentMode::Plan);
+    assert!(!agent.should_nudge_verify(&state));
+
+    // Back to Build, but already nudged → no second nudge.
+    agent.set_mode(AgentMode::Build);
+    state.verify_nudged = true;
+    assert!(!agent.should_nudge_verify(&state));
+}
+
+#[tokio::test]
+async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
+    // No tools needed — the gate fires on the text-only round before the
+    // turn ends, before the model even has a chance to call anything.
+    // The first round is text-only, which triggers the nudge; the second
+    // round is text-only again, which the harness lets through because
+    // `verify_nudged` is now true.
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(vec![
+            text_round("all done"),
+            text_round("really done"),
+        ])),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
+
+    let mut messages = vec![Message::new(Role::User, "go")];
     let outcome = agent
         .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
-        .await;
+        .await
+        .expect("turn completes after the model's second text round");
 
-    assert_eq!(outcome.unwrap().message.content, "all done");
+    assert_eq!(outcome.message.content, "really done");
+    let nudge_count = messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.hidden
+                && m.content.contains("verify_plan_execution")
+        })
+        .count();
+    assert_eq!(
+        nudge_count, 1,
+        "verify nudge must fire exactly once per turn"
+    );
+}
+
+#[tokio::test]
+async fn stall_detection_disabled_when_threshold_is_zero() {
+    // `set_stall_threshold(0)` opts out of detection entirely: even with
+    // an unbounded stream of distinct read-only calls, no StallWarning
+    // fires and no hard-stop trips. This is the documented escape hatch
+    // for users who want pure ADR-0009 behaviour.
+    let tool = RecordingTool::read("alpha", "A-out");
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(readonly_rounds(
+            STALL_THRESHOLD + STALL_HARD_STOP_DELTA + 4,
+            "done",
+        ))),
+        vec![Arc::new(tool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_stall_threshold(0);
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let mut events = Vec::new();
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            events.push(event);
+        })
+        .await
+        .expect("detection disabled → turn runs to completion");
+
+    assert_eq!(outcome.message.content, "done");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
+        "threshold = 0 must suppress all stall warnings"
+    );
     assert!(
         !messages.iter().any(|m| {
-            m.role == Role::User && m.hidden && m.content.contains("tool-call budget")
+            m.role == Role::User
+                && m.hidden
+                && m.content.contains("exploration loop")
         }),
-        "no convergence nudge should be injected anymore"
+        "threshold = 0 must suppress the reflection nudge"
     );
+}
+
+#[tokio::test]
+async fn stall_threshold_can_be_lowered_at_runtime() {
+    // A user-supplied threshold lower than the default must trip
+    // proportionally sooner, confirming the runtime setter actually
+    // reroutes detection (not just the seeded const).
+    let custom = 3;
+    let tool = RecordingTool::read("alpha", "A-out");
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(readonly_rounds(custom, "done"))),
+        vec![Arc::new(tool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_stall_threshold(custom);
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let mut events = Vec::new();
+    let _ = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            events.push(event);
+        })
+        .await;
+
+    let warning_rounds: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::StallWarning { consecutive_rounds } if *consecutive_rounds > 0 => {
+                Some(*consecutive_rounds)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warning_rounds.first().copied(),
+        Some(custom),
+        "first warning must fire at the configured threshold, got {warning_rounds:?}"
+    );
+}
+
+#[tokio::test]
+async fn verify_nudge_disabled_when_toggle_off() {
+    // `set_verify_nudge_enabled(false)` opts out of the gate: the model
+    // can end the turn with an approved plan and no verify call, and the
+    // harness does not inject the reminder.
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(vec![text_round("all done")])),
+        Vec::new(),
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
+    agent.set_verify_nudge_enabled(false);
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await
+        .expect("toggle off → turn ends immediately");
+
+    assert_eq!(outcome.message.content, "all done");
+    assert!(
+        !messages.iter().any(|m| {
+            m.role == Role::User
+                && m.hidden
+                && m.content.contains("verify_plan_execution")
+        }),
+        "verify nudge must not fire when the toggle is off"
+    );
+}
+
+#[test]
+fn agent_config_defaults_match_runtime_constants() {
+    // The config struct's defaults must match the const seeds the agent
+    // uses when no config is loaded, so a missing `[agent]` table is
+    // indistinguishable from one that explicitly sets the defaults.
+    use neenee_store::config::AgentConfig;
+    let cfg = AgentConfig::default();
+    assert_eq!(cfg.stall_threshold, STALL_THRESHOLD);
+    assert!(cfg.verify_nudge_enabled);
 }

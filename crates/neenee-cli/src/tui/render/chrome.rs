@@ -1,7 +1,9 @@
 //! Transient chrome around the input box: the activity bar with an
 //! animated breathing-dot indicator shown above the input, the completion menu
 //! anchored above the input, and the persistent hint bar pinned below the
-//! input.
+//! input. The activity bar is also the click target that opens the Activity
+//! modal (goal + plan + live activity), replacing the old always-pinned goal
+//! bar and plan panel.
 
 use ratatui::{
     layout::Rect,
@@ -10,16 +12,14 @@ use ratatui::{
     widgets::{Block as RtBlock, Clear, Paragraph},
     Frame,
 };
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::document::{estimate_context_tokens, TranscriptMessage};
 use crate::tui::input::FocusZone;
 use crate::tui::layout::LayoutMap;
-use neenee_core::Goal;
 
-use super::design::{
-    GOAL_OBJECTIVE_MAX_CHARS, HINT_BAR_GAP_MIN, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP,
-};
+use super::design::{HINT_BAR_GAP_MIN, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP};
 use super::primitives::{contrast_fg, viewport_rect};
 use super::Theme;
 
@@ -63,24 +63,34 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
 ///
-/// Layout: `<spinner> turn N · round M · <status>`. The turn/round prefix is
-/// structural context (rendered muted) so the eye lands on the status; the
-/// status itself is brand + italic as the live signal. The round segment is
-/// omitted while `current_round == 0` — the pre-request phase (queued /
-/// preparing context) has no round yet, and showing `round 0` would be noise.
-/// When the status string already carries a reason (e.g.
+/// Layout: `<spinner> turn N · round M · <model> · <elapsed> · <status>`. The
+/// turn/round/model/elapsed prefix is structural context (rendered muted) so
+/// the eye lands on the status; the status itself is brand + italic as the
+/// live signal. The round segment is omitted while `current_round == 0` — the
+/// pre-request phase (queued / preparing context) has no round yet, and
+/// showing `round 0` would be noise. The model segment is omitted when the
+/// model id is empty (e.g. before the first provider handshake), and the
+/// elapsed segment is omitted while `turn_started_at` is `None` (e.g. between
+/// turns). When the status string already carries a reason (e.g.
 /// `retry 1/4 in 3s · <message>`), it flows through unchanged as the tail.
+///
+/// Returns `Some(rect)` when the bar is drawn so the event loop can hit-test
+/// clicks and open the Activity modal; `None` when the bar is hidden.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_activity_bar(
     frame: &mut Frame,
     rect: Rect,
     turn: u64,
     current_round: u64,
+    stall_rounds: u64,
+    current_model: &str,
+    turn_started_at: Option<Instant>,
     status: &str,
     spinner_phase: usize,
     theme: &Theme,
-) {
+) -> Option<Rect> {
     if status.is_empty() || status == "idle" || status == "responding" {
-        return;
+        return None;
     }
     let spinner = spinner_glyph();
     let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
@@ -95,15 +105,27 @@ pub fn draw_activity_bar(
         ),
     ];
 
-    // Structural prefix: `turn N` always (the bar only renders mid-turn), and
-    // `round M` once a model request has fired. Muted so the status — the
-    // thing that changes frame to frame — stays the visual focus.
+    // Structural prefix: `turn N` always (the bar only renders mid-turn),
+    // `round M` once a model request has fired, `model` while a provider is
+    // bound, and `elapsed` while the turn timer is running. All muted so the
+    // status — the thing that changes frame to frame — stays the visual focus.
     let dim = Style::default().fg(theme.muted());
     spans.push(Span::raw(" "));
     spans.push(Span::styled(format!("turn {}", turn), dim));
     if current_round >= 1 {
         spans.push(Span::styled(" · ", dim));
         spans.push(Span::styled(format!("round {}", current_round), dim));
+    }
+    if !current_model.is_empty() {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(
+            crate::tui::model_display_name(current_model),
+            dim,
+        ));
+    }
+    if let Some(started) = turn_started_at {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(format_elapsed(started.elapsed()), dim));
     }
     spans.push(Span::styled(" · ", dim));
 
@@ -114,86 +136,18 @@ pub fn draw_activity_bar(
             .add_modifier(Modifier::ITALIC),
     ));
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-}
-
-/// Inputs for [`draw_goal_bar`]. The bar is shown only while the goal is in the
-/// `Active` state (see the early-return guard inside the draw function), so the
-/// caller may pass `Some(goal)` unconditionally and let the renderer decide
-/// visibility.
-pub struct GoalBarView<'a> {
-    pub goal: &'a Goal,
-}
-
-/// Draw the single-line goal bar pinned directly above the activity bar. The
-/// bar surfaces the active goal's objective and checklist progress against a
-/// subtly raised background so the user can tell at a glance it is clickable.
-/// Clicking anywhere inside the returned rect surfaces the full goal via
-/// `/goal status`.
-///
-/// Only rendered when `goal.status == Active`. Returns `Some(rect)` (the full
-/// bar rect, for hit-testing) when drawn, `None` otherwise.
-pub fn draw_goal_bar(
-    frame: &mut Frame,
-    rect: Rect,
-    view: GoalBarView<'_>,
-    theme: &Theme,
-) -> Option<Rect> {
-    let GoalBarView { goal } = view;
-
-    if goal.is_complete {
-        return None;
+    // Stall alert (ADR-0009 safety net): surfaced while the harness considers
+    // the agent stalled on consecutive read-only tool rounds. Rendered in the
+    // warning accent so it stands out from the muted structural prefix, with
+    // an `Esc to interrupt` hint so the user knows they can stop it.
+    if stall_rounds > 0 {
+        let warn = Style::default().fg(theme.warning);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("⚠ stalled: {stall_rounds} read-only rounds — Esc to interrupt"),
+            warn,
+        ));
     }
-
-    let accent_bg = theme.raised();
-
-    // Steady brand dot — the goal bar is not the liveness anchor (the activity
-    // bar is). The bar's existence on the raised background already signals an
-    // in-progress goal; the `[done/total]` suffix carries progress. A second
-    // breathing dot would compete with the activity bar for the user's
-    // peripheral vision and dilute the single-anchor principle (see ADR 0008).
-    let spinner = spinner_glyph();
-    let spinner_color = theme.brand();
-
-    let objective: String = goal
-        .objective
-        .chars()
-        .take(GOAL_OBJECTIVE_MAX_CHARS)
-        .collect();
-    let suffix = if goal.objective.chars().count() > GOAL_OBJECTIVE_MAX_CHARS {
-        "..."
-    } else {
-        ""
-    };
-
-    let progress = goal_checklist_summary(goal)
-        .map(|(done, total, _)| format!(" [{}/{}]", done, total))
-        .unwrap_or_default();
-
-    let label = format!("{}{}{}", objective, suffix, progress);
-
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(
-            spinner,
-            Style::default()
-                .fg(spinner_color)
-                .bg(accent_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(label, Style::default().fg(theme.muted()).bg(accent_bg)),
-    ]);
-
-    // Fill the rest of the row with the raised background so the entire bar
-    // reads as a clickable surface, not just the text portion.
-    let mut spans: Vec<Span<'static>> = line.spans;
-    let used: usize = spans.iter().map(|s| s.content.width()).sum();
-    let full_w = rect.width as usize;
-    spans.push(Span::styled(
-        " ".repeat(full_w.saturating_sub(used)),
-        Style::default().bg(accent_bg),
-    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     Some(rect)
@@ -518,40 +472,31 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
-fn goal_checklist_summary(goal: &Goal) -> Option<(usize, usize, String)> {
-    if goal.checklist.is_empty() {
-        return None;
-    }
-    let done = goal
-        .checklist
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.status,
-                neenee_core::GoalChecklistStatus::Completed
-                    | neenee_core::GoalChecklistStatus::Cancelled
-            )
-        })
-        .count();
-    let current = goal
-        .checklist
-        .iter()
-        .find(|item| item.status == neenee_core::GoalChecklistStatus::InProgress)
-        .or_else(|| {
-            goal.checklist
-                .iter()
-                .find(|item| item.status == neenee_core::GoalChecklistStatus::Pending)
-        })
-        .or_else(|| goal.checklist.last())
-        .map(|item| item.content.clone())
-        .unwrap_or_default();
-    Some((done, goal.checklist.len(), current))
-}
-
 /// Context-usage ratio at which the usage bar turns from green to yellow.
 const CONTEXT_USAGE_WARN_THRESHOLD: f64 = 0.7;
 /// Context-usage ratio at which the usage bar turns from yellow to red.
 const CONTEXT_USAGE_CRIT_THRESHOLD: f64 = 0.9;
+
+/// Compact wall-clock elapsed for the activity bar: `12s`, `1m 23s`,
+/// `1h 02m`. Stays short so it fits the single-line activity bar even with a
+/// long model name + status. Sub-second durations render as `0s` rather than
+/// `0ms` because the bar ticks at most a few times per second and showing
+/// millisecond precision would flicker without adding signal. Shared with the
+/// Activity modal so the bar and the modal report the same elapsed format.
+pub(crate) fn format_elapsed(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        let m = total_secs / 60;
+        let s = total_secs % 60;
+        format!("{}m {:02}s", m, s)
+    } else {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        format!("{}h {:02}m", h, m)
+    }
+}
 
 /// Format a token count with a single-letter SI suffix: `999`, `1.0k`, `20.2k`,
 /// `1.5M`, `3.2B`.
@@ -617,29 +562,6 @@ mod tests {
         assert_eq!(text, "20.2k (8%)");
     }
 
-    #[test]
-    fn checklist_summary_prefers_current_work() {
-        let goal = Goal {
-            objective: "ship".to_string(),
-            is_complete: false,
-            checklist: vec![
-                neenee_core::GoalChecklistItem {
-                    content: "implemented".to_string(),
-                    status: neenee_core::GoalChecklistStatus::Completed,
-                },
-                neenee_core::GoalChecklistItem {
-                    content: "run tests".to_string(),
-                    status: neenee_core::GoalChecklistStatus::InProgress,
-                },
-            ],
-        };
-
-        assert_eq!(
-            goal_checklist_summary(&goal),
-            Some((1, 2, "run tests".to_string()))
-        );
-    }
-
     /// The hint bar must render the model and context bar on a single line
     /// below the input without panicking.
     #[test]
@@ -668,90 +590,6 @@ mod tests {
                 );
             })
             .unwrap();
-    }
-
-    /// The goal bar renders only when the goal is `Active`, reports a rect for
-    /// hit-testing, and includes the checklist progress `[done/total]`.
-    #[test]
-    fn goal_bar_renders_when_active_and_reports_rect() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let theme = Theme::default();
-        let backend = TestBackend::new(80, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        // Active goal with a checklist → bar shown, progress rendered.
-        let active_goal = Goal {
-            objective: "ship the goal bar".to_string(),
-            is_complete: false,
-            checklist: vec![
-                neenee_core::GoalChecklistItem {
-                    content: "done".to_string(),
-                    status: neenee_core::GoalChecklistStatus::Completed,
-                },
-                neenee_core::GoalChecklistItem {
-                    content: "pending".to_string(),
-                    status: neenee_core::GoalChecklistStatus::Pending,
-                },
-            ],
-        };
-        let mut rect = None;
-        terminal
-            .draw(|f| {
-                rect = draw_goal_bar(
-                    f,
-                    Rect::new(0, 0, 80, 1),
-                    GoalBarView { goal: &active_goal },
-                    &theme,
-                );
-            })
-            .unwrap();
-        assert!(rect.is_some(), "goal bar should report a rect when Active");
-
-        // Verify the progress suffix `[1/2]` appears in the rendered buffer.
-        let buf = terminal.backend().buffer();
-        let row: String = (0..80)
-            .map(|x| buf.content[x].symbol().to_string())
-            .collect();
-        assert!(
-            row.contains("[1/2]"),
-            "checklist progress should render: {row}"
-        );
-    }
-
-    /// The goal bar is hidden (returns `None`) for non-active goals so it does
-    /// not linger after completion or while paused.
-    #[test]
-    fn goal_bar_hidden_for_non_active_status() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let theme = Theme::default();
-        let backend = TestBackend::new(80, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let complete_goal = Goal {
-            objective: "done".to_string(),
-            is_complete: true,
-            checklist: vec![],
-        };
-        let mut rect = Some(Rect::new(0, 0, 1, 1));
-        terminal
-            .draw(|f| {
-                rect = draw_goal_bar(
-                    f,
-                    Rect::new(0, 0, 80, 1),
-                    GoalBarView {
-                        goal: &complete_goal,
-                    },
-                    &theme,
-                );
-            })
-            .unwrap();
-        assert!(
-            rect.is_none(),
-            "goal bar should be hidden for Complete status"
-        );
     }
 
     #[test]

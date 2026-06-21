@@ -12,6 +12,58 @@ use std::path::PathBuf;
 /// Reasoning isn't a tool, so each frontend addresses it by name.
 pub const THINKING_KEY: &str = "thinking";
 
+/// Default for [`AgentConfig::stall_threshold`]. Chosen so a normal
+/// "explore + edit + edit + verify + update" cadence never trips the
+/// detector, but a model that abandons writes after the first few reads
+/// does. Exposed as a named const so `Agent::new`'s default matches the
+/// config default without one side hardcoding a magic number.
+pub const DEFAULT_STALL_THRESHOLD: usize = 8;
+
+/// Delta added to [`AgentConfig::stall_threshold`] to derive the hard-stop
+/// line. The window between the reflection nudge and the hard stop gives
+/// the model a fair chance to recover before the harness aborts the turn.
+pub const STALL_HARD_STOP_DELTA: usize = 6;
+
+/// User-tunable agent behaviour, deserialized from the optional `[agent]`
+/// table of `config.toml`. All fields default sensibly, so a
+/// `config.toml` with no `[agent]` table (or a partially specified one)
+/// is valid.
+///
+/// ```toml
+/// [agent]
+/// # Consecutive read-only tool rounds before a stall warning + reflection
+/// # nudge. 0 disables detection entirely (pure ADR-0009 behaviour).
+/// stall_threshold = 8
+/// # When true, the harness injects a hidden reminder if the model tries
+/// # to end a turn with an approved plan but without calling
+/// # `verify_plan_execution`. Disable for trusted fast models or
+/// # plan-less workflows.
+/// verify_nudge_enabled = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Consecutive read-only tool rounds before stall detection fires a
+    /// `StallWarning` and pushes a hidden reflection nudge. `0` disables
+    /// detection entirely (pure ADR-0009 behaviour, no nudge, no
+    /// hard-stop). Mutated at runtime via `Agent::set_stall_threshold`.
+    pub stall_threshold: usize,
+    /// Whether the verify hard-nudge gate is active. When `true` the
+    /// harness injects a hidden reminder before letting a turn end with
+    /// an approved plan but no `verify_plan_execution` call. Mutated at
+    /// runtime via `Agent::set_verify_nudge_enabled`.
+    pub verify_nudge_enabled: bool,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            stall_threshold: DEFAULT_STALL_THRESHOLD,
+            verify_nudge_enabled: true,
+        }
+    }
+}
+
 /// User-tunable frontend presentation, deserialized from the optional `[tui]`
 /// table of `config.toml`. This is the **pure-data** form shared by every
 /// frontend (TUI, future GUI); frontend-specific presenter logic (e.g. the
@@ -151,6 +203,11 @@ pub struct Config {
     /// TUI presentation ([tui] table): per-step-kind default expand state.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// Agent behaviour ([agent] table): stall detector threshold and the
+    /// verify hard-nudge toggle. See [`AgentConfig`] for the per-field
+    /// semantics and TOML examples.
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 impl Default for Config {
@@ -184,6 +241,7 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             websearch: WebSearchConfig::default(),
             tui: TuiConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -226,5 +284,48 @@ impl Config {
         let path = Self::history_file_path();
         fsutil::atomic_write_json(&path, history).map_err(Box::<dyn std::error::Error>::from)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_table_round_trips_through_toml() {
+        // The `[agent]` table must round-trip: partial TOML keeps defaults,
+        // full TOML preserves explicit overrides, and the disabled-stall
+        // sentinel (`stall_threshold = 0`) survives intact rather than
+        // being coerced back to the default.
+        let toml_full = r#"
+            [agent]
+            stall_threshold = 3
+            verify_nudge_enabled = false
+        "#;
+        let cfg: Config = toml::from_str(toml_full).unwrap();
+        assert_eq!(cfg.agent.stall_threshold, 3);
+        assert!(!cfg.agent.verify_nudge_enabled);
+
+        // Missing `[agent]` table → defaults match the documented values.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.agent.stall_threshold, DEFAULT_STALL_THRESHOLD);
+        assert!(cfg.agent.verify_nudge_enabled);
+
+        // The disable sentinel survives.
+        let toml_disabled = r#"
+            [agent]
+            stall_threshold = 0
+        "#;
+        let cfg: Config = toml::from_str(toml_disabled).unwrap();
+        assert_eq!(cfg.agent.stall_threshold, 0);
+
+        // Round-trip through save+load format (serialize then parse).
+        let mut cfg = Config::default();
+        cfg.agent.stall_threshold = 5;
+        cfg.agent.verify_nudge_enabled = false;
+        let serialised = toml::to_string(&cfg).unwrap();
+        let parsed: Config = toml::from_str(&serialised).unwrap();
+        assert_eq!(parsed.agent.stall_threshold, 5);
+        assert!(!parsed.agent.verify_nudge_enabled);
     }
 }

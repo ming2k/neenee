@@ -85,15 +85,65 @@ pub struct Agent {
     context_budget_chars: Arc<std::sync::Mutex<usize>>,
     /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
     compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
+    /// Consecutive read-only tool rounds before stall detection fires a
+    /// `StallWarning` and pushes a reflection nudge. Seeded from
+    /// `STALL_THRESHOLD` (matching `Config::agent.stall_threshold`'s
+    /// default); mutated at runtime via `set_stall_threshold`. `0`
+    /// disables detection entirely (pure ADR-0009 behaviour).
+    stall_threshold: Arc<std::sync::Mutex<usize>>,
+    /// Whether the verify hard-nudge gate is active. Seeded to `true` and
+    /// mutated at runtime via `set_verify_nudge_enabled`. When `false` the
+    /// harness never injects the "you forgot to call verify_plan_execution"
+    /// reminder, even with an active plan in Build mode.
+    verify_nudge_enabled: Arc<std::sync::Mutex<bool>>,
 }
 
 /// Mutable bookkeeping threaded through a single turn's tool-dispatch rounds.
 #[derive(Default)]
-struct TurnState {
+pub(crate) struct TurnState {
     token_usage: TokenUsage,
     /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
     previous_call: Option<(String, String)>,
     repeated_calls: usize,
+    /// Whether every tool call in the most recent round was read-only
+    /// (`ToolAccess::Read` and not one of the mutating Read tools:
+    /// `goal_checklist` / `plan_enter` / `plan_exit` /
+    /// `update_plan_progress`). Set by `dispatch_tool_calls` so the
+    /// outer loop can maintain `consecutive_readonly_rounds`.
+    pub(crate) last_round_was_readonly: bool,
+    /// Consecutive read-only rounds so far this turn. Reset to 0 by any
+    /// productive round. Drives the stall detector (`STALL_THRESHOLD` for
+    /// the reflection nudge, `STALL_HARD_STOP` for the hard abort).
+    pub(crate) consecutive_readonly_rounds: usize,
+    /// One-shot flag so the stall reflection nudge fires at most once per
+    /// stall episode. Reset implicitly when `consecutive_readonly_rounds`
+    /// returns to 0 — a new stall is a new episode.
+    pub(crate) stall_nudged: bool,
+    /// True once the model has invoked `verify_plan_execution` at any
+    /// point during this turn. Drives the verify-nudge gate at turn end.
+    pub(crate) verify_called_this_turn: bool,
+    /// One-shot flag so the verify nudge fires at most once per turn.
+    /// Without this the harness and model could ping-pong indefinitely
+    /// (nudge → text-only reply → nudge → …).
+    pub(crate) verify_nudged: bool,
+}
+
+/// Names of Read-access tools that nonetheless count as "productive" for
+/// stall detection because they mutate durable state the harness tracks
+/// (goal checklist, plan/mode transitions, plan-section progress). Any
+/// round containing one of these is treated as making progress even
+/// though no Write tool fired.
+const PRODUCTIVE_READ_TOOLS: &[&str] =
+    &["goal_checklist", "plan_enter", "plan_exit", "update_plan_progress"];
+
+/// Whether a single tool name counts as productive for the text-fallback
+/// path, where we cannot recover the registered `Tool`'s access bit
+/// cheaply. The text fallback is only used by simpler chat models, which
+/// never carry the Write tools that matter here, so a name-only check is
+/// sufficient: a hit on `PRODUCTIVE_READ_TOOLS` is productive, anything
+/// else is read-only.
+pub(crate) fn call_was_productive(name: &str) -> bool {
+    PRODUCTIVE_READ_TOOLS.contains(&name)
 }
 
 impl Agent {
@@ -187,6 +237,8 @@ impl Agent {
             thread_id,
             context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
             compaction_gate: Arc::new(std::sync::Mutex::new(None)),
+            stall_threshold: Arc::new(std::sync::Mutex::new(STALL_THRESHOLD)),
+            verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
         }
     }
 
@@ -197,6 +249,28 @@ impl Agent {
             .context_budget_chars
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = budget;
+    }
+
+    /// Override the per-turn stall detector threshold. `0` disables
+    /// detection entirely (no `StallWarning`, no reflection nudge, no
+    /// hard-stop). Mirrors `[agent] stall_threshold` in `config.toml` but
+    /// can be flipped at runtime.
+    pub fn set_stall_threshold(&self, threshold: usize) {
+        *self
+            .stall_threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = threshold;
+    }
+
+    /// Override whether the verify hard-nudge gate is active. Mirrors
+    /// `[agent] verify_nudge_enabled` in `config.toml` but can be flipped
+    /// at runtime — useful for tests and for headless runs that do not
+    /// want a hidden reminder pushed into the transcript.
+    pub fn set_verify_nudge_enabled(&self, enabled: bool) {
+        *self
+            .verify_nudge_enabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
     /// Install (or clear with `None`) the mid-turn context-relief gate.
@@ -797,7 +871,31 @@ impl Agent {
                 )
                 .await?
             {
+                if self
+                    .update_stall_state(messages, &mut state, &mut on_event)
+                    .await?
+                    .is_break()
+                {
+                    return Err(self.stall_hard_stop_error(&state));
+                }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                continue;
+            }
+
+            // Verify hard nudge (mirror of the streaming loop). See the
+            // streaming path for the full rationale.
+            if self.should_nudge_verify(&state) {
+                state.verify_nudged = true;
+                messages.push(Message::hidden(
+                    Role::User,
+                    "You are about to end the turn without calling \
+                     verify_plan_execution on the active plan. Before \
+                     reporting completion to the user, call \
+                     verify_plan_execution so an independent verifier can \
+                     audit the implementation against the plan. If you \
+                     have already run it this turn and addressed its \
+                     findings, ignore this reminder and finish.",
+                ));
                 continue;
             }
 
@@ -1000,7 +1098,36 @@ impl Agent {
                 .await?
             {
                 tool_rounds += 1;
+                if self
+                    .update_stall_state(messages, &mut state, &mut on_event)
+                    .await?
+                    .is_break()
+                {
+                    return Err(self.stall_hard_stop_error(&state));
+                }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                continue;
+            }
+
+            // Verify hard nudge: if the model is about to end the turn
+            // with an approved plan active but has not run verification
+            // yet (and has not already been nudged about it this turn),
+            // push a hidden reminder and force one more round. Mirrors
+            // the GOAL_COMPLETE_MARKER gate but for plan completion, and
+            // fires at most once per turn so the model can still wrap
+            // up if it judges the nudge irrelevant.
+            if self.should_nudge_verify(&state) {
+                state.verify_nudged = true;
+                messages.push(Message::hidden(
+                    Role::User,
+                    "You are about to end the turn without calling \
+                     verify_plan_execution on the active plan. Before \
+                     reporting completion to the user, call \
+                     verify_plan_execution so an independent verifier can \
+                     audit the implementation against the plan. If you \
+                     have already run it this turn and addressed its \
+                     findings, ignore this reminder and finish.",
+                ));
                 continue;
             }
 
@@ -1053,6 +1180,18 @@ impl Agent {
                     &mut state.repeated_calls,
                 )?;
             }
+            // Detect whether this round was productive (any Write-capable
+            // tool or any of the mutating Read tools), and whether the
+            // model invoked the plan verifier. Both feed gates in the
+            // outer loop: the productivity flag drives the stall detector,
+            // the verify flag drives the completion-time nudge.
+            state.last_round_was_readonly = !self.round_was_productive(tool_calls);
+            if tool_calls
+                .iter()
+                .any(|call| call.name == "verify_plan_execution")
+            {
+                state.verify_called_this_turn = true;
+            }
             // Emit all ToolCall events up front.
             let call_ids: Vec<String> = tool_calls
                 .iter()
@@ -1103,6 +1242,13 @@ impl Agent {
             }
             self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls)?;
             tracing::debug!(tool = %call.name, "tool call (text fallback)");
+            // Mirror the native path's gate signals so the outer loop's
+            // stall detector and verify nudge behave identically for
+            // text-emitted tool calls.
+            state.last_round_was_readonly = !call_was_productive(&call.name);
+            if call.name == "verify_plan_execution" {
+                state.verify_called_this_turn = true;
+            }
             tool_call::attach_fallback_tool_call(messages, &call);
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
             on_event(AgentEvent::ToolCall {
@@ -1224,6 +1370,145 @@ impl Agent {
             )));
         }
         Ok(())
+    }
+
+    /// Whether a round of tool calls counts as productive for stall
+    /// detection. A round is productive if any of its calls resolves to
+    /// a registered Write-access tool, or names one of the mutating Read
+    /// tools in [`PRODUCTIVE_READ_TOOLS`] (goal checklist, plan/mode
+    /// transitions, plan-section progress). Unknown tool names default to
+    /// read-only so a model hallucinating a Write-looking name cannot
+    /// bypass the detector.
+    fn round_was_productive(&self, calls: &[ToolCall]) -> bool {
+        calls.iter().any(|call| {
+            if call_was_productive(&call.name) {
+                return true;
+            }
+            let access = self
+                .tools
+                .iter()
+                .find(|tool| tool.name() == call.name)
+                .map(|tool| tool.access())
+                .unwrap_or(ToolAccess::Read);
+            access != ToolAccess::Read
+        })
+    }
+
+    /// Update the per-turn read-only streak based on the productivity of
+    /// the round that just finished (`state.last_round_was_readonly` was
+    /// set by `dispatch_tool_calls`). When the streak hits the configured
+    /// threshold for the first time in this episode, emit a
+    /// [`AgentEvent::StallWarning`] and push a hidden reflection nudge so
+    /// the model breaks out of distinct-but-unproductive exploration
+    /// loops. While stalled, every subsequent read-only round re-emits
+    /// `StallWarning` with the latest count so the TUI alert ticks up
+    /// live. Returns `ControlFlow::Break` when the streak has reached
+    /// `threshold + STALL_HARD_STOP_DELTA` after the nudge — the caller
+    /// converts that into a terminal `HarnessError` via
+    /// [`Self::stall_hard_stop_error`].
+    ///
+    /// No-op when the configured threshold is `0` (detection disabled,
+    /// pure ADR-0009 behaviour).
+    async fn update_stall_state<F>(
+        &self,
+        messages: &mut Vec<Message>,
+        state: &mut TurnState,
+        on_event: &mut F,
+    ) -> Result<std::ops::ControlFlow<()>, HarnessError>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        let threshold = *self
+            .stall_threshold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // `0` is the documented sentinel for "detection disabled". Bypass
+        // all bookkeeping so an over-eager streak from a prior threshold
+        // cannot fire a stale warning after the user lowers it mid-run.
+        if threshold == 0 {
+            return Ok(std::ops::ControlFlow::Continue(()));
+        }
+        let hard_stop = threshold.saturating_add(STALL_HARD_STOP_DELTA);
+
+        let was_stalled = state.consecutive_readonly_rounds >= threshold;
+        if state.last_round_was_readonly {
+            state.consecutive_readonly_rounds += 1;
+        } else {
+            state.consecutive_readonly_rounds = 0;
+            // A productive round ends the stall episode, so a future
+            // stall in the same turn gets a fresh nudge. Also clear the
+            // TUI alert when one was active — without this the banner
+            // would linger after recovery, which is misleading.
+            state.stall_nudged = false;
+            if was_stalled {
+                on_event(AgentEvent::StallWarning {
+                    consecutive_rounds: 0,
+                });
+            }
+        }
+
+        // Re-emit the live count every round while stalled so the
+        // activity bar's "N read-only rounds" counter ticks up. The
+        // reflection nudge message is pushed exactly once per episode
+        // (one-shot `stall_nudged` flag).
+        if state.consecutive_readonly_rounds >= threshold {
+            if !state.stall_nudged {
+                state.stall_nudged = true;
+                let n = state.consecutive_readonly_rounds;
+                messages.push(Message::hidden(
+                    Role::User,
+                    format!(
+                        "You have made {n} consecutive read-only tool calls without \
+                         producing any changes or updating plan/goal state. You may \
+                         be stuck in an exploration loop. Step back: re-read the \
+                         task, decide whether you already have the information you \
+                         need, and either act (write/edit/run) or report to the \
+                         user. Do not continue gathering information you already have."
+                    ),
+                ));
+            }
+            let n = state.consecutive_readonly_rounds;
+            on_event(AgentEvent::StallWarning {
+                consecutive_rounds: n,
+            });
+        }
+
+        if state.consecutive_readonly_rounds >= hard_stop && state.stall_nudged {
+            return Ok(std::ops::ControlFlow::Break(()));
+        }
+        Ok(std::ops::ControlFlow::Continue(()))
+    }
+
+    /// Terminal error surfaced when the agent ignored the stall nudge and
+    /// kept burning read-only rounds up to the hard-stop line. The
+    /// message echoes the streak length so the user can tell this apart
+    /// from a normal completion in the transcript.
+    fn stall_hard_stop_error(&self, state: &TurnState) -> HarnessError {
+        HarnessError::Other(format!(
+            "Agent stopped: {} consecutive read-only tool rounds with no \
+             progress after a reflection nudge. This looks like an \
+             exploration loop.",
+            state.consecutive_readonly_rounds
+        ))
+    }
+
+    /// Whether the harness should fire the verify-hard-nudge gate before
+    /// letting the turn end. Conditions: the gate is enabled in config,
+    /// there is an active (approved) plan, the agent is in Build mode,
+    /// the model has not invoked `verify_plan_execution` at any point
+    /// this turn, and the nudge has not already fired (one-shot per
+    /// turn). Returns `false` in Plan mode or when no plan is active —
+    /// there is nothing to verify.
+    pub(crate) fn should_nudge_verify(&self, state: &TurnState) -> bool {
+        let enabled = *self
+            .verify_nudge_enabled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        enabled
+            && !state.verify_nudged
+            && !state.verify_called_this_turn
+            && self.get_mode() == AgentMode::Build
+            && self.active_plan_path().is_some()
     }
 
     pub(crate) fn emit_goal_update<F>(&self, call: &ToolCall, on_event: &mut F)

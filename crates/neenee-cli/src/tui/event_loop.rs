@@ -73,6 +73,14 @@ pub(super) struct UiRuntime {
     /// Set from `AgentResponse::RoundStarted`; reset to 0 at the turn
     /// boundary so the pre-request phase does not show a stale round.
     pub current_round: Arc<Mutex<u64>>,
+    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
+    /// Mirrored into `App::stall_rounds` each frame; while > 0 the activity bar
+    /// appends a `⚠ stalled` segment.
+    pub stall_rounds: Arc<Mutex<u64>>,
+    /// Wall-clock instant the current turn started, or `None` between turns.
+    /// Set by the response listener on a "running" `HarnessState` and cleared
+    /// on idle; drives the muted `<elapsed>` segment in the activity bar.
+    pub turn_started_at: Arc<Mutex<Option<std::time::Instant>>>,
     /// One-shot: when set, the event loop opens the plan preview modal by
     /// loading the file at the given path into `App::plan_preview_content`
     /// and switching to `Modal::PlanPreview`. Drained each frame.
@@ -131,6 +139,8 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.plan_progress = runtime.plan_progress.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
+            app.stall_rounds = *runtime.stall_rounds.lock().await;
+            app.turn_started_at = *runtime.turn_started_at.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
@@ -363,11 +373,11 @@ pub(super) async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    plan_progress: app.plan_progress.as_ref(),
-                    plan_panel_expanded: app.plan_panel_expanded,
-                    current_goal: app.current_goal.as_ref(),
                     turn_count: app.turn_count,
                     current_round: app.current_round,
+                    stall_rounds: app.stall_rounds,
+                    current_model: app.current_model.as_str(),
+                    turn_started_at: app.turn_started_at,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     theme: &app.theme,
@@ -375,8 +385,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             );
             let input_rect = transcript_render.input_rect;
             let hint_rect = transcript_render.hint_rect;
-            let goal_rect = transcript_render.goal_rect;
-            let plan_rect = transcript_render.plan_rect;
+            let activity_rect = transcript_render.activity_rect;
             let content_lines = transcript_render.content_lines;
             let view_height = transcript_render.view_height;
             let sticky = transcript_render.sticky;
@@ -466,8 +475,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             // and for click routing.
             app.content_lines = content_lines;
             app.view_height = view_height;
-            app.goal_rect = goal_rect;
-            app.plan_rect = plan_rect;
+            app.activity_rect = activity_rect;
             match sticky {
                 Some(info) => {
                     app.sticky_step = Some(info.message_idx);
@@ -598,6 +606,21 @@ pub(super) async fn run_app_loop<B: Backend>(
                     f,
                     &app.plan_preview_content,
                     app.plan_preview_scroll,
+                    &app.theme,
+                ),
+                Modal::Activity => render::draw_activity_modal(
+                    f,
+                    render::ActivityModalView {
+                        goal: app.current_goal.as_ref(),
+                        plan: app.plan_progress.as_ref(),
+                        turn_count: app.turn_count,
+                        current_round: app.current_round,
+                        stall_rounds: app.stall_rounds,
+                        current_model: app.current_model.as_str(),
+                        turn_started_at: app.turn_started_at,
+                        activity: &status,
+                    },
+                    &mut app.activity_scroll,
                     &app.theme,
                 ),
                 Modal::None => {}
@@ -1229,6 +1252,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                 input::InputAction::ScrollUp => {
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = app.activity_scroll.saturating_sub(1);
                     } else {
                         // While a permission sheet is open the transcript stays
                         // scrollable, so the wheel / page keys drive the
@@ -1243,6 +1268,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                 input::InputAction::ScrollDown => {
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = app.activity_scroll.saturating_add(1);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -1616,6 +1643,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     | Modal::ModelEditor
                     | Modal::Session
                     | Modal::PlanPreview
+                    | Modal::Activity
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
@@ -1641,6 +1669,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     | Modal::ModelEditor
                     | Modal::Session
                     | Modal::PlanPreview
+                    | Modal::Activity
                     | Modal::None => {}
                 },
                 input::InputAction::QuestionUp => {
@@ -1906,32 +1935,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    // Goal bar: surface the full goal via the existing
-                    // `/goal status` command. Acts as the click-to-expand
-                    // affordance promised by the goal bar.
-                    if app.goal_rect.is_some_and(|r| {
+                    // Activity bar: open the Activity modal, which gathers the
+                    // goal, plan progress, and live activity into one overlay
+                    // (replacing the always-pinned goal bar + plan panel).
+                    if app.activity_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
-                        let cmd = "/goal status".to_string();
-                        runtime.is_responding.store(true, Ordering::SeqCst);
-                        *runtime.activity_status.lock().await = "queued".to_string();
-                        app.follow_bottom = true;
-                        app.pin_summary_line = None;
-                        runtime
-                            .messages
-                            .lock()
-                            .await
-                            .push(TranscriptMessage::new(Role::User, cmd.clone()));
-                        let _ = app.tx.send(AgentRequest::SlashCommand(cmd));
-                        app.selection = SelectionState::None;
-                        app.focused_target = None;
-                        app.drag.cancel();
-                    } else if app.plan_rect.is_some_and(|r| {
-                        // Plan panel: toggle between the single-row summary and
-                        // the full per-section list.
-                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-                    }) {
-                        app.plan_panel_expanded = !app.plan_panel_expanded;
+                        app.active_modal = Modal::Activity;
+                        app.modal_index = 0;
+                        app.activity_scroll = 0;
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();

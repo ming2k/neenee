@@ -132,6 +132,9 @@ pub enum AgentResponse {
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     AutoApproveChanged(bool),
+    /// Mirrors [`AgentEvent::StallWarning`]. The TUI should render a
+    /// non-modal alert so the user can decide whether to interrupt.
+    StallWarning { consecutive_rounds: usize },
     RetryScheduled {
         attempt: usize,
         max_attempts: usize,
@@ -305,6 +308,12 @@ pub enum AgentEvent {
     PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The auto-approve toggle changed (via `/auto-approve`).
     AutoApproveChanged(bool),
+    /// The agent appears stalled: N consecutive read-only tool rounds with
+    /// no write / mode / plan / goal mutation. The TUI should surface a
+    /// visible alert so the user can decide whether to interrupt. Carries
+    /// the streak length. Emitted exactly once per stall episode (a
+    /// productive round resets the streak and clears the alert).
+    StallWarning { consecutive_rounds: usize },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),
     /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.

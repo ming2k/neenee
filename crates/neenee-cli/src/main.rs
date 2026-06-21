@@ -474,6 +474,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })));
     }
 
+    // Wire the `[agent]` config table: stall detector threshold (0
+    // disables) and verify hard-nudge toggle. Both default to sensible
+    // values when the table is absent, so this is a no-op for the common
+    // case.
+    agent.set_stall_threshold(config.agent.stall_threshold);
+    agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
+
     // Tie the agent and its goal persistence to this session/thread.
     let thread_id = session.id().await;
     agent.set_thread_id(&thread_id);
@@ -1265,7 +1272,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                            } else if rest == "pause" || rest == "resume" || rest.starts_with("budget ") {
+                            } else if rest == "pause"
+                                || rest == "resume"
+                                || rest.starts_with("budget ")
+                            {
                                 // Pre-ADR-0010 subcommands removed: the status
                                 // machine and token budget no longer exist.
                                 let _ = resp_tx.send(AgentResponse::Error(
@@ -1378,10 +1388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
 
-                                match goal_service
-                                    .set_goal(&thread_id, &checkpoint.goal)
-                                    .await
-                                {
+                                match goal_service.set_goal(&thread_id, &checkpoint.goal).await {
                                     Ok(goal) => {
                                         agent.set_goal(goal.clone());
                                         emit_goal_updated(&resp_tx, &goal);
@@ -1906,7 +1913,11 @@ fn format_goal_status(goal: &Goal) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "Goal [{}]: {}",
-        if goal.is_complete { "complete" } else { "active" },
+        if goal.is_complete {
+            "complete"
+        } else {
+            "active"
+        },
         goal.objective
     ));
 

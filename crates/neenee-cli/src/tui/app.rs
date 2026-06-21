@@ -90,6 +90,11 @@ pub enum Modal {
     /// stored in [`App::plan_preview_content`]; `plan_preview_scroll` holds
     /// the overlay's own scroll offset.
     PlanPreview,
+    /// Activity overview: the current goal (objective + checklist), the live
+    /// plan-progress breakdown, and the running turn/round/model/elapsed/
+    /// status. Opened by clicking the activity bar. The body scrolls via
+    /// [`App::activity_scroll`].
+    Activity,
 }
 
 /// Active pane inside the session-context modal. The variant order defines the
@@ -154,10 +159,10 @@ pub struct App {
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
     pub sticky_step: Option<usize>,
     pub sticky_rect: Option<ratatui::layout::Rect>,
-    /// Screen rect of the goal bar for the current frame, so clicks inside it
-    /// route to `/goal status`. `None` when no goal bar is shown (goal absent,
-    /// not `Active`, or chrome hidden).
-    pub goal_rect: Option<ratatui::layout::Rect>,
+    /// Screen rect of the activity bar for the current frame, so clicks inside
+    /// it open the Activity modal. `None` when no activity bar is shown (idle,
+    /// streaming, sub-agent view, or chrome hidden).
+    pub activity_rect: Option<ratatui::layout::Rect>,
     /// Content-line index of the sticky step's real summary. Used to re-anchor
     /// the scroll offset when the user collapses the pinned step so the summary
     /// lands at the top of the viewport instead of jumping to unrelated content.
@@ -219,22 +224,13 @@ pub struct App {
     /// snapshot; shown as a badge in the hint bar so the elevated state is
     /// always visible.
     pub auto_approve: bool,
-    /// Live plan progress snapshot, mirrored from the harness. When `Some`,
-    /// a sticky panel renders above the input box so the user can see at a
-    /// glance which sections of the approved plan are done, in progress, or
-    /// still pending. `None` outside Build mode with an active plan.
+    /// Live plan progress snapshot, mirrored from the harness. Shown inside
+    /// the Activity modal (and no longer pinned above the input box) so the
+    /// footer reclaims the vertical space. `None` outside Build mode with an
+    /// active plan.
     pub plan_progress: Option<PlanProgress>,
-    /// Whether the sticky plan panel is expanded to show every section. Toggled
-    /// by clicking inside [`App::plan_rect`]. Collapsed (the default) shows a
-    /// single row with the active section so the panel stays compact.
-    pub plan_panel_expanded: bool,
-    /// Screen rect of the sticky plan panel for the current frame, so clicks
-    /// inside it toggle [`App::plan_panel_expanded`]. `None` when no panel is
-    /// shown (no active plan, chrome hidden, or sub-agent view).
-    pub plan_rect: Option<ratatui::layout::Rect>,
-    /// Harness turn counter, mirrored each frame. Used by the plan panel's
-    /// stale detector: if `turn_count - plan_progress.updated_at_turn`
-    /// exceeds the threshold the panel renders dimmed.
+    /// Harness turn counter, mirrored each frame. Surfaced inside the
+    /// Activity modal as `turn N`, and shown in the activity bar.
     pub turn_count: u64,
     /// Current tool round within the active turn (1-indexed for display:
     /// `0` means the turn has started but no model request has fired yet —
@@ -242,6 +238,13 @@ pub struct App {
     /// from the response listener; shown in the activity bar as
     /// `turn N · round M · <status>`.
     pub current_round: u64,
+    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
+    /// While > 0 the activity bar appends a `⚠ stalled: N — Esc to interrupt`
+    /// segment. Mirrored each frame from the response listener.
+    pub stall_rounds: u64,
+    /// Wall-clock instant the current turn started, or `None` between turns.
+    /// Drives the muted `<elapsed>` segment in the activity bar.
+    pub turn_started_at: Option<std::time::Instant>,
     /// Cached content of the plan file currently shown in `Modal::PlanPreview`.
     /// Loaded from disk when the modal opens so the preview does not flicker
     /// on every redraw; cleared on close so the next open re-reads the file
@@ -250,6 +253,9 @@ pub struct App {
     /// Scroll offset inside `Modal::PlanPreview`. Reset to 0 each time the
     /// modal opens.
     pub plan_preview_scroll: u16,
+    /// Scroll offset inside `Modal::Activity`. Reset to 0 each time the modal
+    /// opens; clamped each frame by the modal's body renderer.
+    pub activity_scroll: usize,
     pub pending_permission: Option<PermissionRequest>,
     pub pending_question: Option<UserQuestionRequest>,
     /// Selected option indices per question. Outer vec parallels

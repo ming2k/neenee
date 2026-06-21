@@ -51,28 +51,8 @@ pub(super) const HINT_BAR_GAP_MIN: usize = 2;
 /// Gap between adjacent right-aligned hint segments.
 pub(super) const HINT_BAR_SEGMENT_GAP: usize = 2;
 
-/// Goal bar: a single-line strip shown directly above the activity bar (and
-/// thus above the input box) only while a goal is in the `Active` state. It
-/// carries the objective excerpt and checklist progress, and is clickable to
-/// surface the full goal via `/goal status`. Hidden in sub-agent view and
-/// while overlay chrome is hidden.
-pub(super) const GOAL_BAR_ROWS: u16 = 1;
-/// Upper bound on the displayed goal objective excerpt shown in the goal bar.
-pub(super) const GOAL_OBJECTIVE_MAX_CHARS: usize = 28;
-
 pub(super) const STATUS_BAR_ROWS: u16 = 1;
 pub(super) const SUBAGENT_BAR_ROWS: u16 = 1;
-
-/// Plan progress sticky panel: a card pinned above the input box whenever an
-/// active plan is set and chrome is visible. Collapsed it is a single row
-/// (left accent bar + plan name + total progress + the active section);
-/// clicking it expands to one row per section in file order. Hidden in
-/// sub-agent view and while overlay chrome is hidden.
-pub(super) const PLAN_PANEL_COLLAPSED_ROWS: u16 = 1;
-/// Upper bound on the expanded panel's total height (header + visible
-/// sections). Plans with more sections elide the tail with `…` so the panel
-/// never eats the transcript.
-pub(super) const PLAN_PANEL_EXPANDED_MAX_ROWS: u16 = 7;
 
 /// Horizontal inset applied to the footer area containing status/composer/hints.
 pub(super) const FOOTER_H_INSET: u16 = TRANSCRIPT_H_INSET;

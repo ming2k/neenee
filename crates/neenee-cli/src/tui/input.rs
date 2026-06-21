@@ -569,6 +569,7 @@ pub fn process_event(
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
                     super::Modal::PlanPreview => InputAction::CloseModal,
+                    super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
                             return InputAction::ActivateFocusedTarget;
@@ -1114,6 +1115,7 @@ pub fn process_event(
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::PlanPreview => InputAction::ScrollUp,
+                    super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
@@ -1150,6 +1152,7 @@ pub fn process_event(
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::PlanPreview => InputAction::ScrollDown,
+                    super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {

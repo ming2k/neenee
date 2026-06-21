@@ -32,9 +32,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
-    PermissionRequest, PlanProgress, ProviderPickerSnapshot, Role, SessionContextSnapshot,
-    SessionOverview, UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal, GoalChecklistStatus,
+    HarnessSnapshot, Message, PermissionRequest, PlanProgress, PlanSectionStatus,
+    ProviderPickerSnapshot, Role, SessionContextSnapshot, SessionOverview, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
@@ -114,6 +114,16 @@ pub async fn run_tui(
     // renders it as `round M` alongside the turn number.
     let current_round: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let current_round_clone = current_round.clone();
+    // Stall alert level (consecutive read-only rounds). Bumped by future stall-
+    // detection logic; reset at each turn boundary. Dormant until that logic
+    // lands, but wired through so the activity bar's `⚠ stalled` segment is
+    // ready.
+    let stall_rounds: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let stall_rounds_clone = stall_rounds.clone();
+    // Wall-clock instant the current turn started. Stamped on a "running"
+    // HarnessState so the activity bar can render a live `<elapsed>` segment.
+    let turn_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    let turn_started_at_clone = turn_started_at.clone();
     // One-shot signals from the response listener to the event loop. The
     // listener can't touch App or send AgentRequests directly, so it stashes
     // the request here and the event loop drains it next frame.
@@ -471,11 +481,17 @@ pub async fn run_tui(
                         // A new turn resets the round counter; it stays 0
                         // until the first `RoundStarted` of the turn lands.
                         *current_round_clone.lock().await = 0;
+                        // Reset the stall alert and stamp the turn timer so the
+                        // activity bar can render a live `<elapsed>` segment.
+                        *stall_rounds_clone.lock().await = 0;
+                        *turn_started_at_clone.lock().await = Some(std::time::Instant::now());
                     }
                     ir_clone.store(running, Ordering::SeqCst);
                     if !running {
                         activity_clone.lock().await.clear();
                         *current_round_clone.lock().await = 0;
+                        *stall_rounds_clone.lock().await = 0;
+                        *turn_started_at_clone.lock().await = None;
                     }
                     // A harness state change is always a turn boundary
                     // (idle at the end of a turn, "running"/"loop N/M" at the
@@ -497,13 +513,28 @@ pub async fn run_tui(
                     finalize_streaming_reasoning(&mut msgs, duration_ms);
                 }
                 AgentResponse::GoalUpdated(goal) => {
+                    let prev = harness_clone.lock().await.goal.clone();
+                    if let Some(text) = describe_goal_change(prev.as_ref(), &goal) {
+                        messages_clone
+                            .lock()
+                            .await
+                            .push(TranscriptMessage::notice(NoticeSeverity::Info, text));
+                    }
                     harness_clone.lock().await.goal = Some(goal);
                 }
                 AgentResponse::ModeChanged(mode) => {
                     harness_clone.lock().await.mode = mode;
                 }
                 AgentResponse::PlanProgressUpdated(progress) => {
+                    let prev = plan_progress_clone.lock().await.clone();
+                    let notices = describe_plan_change(prev.as_ref(), progress.as_ref());
                     *plan_progress_clone.lock().await = progress;
+                    if !notices.is_empty() {
+                        let mut msgs = messages_clone.lock().await;
+                        for text in notices {
+                            msgs.push(TranscriptMessage::notice(NoticeSeverity::Info, text));
+                        }
+                    }
                 }
                 AgentResponse::OpenPlanPreview(path) => {
                     *open_plan_preview_clone.lock().await = Some(path);
@@ -548,6 +579,17 @@ pub async fn run_tui(
                     *cp_clone.lock().await = provider;
                     *cm_clone.lock().await = model;
                 }
+                AgentResponse::StallWarning { consecutive_rounds } => {
+                    // Mirror the live streak into the runtime cell so the
+                    // activity bar's "⚠ stalled: N read-only rounds"
+                    // segment ticks up each round while stalled and
+                    // clears (N = 0) when the model recovers. The frame
+                    // loop copies this into `App::stall_rounds`, which
+                    // `draw_activity_bar` reads. Cast usize → u64 to
+                    // match the activity bar's counter type.
+                    *stall_rounds_clone.lock().await =
+                        consecutive_rounds as u64;
+                }
             }
         }
     });
@@ -564,7 +606,7 @@ pub async fn run_tui(
         max_scroll: 0,
         sticky_step: None,
         sticky_rect: None,
-        goal_rect: None,
+        activity_rect: None,
         sticky_summary_line: None,
         pin_summary_line: None,
         focus_stack: Vec::new(),
@@ -589,12 +631,13 @@ pub async fn run_tui(
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
-        plan_panel_expanded: false,
-        plan_rect: None,
         turn_count: 0,
         current_round: 0,
+        stall_rounds: 0,
+        turn_started_at: None,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
+        activity_scroll: 0,
         pending_permission: None,
         pending_question: None,
         question_selected: Vec::new(),
@@ -659,6 +702,8 @@ pub async fn run_tui(
             plan_progress,
             turn_count,
             current_round,
+            stall_rounds,
+            turn_started_at,
             open_plan_preview,
             trigger_verification,
         },
@@ -706,6 +751,107 @@ pub async fn start_tui(
         tui_config,
     )
     .await
+}
+
+/// Lowercase word for a goal-checklist status, used in inline transcript
+/// notices so a status flip reads as `run tests → in progress`.
+fn goal_status_label(status: GoalChecklistStatus) -> &'static str {
+    match status {
+        GoalChecklistStatus::Pending => "pending",
+        GoalChecklistStatus::InProgress => "in progress",
+        GoalChecklistStatus::Completed => "done",
+        GoalChecklistStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Lowercase word for a plan-section status, used in inline transcript notices
+/// so a section change reads as `Key Changes → done`.
+fn plan_status_label(status: PlanSectionStatus) -> &'static str {
+    match status {
+        PlanSectionStatus::Pending => "pending",
+        PlanSectionStatus::InProgress => "in progress",
+        PlanSectionStatus::Done => "done",
+        PlanSectionStatus::Skipped => "skipped",
+    }
+}
+
+/// Format an inline-transcript notice for a goal update, or `None` when the
+/// update carries nothing user-visible (a no-op re-broadcast of the same
+/// goal). The goal bar is gone from the footer; these notices are how goal
+/// changes now scroll with the transcript instead of living in a pinned bar.
+fn describe_goal_change(prev: Option<&Goal>, new: &Goal) -> Option<String> {
+    let done = new
+        .checklist
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
+            )
+        })
+        .count();
+    let total = new.checklist.len();
+    let summary = |prefix: &str| -> String {
+        let mut s = format!("{prefix} · {}", new.objective);
+        if total > 0 {
+            s.push_str(&format!(" [{}/{}]", done, total));
+        }
+        s
+    };
+    if new.is_complete && prev.is_none_or(|p| !p.is_complete) {
+        return Some(summary("✓ goal complete"));
+    }
+    let prev = prev?;
+    if prev.objective != new.objective || prev.checklist.len() != new.checklist.len() {
+        return Some(summary("goal set"));
+    }
+    // Same objective + length: surface the first checklist item whose status
+    // changed so the user sees which task moved.
+    for (a, b) in prev.checklist.iter().zip(new.checklist.iter()) {
+        if a.status != b.status {
+            return Some(format!(
+                "{} · {} → {}",
+                new.objective,
+                b.content,
+                goal_status_label(b.status),
+            ));
+        }
+    }
+    None
+}
+
+/// Format inline-transcript notices for a plan-progress update. Returns one
+/// line per section whose status changed (so each step the model ticks off
+/// leaves a breadcrumb in the transcript), plus a tally line when a plan first
+/// appears or its section list grows/shrinks. Empty when nothing changed.
+fn describe_plan_change(prev: Option<&PlanProgress>, new: Option<&PlanProgress>) -> Vec<String> {
+    let Some(new) = new else {
+        return Vec::new();
+    };
+    let path = new
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| new.path.display().to_string());
+    let done = new.done_count();
+    let total = new.sections.len();
+    let Some(prev) = prev else {
+        return vec![format!("plan started · {path}  {done}/{total}")];
+    };
+    let mut out = Vec::new();
+    for (a, b) in prev.sections.iter().zip(new.sections.iter()) {
+        if a.status != b.status {
+            out.push(format!(
+                "{path} · {} → {}",
+                b.name,
+                plan_status_label(b.status),
+            ));
+        }
+    }
+    if prev.sections.len() != new.sections.len() {
+        out.push(format!("plan · {path}  {done}/{total}"));
+    }
+    out
 }
 
 #[cfg(test)]

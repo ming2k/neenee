@@ -42,7 +42,11 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
     match ctx.goal {
         Some(goal) => out.push_str(&format!(
             "- **Goal [{}]:** {}\n",
-            if goal.is_complete { "complete" } else { "active" },
+            if goal.is_complete {
+                "complete"
+            } else {
+                "active"
+            },
             goal.objective
         )),
         None => out.push_str("- **Goal:** _none_\n"),

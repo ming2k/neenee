@@ -493,10 +493,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
                 )));
             }
         }
-    } else if agent
-        .get_goal()
-        .is_some_and(|goal| goal.is_complete)
-    {
+    } else if agent.get_goal().is_some_and(|goal| goal.is_complete) {
         completed = true;
     }
 
@@ -614,6 +611,9 @@ pub fn relay_agent_event(
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PlanProgressUpdated(progress) => AgentResponse::PlanProgressUpdated(progress),
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
+        AgentEvent::StallWarning { consecutive_rounds } => {
+            AgentResponse::StallWarning { consecutive_rounds }
+        }
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
         AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),
         AgentEvent::SubTask {

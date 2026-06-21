@@ -192,11 +192,7 @@ impl Tool for UpdateGoalTool {
 
         match args.status.as_str() {
             "complete" => {
-                let goal = self
-                    .context
-                    .goal_service
-                    .mark_complete(&thread_id)
-                    .await?;
+                let goal = self.context.goal_service.mark_complete(&thread_id).await?;
                 Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
             }
             other => Err(format!("invalid update_goal status: {other}")),

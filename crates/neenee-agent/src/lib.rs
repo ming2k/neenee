@@ -64,12 +64,12 @@ pub use neenee_core::{
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
     AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal, GoalChecklistItem,
     GoalChecklistStatus, GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
-    McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
-    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
-    ProviderStreamEvent, PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig,
-    SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolResult, ToolStream,
-    Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply,
-    UserQuestionRequest, WebSearchConfig, PRUNED_TOOL_PLACEHOLDER,
+    McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision, PermissionRequest,
+    Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent,
+    PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent, TokenUsage,
+    Tool, ToolAccess, ToolCall, ToolOutput, ToolResult, ToolStream, Transport, TurnOutcome,
+    TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    WebSearchConfig, PRUNED_TOOL_PLACEHOLDER,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -89,6 +89,23 @@ use tokio_util::sync::CancellationToken;
 /// transcript bounded; the user can interrupt at any time with `Esc` or
 /// `/loop stop`.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
+
+/// Default for the per-turn stall detector threshold. The live value is
+/// held in `Agent::stall_threshold` (mutated by
+/// `Agent::set_stall_threshold`, seeded from `Config::agent.stall_threshold`)
+/// so this const only seeds the default — it must match
+/// `neenee_store::config::DEFAULT_STALL_THRESHOLD` so a `config.toml`
+/// with no `[agent]` table behaves identically to one that explicitly
+/// sets the default.
+const STALL_THRESHOLD: usize = 8;
+
+/// Delta added to the stall threshold to derive the hard-stop line.
+/// Exposed as a const (not a config field) because the window between
+/// the reflection nudge and the hard stop is a tuning knob for *how
+/// forgiving the recovery window is*, not for *whether detection fires*;
+/// conflating them via a single threshold keeps the user-facing config
+/// minimal.
+const STALL_HARD_STOP_DELTA: usize = 6;
 
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
 /// deltas) before the stream is considered stalled. All LLM providers use

@@ -206,7 +206,7 @@ fn context_chars_of(messages: &[TranscriptMessage]) -> usize {
 /// Rough token estimate for the active context, using the same ~4 chars/token
 /// heuristic as `neenee_core`'s `estimate_string_tokens_len`.
 pub fn estimate_context_tokens(messages: &[TranscriptMessage]) -> usize {
-    (context_chars_of(messages) / 4).max(1)
+    context_chars_of(messages) / 4
 }
 
 /// Lifecycle of a user-authored message from the user's point of view.
