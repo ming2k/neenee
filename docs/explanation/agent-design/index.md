@@ -17,7 +17,7 @@ variation on these themes rather than a one-off mechanism.
 
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
-| **Capability and access gating** | One permission surface (`ToolAccess`) feeds two gates: Plan mode and the permission broker. A tool declares `Read`/`Write` once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
+| **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: Plan mode and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
 | **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; goal state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Goals](goals.md) |
 | **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity and budgets are persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents/index.md) |
 | **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents/index.md), [Harness architecture](harness.md) |
@@ -48,10 +48,11 @@ model of one agent turn.
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
    exemption for plan files.
-6. [Sub-agents](subagents/index.md) — the `task` tool's isolated read-only child
-   agent. The reference for isolation: what is shared (the provider), what is
-   fresh (history, goals, plan state), and how events stream back through one
-   pipeline.
+6. [Sub-agents](subagents/index.md) — the `task` tool's isolated child agent
+   and the independent verifier. The reference for isolation: what is shared
+   (the provider), what is fresh (history, goals, plan state), how events
+   stream back through one pipeline, and how a profile admits tools by
+   capability axis.
 7. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
    tools. The reference for failure isolation and for how an extension surface
    reuses the same `Tool` trait and execution path as built-ins.

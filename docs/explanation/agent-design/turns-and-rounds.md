@@ -110,7 +110,7 @@ turns, never partial rounds.
 
 A sub-agent runs its own turn with its own independent round budget — the
 parent's round counter does not move while the child works. See
-[Sub-agents](subagents.md).
+[Sub-agents](subagents/index.md).
 
 ## A turn of several rounds
 
@@ -142,5 +142,5 @@ of all four rounds, and the plan's staleness counter advances by one turn.
   gating, execution, and re-entry into the transcript
 - [Goals](goals.md) — turn-scoped token and time accounting
 - [Plan mode](plan-mode.md) — plan staleness measured in turns
-- [Sub-agents](subagents.md) — independent turns and round budgets for
+- [Sub-agents](subagents/index.md) — independent turns and round budgets for
   child agents
