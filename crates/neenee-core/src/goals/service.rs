@@ -1,30 +1,30 @@
 use std::time::Instant;
 
-use tokio::sync::Semaphore;
-
 use super::store::GoalStore;
-use super::{Goal, GoalAccountingResult, GoalStatus, ThreadGoal, TokenUsage};
+use super::{Goal, ThreadGoal};
 
+/// Slimmed (ADR-0010) facade over the `thread_goals` SQLite table.
+///
+/// The pre-0010 status machine, token budget, elapsed-time accounting,
+/// `pause` / `resume` / `mark_blocked` transitions, and the
+/// `accounting_lock` semaphore are all gone. The remaining surface is the
+/// minimum needed to back `/goal <objective>`, `/goal edit`, `/goal done`,
+/// `/goal clear`, and the `[NEENEE_GOAL_COMPLETE]` marker path.
 pub struct GoalService {
     store: GoalStore,
-    accounting_lock: Semaphore,
 }
 
 impl Clone for GoalService {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
-            accounting_lock: Semaphore::new(1),
         }
     }
 }
 
 impl GoalService {
     pub fn new(store: GoalStore) -> Self {
-        Self {
-            store,
-            accounting_lock: Semaphore::new(1),
-        }
+        Self { store }
     }
 
     pub async fn get_goal(&self, thread_id: &str) -> Result<Option<Goal>, String> {
@@ -34,14 +34,10 @@ impl GoalService {
             .map(|goal| goal.map(runtime_goal_from_persisted))
     }
 
-    /// Set or replace the goal for a thread. This is the user-facing entry point.
-    pub async fn set_goal(
-        &self,
-        thread_id: &str,
-        objective: &str,
-        status: GoalStatus,
-        token_budget: Option<i64>,
-    ) -> Result<Goal, String> {
+    /// Set or replace the goal for a thread. Always creates an active,
+    /// incomplete goal — the pre-0010 `status` and `token_budget` arguments
+    /// are gone.
+    pub async fn set_goal(&self, thread_id: &str, objective: &str) -> Result<Goal, String> {
         let objective = objective.trim();
         if objective.is_empty() {
             return Err("goal objective must not be empty".to_string());
@@ -49,216 +45,60 @@ impl GoalService {
         if objective.chars().count() > 4000 {
             return Err("goal objective must be at most 4000 characters".to_string());
         }
-        if let Some(budget) = token_budget {
-            if budget <= 0 {
-                return Err("goal budget must be positive".to_string());
-            }
-        }
-
-        // Acquire the accounting lock so an idle continuation cannot interleave
-        // with a user mutation.
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let goal = self
-            .store
-            .replace_goal(thread_id, objective, status, token_budget)
-            .await?;
+        let goal = self.store.replace_goal(thread_id, objective).await?;
         Ok(runtime_goal_from_persisted(goal))
     }
 
-    pub async fn update_goal(
+    /// Rewrite the objective of the existing goal. Returns `None` if no goal
+    /// is set for the thread.
+    pub async fn update_objective(
         &self,
         thread_id: &str,
-        objective: Option<&str>,
-        status: Option<GoalStatus>,
-        token_budget: Option<Option<i64>>,
+        objective: &str,
     ) -> Result<Option<Goal>, String> {
-        if let Some(objective) = objective {
-            if objective.trim().is_empty() {
-                return Err("goal objective must not be empty".to_string());
-            }
-            if objective.chars().count() > 4000 {
-                return Err("goal objective must be at most 4000 characters".to_string());
-            }
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return Err("goal objective must not be empty".to_string());
         }
-        if let Some(Some(budget)) = token_budget {
-            if budget <= 0 {
-                return Err("goal budget must be positive".to_string());
-            }
+        if objective.chars().count() > 4000 {
+            return Err("goal objective must be at most 4000 characters".to_string());
         }
-
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let goal = self
-            .store
-            .update_goal(thread_id, objective, status, token_budget, None)
-            .await?;
+        let goal = self.store.update_objective(thread_id, objective).await?;
         Ok(goal.map(runtime_goal_from_persisted))
     }
 
     pub async fn clear_goal(&self, thread_id: &str) -> Result<bool, String> {
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
         let deleted = self.store.delete_goal(thread_id).await?;
         Ok(deleted.is_some())
     }
 
-    pub async fn pause(&self, thread_id: &str) -> Result<Option<Goal>, String> {
-        self.update_goal_status(thread_id, GoalStatus::Paused).await
-    }
-
-    pub async fn resume(&self, thread_id: &str) -> Result<Option<Goal>, String> {
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some(goal) = self.store.get_goal(thread_id).await? else {
-            return Ok(None);
-        };
-        if !goal.status.can_be_resumed() {
-            return Err(format!("cannot resume goal with status {:?}", goal.status));
-        }
-        let new_status = if goal.status == GoalStatus::BudgetLimited {
-            GoalStatus::BudgetLimited
-        } else {
-            GoalStatus::Active
-        };
-        let updated = self
-            .store
-            .update_goal(thread_id, None, Some(new_status), None, Some(&goal.goal_id))
-            .await?;
-        Ok(updated.map(runtime_goal_from_persisted))
-    }
-
     pub async fn mark_complete(&self, thread_id: &str) -> Result<Option<Goal>, String> {
-        self.update_goal_status(thread_id, GoalStatus::Complete)
-            .await
+        let goal = self.store.mark_complete(thread_id).await?;
+        Ok(goal.map(runtime_goal_from_persisted))
     }
 
-    pub async fn mark_blocked(&self, thread_id: &str) -> Result<Option<Goal>, String> {
-        self.update_goal_status(thread_id, GoalStatus::Blocked)
-            .await
-    }
-
-    async fn update_goal_status(
-        &self,
-        thread_id: &str,
-        new_status: GoalStatus,
-    ) -> Result<Option<Goal>, String> {
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some(goal) = self.store.get_goal(thread_id).await? else {
-            return Ok(None);
-        };
-
-        let allowed = matches!(
-            (goal.status, new_status),
-            (GoalStatus::Active, GoalStatus::Paused)
-                | (GoalStatus::Active, GoalStatus::Blocked)
-                | (GoalStatus::Active, GoalStatus::Complete)
-                | (GoalStatus::Paused, GoalStatus::Active)
-                | (GoalStatus::Blocked, GoalStatus::Active)
-                | (GoalStatus::Blocked, GoalStatus::Complete)
-                | (GoalStatus::UsageLimited, GoalStatus::Active)
-                | (GoalStatus::UsageLimited, GoalStatus::Complete)
-                | (GoalStatus::BudgetLimited, GoalStatus::Active)
-                | (GoalStatus::BudgetLimited, GoalStatus::Complete)
-                | (GoalStatus::Complete, GoalStatus::Active)
-        );
-
-        if !allowed {
-            return Err(format!(
-                "cannot transition goal from {:?} to {:?}",
-                goal.status, new_status
-            ));
-        }
-
-        let updated = self
-            .store
-            .update_goal(thread_id, None, Some(new_status), None, Some(&goal.goal_id))
-            .await?;
-        Ok(updated.map(runtime_goal_from_persisted))
-    }
-
-    /// Record the time/token cost of a finished turn against the active goal.
-    pub async fn account_turn(
-        &self,
-        thread_id: &str,
-        token_usage: TokenUsage,
-        elapsed_seconds: i64,
-    ) -> Result<GoalAccountingResult, String> {
-        let _permit = self
-            .accounting_lock
-            .acquire()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let Some(goal) = self.store.get_goal(thread_id).await? else {
-            return Ok(GoalAccountingResult::Unchanged);
-        };
-
-        if !matches!(goal.status, GoalStatus::Active | GoalStatus::BudgetLimited) {
-            return Ok(GoalAccountingResult::Unchanged);
-        }
-
-        let updated = self
-            .store
-            .account_usage(
-                thread_id,
-                elapsed_seconds,
-                token_usage.total_tokens,
-                Some(&goal.goal_id),
-            )
-            .await?;
-
-        match updated {
-            Some(goal) => Ok(GoalAccountingResult::Updated(runtime_goal_from_persisted(
-                goal,
-            ))),
-            None => Ok(GoalAccountingResult::Unchanged),
-        }
-    }
-
-    /// Convenience: check whether a thread has an active goal that should auto-continue.
-    pub async fn should_auto_continue(&self, thread_id: &str) -> Result<bool, String> {
-        let goal = self.get_goal(thread_id).await?;
-        Ok(goal.is_some_and(|g| g.status == GoalStatus::Active))
-    }
-
-    /// Convenience: fetch the current goal and ensure it is active.
+    /// Convenience: fetch the current goal only if it is still active
+    /// (i.e. not yet marked complete).
     pub async fn active_goal(&self, thread_id: &str) -> Result<Option<Goal>, String> {
         self.get_goal(thread_id)
             .await
-            .map(|g| g.filter(|g| g.status == GoalStatus::Active))
+            .map(|g| g.filter(|g| !g.is_complete))
     }
 }
 
 fn runtime_goal_from_persisted(goal: ThreadGoal) -> Goal {
     Goal {
         objective: goal.objective,
-        status: goal.status,
-        checklist: Vec::new(), // checklist is kept in-memory on Agent for now
-        tokens_used: goal.tokens_used,
-        token_budget: goal.token_budget,
-        time_used_seconds: goal.time_used_seconds,
+        is_complete: goal.is_complete,
+        // The checklist is intentionally not persisted — it lives in memory
+        // on the Agent and is re-attached by `refresh_agent_goal`.
+        checklist: Vec::new(),
     }
 }
 
+/// Turn-level elapsed-time keeper. Kept after ADR-0010 even though
+/// goal-level time accounting is gone, because the harness still uses it
+/// for per-turn telemetry (e.g. plan-progress timestamps).
 pub struct TurnTimer {
     start: Instant,
 }

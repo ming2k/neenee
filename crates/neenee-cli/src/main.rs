@@ -17,16 +17,15 @@ use neenee_agent::TaskTool;
 #[cfg(test)]
 use neenee_core::{async_trait, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStatus, GoalStore,
-    McpConnectionStatus, McpServerInfo, Message, ModelInfo, Provider, SessionContextSnapshot,
-    SessionOverview, Tool,
+    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStore, McpConnectionStatus,
+    McpServerInfo, Message, ModelInfo, Provider, SessionContextSnapshot, SessionOverview, Tool,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
     config::Config,
     embedding, lock, paths, provider_usage,
     search_tool::SearchHistoryTool,
-    session::{self, discard_trailing_loop_prompts, SessionStore},
+    session::{self, discard_trailing_loop_prompts, SessionStore, UNCAPPED_ITERATIONS},
 };
 use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
 use neenee_tools::{
@@ -62,15 +61,8 @@ fn load_legacy_goal_from_config() -> Option<Goal> {
     let objective = legacy.harness_goal?;
     Some(Goal {
         objective,
-        status: if legacy.harness_goal_completed {
-            GoalStatus::Complete
-        } else {
-            GoalStatus::Active
-        },
+        is_complete: legacy.harness_goal_completed,
         checklist: legacy.harness_goal_checklist,
-        tokens_used: 0,
-        token_budget: None,
-        time_used_seconds: 0,
     })
 }
 
@@ -487,9 +479,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_thread_id(&thread_id);
     if goal_service.get_goal(&thread_id).await?.is_none() {
         if let Some(goal) = load_legacy_goal_from_config() {
-            let _ = goal_service
-                .set_goal(&thread_id, &goal.objective, goal.status, goal.token_budget)
-                .await;
+            let _ = goal_service.set_goal(&thread_id, &goal.objective).await;
         }
     }
     refresh_agent_goal(&agent, &goal_service, &thread_id).await;
@@ -1238,24 +1228,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "No goal to complete.",
                                 )
                                 .await;
-                            } else if rest == "pause" {
-                                report_goal_result(
-                                    &resp_tx,
-                                    &agent,
-                                    goal_service.pause(&thread_id).await,
-                                    |_| "Goal paused.".to_string(),
-                                    "No active goal to pause.",
-                                )
-                                .await;
-                            } else if rest == "resume" {
-                                report_goal_result(
-                                    &resp_tx,
-                                    &agent,
-                                    goal_service.resume(&thread_id).await,
-                                    |_| "Goal resumed.".to_string(),
-                                    "No goal to resume.",
-                                )
-                                .await;
                             } else if rest.starts_with("edit ") {
                                 let new_objective = rest.strip_prefix("edit ").unwrap_or("").trim();
                                 if new_objective.is_empty() {
@@ -1264,7 +1236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ));
                                 } else {
                                     match goal_service
-                                        .update_goal(&thread_id, Some(new_objective), None, None)
+                                        .update_objective(&thread_id, new_objective)
                                         .await
                                     {
                                         Ok(Some(goal)) => {
@@ -1293,57 +1265,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                            } else if rest.starts_with("budget ") {
-                                let budget_arg = rest.strip_prefix("budget ").unwrap_or("").trim();
-                                if budget_arg == "clear" {
-                                    report_goal_result(
-                                        &resp_tx,
-                                        &agent,
-                                        goal_service
-                                            .update_goal(&thread_id, None, None, Some(None))
-                                            .await,
-                                        |_| "Goal token budget cleared.".to_string(),
-                                        "No goal to update.",
-                                    )
-                                    .await;
-                                } else {
-                                    match budget_arg.parse::<i64>() {
-                                        Ok(budget) if budget > 0 => {
-                                            report_goal_result(
-                                                &resp_tx,
-                                                &agent,
-                                                goal_service
-                                                    .update_goal(
-                                                        &thread_id,
-                                                        None,
-                                                        None,
-                                                        Some(Some(budget)),
-                                                    )
-                                                    .await,
-                                                |_| {
-                                                    format!(
-                                                        "Goal token budget set to {} tokens.",
-                                                        budget
-                                                    )
-                                                },
-                                                "No goal to update.",
-                                            )
-                                            .await;
-                                        }
-                                        _ => {
-                                            let _ = resp_tx.send(AgentResponse::Error(
-                                                "Usage: /goal budget <tokens> | /goal budget clear"
-                                                    .to_string(),
-                                            ));
-                                        }
-                                    }
-                                }
+                            } else if rest == "pause" || rest == "resume" || rest.starts_with("budget ") {
+                                // Pre-ADR-0010 subcommands removed: the status
+                                // machine and token budget no longer exist.
+                                let _ = resp_tx.send(AgentResponse::Error(
+                                    "The /goal pause, /goal resume, and /goal budget subcommands were removed: \
+                                     the goal no longer carries a status machine or token budget. \
+                                     Use /goal <objective>, /goal edit, /goal done, or /goal clear."
+                                        .to_string(),
+                                ));
                             } else {
                                 // Set a new goal.
-                                match goal_service
-                                    .set_goal(&thread_id, rest, GoalStatus::Active, None)
-                                    .await
-                                {
+                                match goal_service.set_goal(&thread_id, rest).await {
                                     Ok(goal) => {
                                         agent.set_goal(goal.clone());
                                         emit_goal_updated(&resp_tx, &goal);
@@ -1361,8 +1294,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         "/loop" => {
                             let thread_id = session.id().await;
-                            let argument = parts.get(1).copied().unwrap_or("8");
-                            if argument == "stop" {
+                            // Everything after "/loop " — preserves spaces inside
+                            // the objective text so `/loop fix the bug` carries the
+                            // full sentence as the goal.
+                            let raw_args = cmd.strip_prefix("/loop").unwrap_or("").trim();
+                            if raw_args == "stop" {
                                 let mut current = ctt_clone.write().await;
                                 if let Some(token) = current.take() {
                                     token.cancel();
@@ -1377,18 +1313,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 send_harness_state(&resp_tx, &agent, "idle");
                                 continue;
                             }
-                            if argument == "status" {
+                            if raw_args == "status" {
                                 let running = ctt_clone.read().await.is_some();
                                 let status = if running { "running" } else { "idle" };
                                 let checkpoint = session.checkpoint().await;
                                 let detail = checkpoint
                                     .map(|checkpoint| {
+                                        let budget =
+                                            if checkpoint.max_iterations == UNCAPPED_ITERATIONS {
+                                                "uncapped".to_string()
+                                            } else {
+                                                // Legacy pre-ADR-0009 checkpoint: show the
+                                                // original finite budget for traceability.
+                                                format!("cap {}", checkpoint.max_iterations)
+                                            };
                                         format!(
-                                            "{} {}/{} for {}",
+                                            "{} · iteration {} ({}) for {}",
                                             checkpoint.status,
                                             checkpoint.iteration,
-                                            checkpoint.max_iterations,
-                                            checkpoint.goal
+                                            budget,
+                                            checkpoint.goal,
                                         )
                                     })
                                     .unwrap_or_else(|| "no checkpoint".to_string());
@@ -1399,7 +1343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 send_harness_state(&resp_tx, &agent, status);
                                 continue;
                             }
-                            if argument == "resume" {
+                            if raw_args == "resume" {
                                 if ctt_clone.read().await.is_some() {
                                     let _ = resp_tx.send(AgentResponse::Error(
                                         "A chat or loop task is already running.".to_string(),
@@ -1435,12 +1379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 match goal_service
-                                    .set_goal(
-                                        &thread_id,
-                                        &checkpoint.goal,
-                                        GoalStatus::Active,
-                                        None,
-                                    )
+                                    .set_goal(&thread_id, &checkpoint.goal)
                                     .await
                                 {
                                     Ok(goal) => {
@@ -1455,9 +1394,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Resuming goal loop at iteration {}/{}{}.",
+                                    "Resuming goal loop at iteration {}{}.",
                                     start_iteration,
-                                    checkpoint.max_iterations,
                                     if discarded > 0 {
                                         " after removing an incomplete control prompt"
                                     } else {
@@ -1480,32 +1418,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     checkpoint.goal,
                                     start_iteration,
-                                    checkpoint.max_iterations,
                                 )
                                 .await;
                                 continue;
                             }
 
-                            let max_iterations = match argument.parse::<usize>() {
-                                Ok(value) if (1..=50).contains(&value) => value,
-                                _ => {
-                                    let _ = resp_tx.send(AgentResponse::Error(
-                                        "Usage: /loop <1-50> | /loop resume | /loop stop | /loop status".to_string(),
-                                    ));
-                                    continue;
+                            // Reject the legacy numeric form `/loop <N>`: the
+                            // iteration cap was removed (ADR-0009). A pure-number
+                            // argument is unambiguously the old syntax, so route
+                            // the user to the new commands instead of silently
+                            // treating the number as a goal.
+                            if raw_args.parse::<usize>().is_ok() {
+                                let _ = resp_tx.send(AgentResponse::Error(
+                                    "The `/loop <N>` form was removed: the loop now runs unbounded. \
+                                     Use `/loop` to start on the current goal, `/loop <objective>` \
+                                     to set a fresh goal and start, or `/loop stop` to interrupt."
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+
+                            // `/loop <content>` sets a fresh goal from the content
+                            // and starts an uncapped loop on it; `/loop` (empty)
+                            // starts an uncapped loop on the existing goal. Either
+                            // way the loop runs until the model emits the completion
+                            // marker, the user interrupts, or an error aborts.
+                            let objective = if raw_args.is_empty() {
+                                match goal_service.active_goal(&thread_id).await {
+                                    Ok(Some(goal)) => {
+                                        let _ = resp_tx.send(AgentResponse::Text(format!(
+                                            "Starting autonomous loop on existing goal: {}",
+                                            goal.objective
+                                        )));
+                                        goal.objective
+                                    }
+                                    Ok(None) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(
+                                            "No active goal. Set one with /goal <objective>, \
+                                             then /loop, or start a fresh loop with \
+                                             /loop <objective>."
+                                                .to_string(),
+                                        ));
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                        continue;
+                                    }
                                 }
-                            };
-                            let goal = match goal_service.active_goal(&thread_id).await {
-                                Ok(Some(goal)) => goal,
-                                Ok(None) => {
-                                    let _ = resp_tx.send(AgentResponse::Error(
-                                        "Set an active goal with /goal <objective> before starting /loop.".to_string()
-                                    ));
-                                    continue;
-                                }
-                                Err(error) => {
-                                    let _ = resp_tx.send(AgentResponse::Error(error));
-                                    continue;
+                            } else {
+                                match goal_service.set_goal(&thread_id, raw_args).await {
+                                    Ok(goal) => {
+                                        agent.set_goal(goal.clone());
+                                        emit_goal_updated(&resp_tx, &goal);
+                                        goal.objective
+                                    }
+                                    Err(error) => {
+                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                        continue;
+                                    }
                                 }
                             };
                             start_goal_loop(
@@ -1522,9 +1493,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     retry_base_ms: config.provider_retry_base_ms,
                                     retry_max_ms: config.provider_retry_max_ms,
                                 },
-                                goal.objective,
+                                objective,
                                 1,
-                                max_iterations,
                             )
                             .await;
                         }
@@ -1704,7 +1674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /sessions — Browse past sessions\n\
                                 /resume [id] — Resume the most recent or selected session\n\
                                 /goal     — Set, inspect, complete, or clear the active goal\n\
-                                /loop [N|resume|status|stop] — Run or resume bounded autonomous goal work\n\
+                                /loop [objective|resume|status|stop] — Run an uncapped autonomous goal loop\n\
                                 /init [path] — Initialize a .neenee/ config tree\n\
                                 /skills [list|reload] — List or reload available skills\n\
                                 /skill <name> — Load a skill by name\n\
@@ -1936,7 +1906,7 @@ fn format_goal_status(goal: &Goal) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "Goal [{}]: {}",
-        goal.status.as_str(),
+        if goal.is_complete { "complete" } else { "active" },
         goal.objective
     ));
 
@@ -1968,53 +1938,7 @@ fn format_goal_status(goal: &Goal) -> String {
         }
     }
 
-    let has_token_budget = goal.token_budget.is_some_and(|b| b > 0);
-    let has_time = goal.time_used_seconds > 0;
-    if has_token_budget || has_time {
-        lines.push(String::new());
-        lines.push("Budget:".to_string());
-        if let Some(budget) = goal.token_budget.filter(|b| *b > 0) {
-            let used = goal.tokens_used;
-            let pct = ((used as f64) / (budget as f64) * 100.0).clamp(0.0, 100.0) as u8;
-            lines.push(format!(
-                "  tokens  {used} / {budget}  {}",
-                budget_bar(pct, 24)
-            ));
-        }
-        if has_time {
-            lines.push(format!(
-                "  time    {}",
-                humanize_seconds(goal.time_used_seconds)
-            ));
-        }
-    }
-
     lines.join("\n")
-}
-
-/// Render a fixed-width ASCII progress bar for `pct` (0..=100). The bar fills
-/// with `#` and empties with `-`, bracketed by `[` / `]` for a total width of
-/// `width` characters (including the brackets).
-fn budget_bar(pct: u8, width: usize) -> String {
-    if width < 4 {
-        return format!("[{pct}%]");
-    }
-    let bar_width = width - 2;
-    let filled = ((pct as usize) * bar_width / 100).min(bar_width);
-    let empty = bar_width - filled;
-    format!("[{}{}]", "#".repeat(filled), "-".repeat(empty))
-}
-
-/// Format a duration in seconds as a compact `Xh YYm` / `Xm YYs` / `Xs` string.
-fn humanize_seconds(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs >= 3600 {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
 }
 
 #[cfg(test)]
@@ -2144,14 +2068,11 @@ mod tests {
     fn goal_status_includes_structured_checklist() {
         let goal = Goal {
             objective: "ship".to_string(),
-            status: GoalStatus::Active,
+            is_complete: false,
             checklist: vec![neenee_core::GoalChecklistItem {
                 content: "verify".to_string(),
                 status: neenee_core::GoalChecklistStatus::InProgress,
             }],
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
         };
 
         let status = format_goal_status(&goal);
@@ -2161,23 +2082,19 @@ mod tests {
     }
 
     #[test]
-    fn goal_status_renders_budget_bar_and_time() {
+    fn goal_status_shows_complete_state() {
+        // Post-ADR-0010: no budget bar, no time line. The state label is
+        // the only thing beyond objective + checklist.
         let goal = Goal {
             objective: "ship".to_string(),
-            status: GoalStatus::Active,
+            is_complete: true,
             checklist: Vec::new(),
-            tokens_used: 40_000,
-            token_budget: Some(50_000),
-            time_used_seconds: 125,
         };
-
         let status = format_goal_status(&goal);
-        // 80% of a 24-char bar (bar_width=22) → 17 filled, 5 empty.
-        let expected_bar = budget_bar(80, 24);
-        assert_eq!(expected_bar.len(), 24);
-        assert_eq!(expected_bar.matches('#').count(), 17);
-        assert!(status.contains(&format!("tokens  40000 / 50000  {expected_bar}")));
-        assert!(status.contains("time    2m05s"));
+        assert!(status.contains("Goal [complete]: ship"));
+        assert!(!status.contains("Budget"));
+        assert!(!status.contains("tokens"));
+        assert!(!status.contains("time"));
     }
 
     #[tokio::test]

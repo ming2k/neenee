@@ -62,15 +62,14 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal, GoalAccountingResult,
-    GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus, GoalStore, HarnessError,
-    HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp,
-    PermissionDecision, PermissionRequest, Provider, ProviderEntry, ProviderPickerRow,
-    ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, RetryableError, Role,
-    SessionOverview, SkillsConfig, SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall,
-    ToolOutput, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion,
-    UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
-    PRUNED_TOOL_PLACEHOLDER,
+    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal, GoalChecklistItem,
+    GoalChecklistStatus, GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
+    McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
+    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
+    ProviderStreamEvent, PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig,
+    SubTaskEvent, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolResult, ToolStream,
+    Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply,
+    UserQuestionRequest, WebSearchConfig, PRUNED_TOOL_PLACEHOLDER,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -81,13 +80,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Cap on the number of tool rounds within a single turn. Prevents runaway
-/// tool loops from burning the entire context budget.
-const MAX_TOOL_ROUNDS: usize = 32;
-
 /// Maximum number of times the same tool call (same name + same arguments)
 /// may repeat within a turn before the agent treats it as a stuck loop and
-/// errors out.
+/// errors out. This is the only per-turn backstop: distinct tool calls are
+/// allowed to run unbounded, matching the codex / claude-code model where
+/// the agentic loop runs until the model itself stops calling tools. Context
+/// compaction (`compaction_max_chars` plus mid-turn pruning) keeps the
+/// transcript bounded; the user can interrupt at any time with `Esc` or
+/// `/loop stop`.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
 
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call

@@ -159,18 +159,25 @@ even when a runtime omits ids or emits duplicates. So the wire id and
 the UI id are separate namespaces: one satisfies the protocol, the other
 keeps the display stable.
 
-## Loops need bounds
+## Unbounded by design
 
-A tool-calling loop is unbounded by default — the model can keep
-proposing calls indefinitely. Two execution bounds rein it in: a cap on
-total rounds per turn, and a cap on consecutive identical calls. The
-repetition guard resets on any distinct call or interleaved text, so a
-productive loop runs on while a stuck one stops.
+A tool-calling loop is **uncapped by design**: the model is free to keep
+proposing distinct tool calls until it emits a final assistant message
+with no tool call. This matches the codex / claude-code agentic-loop
+model — the loop runs until the model itself decides it is done, with
+context compaction as the backstop that keeps long turns bounded and
+the user able to interrupt at any time (ADR-0009).
 
-These are execution bounds, not a security sandbox. They keep a loop
-from running away; they do not constrain what a tool is allowed to do.
-The safety surface — authorization, plan gating — is the gates above.
-For the full bound table and how it interacts with retry, see
+The one in-loop guardrail is the **repeated-call guard**: three
+consecutive identical calls (same name + same arguments) trip it, the
+fourth is rejected as an error, and the turn aborts. The guard resets on
+any distinct call or interleaved text, so a productive loop runs on
+while a stuck one stops.
+
+This is an execution bound, not a security sandbox. It catches a stuck
+loop; it does not constrain what a tool is allowed to do. The safety
+surface — authorization, plan gating — is the gates above. For the full
+bound table and how it interacts with retry, see
 [Request flow](../request-flow.md) and [Harness architecture](harness.md).
 
 ## See also

@@ -14,6 +14,7 @@ before the individual docs.
 |------|--------|
 | [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
 | [Harness architecture](agent-design/harness.md) | Control plane around provider calls, goal state, autonomous loop, safety bounds |
+| [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model: a turn as the user-perceived unit, a round as the ReAct loop iteration inside it, and which concerns attach to each layer |
 | [Goals](agent-design/goals.md) | Durable per-session objectives: status machine, checklist, token budget, and completion deferral |
 | [Sub-agents](agent-design/subagents.md) | The `task` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and Plan-mode gating |

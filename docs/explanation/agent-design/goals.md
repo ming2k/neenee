@@ -3,8 +3,8 @@
 A **goal** is a durable, per-session objective the agent works toward across
 many turns. It is the unit that backs `/loop`, drives the progress checklist in
 the header, and enforces a token budget. This page is the mechanism deep dive.
-For where goals fit in the control plane — retry, cancellation, the autonomous
-loop's iteration budget — see [Harness architecture](harness.md).
+For where goals fit in the control plane — retry, cancellation, the uncapped
+autonomous loop — see [Harness architecture](harness.md).
 
 ## Why a dedicated goal primitive
 
@@ -215,8 +215,8 @@ same state textually, including a budget bar and per-item labels.
 
 ## See also
 
-- [Harness architecture](harness.md) — the control plane, the autonomous
-  loop's iteration budget, and how goal accounting interleaves with retry and
+- [Harness architecture](harness.md) — the control plane, the uncapped
+  autonomous loop, and how goal accounting interleaves with retry and
   cancellation
 - [Built-in tools](../../reference/tools.md) — `get_goal`, `create_goal`,
   `update_goal`, `goal_checklist` parameter schemas

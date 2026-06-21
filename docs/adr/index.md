@@ -18,3 +18,6 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0005](0005-strict-layering-and-renames.md) | Strictly-layered topology + scenario-bound store | Accepted |
 | [0006](0006-plan-mode-v2.md) | Plan mode v2: approval gate, active plan path, proposed-plan rendering | Accepted |
 | [0007](0007-plan-progress-panel.md) | Plan progress sticky panel above input box | Accepted |
+| [0008](0008-single-breathing-anchor.md) | Single breathing anchor for TUI liveness | Accepted |
+| [0009](0009-uncapped-agentic-loop.md) | Uncapped agentic loop (remove per-turn round cap and `/loop` iteration cap) | Accepted |
+| [0010](0010-slim-goal-primitive.md) | Slim the goal primitive (drop status machine, token budget, time accounting) | Accepted |

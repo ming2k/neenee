@@ -3,7 +3,7 @@
 The `task` tool spawns an isolated, read-only child agent to investigate a
 sub-question and return a written answer. The parent agent stays in control of
 all writes. This page covers the isolation model, event streaming, and the TUI
-zoom view. For the `Tool` trait and access classes, see
+zoom view. For the tool's parameters and access class, see
 [Built-in tools](../../reference/tools.md).
 
 ## Why a sub-agent tool
@@ -16,55 +16,46 @@ answer, or the model spends turns re-reading things it already saw. A
 sub-agent gives the model a way to delegate the exploration:
 
 1. **Context isolation.** The sub-agent runs with a fresh two-message history
-   (system + task prompt). Its tool rounds never enter the parent's transcript;
-   only its final summary does.
-2. **Read-only by construction.** The sub-agent receives only `Read` tools, so
-   it cannot mutate the workspace, and it never triggers the permission
-   broker.
+   (its task prompt plus the system prompt). Its tool rounds never enter the
+   parent's transcript; only its final summary does.
+2. **Read-only by construction.** The sub-agent receives only read-access
+   tools, so it cannot mutate the workspace, and it never triggers the
+   permission broker.
 3. **Parallelizable investigation.** The model can dispatch several `task`
    calls to map different parts of a problem, then act on the synthesized
    findings.
 
 ## The `task` tool
 
-`TaskTool` (`crates/neenee-agent/src/task_tool.rs:24`) is the only built-in
-tool that overrides the streaming entry points of the `Tool` trait. It lives
-in the `neenee-agent` crate, not `neenee-tools`, because it constructs an
-`Agent` internally — spawning a sub-agent is an orchestration concern.
+The `task` tool is the one built-in tool whose result is not a single value
+but a streamed investigation. It takes a short description and a prompt, both
+required, and returns a payload carrying the sub-agent's summary, its full
+transcript, and its token usage. The parent persists that transcript as the
+tool step's children, so `/resume` rebuilds the nested view later.
 
-| Member | Value |
-|--------|-------|
-| `name()` | `"task"` |
-| `access()` | `ToolAccess::Read` |
-| Parameters | `description` (string), `prompt` (string), both required |
-| Overrides | `call_with_events`, `call_structured_with_events` |
+Because the sub-agent's progress is interesting in real time (not just its
+final answer), the tool streams live rather than blocking until completion:
+every token and tool round the child produces is relayed to the parent TUI as
+it happens.
 
-The harness invokes `call_structured_with_events`
-(`crates/neenee-agent/src/agent.rs:1582`), which runs the sub-agent and
-returns a `ToolOutput::Subagent { summary, messages, usage }`
-(`crates/neenee-agent/src/task_tool.rs:107`). The `messages` field is the full
-child transcript; the parent persists it as the tool step's `children` so
-`/resume` rebuilds the nested view.
-
-Input validation (`task_tool.rs:131`) rejects only non-JSON or
-empty-after-trim fields. The `<=60 chars` note in the parameter description is
-a model-facing hint, not an enforced bound.
+Input validation rejects only non-JSON or empty-after-trim fields. The length
+hint on the description is a model-facing nudge, not an enforced bound.
 
 ## Isolation model
 
-The sub-agent shares exactly one thing with the parent — the provider — and
-nothing else:
+The sub-agent shares exactly one thing with the parent — the model provider —
+and nothing else:
 
 | Concern | Shared? | How |
 |---------|---------|-----|
-| Provider | Yes | `self.provider.clone()` (`task_tool.rs:159`) |
-| Conversation history | No | Fresh `[System, User]` (`task_tool.rs:173`) |
-| Tools | Snapshot, filtered | Read-only subset, see below |
-| Goal state | No | `GoalStore::open_in_memory()` (`task_tool.rs:153`) |
-| Plan state, mode | No | Sub-agent constructed with `AgentMode::Build` (`task_tool.rs:161`) |
-| Skills | No | `SkillRegistry::empty()` (`task_tool.rs:163`) |
-| Cancellation token | No | Fresh `CancellationToken::new()` (`task_tool.rs:193`) |
-| Session persistence | No | Sub-agent's `Agent` is built without persistence |
+| Provider | Yes | The same provider connection |
+| Conversation history | No | A fresh system + task prompt |
+| Tools | Snapshot, filtered | The read-only subset (see below) |
+| Goal state | No | An empty in-memory goal store |
+| Plan state, mode | No | Build mode, no active plan |
+| Skills | No | No loaded skills |
+| Cancellation token | No | A fresh, independent token |
+| Session persistence | No | The sub-agent is never persisted |
 
 The filesystem is implicitly shared because the sub-agent inherits the process
 working directory, but its toolset has no write tools, so it cannot mutate
@@ -72,130 +63,104 @@ files.
 
 ### Tool filtering
 
-The sub-agent receives the filtered intersection
-(`crates/neenee-agent/src/task_tool.rs:146`):
+The sub-agent runs with the read-only subset of the parent's tools. Two
+consequences fall out of that filter alone:
 
-```rust
-let sub_tools: Vec<Arc<dyn Tool>> = self
-    .tools
-    .iter()
-    .filter(|tool| tool.access() == ToolAccess::Read && tool.name() != "task")
-    .cloned()
-    .collect();
-```
+- **Recursion is impossible.** `task` itself is excluded, so a sub-agent
+  cannot spawn another sub-agent.
+- **Goal, plan, and verify tools are inert.** They are added inside the
+  sub-agent from a snapshot, tied to its own (empty) state cells — not the
+  parent's. For a read-only research task they have nothing to act on.
 
-Two consequences fall out of the filter alone:
-
-- **Recursion is impossible.** `task` is excluded, so a sub-agent cannot spawn
-  another sub-agent.
-- **Goal, plan, and verify tools are absent.** They are added inside the
-  sub-agent's own `Agent::new`, but from a snapshot of the filtered set, and
-  they share the sub-agent's own state cells — not the parent's. They are
-  inert for a read-only research task.
-
-The snapshot `TaskTool` holds is captured at construction
-(`crates/neenee-cli/src/main.rs:449`), after built-ins and MCP tools are
-assembled but before `SearchHistoryTool` is pushed. So MCP read-only servers
-are visible to sub-agents; the history tool is not.
+The snapshot is captured once, after built-ins and MCP tools are assembled.
+Read-only MCP servers are therefore visible to sub-agents; tools assembled
+later, such as the history tool, are not.
 
 ## Event streaming
 
-The sub-agent is a real `Agent`, so it emits the full `AgentEvent` stream.
-`TaskTool` translates each into a `SubTaskEvent`
-(`crates/neenee-core/src/events.rs:225`) and forwards it, so the parent TUI
+The sub-agent is a real agent, so it emits the full event stream a parent
+does. Each child event is wrapped and forwarded to the parent, so the TUI
 builds the nested view in real time:
 
 ```text
-sub-agent AgentEvent ──forward_event──► SubTaskEvent
-                                            │
-parent dispatch wraps ──► AgentEvent::SubTask { parent_call_id, event }
-                                            │
-orchestration relay ──► AgentResponse::SubTask
-                                            │
-TUI appends to the matching tool step's children
+sub-agent event ──forward──► wrapped child event
+                                │
+parent dispatch        ──► parent event carrying the child event
+                                │
+orchestration relay    ──► response the TUI appends to the matching step
 ```
 
-`SubTaskEvent` carries the same shapes the parent stream does — `StreamStart`,
-`StreamDelta`, `StreamEnd`, `ToolCall`, `ToolResult`, `Activity` — so the
-zoomed view renders through the same transcript pipeline as the top-level
-conversation. `forward_event` (`task_tool.rs:232`) ignores parent-only events
-like `GoalUpdated`, `ModeChanged`, and `PermissionRequest` that have no
-read-only-researcher meaning.
-
-The `parent_call_id` is the dispatch-generated call id, not the model's
-`call.id`, because the TUI keys its step off the `ToolCall` event id
-(`crates/neenee-agent/src/agent.rs:1568`).
+The forwarded events carry the same shapes the parent stream does — streaming
+deltas, tool calls, tool results, activity — so the zoomed view renders
+through the same transcript pipeline as the top-level conversation.
+Parent-only events that have no read-only-researcher meaning (goal updates,
+mode changes, permission requests) are dropped on the way through.
 
 ## TUI zoom view
 
-The `task` step renders inline as one summary line plus a live status line
-(`crates/neenee-cli/src/tui/render/step/renderers.rs:1004`). Pressing `Enter`
-on the step — or clicking it — pushes onto the app's `focus_stack`
-(`crates/neenee-cli/src/tui/app.rs:626`) and the transcript switches to
-showing that step's children.
+The `task` step renders inline as one summary line plus a live status line.
+Pressing `Enter` on the step — or clicking it — pushes onto the view's focus
+stack and the transcript switches to showing that step's children.
 
-When zoomed in (`crates/neenee-cli/src/tui/render/mod.rs:204`):
+When zoomed in:
 
-- The entire footer — plan panel, goal bar, status bar, input box, hint bar — is hidden.
-  The sub-agent view is read-only chrome.
-- A one-row navigation band at the bottom shows `Task <description> (N of M)`
-  on the left and `Esc back   [ prev   ] next` on the right
-  (`crates/neenee-cli/src/tui/render/step/renderers.rs:1111`).
-- `Esc` pops the focus stack (`app.rs:633`); `[` and `]` cycle sibling `task`
-  steps at the current depth (`app.rs:645`).
+- The entire footer — plan panel, goal bar, status bar, input box, hint bar —
+  is hidden. The sub-agent view is read-only chrome.
+- A one-row navigation band at the bottom shows the task position
+  (`N of M`) on the left and `Esc back   [ prev   ] next` on the right.
+- `Esc` pops back up the focus stack; `[` and `]` cycle sibling `task` steps
+  at the current depth.
 - The plan progress panel is hidden, because the plan belongs to the parent
   context (see [Plan mode](plan-mode.md)).
 
-On `/resume`, persisted `Message::children` repopulate the step's children, so
+On `/resume`, persisted child transcripts repopulate the step's children, so
 the zoom view rebuilds from disk. The live event stream always wins over the
 snapshot.
 
 ## Failure and cancellation
 
-A sub-agent that hits a harness safety bound (32 tool rounds, three identical
-calls) or a provider error still returns a `Subagent` payload
-(`crates/neenee-agent/src/task_tool.rs:206`). Its `summary` is prefixed with
-`Error:` so the existing failure classifier and the TUI's red Failed badge
-both trigger, and the partial transcript is preserved so the user can resume
-into the half-finished work. Only input-validation errors (bad JSON, missing
-fields) propagate as `Err`, because they have no partial transcript worth
-keeping.
+A sub-agent that hits a harness safety bound (too many tool rounds, repeated
+identical calls) or a provider error still returns its result payload. Its
+summary is prefixed so the existing failure classifier and the TUI's Failed
+badge both trigger, and the partial transcript is preserved so the user can
+resume into the half-finished work. Only input-validation errors (bad JSON,
+missing fields) propagate as hard errors, because they have no partial
+transcript worth keeping.
 
-The sub-agent runs with its own never-cancelled `CancellationToken`
-(`task_tool.rs:193`). When the parent turn is interrupted, the parent's
-dispatch drops the sub-agent future and emits `ToolCancelled` for the `task`
-call id; the TUI then recursively cancels the nested tool steps
-(`crates/neenee-cli/src/tui/document.rs`). The sub-agent does not need a token
-linked to the parent — the parent simply stops awaiting it.
+The sub-agent runs with its own independent cancellation. When the parent
+turn is interrupted, the parent simply stops awaiting the sub-agent and emits
+a cancellation for the `task` call id; the TUI then recursively cancels the
+nested tool steps. No token needs to link the two — the parent dropping the
+future is enough.
 
-Real `TokenUsage` from the sub-agent is accumulated into the parent turn's
-`TurnState` (`crates/neenee-agent/src/agent.rs:1175`) so cost flows up to the
-active [goal](goals.md) if one is set.
+Real token usage from the sub-agent is accumulated into the parent turn's
+cost, so it flows up to the active [goal](goals.md) if one is set.
 
 ## Plan mode
 
-`task` is `Read`, so the default `allowed_in_plan_mode` permits it
-(`crates/neenee-core/src/capability.rs:90`). The Plan-mode system prompt
-explicitly endorses it as a read-only research tool.
+`task` is a read-access tool, so the default Plan-mode rule permits it, and
+the Plan-mode system prompt explicitly endorses it as a read-only research
+tool.
 
-The sub-agent is hardcoded to `AgentMode::Build` regardless of the parent's
-mode. This is not a tension: the Plan-mode gate only matters for `Write`
-tools, and the sub-agent has none. Whether the parent is in `Plan` or `Build`,
-the sub-agent behaves as a read-only researcher.
+The sub-agent is Build mode regardless of the parent's mode. This is not a
+tension: the Plan-mode gate only matters for write tools, and the sub-agent
+has none. Whether the parent is in Plan or Build, the sub-agent behaves as a
+read-only researcher.
 
-## Related: `verify_plan_execution`
+## Related: plan verification
 
-`VerifyPlanExecutionTool` (`crates/neenee-agent/src/plan_verify.rs:27`)
-reuses `TaskTool` internally to spawn an independent verifier with a clean
-context. It uses the plain `call` path rather than the structured streaming
-path, so its nested step does not stream sub-agent tokens live — by design,
-since a verifier reports a final PASS / PARTIAL / FAIL verdict. See
-[Plan mode](plan-mode.md).
+There is a sibling tool that reuses `task` internally to spawn an independent
+verifier with a clean context — the mechanism behind the Build-mode prompt's
+"spawn a verifier before declaring completion" instruction. It uses the
+non-streaming path, so its nested step does not stream live tokens, by design:
+a verifier reports a final PASS / PARTIAL / FAIL verdict rather than an
+investigation to watch. See [Plan mode](plan-mode.md).
 
 ## See also
 
-- [Built-in tools](../../reference/tools.md) — `task` parameter schema and access
-- [Plan mode](plan-mode.md) — `task` in Plan mode, and `verify_plan_execution`
+- [Built-in tools](../../reference/tools.md) — `task` parameter schema and
+  access class
+- [Plan mode](plan-mode.md) — `task` in Plan mode, and plan verification
 - [Tool rounds](tool-rounds.md) — the round trip the sub-agent runs internally
 - [Goals](goals.md) — how sub-agent token cost flows up to a parent goal
 - [Harness architecture](harness.md) — the safety bounds that bound a

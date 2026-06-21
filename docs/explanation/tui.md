@@ -266,13 +266,21 @@ has to remember "which mode am I in" to predict what a key will do.
 
 The activity indicator is a single dot whose luminance sweeps between the
 summary background and the status accent at roughly 10 fps, not a braille
-`⠋⠙⠹` cycle. Two reasons. First, the sweep is per-step: each `Running`
-tool step carries its own breathing accent in its summary line, so the
-status of an in-flight call is visible in place rather than only in the
-status bar. Second, braille spinners read as "the program is computing"
-and are easy to mistake for an unresponsive loop; a slow luminance sweep
-reads as "the program is waiting" — which is almost always the truth
-during a provider round trip.
+`⠋⠙⠹` cycle. Braille spinners read as "the program is computing" and are
+easy to mistake for an unresponsive loop; a slow luminance sweep reads as
+"the program is waiting" — which is almost always the truth during a
+provider round trip.
+
+The breathing dot is also the **single** motion anchor in the TUI: every
+other running indicator (tool-step summary, reasoning marker, goal bar)
+holds a steady accent, never a luminance sweep. Concentrating all of the
+motion budget in one place preserves the dot's role as a peripheral
+"system is alive" cue — if every component breathed in unison, the dot
+would lose its isolation and stop functioning as an anchor. Per-step
+liveness is carried by hue (`info` while running, `error_fg` on failure,
+`text_muted` when cancelled) and by marker shape (`●` while a trace is
+streaming, `+`/`-` once it finishes). See
+[ADR-0008](../adr/0008-single-breathing-anchor.md).
 
 ### Sticky headers instead of scroll anchoring
 

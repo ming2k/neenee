@@ -46,7 +46,13 @@ pub enum MessageKind {
         /// exit code) alongside the legacy `output` text. Currently stored but
         /// not yet consumed by the renderer — the classification/rendering
         /// switch is a follow-up slice.
-        structured: Option<neenee_core::ToolOutput>,
+        ///
+        /// Boxed to keep this enum variant small: `ToolOutput` (and especially
+        /// its `Subagent`/`Patch` variants) is large enough that an unboxed
+        /// `Option<ToolOutput>` would dominate the `MessageKind` enum size
+        /// (clippy::large_enum_variant). The indirection is transparent to
+        /// callers — the surrounding accessors deref it as needed.
+        structured: Option<Box<neenee_core::ToolOutput>>,
         /// Explicit lifecycle. Kept in sync with `output` by the
         /// `finish_tool_step` / `cancel_tool_step` transitions below.
         status: ToolStepStatus,
@@ -82,17 +88,14 @@ pub enum MessageKind {
     },
 }
 
-/// Severity of a [`MessageKind::Notice`]. Drives the color, the leading icon,
-/// and (in future) the available follow-up affordances (e.g. a TurnLimit
-/// notice can offer a one-key `/loop resume`).
+/// Severity of a [`MessageKind::Notice`]. Drives the color and the leading
+/// icon through the central severity→presentation map in
+/// `render/notice.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeSeverity {
     /// Neutral status (compaction summary, provider switch, …). Replaces the
     /// old `Role::System` + `system_text()` rendering.
     Info,
-    /// A recoverable harness guardrail — the turn was paused, not failed.
-    /// Distinct from [`NoticeSeverity::Error`] so it reads as amber, not red.
-    TurnLimit,
     /// A terminal failure surfaced from the harness or a tool.
     Error,
 }
@@ -250,7 +253,16 @@ pub struct TranscriptMessage {
 impl TranscriptMessage {
     pub fn new(role: Role, raw: impl Into<String>) -> Self {
         let raw = raw.into();
-        let blocks = parse_blocks(&raw);
+        // User messages are rendered verbatim as plain text — no markdown
+        // interpretation — so pasted text containing markdown-like syntax
+        // does not get mangled into headings/code fences/lists and the
+        // transcript stays readable. The raw text becomes a single `Text`
+        // block; `wrap_text` preserves intra-block line breaks.
+        let blocks = if role == Role::User {
+            parse_blocks_plain(&raw)
+        } else {
+            parse_blocks(&raw)
+        };
         Self {
             role,
             blocks,
@@ -358,7 +370,7 @@ impl TranscriptMessage {
             ToolStepStatus::Ok
         };
         *step_output = Some(output);
-        *step_structured = Some(structured);
+        *step_structured = Some(Box::new(structured));
         *step_duration = Some(duration_ms);
         self.refresh_tool_step();
         true
@@ -382,16 +394,21 @@ impl TranscriptMessage {
         if step_id != id || !status.is_running() {
             return false;
         }
-        if !matches!(structured, Some(neenee_core::ToolOutput::Shell { .. })) {
-            *structured = Some(neenee_core::ToolOutput::Shell {
+        if !matches!(
+            structured.as_deref(),
+            Some(neenee_core::ToolOutput::Shell { .. })
+        ) {
+            *structured = Some(Box::new(neenee_core::ToolOutput::Shell {
                 command: String::new(),
                 stdout: String::new(),
                 stderr: String::new(),
                 exit: None,
                 truncated: false,
-            });
+            }));
         }
-        if let Some(neenee_core::ToolOutput::Shell { stdout, stderr, .. }) = structured {
+        if let Some(neenee_core::ToolOutput::Shell { stdout, stderr, .. }) =
+            structured.as_deref_mut()
+        {
             match stream {
                 neenee_core::ToolStream::Stdout(s) => stdout.push_str(s),
                 neenee_core::ToolStream::Stderr(s) => stderr.push_str(s),
@@ -854,9 +871,9 @@ impl TranscriptMessage {
         Some(match duration_ms {
             None => format!("Thinking · {} chars", chars),
             Some(_) => format!(
-                "Thinking · {} · {} chars",
-                duration_text(*duration_ms),
-                chars
+                "Thinking · {} chars · {}",
+                chars,
+                duration_text(*duration_ms)
             ),
         })
     }
@@ -1041,6 +1058,19 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
         return parse_blocks_with_plan_splits(text);
     }
     parse_blocks_markdown(text)
+}
+
+/// Parse plain-text input (user messages) into blocks without any markdown
+/// interpretation. The entire text becomes a single [`Block::Text`] so it
+/// renders as one continuous verbatim panel; line breaks are preserved by the
+/// renderer's wrapper rather than being collapsed by a markdown parser.
+fn parse_blocks_plain(text: &str) -> Vec<Block> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![Block::Text {
+        content: text.to_string(),
+    }]
 }
 
 const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";

@@ -22,7 +22,7 @@ Project and user-defined commands are covered under
 | `/sessions` | Browse past sessions |
 | `/resume [id]` | Resume the most recent or selected session |
 | `/goal` | Set, inspect, complete, or clear the active goal |
-| `/loop [N\|resume\|status\|stop]` | Run or resume bounded autonomous goal work |
+| `/loop [objective\|resume\|status\|stop]` | Run an uncapped autonomous goal loop |
 | `/init [path]` | Initialize a `.neenee/` config tree |
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
@@ -65,10 +65,18 @@ accounted against the active goal; reaching the token budget moves the goal to
 
 | Form | Effect |
 |------|--------|
-| `/loop <N>` | Run up to N autonomous iterations; `N` is `1..=50`, default 8 |
+| `/loop` | Start an uncapped autonomous loop on the active goal (set one with `/goal <objective>` first) |
+| `/loop <objective>` | Set a fresh goal from `<objective>` and start an uncapped autonomous loop on it |
 | `/loop resume` | Resume an unfinished durable checkpoint |
 | `/loop status` | Show autonomous loop status |
 | `/loop stop` | Stop the active loop |
+
+The loop runs until the model emits `[NEENEE_GOAL_COMPLETE]` (and the goal
+checklist allows completion), the user runs `/loop stop` or presses `Esc`, an
+error aborts the active turn, or a newer chat or loop request supersedes it.
+There is **no iteration budget**: each iteration is a complete agent turn with
+its own uncapped ReAct loop, and context compaction keeps long loops bounded.
+A legacy `/loop <N>` form (pure number) is rejected with a migration hint.
 
 ### `/session`
 

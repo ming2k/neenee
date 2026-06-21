@@ -83,7 +83,7 @@ optional and the stack collapses from the top when a row is hidden:
 ├────────────────────────────────────────────────────────────┤
 │ ● ship the goal bar  [1/2]                                  │  ← goal bar
 ├────────────────────────────────────────────────────────────┤
-│ ● making edits                                              │  ← status bar
+│ ● turn 4 · round 2 · making edits                           │  ← status bar
 ├────────────────────────────────────────────────────────────┤
 │  > type here…                                               │  ← input box
 ├────────────────────────────────────────────────────────────┤

@@ -386,7 +386,7 @@ impl Agent {
     /// Append a hidden user message that asks the model to continue the active goal.
     pub fn inject_goal_continuation(&self, messages: &mut Vec<Message>) {
         if let Some(goal) = self.get_goal() {
-            if goal.status == GoalStatus::Active {
+            if !goal.is_complete {
                 messages.push(Message::hidden(
                     Role::User,
                     goals::prompts::continuation_prompt(&goal),
@@ -402,18 +402,6 @@ impl Agent {
                 Role::User,
                 goals::prompts::objective_updated_prompt(&goal),
             ));
-        }
-    }
-
-    /// Append a hidden user message that informs the model the goal hit its budget.
-    pub fn inject_budget_limit(&self, messages: &mut Vec<Message>) {
-        if let Some(goal) = self.get_goal() {
-            if goal.status == GoalStatus::BudgetLimited {
-                messages.push(Message::hidden(
-                    Role::User,
-                    goals::prompts::budget_limit_prompt(&goal),
-                ));
-            }
         }
     }
 
@@ -759,14 +747,8 @@ impl Agent {
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState::default();
-        let mut tool_rounds = 0;
 
         loop {
-            if tool_rounds >= MAX_TOOL_ROUNDS {
-                return Err(HarnessError::TurnLimitReached {
-                    rounds: MAX_TOOL_ROUNDS,
-                });
-            }
             if cancel.is_cancelled() {
                 return Err(HarnessError::Interrupted);
             }
@@ -815,7 +797,6 @@ impl Agent {
                 )
                 .await?
             {
-                tool_rounds += 1;
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 continue;
             }
@@ -848,15 +829,6 @@ impl Agent {
         let mut tool_rounds = 0;
 
         loop {
-            if tool_rounds >= MAX_TOOL_ROUNDS {
-                tracing::warn!(
-                    max_rounds = MAX_TOOL_ROUNDS,
-                    "turn paused: tool-round limit"
-                );
-                return Err(HarnessError::TurnLimitReached {
-                    rounds: MAX_TOOL_ROUNDS,
-                });
-            }
             if cancel.is_cancelled() {
                 return Err(HarnessError::Interrupted);
             }

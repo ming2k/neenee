@@ -5,7 +5,7 @@
 //! auto-loads skills whose names are mentioned in the latest user turn.
 
 use crate::skills;
-use crate::{Agent, AgentMode, GoalStatus, Message, Role};
+use crate::{Agent, AgentMode, Message, Role};
 
 impl Agent {
     /// Build a system prompt that includes tool definitions and skills index.
@@ -93,11 +93,16 @@ impl Agent {
         }
 
         if let Some(goal) = self.get_goal() {
+            let state_label = if goal.is_complete {
+                "complete"
+            } else {
+                "active"
+            };
             parts.push(format!(
-                "\nActive harness goal ({:?}):\n{}",
-                goal.status, goal.objective
+                "\nActive harness goal ({state_label}):\n{}",
+                goal.objective
             ));
-            if goal.status == GoalStatus::Active {
+            if !goal.is_complete {
                 if !goal.checklist.is_empty() {
                     parts.push(format!(
                         "Goal checklist:\n{}",
@@ -111,7 +116,7 @@ impl Agent {
                 parts.push(
                     "Work toward this goal across turns. Use get_goal to read the current goal, \
                      create_goal when the user asks for a new goal, update_goal to mark the goal \
-                     complete or blocked, and goal_checklist to expose concrete progress items. \
+                     complete, and goal_checklist to expose concrete progress items. \
                      Only when the objective is fully achieved, verified, and every checklist item \
                      is completed or cancelled, call update_goal with status \"complete\"."
                         .to_string(),

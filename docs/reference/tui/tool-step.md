@@ -75,8 +75,10 @@ summary line is:
 | Cancelled | (no suffix) |
 
 (The child-step accents and sticky-pin color use the raw
-[`ToolStatus::color`](step-state.md#lifecycle-accent) palette directly,
-without the breathing sweep applied to the parent summary.)
+[`ToolStatus::color`](step-state.md#lifecycle-accent) palette directly. Per
+[ADR-0008](../../adr/0008-single-breathing-anchor.md), the activity bar is the
+single breathing anchor, so the parent summary carries a steady accent while
+running — no luminance sweep.)
 
 ## Detail overlay
 

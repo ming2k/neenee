@@ -42,7 +42,7 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
     match ctx.goal {
         Some(goal) => out.push_str(&format!(
             "- **Goal [{}]:** {}\n",
-            goal.status.as_str(),
+            if goal.is_complete { "complete" } else { "active" },
             goal.objective
         )),
         None => out.push_str("- **Goal:** _none_\n"),
@@ -268,7 +268,7 @@ fn choose_fence(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neenee_core::{Goal, GoalStatus, ToolCall};
+    use neenee_core::{Goal, ToolCall};
 
     fn user(content: &str) -> Message {
         Message::new(Role::User, content)
@@ -317,7 +317,7 @@ mod tests {
     fn includes_goal_objective_and_checklist() {
         let goal = Goal {
             objective: "Ship /export".to_string(),
-            status: GoalStatus::Active,
+            is_complete: false,
             checklist: vec![
                 neenee_core::GoalChecklistItem {
                     content: "Design".to_string(),
@@ -332,9 +332,6 @@ mod tests {
                     status: GoalChecklistStatus::Pending,
                 },
             ],
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
         };
         let out = format_export_markdown(
             ExportContext {

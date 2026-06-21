@@ -2,8 +2,8 @@ pub use async_trait::async_trait;
 
 pub mod goals;
 pub use goals::{
-    Goal, GoalAccountingResult, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStatus,
-    GoalStore, TokenUsage, TurnOutcome, TurnTimer,
+    Goal, GoalChecklistItem, GoalChecklistStatus, GoalService, GoalStore, TokenUsage, TurnOutcome,
+    TurnTimer,
 };
 
 pub const GOAL_COMPLETE_MARKER: &str = "[NEENEE_GOAL_COMPLETE]";

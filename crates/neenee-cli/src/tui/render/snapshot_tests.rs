@@ -74,7 +74,7 @@ fn tool_step_streaming(
         ..
     } = &mut m.kind
     {
-        *s = Some(structured);
+        *s = Some(Box::new(structured));
         *exp = expanded;
     }
     m
@@ -107,7 +107,6 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
                 &mut current_y,
                 &mut content_lines,
                 &mut sticky,
-                0,
                 false,
             );
         })
@@ -307,7 +306,7 @@ fn list_dir_expanded_renders_listing() {
 #[test]
 fn bash_running_streams_live_preview() {
     // A long-running bash command mid-stream: status is still Running (header
-    // shows the breathing dot) but partial stdout already shows under the
+    // shows a steady `info` accent) but partial stdout already shows under the
     // header via the structured Shell, instead of freezing on a spinner.
     let m = tool_step_streaming(
         "bash",

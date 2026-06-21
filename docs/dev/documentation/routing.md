@@ -94,6 +94,10 @@ purpose. Do not invent new root markdown files to escape the gates; route into
 - Do not duplicate the `README.md` quick start inside `docs/`; link to it.
 - Do not put design rationale in reference pages; move it to explanation docs
   or ADRs.
+- Do not put implementation coordinates in explanation docs — no source file
+  paths or line numbers, no struct field listings, no API signatures, no
+  fenced source blocks. Keep explanation conceptual; move the detail to
+  `docs/reference/` and link from there.
 - Do not put option tables in tutorials; link to reference docs.
 - Do not mix user docs and contributor docs; `docs/dev/` is the firewall.
 - Do not create an empty documentation directory without an `index.md`.

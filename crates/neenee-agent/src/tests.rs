@@ -166,11 +166,8 @@ fn agent() -> Agent {
 fn active_goal(objective: &str) -> Goal {
     Goal {
         objective: objective.to_string(),
-        status: GoalStatus::Active,
+        is_complete: false,
         checklist: Vec::new(),
-        tokens_used: 0,
-        token_budget: None,
-        time_used_seconds: 0,
     }
 }
 
@@ -196,12 +193,12 @@ fn retry_metadata_is_not_exposed_as_public_error_text() {
 fn goal_lifecycle_is_explicit() {
     let agent = agent();
     agent.set_goal(active_goal("verify behavior"));
-    assert_eq!(agent.get_goal().unwrap().status, GoalStatus::Active);
+    assert!(!agent.get_goal().unwrap().is_complete);
 
     let mut completed = active_goal("verify behavior");
-    completed.status = GoalStatus::Complete;
+    completed.is_complete = true;
     agent.set_goal(completed);
-    assert_eq!(agent.get_goal().unwrap().status, GoalStatus::Complete);
+    assert!(agent.get_goal().unwrap().is_complete);
 
     agent.clear_goal();
     assert_eq!(agent.get_goal(), None);
@@ -1451,4 +1448,45 @@ async fn agent_without_project_root_never_writes_permissions_file() {
 
     std::env::remove_var("NEENEE_DATA_DIR");
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---- Uncapped tool rounds ----------------------------------------------
+//
+// The per-turn tool-round cap was removed (along with the soft convergence
+// nudge) to align with the codex / claude-code agentic-loop model: the
+// turn runs until the model stops calling tools, with context compaction
+// as the backstop. This test pins the new behaviour — a long sequence of
+// distinct tool calls runs well past the previous hard cap of 32 and only
+// stops when the model finally emits a text answer.
+
+#[tokio::test]
+async fn turn_runs_uncapped_until_model_emits_text() {
+    // 64 distinct tool rounds — twice the previous hard cap — followed by a
+    // text answer. Each round uses a distinct argument so the repeated-call
+    // guard never trips.
+    let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..64)
+        .map(|i| tool_round(&[("c", "alpha", &format!("{{\"i\":{i}}}"))]))
+        .collect();
+    rounds.push(text_round("all done"));
+    let tool = RecordingTool::read("alpha", "out");
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(rounds)),
+        vec![Arc::new(tool)],
+        AgentMode::Build,
+        test_goal_service(),
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    assert_eq!(outcome.unwrap().message.content, "all done");
+    assert!(
+        !messages.iter().any(|m| {
+            m.role == Role::User && m.hidden && m.content.contains("tool-call budget")
+        }),
+        "no convergence nudge should be injected anymore"
+    );
 }

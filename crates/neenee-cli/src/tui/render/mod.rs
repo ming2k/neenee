@@ -124,6 +124,10 @@ pub struct TranscriptView<'a> {
     /// detector (turns since `plan_progress.updated_at_turn` exceeded the
     /// threshold ⇒ dimmed header + suffix).
     pub turn_count: u64,
+    /// Current tool round within the active turn (1-indexed for display; `0`
+    /// before the first model request lands). Shown in the activity bar as
+    /// `turn N · round M · <status>`.
+    pub current_round: u64,
     /// Message index of the step (tool step or reasoning trace) whose header
     /// currently rests under the mouse pointer (inline or sticky pinned), so
     /// the next draw lights it up to the intermediate hover tone as a click
@@ -204,6 +208,7 @@ pub fn draw_transcript(
         plan_panel_expanded,
         current_goal,
         turn_count,
+        current_round,
         hovered_step,
         theme,
         ..
@@ -259,7 +264,7 @@ pub fn draw_transcript(
     // Goal bar: single-line strip above the activity bar, shown only while a
     // goal is present and in the `Active` state. The visibility guard mirrors
     // `draw_goal_bar`'s own early-return so the reserved row is never empty.
-    let goal_bar_active = current_goal.is_some_and(|g| g.status == neenee_core::GoalStatus::Active)
+    let goal_bar_active = current_goal.is_some_and(|g| !g.is_complete)
         && !chrome_hidden
         && !in_subagent;
     let goal_bar_height: u16 = if goal_bar_active { GOAL_BAR_ROWS } else { 0 };
@@ -391,7 +396,6 @@ pub fn draw_transcript(
                 &mut current_y,
                 &mut content_lines,
                 &mut sticky_steps,
-                spinner_phase,
                 hovered_step == Some(mi),
             );
         } else if msg.is_thinking() {
@@ -407,7 +411,6 @@ pub fn draw_transcript(
                 &mut current_y,
                 &mut content_lines,
                 &mut sticky_steps,
-                spinner_phase,
                 hovered_step == Some(mi),
             );
         } else {
@@ -512,15 +515,7 @@ pub fn draw_transcript(
                 footer_w,
                 GOAL_BAR_ROWS,
             );
-            draw_goal_bar(
-                frame,
-                rect,
-                chrome::GoalBarView {
-                    goal,
-                    spinner_phase,
-                },
-                theme,
-            )
+            draw_goal_bar(frame, rect, chrome::GoalBarView { goal }, theme)
         } else {
             None
         }
@@ -541,6 +536,8 @@ pub fn draw_transcript(
                 footer_w,
                 STATUS_BAR_ROWS,
             ),
+            turn_count,
+            current_round,
             activity,
             spinner_phase,
             theme,
@@ -693,6 +690,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -963,6 +961,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -998,6 +997,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1122,6 +1122,7 @@ mod tests {
                             plan_panel_expanded: false,
                             current_goal: None,
                             turn_count: 0,
+                            current_round: 0,
                             hovered_step: None,
                             focused_target: None,
                             theme,
@@ -1270,6 +1271,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1413,6 +1415,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,
@@ -1491,6 +1494,7 @@ mod tests {
                         plan_panel_expanded: false,
                         current_goal: None,
                         turn_count: 0,
+                        current_round: 0,
                         hovered_step: None,
                         focused_target: None,
                         theme: &theme,

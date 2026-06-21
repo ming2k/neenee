@@ -1,6 +1,6 @@
 //! Raw-mode / alternate-screen lifecycle: graceful cleanup, signal-guard.
 
-use crossterm::event::{DisableMouseCapture, PopKeyboardEnhancementFlags};
+use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags};
 use crossterm::{execute, terminal::disable_raw_mode};
 
 use std::io::{self, Write};
@@ -15,6 +15,7 @@ pub(super) fn restore_terminal() {
     let _ = execute!(
         stdout,
         PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen,
         DisableMouseCapture
     );

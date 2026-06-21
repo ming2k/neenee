@@ -22,7 +22,6 @@ use crate::tui::document::{Block, TranscriptMessage};
 use crate::tui::layout::{BlockRegion, LayoutMap};
 use crate::tui::selection::SelectionState;
 
-use crate::tui::render::chrome::{breathing_color, spinner_glyph};
 use crate::tui::render::message_body::draw_message_body;
 use crate::tui::render::text_layout::{
     block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
@@ -162,9 +161,9 @@ pub struct StickyStep {
 /// summary text, padded to the full width. The body content is expected to
 /// start at column 2 so it left-aligns with the summary text.
 ///
-/// Run state is conveyed purely by `fg` (breathing accent while running, error
-/// red on failure, muted when cancelled, neutral on success) — there is no
-/// status glyph or per-tool icon in the summary. An empty `expand` segment
+/// Run state is conveyed purely by `fg` (a steady `info` accent while running,
+/// error red on failure, muted when cancelled, neutral on success) — there is
+/// no status glyph or per-tool icon in the summary. An empty `expand` segment
 /// (and its trailing space) is skipped so callers can omit it cleanly.
 fn tool_summary_line(
     expand: &str,
@@ -1034,12 +1033,12 @@ pub fn draw_subagent_inline_step(
     // (block_idx = usize::MAX) so the existing click/Enter handling recognizes
     // it; the app decides to navigate rather than toggle for `task` steps. No
     // expand marker or status glyph — the step navigates, and run state reads
-    // from the summary color (this step has no spinner phase, so a running step
-    // is a steady accent rather than a breathing one). Color is resolved
-    // through the shared state machine: a non-completed lifecycle supplies an
-    // accent that wins outright; the completed case falls through to the
-    // disclosure × interaction weight ladder (a task never expands inline, so
-    // it is bright only under the pointer and calm otherwise).
+    // from the summary color (a steady accent, matching every other step per
+    // the single-breathing-anchor rule in ADR 0008). Color is resolved through
+    // the shared state machine: a non-completed lifecycle supplies an accent
+    // that wins outright; the completed case falls through to the disclosure ×
+    // interaction weight ladder (a task never expands inline, so it is bright
+    // only under the pointer and calm otherwise).
     let accent = match status {
         ToolStatus::Failed => Some(theme.error_fg),
         ToolStatus::Denied => Some(theme.warn()),
@@ -1166,7 +1165,6 @@ pub fn draw_tool_step(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_steps: &mut Vec<StickyStep>,
-    spinner_phase: usize,
     hovered: bool,
 ) {
     let Some(summary) = msg.tool_step_summary() else {
@@ -1174,16 +1172,19 @@ pub fn draw_tool_step(
     };
     let expanded = msg.tool_step_expanded() == Some(true);
 
-    // Run state is conveyed by color alone: a breathing accent while running,
-    // red on failure, muted when cancelled, and neutral on success. There is no
-    // status glyph or per-tool icon in the summary. `status_color` drives the
-    // child tool-step accents and the sticky pin; the summary text color is
-    // resolved through the shared state machine. A non-completed lifecycle
-    // supplies an accent (breathing for Running) that wins outright; the
-    // completed case falls through to the disclosure × interaction weight
-    // ladder so a finished call reads as calm — bright only while its body is
-    // open or the pointer rests on it, never merely because it carries
-    // keyboard focus.
+    // Run state is conveyed by color alone: a steady `info` accent while
+    // running, red on failure, muted when cancelled, and neutral on success.
+    // There is no status glyph or per-tool icon in the summary. The summary
+    // text color is resolved through the shared state machine: a non-completed
+    // lifecycle supplies an accent that wins outright; the completed case falls
+    // through to the disclosure × interaction weight ladder so a finished call
+    // reads as calm — bright only while its body is open or the pointer rests
+    // on it, never merely because it carries keyboard focus.
+    //
+    // The activity bar is the single breathing anchor (ADR 0008); per-step
+    // liveness rides on hue alone so a transcript full of running steps does
+    // not flash in unison and steal attention from the content the user is
+    // reading.
     let status = msg
         .tool_step_status()
         .map(ToolStatus::from_status)
@@ -1191,12 +1192,7 @@ pub fn draw_tool_step(
     // Tool steps render flat on the app background (no band) — like
     // reasoning traces, only the optional content block carries a `code_bg`.
     let summary_bg = theme.surface();
-    let status_color = match status {
-        // Breathing accent: luminance sweeps between the summary bg and the
-        // status color so a running step reads as "alive" without a spinner.
-        ToolStatus::Running => breathing_color(spinner_phase, status.color(theme), summary_bg),
-        _ => status.color(theme),
-    };
+    let status_color = status.color(theme);
     let accent = match status {
         ToolStatus::Ok => None,
         _ => Some(status_color),
@@ -1321,7 +1317,7 @@ pub fn draw_tool_step(
                 // composed output yet but a partial structured stdout.
                 let has_output = output.as_deref().is_some_and(|s| !s.is_empty());
                 let bash_streaming = matches!(
-                    structured,
+                    structured.as_deref(),
                     Some(neenee_core::ToolOutput::Shell { stdout, .. }) if !stdout.is_empty()
                 );
                 if has_output || bash_streaming {
@@ -1331,7 +1327,7 @@ pub fn draw_tool_step(
                         name,
                         arguments,
                         output.as_deref().unwrap_or(""),
-                        structured.as_ref(),
+                        structured.as_deref(),
                         selection,
                         indent,
                         inner_w,
@@ -1526,12 +1522,12 @@ fn draw_reasoning_summary(
 ) -> usize {
     let marker = marker_override.unwrap_or(if expanded { "-" } else { "+" });
     let summary_line_idx = *ctx.content_lines;
-    // A reasoning trace's lifecycle only affects its marker (a breathing `●`
-    // while running, supplied by the caller as `marker_color`), never the
-    // summary text, so no accent is supplied and the summary color is the
-    // pure disclosure × interaction weight from the shared state machine:
-    // open → primary foreground, collapsed + hovered → intermediate hover
-    // tone, otherwise muted.
+    // A reasoning trace's lifecycle is carried by the summary text (duration
+    // omitted while streaming) and the steady `info` hue — never by the
+    // marker, which is always the disclosure `+`/`-`. So no accent is
+    // supplied and the summary color is the pure disclosure × interaction
+    // weight from the shared state machine: open → primary foreground,
+    // collapsed + hovered → intermediate hover tone, otherwise muted.
     let summary_color = summary_text_color(
         None,
         Disclosure::from_expanded(expanded),
@@ -1571,20 +1567,12 @@ pub fn draw_reasoning_trace(
     current_y: &mut u16,
     content_lines: &mut usize,
     sticky_steps: &mut Vec<StickyStep>,
-    spinner_phase: usize,
     hovered: bool,
 ) {
     let Some(summary) = msg.thinking_summary() else {
         return;
     };
     let expanded = msg.thinking_expanded() == Some(true);
-    let running = matches!(
-        &msg.kind,
-        crate::tui::document::MessageKind::Thinking {
-            duration_ms: None,
-            ..
-        }
-    );
     let full_width = transcript_area.width as usize;
 
     if full_width < (TRANSCRIPT_BODY_PREFIX_COLS + 1) as usize {
@@ -1619,17 +1607,15 @@ pub fn draw_reasoning_trace(
             &mut ctx,
             mi,
             expanded,
-            running.then(spinner_glyph),
+            // Always use the disclosure marker (`+`/`-`), never a streaming
+            // `●`. With the activity bar as the single breathing anchor
+            // (ADR 0008), nothing about the marker needs to change between
+            // streaming and finished — the lifecycle reads from the summary
+            // text (duration omitted while streaming) and the steady `info`
+            // hue alone.
+            None,
             &summary,
-            // While streaming the `●` marker breathes between its info tone
-            // and the surface — the same liveness cue a running tool step uses
-            // — so an in-progress trace reads as active. Once finished, the
-            // marker reverts to a steady `+`/`-` in the info tone.
-            if running {
-                breathing_color(spinner_phase, theme.info(), theme.surface())
-            } else {
-                theme.info()
-            },
+            theme.info(),
             hovered,
         )
     };

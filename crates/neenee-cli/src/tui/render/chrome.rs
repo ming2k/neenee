@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::document::{estimate_context_tokens, TranscriptMessage};
 use crate::tui::input::FocusZone;
 use crate::tui::layout::LayoutMap;
-use neenee_core::{Goal, GoalStatus};
+use neenee_core::Goal;
 
 use super::design::{
     GOAL_OBJECTIVE_MAX_CHARS, HINT_BAR_GAP_MIN, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP,
@@ -62,9 +62,19 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// Replaces the old inline `┃ neenee ⟳ <status>` indicator: the brand prefix
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
+///
+/// Layout: `<spinner> turn N · round M · <status>`. The turn/round prefix is
+/// structural context (rendered muted) so the eye lands on the status; the
+/// status itself is brand + italic as the live signal. The round segment is
+/// omitted while `current_round == 0` — the pre-request phase (queued /
+/// preparing context) has no round yet, and showing `round 0` would be noise.
+/// When the status string already carries a reason (e.g.
+/// `retry 1/4 in 3s · <message>`), it flows through unchanged as the tail.
 pub fn draw_activity_bar(
     frame: &mut Frame,
     rect: Rect,
+    turn: u64,
+    current_round: u64,
     status: &str,
     spinner_phase: usize,
     theme: &Theme,
@@ -74,7 +84,8 @@ pub fn draw_activity_bar(
     }
     let spinner = spinner_glyph();
     let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
-    let line = Line::from(vec![
+
+    let mut spans: Vec<Span> = vec![
         Span::raw(" "),
         Span::styled(
             spinner,
@@ -82,15 +93,28 @@ pub fn draw_activity_bar(
                 .fg(spinner_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        Span::styled(
-            status,
-            Style::default()
-                .fg(theme.brand())
-                .add_modifier(Modifier::ITALIC),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), rect);
+    ];
+
+    // Structural prefix: `turn N` always (the bar only renders mid-turn), and
+    // `round M` once a model request has fired. Muted so the status — the
+    // thing that changes frame to frame — stays the visual focus.
+    let dim = Style::default().fg(theme.muted());
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(format!("turn {}", turn), dim));
+    if current_round >= 1 {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(format!("round {}", current_round), dim));
+    }
+    spans.push(Span::styled(" · ", dim));
+
+    spans.push(Span::styled(
+        status,
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::ITALIC),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 /// Inputs for [`draw_goal_bar`]. The bar is shown only while the goal is in the
@@ -99,7 +123,6 @@ pub fn draw_activity_bar(
 /// visibility.
 pub struct GoalBarView<'a> {
     pub goal: &'a Goal,
-    pub spinner_phase: usize,
 }
 
 /// Draw the single-line goal bar pinned directly above the activity bar. The
@@ -116,22 +139,21 @@ pub fn draw_goal_bar(
     view: GoalBarView<'_>,
     theme: &Theme,
 ) -> Option<Rect> {
-    let GoalBarView {
-        goal,
-        spinner_phase,
-    } = view;
+    let GoalBarView { goal } = view;
 
-    if goal.status != GoalStatus::Active {
+    if goal.is_complete {
         return None;
     }
 
     let accent_bg = theme.raised();
 
-    // Breathing spinner — same calm luminance sweep as the activity bar, so the
-    // goal bar reads as a sibling indicator while the goal is actively in
-    // progress.
+    // Steady brand dot — the goal bar is not the liveness anchor (the activity
+    // bar is). The bar's existence on the raised background already signals an
+    // in-progress goal; the `[done/total]` suffix carries progress. A second
+    // breathing dot would compete with the activity bar for the user's
+    // peripheral vision and dilute the single-anchor principle (see ADR 0008).
     let spinner = spinner_glyph();
-    let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
+    let spinner_color = theme.brand();
 
     let objective: String = goal
         .objective
@@ -599,10 +621,7 @@ mod tests {
     fn checklist_summary_prefers_current_work() {
         let goal = Goal {
             objective: "ship".to_string(),
-            status: GoalStatus::Active,
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
+            is_complete: false,
             checklist: vec![
                 neenee_core::GoalChecklistItem {
                     content: "implemented".to_string(),
@@ -665,10 +684,7 @@ mod tests {
         // Active goal with a checklist → bar shown, progress rendered.
         let active_goal = Goal {
             objective: "ship the goal bar".to_string(),
-            status: GoalStatus::Active,
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
+            is_complete: false,
             checklist: vec![
                 neenee_core::GoalChecklistItem {
                     content: "done".to_string(),
@@ -686,10 +702,7 @@ mod tests {
                 rect = draw_goal_bar(
                     f,
                     Rect::new(0, 0, 80, 1),
-                    GoalBarView {
-                        goal: &active_goal,
-                        spinner_phase: 0,
-                    },
+                    GoalBarView { goal: &active_goal },
                     &theme,
                 );
             })
@@ -719,10 +732,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let complete_goal = Goal {
             objective: "done".to_string(),
-            status: GoalStatus::Complete,
-            tokens_used: 0,
-            token_budget: None,
-            time_used_seconds: 0,
+            is_complete: true,
             checklist: vec![],
         };
         let mut rect = Some(Rect::new(0, 0, 1, 1));
@@ -733,7 +743,6 @@ mod tests {
                     Rect::new(0, 0, 80, 1),
                     GoalBarView {
                         goal: &complete_goal,
-                        spinner_phase: 0,
                     },
                     &theme,
                 );

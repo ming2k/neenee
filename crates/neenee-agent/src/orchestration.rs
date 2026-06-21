@@ -4,7 +4,7 @@
 //! This module wraps every turn with the cross-cutting policy a frontend
 //! cannot reasonably reimplement: context compaction (pre-turn and mid-turn
 //! pruning), retry with exponential backoff, goal accounting, permission
-//! relay, and the autonomous goal loop.
+//! relay, and the uncapped autonomous goal loop.
 //!
 //! Frontends drive the harness through [`execute_turn`],
 //! [`start_interactive_turn`], and [`start_goal_loop`]. They own only the
@@ -25,15 +25,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Agent;
 use neenee_core::{
-    AgentEvent, AgentResponse, Goal, GoalAccountingResult, GoalService, GoalStatus, HarnessError,
-    HarnessSnapshot, ImagePart, Message, Provider, ProviderStreamEvent, Role, TurnTimer,
-    GOAL_COMPLETE_MARKER,
+    AgentEvent, AgentResponse, Goal, GoalService, HarnessError, HarnessSnapshot, ImagePart,
+    Message, Provider, ProviderStreamEvent, Role, GOAL_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
     session::{
         estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision, CompactionHooks,
-        CompactionResult, LoopCheckpoint, SessionStore,
+        CompactionResult, LoopCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
     },
 };
 
@@ -307,9 +306,6 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                     .tx
                     .send(AgentResponse::Text("... [Interrupted]".to_string()));
             }
-            Err(HarnessError::TurnLimitReached { rounds }) if is_current => {
-                let _ = context.tx.send(AgentResponse::TurnPaused { rounds });
-            }
             Err(error) if is_current => {
                 let _ = context.tx.send(AgentResponse::Error(error.to_string()));
             }
@@ -344,7 +340,6 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     let _ = tx.send(AgentResponse::Activity("saving request".to_string()));
     let admitted_session_id = session.id().await;
     let thread_id = admitted_session_id.clone();
-    let timer = TurnTimer::new();
     let mut turn_history = {
         let mut history = history.lock().await;
         history.push(if input.hidden {
@@ -477,25 +472,11 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     session.replace_messages(turn_history).await?;
     let outcome = result?;
 
-    // Account the time and token cost of this turn against the persisted goal.
-    match goal_service
-        .account_turn(&thread_id, outcome.token_usage, timer.elapsed_seconds())
-        .await
-    {
-        Ok(GoalAccountingResult::Updated(goal)) => {
-            agent.set_goal(goal.clone());
-            emit_goal_updated(&tx, &goal);
-        }
-        Ok(GoalAccountingResult::Unchanged) => {}
-        Err(error) => {
-            let _ = tx.send(AgentResponse::Error(format!(
-                "Goal accounting failed: {error}"
-            )));
-        }
-    }
-
-    // Legacy /loop marker support: if the model explicitly emitted the completion
-    // marker and the goal checklist allows completion, mark it complete in the DB.
+    // Marker-based completion: if the model explicitly emitted the completion
+    // marker and the goal checklist allows completion, mark it complete in the
+    // DB. The pre-ADR-0010 token/time accounting step is gone — per-turn
+    // telemetry stays on `outcome.token_usage` but is no longer booked
+    // against a goal.
     let requested_completion = outcome.message.content.contains(GOAL_COMPLETE_MARKER);
     let mut completed = false;
     if requested_completion && agent.goal_can_complete() {
@@ -514,7 +495,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         }
     } else if agent
         .get_goal()
-        .is_some_and(|goal| goal.status == GoalStatus::Complete)
+        .is_some_and(|goal| goal.is_complete)
     {
         completed = true;
     }
@@ -536,15 +517,6 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     }
     if completed {
         let _ = tx.send(AgentResponse::Text("Goal completed.".to_string()));
-    }
-
-    if agent
-        .get_goal()
-        .is_some_and(|goal| goal.status == GoalStatus::BudgetLimited)
-    {
-        let _ = tx.send(AgentResponse::Text(
-            "Goal token budget exhausted. Use /goal budget <tokens> to increase it or /goal resume after reviewing.".to_string(),
-        ));
     }
 
     // Sync the agent's plan state to the session so resume restores both the
@@ -588,12 +560,12 @@ pub fn relay_agent_event(
 ) {
     let response = match event {
         AgentEvent::ModelRequestStarted { tool_round } => {
-            let status = if tool_round == 0 {
-                "waiting for model".to_string()
-            } else {
-                format!("waiting for model · round {}", tool_round + 1)
-            };
-            AgentResponse::Activity(status)
+            // Structured round signal first, so the activity bar can show
+            // `turn N · round M · waiting for model` with the round as a
+            // first-class field rather than text-mining it out of the status
+            // string. The bare status follows as the `Activity` below.
+            let _ = tx.send(AgentResponse::RoundStarted { round: tool_round });
+            AgentResponse::Activity("waiting for model".to_string())
         }
         AgentEvent::AssistantDelta { delta, start } => {
             if start {
@@ -740,12 +712,25 @@ pub struct LoopRunContext {
     pub retry_max_ms: u64,
 }
 
-pub async fn start_goal_loop(
-    context: LoopRunContext,
-    goal: String,
-    start_iteration: usize,
-    max_iterations: usize,
-) {
+/// Run an uncapped autonomous loop driving `goal`.
+///
+/// Each iteration is a complete agent turn that re-enters the transcript with
+/// a hidden control prompt. The loop terminates only when:
+///
+/// - the model emits `GOAL_COMPLETE_MARKER` and the goal checklist allows
+///   completion (the `Ok(true)` arm — `execute_turn` reports goal completion);
+/// - the user interrupts (`Esc` or `/loop stop`);
+/// - a newer chat or loop request supersedes this one (generation bump);
+/// - a provider or tool pipeline error aborts the active turn.
+///
+/// There is no iteration budget. The cap was removed in ADR-0009 to align
+/// with the codex / claude-code model where the agentic loop runs until the
+/// model itself stops calling tools; context compaction is the backstop that
+/// keeps long loops bounded, and the user can interrupt at any time.
+///
+/// `start_iteration` is provided so `/loop resume` can pick up from a durable
+/// checkpoint; the normal `/loop` entry passes `1`.
+pub async fn start_goal_loop(context: LoopRunContext, goal: String, start_iteration: usize) {
     let token = CancellationToken::new();
     let generation = context.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(previous) = context.token_slot.write().await.replace(token.clone()) {
@@ -757,39 +742,31 @@ pub async fn start_goal_loop(
     send_harness_state(
         &context.tx,
         &context.agent,
-        format!(
-            "loop {}/{}",
-            start_iteration.saturating_sub(1),
-            max_iterations
-        ),
+        format!("loop {}", start_iteration.saturating_sub(1)),
     );
 
     tokio::spawn(async move {
-        let mut terminal_status = "exhausted";
-        for iteration in start_iteration..=max_iterations {
+        let mut iteration = start_iteration;
+        loop {
             let _ = context
                 .session
                 .set_checkpoint(Some(LoopCheckpoint {
                     goal: goal.clone(),
                     iteration,
-                    max_iterations,
+                    max_iterations: UNCAPPED_ITERATIONS,
                     status: "running".to_string(),
                 }))
                 .await;
-            send_harness_state(
-                &context.tx,
-                &context.agent,
-                format!("loop {}/{}", iteration, max_iterations),
-            );
+            send_harness_state(&context.tx, &context.agent, format!("loop {}", iteration));
             let prompt = format!(
-                "Autonomous goal loop iteration {}/{}.\n\
+                "Autonomous goal loop iteration {}.\n\
                  Goal: {}\n\
                  Continue making concrete progress. Inspect the current state, use tools, \
                  implement and verify work. Do not stop at a plan. Emit {} only if the \
                  entire goal is achieved and verified.",
-                iteration, max_iterations, goal, GOAL_COMPLETE_MARKER
+                iteration, goal, GOAL_COMPLETE_MARKER
             );
-            match execute_turn(
+            let outcome = execute_turn(
                 TurnContext {
                     agent: context.agent.clone(),
                     history: context.history.clone(),
@@ -809,17 +786,16 @@ pub async fn start_goal_loop(
                     images: Vec::new(),
                 },
             )
-            .await
-            {
+            .await;
+            match outcome {
                 Ok(true) => {
-                    terminal_status = "completed";
                     let _ = context
                         .session
                         .set_checkpoint(Some(LoopCheckpoint {
                             goal: goal.clone(),
                             iteration,
-                            max_iterations,
-                            status: terminal_status.to_string(),
+                            max_iterations: UNCAPPED_ITERATIONS,
+                            status: "completed".to_string(),
                         }))
                         .await;
                     let _ = context.tx.send(AgentResponse::Text(format!(
@@ -828,31 +804,18 @@ pub async fn start_goal_loop(
                     )));
                     break;
                 }
-                Ok(false) if iteration == max_iterations => {
-                    let _ = context
-                        .session
-                        .set_checkpoint(Some(LoopCheckpoint {
-                            goal: goal.clone(),
-                            iteration,
-                            max_iterations,
-                            status: terminal_status.to_string(),
-                        }))
-                        .await;
-                    let _ = context.tx.send(AgentResponse::Text(format!(
-                        "Loop exhausted its {} iteration budget. Continue with /loop <N> or set a new goal.",
-                        max_iterations
-                    )));
+                Ok(false) => {
+                    iteration = iteration.saturating_add(1);
+                    continue;
                 }
-                Ok(false) => {}
                 Err(HarnessError::Interrupted) => {
-                    terminal_status = "interrupted";
                     let _ = context
                         .session
                         .set_checkpoint(Some(LoopCheckpoint {
                             goal: goal.clone(),
                             iteration,
-                            max_iterations,
-                            status: terminal_status.to_string(),
+                            max_iterations: UNCAPPED_ITERATIONS,
+                            status: "interrupted".to_string(),
                         }))
                         .await;
                     let _ = context
@@ -861,14 +824,13 @@ pub async fn start_goal_loop(
                     break;
                 }
                 Err(error) => {
-                    terminal_status = "error";
                     let _ = context
                         .session
                         .set_checkpoint(Some(LoopCheckpoint {
                             goal: goal.clone(),
                             iteration,
-                            max_iterations,
-                            status: terminal_status.to_string(),
+                            max_iterations: UNCAPPED_ITERATIONS,
+                            status: "error".to_string(),
                         }))
                         .await;
                     let _ = context.tx.send(AgentResponse::Error(error.to_string()));

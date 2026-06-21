@@ -113,19 +113,29 @@ transition table, the checklist rules, and the persistence model.
 
 ## Autonomous loop
 
-`/loop` defaults to 8 iterations. `/loop <N>` accepts `1..=50`.
-`/loop resume` retries the unfinished iteration from the durable checkpoint.
-It restores the checkpoint goal and removes an incomplete trailing hidden loop
-prompt before continuing. Completed and exhausted checkpoints are terminal.
+`/loop` runs an uncapped autonomous loop driving the active goal. Each
+iteration is a complete agent turn with current filesystem state and
+conversation history, preceded by a hidden control prompt that re-states
+the goal and asks the model to keep making concrete progress.
 
-Each iteration is a complete agent turn with current filesystem state and
-conversation history. A loop stops when:
+| Form | Effect |
+|------|--------|
+| `/loop` | Start on the active goal (set one with `/goal <objective>` first) |
+| `/loop <objective>` | Set a fresh goal and start the loop in one step |
+| `/loop resume` | Resume an unfinished durable checkpoint |
 
-- the completion marker is emitted;
-- the iteration budget is exhausted;
+The loop stops when:
+
+- the completion marker is emitted (and the goal checklist allows completion);
 - the user presses `Esc` or runs `/loop stop`;
 - a newer chat or loop request supersedes it;
 - the provider or tool pipeline returns an error.
+
+There is no iteration budget. The previous `1..=50` cap was removed
+(ADR-0009) to align with the codex / claude-code agentic-loop model: the
+loop runs until the model itself stops calling tools, with context
+compaction as the backstop that keeps long loops bounded. A legacy
+`/loop <N>` form is rejected with a migration hint.
 
 Task generation ids prevent an older task from clearing the cancellation state
 of a newer task.
@@ -146,10 +156,16 @@ replayed.
 
 ## Safety bounds
 
-- 32 tool rounds per agent turn.
 - 3 consecutive identical tool calls.
-- 50 autonomous iterations per `/loop`.
 - 8 seconds to initialize an MCP server.
+
+Distinct tool calls and autonomous loop iterations are both **uncapped**,
+matching the codex / claude-code agentic-loop model. Context compaction
+(`compaction_max_chars` plus mid-turn pruning) is the backstop that keeps
+unbounded loops from exhausting the context window; the user can interrupt
+at any time with `Esc` or `/loop stop`. See ADR-0009 for the rationale and
+the prior caps (32 tool rounds per turn, 50 autonomous iterations per
+`/loop`) that this decision removed.
 
 These are execution bounds, not a security sandbox. Tool permission policy is
 a separate future layer.
@@ -200,10 +216,11 @@ branch snapshots under `sessions/<id>.json`:
 - Each turn records its admission session id and refuses a late commit after a
   session switch.
 
-Loop checkpoints record goal, iteration budget, current iteration, and final
-status. `/session status` exposes the checkpoint, `/loop resume` continues an
-unfinished checkpoint, and `/session new` cancels old work and creates a fresh
-session id.
+Loop checkpoints record goal, current iteration, and final status (the
+iteration budget is uncapped — `usize::MAX` on the wire, see ADR-0009).
+`/session status` exposes the checkpoint, `/loop resume` continues an
+unfinished checkpoint, and `/session new` cancels old work and creates a
+fresh session id.
 
 ## Context compaction
 

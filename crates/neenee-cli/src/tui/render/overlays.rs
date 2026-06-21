@@ -1481,17 +1481,25 @@ pub fn draw_tool_step_detail_overlay(
         .fg(theme.warn())
         .add_modifier(Modifier::BOLD);
     match &msg.kind {
-        MessageKind::ToolStep {
-            structured:
-                Some(neenee_core::ToolOutput::Shell {
-                    command,
-                    stdout,
-                    stderr,
-                    exit,
-                    truncated,
-                }),
-            ..
-        } => {
+        MessageKind::ToolStep { structured, .. }
+            if matches!(
+                structured.as_deref(),
+                Some(neenee_core::ToolOutput::Shell { .. })
+            ) =>
+        {
+            let MessageKind::ToolStep { structured, .. } = &msg.kind else {
+                unreachable!()
+            };
+            let neenee_core::ToolOutput::Shell {
+                command,
+                stdout,
+                stderr,
+                exit,
+                truncated,
+            } = structured.as_deref().expect("guarded by match guard")
+            else {
+                unreachable!()
+            };
             if !command.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("$ {}", command),
@@ -1670,49 +1678,6 @@ fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Color, width: u
     frame.render_widget(para.block(block), area);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_ellipsis_keeps_short_strings_untouched() {
-        assert_eq!(truncate_ellipsis("hi", 10), "hi");
-        assert_eq!(truncate_ellipsis("hi", 2), "hi");
-        assert_eq!(truncate_ellipsis("", 5), "");
-    }
-
-    #[test]
-    fn truncate_ellipsis_appends_ellipsis_on_overflow() {
-        // "hello world" (11 cols) capped at 6 -> 5 chars + …
-        assert_eq!(truncate_ellipsis("hello world", 6), "hello…");
-    }
-
-    #[test]
-    fn truncate_ellipsis_degenerate_widths() {
-        assert_eq!(truncate_ellipsis("abc", 0), "");
-        assert_eq!(truncate_ellipsis("abc", 1), "…");
-    }
-
-    #[test]
-    fn truncate_ellipsis_is_width_aware_for_cjk() {
-        // 你好 = 4 display cols. Capped at 3 -> only 你 (2 cols) fits before the ….
-        assert_eq!(truncate_ellipsis("你好", 3), "你…");
-    }
-
-    #[test]
-    fn relative_time_compact_drops_ago_suffix() {
-        // now
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        assert_eq!(relative_time_compact(t), "now");
-        // 2 hours ago -> "2h" (no "ago")
-        let t = t.saturating_sub(2 * 3600);
-        assert_eq!(relative_time_compact(t), "2h");
-    }
-}
-
 /// Read-only preview modal for the active plan file. Reached by clicking
 /// the sticky plan panel above the input box or pressing `Ctrl+P`. The
 /// caller caches the file content in `App::plan_preview_content` at open
@@ -1755,5 +1720,48 @@ pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, th
             ))),
             footer,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ellipsis_keeps_short_strings_untouched() {
+        assert_eq!(truncate_ellipsis("hi", 10), "hi");
+        assert_eq!(truncate_ellipsis("hi", 2), "hi");
+        assert_eq!(truncate_ellipsis("", 5), "");
+    }
+
+    #[test]
+    fn truncate_ellipsis_appends_ellipsis_on_overflow() {
+        // "hello world" (11 cols) capped at 6 -> 5 chars + …
+        assert_eq!(truncate_ellipsis("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_degenerate_widths() {
+        assert_eq!(truncate_ellipsis("abc", 0), "");
+        assert_eq!(truncate_ellipsis("abc", 1), "…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_is_width_aware_for_cjk() {
+        // 你好 = 4 display cols. Capped at 3 -> only 你 (2 cols) fits before the ….
+        assert_eq!(truncate_ellipsis("你好", 3), "你…");
+    }
+
+    #[test]
+    fn relative_time_compact_drops_ago_suffix() {
+        // now
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        assert_eq!(relative_time_compact(t), "now");
+        // 2 hours ago -> "2h" (no "ago")
+        let t = t.saturating_sub(2 * 3600);
+        assert_eq!(relative_time_compact(t), "2h");
     }
 }

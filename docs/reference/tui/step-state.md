@@ -138,12 +138,12 @@ The accent color a renderer passes to `summary_text_color`, by source:
 
 | Step kind | Lifecycle | Accent | Source |
 |-----------|-----------|--------|--------|
-| Tool | `Running` | `Some(theme.info)`, breathing-swept against the summary bg | `draw_tool_step` |
+| Tool | `Running` | `Some(theme.info)` — steady accent against the summary bg | `draw_tool_step` |
 | Tool | `Failed` | `Some(theme.error_fg)` | `draw_tool_step`, `draw_subagent_bar` |
 | Tool | `Denied` | `Some(theme.warn)` — distinct from a runtime failure | `draw_tool_step`, `draw_subagent_bar` |
 | Tool | `Cancelled` | `Some(theme.text_muted)` — reads as inert, not as a fresh failure | `draw_tool_step`, `draw_subagent_bar` |
 | Tool | `Ok` | `None` — hands control to the weight channel | `draw_tool_step`, `draw_subagent_bar` |
-| Reasoning | streaming / finished | `None` — the marker (`●`, breathing while live) carries the lifecycle, never the text | `draw_reasoning_trace` |
+| Reasoning | streaming / finished | `None` — the lifecycle reads from the summary text (duration omitted while streaming) and the steady `info` hue; the marker is always `+`/`-`, never a streaming glyph | `draw_reasoning_trace` |
 
 A `Some(accent)` always overrides the weight channel outright. `None` falls
 through to `summary_weight`. This is what keeps a collapsed, idle, failed step

@@ -156,6 +156,10 @@ pub enum InputAction {
     /// Paste from the system clipboard (image or text). Resolved by the app
     /// loop, which reads the clipboard asynchronously.
     Paste,
+    /// Terminal-level bracketed paste. The text payload is already available;
+    /// the app loop routes it through the same chip-or-inline logic as
+    /// [`Paste`].
+    BracketedPaste(String),
     /// Input character.
     InsertChar(char),
     /// Delete character before cursor.
@@ -1221,6 +1225,15 @@ pub fn process_event(
                     }
                 }
                 _ => InputAction::None,
+            }
+        }
+        Event::Paste(text) => {
+            // Terminal-level bracketed paste. Route the payload through the
+            // same chip-or-inline logic as Ctrl+V; only on the main prompt.
+            if context.active_modal == super::Modal::None {
+                InputAction::BracketedPaste(text)
+            } else {
+                InputAction::None
             }
         }
         _ => InputAction::None,

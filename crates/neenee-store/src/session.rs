@@ -17,6 +17,15 @@ pub use neenee_core::{estimate_chars, estimate_tokens};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+/// Sentinel value for `LoopCheckpoint::max_iterations` indicating an uncapped
+/// loop. `/loop` no longer accepts a numeric iteration budget; it runs until
+/// the model emits the completion marker, the user runs `/loop stop`, an
+/// error aborts the loop, or a newer request supersedes it. Stored on the
+/// checkpoint so legacy snapshots that carry a finite `max_iterations` from
+/// pre-ADR-0009 versions still resume cleanly: the resume path treats any
+/// valid checkpoint — capped or not — as uncapped going forward.
+pub const UNCAPPED_ITERATIONS: usize = usize::MAX;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopCheckpoint {
     pub goal: String,
@@ -27,7 +36,7 @@ pub struct LoopCheckpoint {
 
 impl LoopCheckpoint {
     pub fn resume_iteration(&self) -> Result<usize, String> {
-        if !(1..=50).contains(&self.max_iterations) {
+        if self.max_iterations == 0 {
             return Err(format!(
                 "Checkpoint has invalid iteration budget {}.",
                 self.max_iterations
@@ -43,7 +52,12 @@ impl LoopCheckpoint {
             return Err(format!("Checkpoint has unknown status '{}'.", self.status));
         }
         let iteration = self.iteration.max(1);
-        if iteration > self.max_iterations {
+        // Capped checkpoints (legacy pre-ADR-0009 snapshots with
+        // `max_iterations <= 50`) are no longer treated as bounded on resume:
+        // the loop continues past the original budget. We still reject
+        // `iteration > max_iterations` for capped checkpoints because that
+        // signals a corrupted checkpoint, not a crossed cap.
+        if self.max_iterations != UNCAPPED_ITERATIONS && iteration > self.max_iterations {
             return Err(format!(
                 "Checkpoint iteration {} exceeds its budget {}.",
                 iteration, self.max_iterations
@@ -2367,6 +2381,53 @@ mod tests {
             let checkpoint = LoopCheckpoint {
                 status: status.to_string(),
                 ..unfinished.clone()
+            };
+            assert!(checkpoint.resume_iteration().is_err());
+        }
+
+        // A zero budget is still rejected — it signals a corrupt checkpoint,
+        // not the uncapped sentinel.
+        let zero_budget = LoopCheckpoint {
+            max_iterations: 0,
+            ..unfinished.clone()
+        };
+        assert!(zero_budget.resume_iteration().is_err());
+
+        // Iteration exceeding the budget is rejected for capped (legacy)
+        // checkpoints so a corrupted snapshot cannot resume past its cap.
+        let over_budget = LoopCheckpoint {
+            iteration: 12,
+            max_iterations: 8,
+            ..unfinished.clone()
+        };
+        assert!(over_budget.resume_iteration().is_err());
+    }
+
+    #[test]
+    fn resume_iteration_accepts_uncapped_checkpoint() {
+        // Post-ADR-0009 checkpoints store `UNCAPPED_ITERATIONS` and resume
+        // cleanly from any unfinished iteration — there is no upper bound to
+        // cross. Both fresh (`iteration == 1`) and deep (`iteration == 1000`)
+        // checkpoints resume from their stored iteration.
+        let uncapped = LoopCheckpoint {
+            goal: "ship".to_string(),
+            iteration: 7,
+            max_iterations: UNCAPPED_ITERATIONS,
+            status: "interrupted".to_string(),
+        };
+        assert_eq!(uncapped.resume_iteration().unwrap(), 7);
+
+        let deep = LoopCheckpoint {
+            iteration: 1000,
+            ..uncapped.clone()
+        };
+        assert_eq!(deep.resume_iteration().unwrap(), 1000);
+
+        // Terminal statuses are still rejected on the uncapped path.
+        for status in ["completed", "exhausted"] {
+            let checkpoint = LoopCheckpoint {
+                status: status.to_string(),
+                ..uncapped.clone()
             };
             assert!(checkpoint.resume_iteration().is_err());
         }

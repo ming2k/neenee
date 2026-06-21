@@ -73,11 +73,6 @@ pub enum HarnessError {
     ContextOverflow(String),
     /// The turn was cancelled by the user.
     Interrupted,
-    /// The turn hit the tool-round budget cap. This is a **planned stop**,
-    /// not a runtime failure: the agent ran out of tool budget rather than
-    /// crashing. Surfaced distinctly so the UI can render it as a recoverable
-    /// notice (with a "continue" affordance) instead of a red error.
-    TurnLimitReached { rounds: usize },
     /// Any other terminal failure; the message is user-facing.
     Other(String),
 }
@@ -106,10 +101,6 @@ impl std::fmt::Display for HarnessError {
             | Self::ContextOverflow(message)
             | Self::Other(message) => write!(f, "{message}"),
             Self::Interrupted => write!(f, "Interrupted"),
-            Self::TurnLimitReached { rounds } => write!(
-                f,
-                "Turn paused after {rounds} tool rounds. Refine the goal or continue with /loop."
-            ),
         }
     }
 }

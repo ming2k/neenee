@@ -1,7 +1,7 @@
 # Agent design
 
 This section is the design canon for neenee's agent — a bounded, tool-using,
-semi-autonomous coding agent. The seven pages here are not independent
+semi-autonomous coding agent. The eight pages here are not independent
 features; they are facets of one system. Read together they describe how a
 single agent turn is steered, gated, isolated, made durable, and kept honest.
 
@@ -33,25 +33,29 @@ model of one agent turn.
    provider call: turn execution, the two capability surfaces, the permission
    broker, the durable session, context compaction, and safety bounds. Start
    here.
-2. [Tool rounds](tool-rounds.md) — the round trip of a tool call as a design
+2. [Turns and rounds](turns-and-rounds.md) — the two-layer execution model:
+   a turn as the user-perceived unit, a round as the ReAct loop iteration
+   inside it, and which concerns attach to each layer. The structural map
+   the rest of the canon is built on.
+3. [Tool rounds](tool-rounds.md) — the round trip of a tool call as a design
    concept: declaration, gating, execution, and how outcomes re-enter the
    conversation. This is the unit the rest of the canon operates on.
-3. [Goals](goals.md) — durable per-session objectives: the status machine,
+4. [Goals](goals.md) — durable per-session objectives: the status machine,
    the checklist that gates completion, token-budget enforcement in SQL, and
    the legacy migration. How the agent remembers what it is doing across
    turns and restarts.
-4. [Plan mode](plan-mode.md) — a read-only execution surface for researching
+5. [Plan mode](plan-mode.md) — a read-only execution surface for researching
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
    exemption for plan files.
-5. [Sub-agents](subagents.md) — the `task` tool's isolated read-only child
+6. [Sub-agents](subagents.md) — the `task` tool's isolated read-only child
    agent. The reference for isolation: what is shared (the provider), what is
    fresh (history, goals, plan state), and how events stream back through one
    pipeline.
-6. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
+7. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
    tools. The reference for failure isolation and for how an extension surface
    reuses the same `Tool` trait and execution path as built-ins.
-7. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
+8. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
    to resolve ambiguity. The reference for the oneshot-channel blocking
    pattern the permission broker also uses.
 

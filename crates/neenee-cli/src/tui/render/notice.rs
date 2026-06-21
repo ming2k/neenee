@@ -33,7 +33,6 @@ use super::{Theme, TRANSCRIPT_BODY_RIGHT_INSET};
 fn severity_presentation(severity: NoticeSeverity, theme: &Theme) -> (&'static str, Color) {
     match severity {
         NoticeSeverity::Error => ("✖", theme.err()),
-        NoticeSeverity::TurnLimit => ("⏸", theme.warn()),
         NoticeSeverity::Info => ("ℹ", theme.info()),
     }
 }

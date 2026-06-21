@@ -52,6 +52,22 @@ pub(super) fn draw_message_body(
     for (bi, block) in msg.blocks.iter().enumerate() {
         let sel_range = block_selection_range(selection, mi, bi);
 
+        // Breathe room around lists: insert a blank row between a list item
+        // and any adjacent block (including the previous item) so ordered
+        // and unordered lists read as discrete entries rather than merging
+        // with surrounding prose or each other.
+        if bi > 0
+            && (matches!(block, Block::ListItem { .. })
+                || matches!(msg.blocks[bi - 1], Block::ListItem { .. }))
+        {
+            *content_lines += 1;
+            if *skip_rows > 0 {
+                *skip_rows = skip_rows.saturating_sub(1);
+            } else if *current_y < area.y + area.height {
+                *current_y += 1;
+            }
+        }
+
         match block {
             Block::Text { content } => {
                 let is_user = msg.role == neenee_core::Role::User;

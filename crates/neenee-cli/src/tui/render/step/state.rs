@@ -90,8 +90,9 @@ pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &
 /// - A **non-completed lifecycle** supplies an accent (hue) which wins outright
 ///   so a running / failed / denied step stays visibly accented even when
 ///   collapsed and idle. The caller computes the accent from its kind-specific
-///   lifecycle source (e.g. `ToolStatus::color`, with breathing applied for
-///   `Running`).
+///   lifecycle source (e.g. `ToolStatus::color`); per ADR 0008 the accent is a
+///   steady hue, never a breathing sweep — the activity bar owns the only
+///   motion in the TUI.
 /// - `None` (completed, or a kind whose lifecycle only affects its marker —
 ///   reasoning) hands control to [`summary_weight`].
 ///

@@ -261,23 +261,22 @@ The loop returns a final assistant message when any of these holds:
 | Condition | Where | Result |
 |-----------|-------|--------|
 | Response has no `tool_calls` and no fallback JSON parses | `run_streaming_with_events` tail | Success; assistant text is the answer |
-| `tool_rounds >= MAX_TOOL_ROUNDS` (32) | `run_streaming_with_events` head | Error; turn aborts |
 | `guard_repeated_call` rejects a 4th consecutive identical call | `guard_repeated_call` | Error; turn aborts |
 | Provider or tool pipeline returns an error | propagated | Error; turn aborts |
 | Context overflow before any tool event | retry layer | Compact and retry once |
 
 ### Safety bounds
 
-Two bounds prevent runaway loops (`crates/neenee-core/src/lib.rs`):
+Distinct tool rounds are uncapped — the loop runs until the model emits a
+final assistant message, with context compaction as the backstop
+(`crates/neenee-agent/src/lib.rs`, ADR-0009):
 
-- `MAX_TOOL_ROUNDS = 32`. A single turn cannot exceed 32 tool rounds
-  (each round may contain multiple parallel tool calls).
 - `MAX_REPEATED_TOOL_CALLS = 3`. `guard_repeated_call` tracks the previous
   `(name, arguments)` pair. After three consecutive identical calls the
   fourth is rejected with an error. Distinct calls and interleaved text
   resets the counter.
 
-These are execution bounds, not a security sandbox. See
+This is an execution bound, not a security sandbox. See
 [Harness architecture](agent-design/harness.md) for the full safety surface.
 
 ## Fallback variant

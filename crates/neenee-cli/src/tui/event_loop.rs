@@ -69,6 +69,10 @@ pub(super) struct UiRuntime {
     /// plan panel can compute "not updated for N turns" without an extra
     /// event channel.
     pub turn_count: Arc<Mutex<u64>>,
+    /// Current tool round within the active turn (1-indexed for display).
+    /// Set from `AgentResponse::RoundStarted`; reset to 0 at the turn
+    /// boundary so the pre-request phase does not show a stale round.
+    pub current_round: Arc<Mutex<u64>>,
     /// One-shot: when set, the event loop opens the plan preview modal by
     /// loading the file at the given path into `App::plan_preview_content`
     /// and switching to `Modal::PlanPreview`. Drained each frame.
@@ -126,6 +130,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.session_context = runtime.session_context.lock().await.clone();
             app.plan_progress = runtime.plan_progress.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
+            app.current_round = *runtime.current_round.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
@@ -362,6 +367,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     plan_panel_expanded: app.plan_panel_expanded,
                     current_goal: app.current_goal.as_ref(),
                     turn_count: app.turn_count,
+                    current_round: app.current_round,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     theme: &app.theme,
@@ -1430,6 +1436,12 @@ pub(super) async fn run_app_loop<B: Backend>(
                         clipboard_ops::spawn_clipboard_paste(&paste_tx);
                     }
                 }
+                input::InputAction::BracketedPaste(text) => {
+                    // Terminal-level paste (bracketed paste mode). The payload
+                    // is already in hand, so route it directly through the same
+                    // chip-or-inline logic as Ctrl+V without an async hop.
+                    clipboard_ops::apply_clipboard_paste(app, clipboard::ClipboardRead::Text(text));
+                }
                 input::InputAction::ExitSubAgent => {
                     app.exit_subagent();
                 }
@@ -2249,6 +2261,14 @@ pub(super) fn display_status(
     match (loop_status, activity) {
         ("idle", "") => "idle".to_string(),
         ("idle", activity) => activity.to_string(),
+        // "running" is implied by the activity bar's spinner + `turn N`
+        // prefix, so it would be redundant noise ahead of the status. Drop
+        // it and show the activity alone — but fall back to "preparing" when
+        // no specific activity has landed yet (the gap between turn start
+        // and the first `AgentResponse::Activity`), so the activity bar
+        // always has a non-empty label to anchor the breathing dot against.
+        ("running", "") => "preparing".to_string(),
+        ("running", activity) => activity.to_string(),
         (loop_status, "") => loop_status.to_string(),
         (loop_status, activity) => format!("{} · {}", loop_status, activity),
     }

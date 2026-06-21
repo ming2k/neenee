@@ -13,7 +13,7 @@ the input box). Only visible while a goal is in the `Active` state.
 |-----------|-------|
 | Location | 1 row above the status bar, below the plan panel |
 | Glyph | `●` (`spinner_glyph`), BOLD |
-| Color | `breathing_color(phase, theme.brand(), theme.surface())` — same cosine luminance sweep as the status bar |
+| Color | `theme.brand()` (steady — the bar's existence on the `raised` background signals an active goal; progress is carried by the `[done/total]` suffix) |
 | Objective | `theme.muted()`, truncated to `GOAL_OBJECTIVE_MAX_CHARS = 28` chars with `...` suffix |
 | Progress | `[done/total]` appended when the checklist is non-empty |
 | Background | `raised` (entire row, so it reads as a clickable surface) |

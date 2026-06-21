@@ -236,6 +236,12 @@ pub struct App {
     /// stale detector: if `turn_count - plan_progress.updated_at_turn`
     /// exceeds the threshold the panel renders dimmed.
     pub turn_count: u64,
+    /// Current tool round within the active turn (1-indexed for display:
+    /// `0` means the turn has started but no model request has fired yet —
+    /// e.g. the "queued" / "preparing context" phase). Mirrored each frame
+    /// from the response listener; shown in the activity bar as
+    /// `turn N · round M · <status>`.
+    pub current_round: u64,
     /// Cached content of the plan file currently shown in `Modal::PlanPreview`.
     /// Loaded from disk when the modal opens so the preview does not flicker
     /// on every redraw; cleared on close so the next open re-reads the file

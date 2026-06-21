@@ -25,7 +25,7 @@ pub(crate) use providers::{
 
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -75,6 +75,7 @@ pub async fn run_tui(
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -108,6 +109,11 @@ pub async fn run_tui(
     let plan_progress_clone = plan_progress.clone();
     let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let turn_count_clone = turn_count.clone();
+    // Current tool round within the active turn. Reset to 0 at each turn
+    // boundary and bumped from `AgentResponse::RoundStarted`. The activity bar
+    // renders it as `round M` alongside the turn number.
+    let current_round: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let current_round_clone = current_round.clone();
     // One-shot signals from the response listener to the event loop. The
     // listener can't touch App or send AgentRequests directly, so it stashes
     // the request here and the event loop drains it next frame.
@@ -162,6 +168,11 @@ pub async fn run_tui(
                 AgentResponse::Activity(status) => {
                     *activity_clone.lock().await = status;
                     ir_clone.store(true, Ordering::SeqCst);
+                }
+                AgentResponse::RoundStarted { round } => {
+                    // 1-indexed for display: tool_round 0 is the turn's first
+                    // model request, shown as `round 1`.
+                    *current_round_clone.lock().await = round as u64 + 1;
                 }
                 AgentResponse::StreamStart => {
                     let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
@@ -457,10 +468,14 @@ pub async fn run_tui(
                     if running {
                         let mut tc = turn_count_clone.lock().await;
                         *tc = tc.saturating_add(1);
+                        // A new turn resets the round counter; it stays 0
+                        // until the first `RoundStarted` of the turn lands.
+                        *current_round_clone.lock().await = 0;
                     }
                     ir_clone.store(running, Ordering::SeqCst);
                     if !running {
                         activity_clone.lock().await.clear();
+                        *current_round_clone.lock().await = 0;
                     }
                     // A harness state change is always a turn boundary
                     // (idle at the end of a turn, "running"/"loop N/M" at the
@@ -514,20 +529,6 @@ pub async fn run_tui(
                         event_loop::compact_retry_reason(&message)
                     );
                     ir_clone.store(true, Ordering::SeqCst);
-                }
-                AgentResponse::TurnPaused { rounds } => {
-                    // A planned stop (tool-round budget cap), not a runtime
-                    // failure: render amber with a "paused" glyph so it reads
-                    // as recoverable — the user can `/loop resume` to continue.
-                    let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::notice(
-                        NoticeSeverity::TurnLimit,
-                        format!(
-                            "Turn paused after {rounds} tool rounds. Refine the goal or continue with /loop."
-                        ),
-                    ));
-                    ir_clone.store(false, Ordering::SeqCst);
-                    activity_clone.lock().await.clear();
                 }
                 AgentResponse::Error(e) => {
                     let mut msgs = messages_clone.lock().await;
@@ -591,6 +592,7 @@ pub async fn run_tui(
         plan_panel_expanded: false,
         plan_rect: None,
         turn_count: 0,
+        current_round: 0,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
         pending_permission: None,
@@ -656,6 +658,7 @@ pub async fn run_tui(
             session_context,
             plan_progress,
             turn_count,
+            current_round,
             open_plan_preview,
             trigger_verification,
         },

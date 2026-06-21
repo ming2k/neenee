@@ -7,6 +7,9 @@ Use this checklist before approving documentation changes.
 - File passed through the correct gate in [Routing](routing.md); the gates
   are a priority-ordered cascade, not a free choice.
 - ADRs (Time gate) are not mixed with explanation or reference material.
+- Explanation docs stay conceptual: no source coordinates, struct layouts, API
+  signatures, or fenced source blocks. That detail lives in reference pages,
+  linked from the explanation.
 - User-facing and contributor content are not mixed; `docs/dev/` is the
   firewall between them.
 - Root files are used only for their fixed purpose, not as a routing escape

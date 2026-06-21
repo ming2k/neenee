@@ -139,6 +139,15 @@ pub enum AgentResponse {
         message: String,
     },
     Activity(String),
+    /// A new tool round started within the current turn. `round` is the
+    /// 0-indexed model-request index within the turn (0 = the first request).
+    /// Surfaced as structured data so the activity bar can render
+    /// `turn N · round M · <status>` without parsing the round back out of the
+    /// `Activity` status string. Emitted just before the matching
+    /// `Activity("waiting for model")`.
+    RoundStarted {
+        round: usize,
+    },
     StreamStart,
     StreamDelta(String),
     StreamReasoningDelta(String),
@@ -149,13 +158,6 @@ pub enum AgentResponse {
     SubTask {
         parent_call_id: String,
         event: SubTaskEvent,
-    },
-    /// The turn was paused by a harness guardrail (tool-round budget cap),
-    /// not by a runtime failure. Distinct from [`AgentResponse::Error`] so the
-    /// UI can render it as a recoverable notice with a continue affordance
-    /// instead of a red error. `rounds` is the budget that was reached.
-    TurnPaused {
-        rounds: usize,
     },
     Error(String),
     Exit,

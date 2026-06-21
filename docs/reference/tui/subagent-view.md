@@ -35,7 +35,7 @@ so the existing click / `Enter` machinery recognizes it.
 |-----------|-------|
 | Background | `theme.surface()` (`app_bg`), inset 2 cols (`TRANSCRIPT_H_INSET`) |
 | Marker | None — the step navigates; disclosure is conveyed by Enter/click, not `+`/`-` |
-| Summary color | `summary_text_color(accent, Collapsed, Hovered?)` via the shared [step state machine](step-state.md); Running has no breathing (no spinner phase wired here) so it reads as a steady `info` accent |
+| Summary color | `summary_text_color(accent, Collapsed, Hovered?)` via the shared [step state machine](step-state.md); `Running` reads as a steady `info` accent (no per-step breathing — see [ADR-0008](../../adr/0008-single-breathing-anchor.md)) |
 | Status line | Wrapped, `theme.muted()`, indented 2 cols; the whole line is part of the same clickable summary so clicking anywhere enters the zoom |
 | Lifecycle accent | Same wiring as a tool step: `Ok → None`, `Failed → Some(theme.error_fg)`, `Denied → Some(theme.warn)`, `Cancelled → Some(theme.text_muted)`, `Running → Some(theme.info)` |
 

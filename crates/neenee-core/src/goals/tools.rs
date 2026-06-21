@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::{Tool, ToolAccess};
 
 use super::service::GoalService;
-use super::{Goal, GoalChecklistItem, GoalChecklistStatus, GoalStatus};
+use super::{Goal, GoalChecklistItem, GoalChecklistStatus};
 
 /// Shared context injected into goal-aware tools so they know the current
 /// thread/session id and can reach the goal service.
@@ -43,7 +43,7 @@ impl Tool for GetGoalTool {
     }
 
     fn description(&self) -> &str {
-        "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget."
+        "Get the current goal for this thread, including objective, completion state, and checklist."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -85,7 +85,7 @@ impl Tool for CreateGoalTool {
     }
 
     fn description(&self) -> &str {
-        "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use update_goal only for status."
+        "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Replaces any existing goal on this thread."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -94,11 +94,7 @@ impl Tool for CreateGoalTool {
             "properties": {
                 "objective": {
                     "type": "string",
-                    "description": "Required. The concrete objective to start pursuing. This starts a new active goal when no goal exists or replaces the current goal when it is complete."
-                },
-                "token_budget": {
-                    "type": "integer",
-                    "description": "Positive token budget for the new goal. Omit unless explicitly requested."
+                    "description": "Required. The concrete objective to start pursuing. Replaces the current goal if one exists."
                 }
             },
             "required": ["objective"],
@@ -115,14 +111,13 @@ impl Tool for CreateGoalTool {
     }
 
     fn permission_description(&self) -> String {
-        "Start a new active goal for this thread, replacing any completed goal.".to_string()
+        "Start a new active goal for this thread, replacing any existing goal.".to_string()
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
         struct Args {
             objective: String,
-            token_budget: Option<i64>,
         }
 
         let args: Args =
@@ -132,12 +127,7 @@ impl Tool for CreateGoalTool {
         let goal = self
             .context
             .goal_service
-            .set_goal(
-                &thread_id,
-                &args.objective,
-                GoalStatus::Active,
-                args.token_budget,
-            )
+            .set_goal(&thread_id, &args.objective)
             .await?;
         Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
     }
@@ -160,7 +150,7 @@ impl Tool for UpdateGoalTool {
     }
 
     fn description(&self) -> &str {
-        "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to `complete` only when the objective has actually been achieved and no required work remains. Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again. Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`. Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work. You cannot use this tool to pause, resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system."
+        "Mark the existing goal as complete. Use this tool only when the objective has actually been achieved and no required work remains (the checklist, if any, must be fully resolved). Do not mark a goal complete merely because you are stopping work or because progress is slow."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -169,8 +159,8 @@ impl Tool for UpdateGoalTool {
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["complete", "blocked"],
-                    "description": "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse."
+                    "enum": ["complete"],
+                    "description": "Set to `complete` only when the objective is achieved and the checklist, if any, is fully resolved."
                 }
             },
             "required": ["status"],
@@ -183,11 +173,11 @@ impl Tool for UpdateGoalTool {
     }
 
     fn permission_label(&self) -> String {
-        "Update goal".to_string()
+        "Mark goal complete".to_string()
     }
 
     fn permission_description(&self) -> String {
-        "Mark the active goal as complete or blocked.".to_string()
+        "Mark the active goal as complete.".to_string()
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -200,13 +190,17 @@ impl Tool for UpdateGoalTool {
             serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
         let thread_id = self.context.thread_id()?;
 
-        let goal = match args.status.as_str() {
-            "complete" => self.context.goal_service.mark_complete(&thread_id).await?,
-            "blocked" => self.context.goal_service.mark_blocked(&thread_id).await?,
-            other => return Err(format!("invalid update_goal status: {other}")),
-        };
-
-        Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
+        match args.status.as_str() {
+            "complete" => {
+                let goal = self
+                    .context
+                    .goal_service
+                    .mark_complete(&thread_id)
+                    .await?;
+                Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
+            }
+            other => Err(format!("invalid update_goal status: {other}")),
+        }
     }
 }
 
@@ -287,8 +281,8 @@ impl Tool for GoalChecklistTool {
         let goal = guard
             .as_mut()
             .ok_or_else(|| "No active goal. Set one with /goal <objective>.".to_string())?;
-        if goal.status != GoalStatus::Active {
-            return Err("The goal is not active.".to_string());
+        if goal.is_complete {
+            return Err("The goal is already complete.".to_string());
         }
         if args.items.is_empty() && !goal.checklist.is_empty() {
             return Err(
@@ -343,7 +337,7 @@ mod tests {
     #[test]
     fn update_goal_exposes_user_friendly_permission_text() {
         let tool = UpdateGoalTool::new(make_context());
-        assert_eq!(tool.permission_label(), "Update goal");
+        assert_eq!(tool.permission_label(), "Mark goal complete");
         let desc = tool.permission_description();
         assert_ne!(desc, tool.description());
         assert!(!desc.contains("do not"));
