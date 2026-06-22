@@ -66,10 +66,11 @@ pub use neenee_core::{
     GoalChecklistStatus, GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
     McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision, PermissionRequest,
     Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent,
-    PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent, SubagentProfile,
-    TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream,
-    Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply,
-    UserQuestionRequest,     WebSearchConfig, PRUNED_TOOL_PLACEHOLDER, EXPLORE, VERIFY,
+    PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
+    SubagentProfile, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult,
+    ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
+    UserQuestionReply, UserQuestionRequest, WebSearchConfig, EXPLORE, PRUNED_TOOL_PLACEHOLDER,
+    VERIFY,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from

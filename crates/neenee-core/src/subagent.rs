@@ -192,40 +192,58 @@ mod tests {
 
     #[test]
     fn explore_policy_admits_plain_read_tool() {
-        assert!(EXPLORE.tool_policy.admits(&make(ToolAccess::Read, false, false)));
+        assert!(EXPLORE
+            .tool_policy
+            .admits(&make(ToolAccess::Read, false, false)));
     }
 
     #[test]
     fn explore_policy_rejects_write_tool() {
-        assert!(!EXPLORE.tool_policy.admits(&make(ToolAccess::Write, false, false)));
+        assert!(!EXPLORE
+            .tool_policy
+            .admits(&make(ToolAccess::Write, false, false)));
     }
 
     #[test]
     fn explore_policy_rejects_execute_tool() {
         // bash shape: Execute. EXPLORE's Read ceiling excludes it — a research
         // explorer must not run commands.
-        assert!(!EXPLORE.tool_policy.admits(&make(ToolAccess::Execute, false, false)));
+        assert!(!EXPLORE
+            .tool_policy
+            .admits(&make(ToolAccess::Execute, false, false)));
     }
 
     #[test]
     fn verify_policy_admits_read_and_execute_but_not_write() {
         // VERIFY is the verifier shape: read-only inspection + command
         // execution for tests/builds, but no file-write.
-        assert!(VERIFY.tool_policy.admits(&make(ToolAccess::Read, false, false)));
-        assert!(VERIFY.tool_policy.admits(&make(ToolAccess::Execute, false, false)));
-        assert!(!VERIFY.tool_policy.admits(&make(ToolAccess::Write, false, false)));
+        assert!(VERIFY
+            .tool_policy
+            .admits(&make(ToolAccess::Read, false, false)));
+        assert!(VERIFY
+            .tool_policy
+            .admits(&make(ToolAccess::Execute, false, false)));
+        assert!(!VERIFY
+            .tool_policy
+            .admits(&make(ToolAccess::Write, false, false)));
     }
 
     #[test]
     fn verify_policy_still_rejects_user_and_recursion() {
-        assert!(!VERIFY.tool_policy.admits(&make(ToolAccess::Read, true, false)));
-        assert!(!VERIFY.tool_policy.admits(&make(ToolAccess::Execute, false, true)));
+        assert!(!VERIFY
+            .tool_policy
+            .admits(&make(ToolAccess::Read, true, false)));
+        assert!(!VERIFY
+            .tool_policy
+            .admits(&make(ToolAccess::Execute, false, true)));
     }
 
     #[test]
     fn explore_policy_rejects_user_interaction_tool() {
         // ask_user shape: Read + requires_user.
-        assert!(!EXPLORE.tool_policy.admits(&make(ToolAccess::Read, true, false)));
+        assert!(!EXPLORE
+            .tool_policy
+            .admits(&make(ToolAccess::Read, true, false)));
     }
 
     #[test]
@@ -233,7 +251,9 @@ mod tests {
         // task shape: Read + spawns_subagent. Even though it is Read, the
         // recursion guard excludes it — this is the case the old name-based
         // `name != "task"` filter hardcoded.
-        assert!(!EXPLORE.tool_policy.admits(&make(ToolAccess::Read, false, true)));
+        assert!(!EXPLORE
+            .tool_policy
+            .admits(&make(ToolAccess::Read, false, true)));
     }
 
     #[test]
@@ -250,11 +270,11 @@ mod tests {
     #[test]
     fn select_tools_filters_a_mixed_set() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(make(ToolAccess::Read, false, false)),     // admit
-            Arc::new(make(ToolAccess::Execute, false, false)),  // reject (execute > Read)
-            Arc::new(make(ToolAccess::Write, false, false)),    // reject (write)
-            Arc::new(make(ToolAccess::Read, true, false)),      // reject (user)
-            Arc::new(make(ToolAccess::Read, false, true)),      // reject (recurse)
+            Arc::new(make(ToolAccess::Read, false, false)), // admit
+            Arc::new(make(ToolAccess::Execute, false, false)), // reject (execute > Read)
+            Arc::new(make(ToolAccess::Write, false, false)), // reject (write)
+            Arc::new(make(ToolAccess::Read, true, false)),  // reject (user)
+            Arc::new(make(ToolAccess::Read, false, true)),  // reject (recurse)
         ];
         let selected = EXPLORE.select_tools(&tools);
         assert_eq!(selected.len(), 1);
@@ -264,11 +284,36 @@ mod tests {
     #[test]
     fn verify_select_tools_admits_read_and_execute_only() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Stub { name: "read_file", access: ToolAccess::Read, requires_user: false, spawns_subagent: false }),
-            Arc::new(Stub { name: "bash", access: ToolAccess::Execute, requires_user: false, spawns_subagent: false }),
-            Arc::new(Stub { name: "write_file", access: ToolAccess::Write, requires_user: false, spawns_subagent: false }),
-            Arc::new(Stub { name: "ask_user", access: ToolAccess::Read, requires_user: true, spawns_subagent: false }),
-            Arc::new(Stub { name: "task", access: ToolAccess::Read, requires_user: false, spawns_subagent: true }),
+            Arc::new(Stub {
+                name: "read_file",
+                access: ToolAccess::Read,
+                requires_user: false,
+                spawns_subagent: false,
+            }),
+            Arc::new(Stub {
+                name: "bash",
+                access: ToolAccess::Execute,
+                requires_user: false,
+                spawns_subagent: false,
+            }),
+            Arc::new(Stub {
+                name: "write_file",
+                access: ToolAccess::Write,
+                requires_user: false,
+                spawns_subagent: false,
+            }),
+            Arc::new(Stub {
+                name: "ask_user",
+                access: ToolAccess::Read,
+                requires_user: true,
+                spawns_subagent: false,
+            }),
+            Arc::new(Stub {
+                name: "task",
+                access: ToolAccess::Read,
+                requires_user: false,
+                spawns_subagent: true,
+            }),
         ];
         let selected = VERIFY.select_tools(&tools);
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();

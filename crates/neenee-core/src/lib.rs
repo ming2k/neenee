@@ -33,7 +33,6 @@ pub mod subagent;
 pub mod tool_call;
 pub mod webconfig;
 pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
-pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, VERIFY};
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
@@ -47,5 +46,6 @@ pub use pressure::{
     estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
 };
 pub use skillsconfig::SkillsConfig;
+pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, VERIFY};
 pub use tool_output::truncate_utf8;
 pub use webconfig::WebSearchConfig;
