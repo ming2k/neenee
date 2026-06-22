@@ -15,11 +15,9 @@ use neenee_agent::skills::{
 use neenee_agent::Agent;
 use neenee_agent::TaskTool;
 #[cfg(test)]
-use neenee_core::{async_trait, ProviderStreamEvent};
+use neenee_core::{async_trait, Message, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStore, McpConnectionStatus,
-    McpServerInfo, Message, ModelInfo, Provider, SessionContextSnapshot, SessionOverview, Tool,
-    EXPLORE,
+    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStore, Provider, Tool, EXPLORE,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
@@ -37,6 +35,18 @@ use neenee_tools::{
 };
 #[allow(dead_code)]
 mod tui;
+
+mod goals;
+mod session_view;
+mod startup;
+
+use goals::{format_goal_status, load_legacy_goal_from_config};
+use session_view::{
+    build_session_context, build_sessions_overview, provider_key_status, resume_session,
+    short_session_id,
+};
+use startup::{init_tracing, parse_args, split_custom_command, StartupMode, BUILTIN_COMMANDS};
+
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::{
@@ -45,261 +55,6 @@ use std::sync::{
 };
 use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
-
-fn load_legacy_goal_from_config() -> Option<Goal> {
-    #[derive(serde::Deserialize)]
-    struct LegacyGoal {
-        harness_goal: Option<String>,
-        #[serde(default)]
-        harness_goal_completed: bool,
-        #[serde(default)]
-        harness_goal_checklist: Vec<neenee_core::GoalChecklistItem>,
-    }
-
-    let path = Config::config_file_path();
-    let content = std::fs::read_to_string(path).ok()?;
-    let legacy: LegacyGoal = toml::from_str(&content).ok()?;
-    let objective = legacy.harness_goal?;
-    Some(Goal {
-        objective,
-        is_complete: legacy.harness_goal_completed,
-        checklist: legacy.harness_goal_checklist,
-    })
-}
-
-const BUILTIN_COMMANDS: &[&str] = &[
-    "models",
-    "mode",
-    "mcp",
-    "permissions",
-    "auto-approve",
-    "stall-threshold",
-    "verify-nudge",
-    "session",
-    "sessions",
-    "resume",
-    "compact",
-    "goal",
-    "loop",
-    "init",
-    "skills",
-    "skill",
-    "export",
-    "clear",
-    "help",
-    "exit",
-];
-
-fn split_custom_command(input: &str) -> (&str, &str) {
-    let input = input.trim();
-    let split_at = input.find(char::is_whitespace).unwrap_or(input.len());
-    let (name, arguments) = input.split_at(split_at);
-    (name.trim_start_matches('/'), arguments.trim())
-}
-
-async fn resume_session(
-    session: &SessionStore,
-    history: &tokio::sync::Mutex<Vec<Message>>,
-    id: Option<&str>,
-) -> Result<(String, Vec<Message>), String> {
-    let id = session.resume(id).await?;
-    *history.lock().await = session.messages().await;
-    Ok((id, session.transcript().await))
-}
-
-fn short_session_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
-}
-
-/// Whether each provider has a usable API key (env var or config).
-/// Keyless providers (local llama, mock) always report `true`.
-///
-/// Derived from the provider catalog so the readiness signal and the actual
-/// provider construction share one resolution path.
-fn provider_key_status(config: &Config) -> Vec<(String, bool)> {
-    catalog::build_catalog(config)
-        .iter()
-        .map(|entry| (entry.id.clone(), entry.key_ready()))
-        .collect()
-}
-
-/// Build a render-ready snapshot of the live session for the session-context
-/// modal. Pulls model info from the catalog, tools/permissions/skills from the
-/// agent, and MCP per-server tool names by matching the `mcp__<server>__*`
-/// naming convention against the agent's installed tools.
-///
-/// Sent in reply to [`AgentRequest::QuerySessionContext`] and re-sent after any
-/// mutation ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`])
-/// so the modal always reflects the post-change state.
-fn build_session_context(
-    agent: &Agent,
-    _skills_registry: &SkillRegistry,
-    mcp_statuses: &[(String, McpConnectionStatus)],
-    config: &Config,
-) -> SessionContextSnapshot {
-    let provider_id = catalog::default_provider_id(config).to_string();
-    let model = catalog::resolved_model_name(config, &provider_id);
-
-    // Catalog entry carries the authoritative display metadata; fall back to
-    // the raw model id / empty when the provider isn't a known catalog entry.
-    let entry = catalog::build_catalog(config)
-        .into_iter()
-        .find(|e| e.id == provider_id);
-    let display_name = entry
-        .as_ref()
-        .map(|e| e.name.clone())
-        .unwrap_or_else(|| model.clone());
-    let description = entry
-        .as_ref()
-        .map(|e| e.description.clone())
-        .unwrap_or_default();
-    let context_window = entry.as_ref().map(|e| e.context_window()).unwrap_or(0);
-    let api_key_ready = entry.as_ref().map(|e| e.key_ready()).unwrap_or(false);
-
-    let model_info = ModelInfo {
-        provider: provider_id,
-        capabilities: derive_capabilities(&model),
-        display_name,
-        model,
-        context_window,
-        api_key_ready,
-        description,
-    };
-
-    let tools = agent.snapshot_tools();
-    let permissions = agent.allowed_tools_structured();
-    let skills = agent.snapshot_skills();
-
-    // Per-server tool names: match the agent's installed tools by their
-    // `mcp__<server>__<tool>` naming convention. The status enum only carries a
-    // count, so this is where the per-server list is reconstructed.
-    let mcp = mcp_statuses
-        .iter()
-        .map(|(name, status)| {
-            let prefix = format!("mcp:{}", name);
-            let tool_names: Vec<String> = tools
-                .iter()
-                .filter(|t| t.source == prefix)
-                .map(|t| t.name.clone())
-                .collect();
-            let (connected, disabled, failure) = match status {
-                McpConnectionStatus::Connected { .. } => (true, false, None),
-                McpConnectionStatus::Disabled => (false, true, None),
-                McpConnectionStatus::Failed(reason) => (false, false, Some(reason.clone())),
-            };
-            McpServerInfo {
-                name: name.clone(),
-                connected,
-                disabled,
-                failure,
-                tool_names,
-            }
-        })
-        .collect();
-
-    SessionContextSnapshot {
-        model: model_info,
-        tools,
-        permissions,
-        skills,
-        mcp,
-    }
-}
-
-/// Heuristic model-capability hints for the session modal. Per-model capability
-/// data is resolved from the [`neenee_core::model`] registry; the harness
-/// depends on tool calling for every provider, so it is always advertised.
-fn derive_capabilities(model: &str) -> Vec<String> {
-    let mut caps = vec!["tool calling".to_string()];
-    if neenee_core::resolve_model(model).reasoning {
-        caps.push("reasoning".to_string());
-    }
-    caps
-}
-
-#[derive(Debug)]
-enum StartupMode {
-    Fresh,
-    Resume(Option<String>),
-    Picker,
-    Doctor,
-}
-
-fn parse_args(args: Vec<String>) -> (StartupMode, Option<std::path::PathBuf>, bool) {
-    let mut iter = args.into_iter().peekable();
-    let mut project: Option<std::path::PathBuf> = None;
-    let mut auto_approve = false;
-    let mut rest = Vec::new();
-    while let Some(arg) = iter.next() {
-        if arg == "--project" {
-            project = iter.next().map(std::path::PathBuf::from);
-        } else if let Some(value) = arg.strip_prefix("--project=") {
-            project = Some(std::path::PathBuf::from(value));
-        } else if arg == "--auto-approve" {
-            auto_approve = true;
-        } else {
-            rest.push(arg);
-        }
-    }
-
-    let mode = match rest.as_slice() {
-        [] => StartupMode::Fresh,
-        [cmd] if cmd == "resume" => StartupMode::Picker,
-        [cmd, id] if cmd == "resume" => StartupMode::Resume(Some(id.clone())),
-        [cmd, ..] if cmd == "doctor" => StartupMode::Doctor,
-        [cmd, ..] => {
-            eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity\n\nOptions:\n  --project <path>    operate on the project at <path>\n  --auto-approve      bypass write-tool permission prompts for this session",
-                cmd
-            );
-            std::process::exit(2);
-        }
-    };
-    (mode, project, auto_approve)
-}
-
-async fn build_sessions_overview(session: &SessionStore) -> Vec<SessionOverview> {
-    match session.list().await {
-        Ok(items) => items
-            .into_iter()
-            .map(|item| SessionOverview {
-                id: item.id,
-                overview: item.overview,
-                created_at: item.created_at,
-                updated_at: item.updated_at,
-                message_count: item.message_count,
-                active: item.active,
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Initialise file-based tracing when `NEENEE_LOG` names a log file.
-///
-/// A TUI cannot log to stdout (it would corrupt the display), so tracing is
-/// opt-in and always writes to a file. Verbosity comes from `RUST_LOG`,
-/// defaulting to `info` for the neenee crates. The returned guard flushes the
-/// non-blocking writer on drop and must live for the whole process.
-fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let path = std::path::PathBuf::from(std::env::var_os("NEENEE_LOG")?);
-    let dir = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => std::path::PathBuf::from("."),
-    };
-    let file_name = path.file_name()?.to_owned();
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::never(dir, file_name));
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("neenee=info,neenee_core=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(writer)
-        .with_ansi(false)
-        .init();
-    tracing::info!("neenee tracing initialised");
-    Some(guard)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -436,7 +191,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TaskTool gets a snapshot of the toolset (excluding itself) so spawned
     // sub-agents cannot recurse and inherit the live provider. It binds the
     // EXPLORE profile (read-only / non-interactive / non-recursive).
-    let task_tool = Arc::new(TaskTool::new(agent_provider.clone(), tools.clone(), &EXPLORE));
+    let task_tool = Arc::new(TaskTool::new(
+        agent_provider.clone(),
+        tools.clone(),
+        &EXPLORE,
+    ));
     tools.push(task_tool);
     tools.push(Arc::new(SearchHistoryTool::new(
         embedding_store.clone(),
@@ -1988,51 +1747,6 @@ async fn run_shell_command(
     }
 }
 
-fn format_goal_status(goal: &Goal) -> String {
-    use neenee_core::GoalChecklistStatus;
-
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Goal [{}]: {}",
-        if goal.is_complete {
-            "complete"
-        } else {
-            "active"
-        },
-        goal.objective
-    ));
-
-    if !goal.checklist.is_empty() {
-        let total = goal.checklist.len();
-        let done = goal
-            .checklist
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item.status,
-                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-                )
-            })
-            .count();
-        lines.push(String::new());
-        lines.push(format!("Plans ({done}/{total}):"));
-        for item in &goal.checklist {
-            let (glyph, label) = match item.status {
-                GoalChecklistStatus::Completed => ("✓", "done"),
-                GoalChecklistStatus::Cancelled => ("✗", "cancelled"),
-                GoalChecklistStatus::InProgress => ("◎", "in progress"),
-                GoalChecklistStatus::Pending => ("○", "pending"),
-            };
-            lines.push(format!(
-                "  {glyph} {content}  ({label})",
-                content = item.content
-            ));
-        }
-    }
-
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2154,39 +1868,6 @@ mod tests {
         assert!(!neenee_core::is_context_overflow(
             "network connection reset"
         ));
-    }
-
-    #[test]
-    fn goal_status_includes_structured_checklist() {
-        let goal = Goal {
-            objective: "ship".to_string(),
-            is_complete: false,
-            checklist: vec![neenee_core::GoalChecklistItem {
-                content: "verify".to_string(),
-                status: neenee_core::GoalChecklistStatus::InProgress,
-            }],
-        };
-
-        let status = format_goal_status(&goal);
-        assert!(status.contains("Goal [active]: ship"));
-        assert!(status.contains("Plans (0/1):"));
-        assert!(status.contains("◎ verify  (in progress)"));
-    }
-
-    #[test]
-    fn goal_status_shows_complete_state() {
-        // Post-ADR-0010: no budget bar, no time line. The state label is
-        // the only thing beyond objective + checklist.
-        let goal = Goal {
-            objective: "ship".to_string(),
-            is_complete: true,
-            checklist: Vec::new(),
-        };
-        let status = format_goal_status(&goal);
-        assert!(status.contains("Goal [complete]: ship"));
-        assert!(!status.contains("Budget"));
-        assert!(!status.contains("tokens"));
-        assert!(!status.contains("time"));
     }
 
     #[tokio::test]
