@@ -21,7 +21,7 @@ use crate::{agent::Agent, skills::SkillRegistry};
 /// Spawn a read-only exploration sub-agent to handle a research sub-task.
 ///
 /// The sub-agent runs the same provider with the tools admitted by the bound
-/// [`SubagentProfile`] (today always [`EXPLORE`]): read-only, non-interactive,
+/// [`SubagentProfile`] (today always [`neenee_core::EXPLORE`]): read-only, non-interactive,
 /// non-recursive. Its final answer is returned to the calling agent, which
 /// stays in control of any write operations and any questions for the user.
 pub struct TaskTool {

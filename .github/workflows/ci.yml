@@ -97,10 +97,11 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # NOTE: not using `RUSTDOCFLAGS: "-D warnings"` yet. The workspace has a
-    # number of pre-existing rustdoc warnings (broken intra-doc links, links to
-    # private items) that are tracked for a separate cleanup. This job still
-    # fails on hard build errors. Re-enable -D warnings once the links are fixed.
+    # Treat rustdoc warnings (broken intra-doc links, etc.) as failures so the
+    # job can't quietly regress. The one prior broken link (`EXPLORE`) was fixed
+    # in `crates/neenee-agent/src/task_tool.rs`.
+    env:
+      RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
