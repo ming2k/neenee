@@ -679,8 +679,8 @@ fn draw_bash_content(
                 byte_offset,
             );
         }
-        if matches!(exit, Some(c) if *c != 0) {
-            let m = format!("exit {}", exit.unwrap());
+        if let Some(code) = exit.filter(|c| *c != 0) {
+            let m = format!("exit {}", code);
             let _ = emit_bash_lines(
                 ctx,
                 mi,

@@ -218,8 +218,13 @@ pub(super) fn wrap_text(text: &str, max_width: usize) -> Vec<WrappedLine> {
         if current_width + ch_width > max_width && !current_line.is_empty() {
             let move_previous = prohibited_line_start(ch)
                 || current_line.chars().last().is_some_and(prohibited_line_end);
-            if move_previous && current_line.chars().count() > 1 {
-                let moved = current_line.pop().unwrap();
+            // Only pop when we know a character will move down with the
+            // wrap; `count() > 1` guarantees `pop()` yields `Some` while
+            // leaving at least one character on the current line.
+            let to_move = (move_previous && current_line.chars().count() > 1)
+                .then(|| current_line.pop())
+                .flatten();
+            if let Some(moved) = to_move {
                 let moved_start = byte_idx - moved.len_utf8();
                 lines.push(WrappedLine {
                     text: std::mem::take(&mut current_line),

@@ -403,8 +403,14 @@ impl Tool for BashTool {
         }
         .map_err(|e| format!("Failed to execute: {}", e))?;
 
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("failed to capture child stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("failed to capture child stderr")?;
 
         // Drain stderr on a separate task so the child can't block on a full
         // stderr pipe while the main task reads stdout.

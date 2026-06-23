@@ -13,19 +13,65 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+/// Owner-only mode (`rw-------`) applied to every file we write and `rwx------`
+/// to its parent directory on Unix. Config and session files hold secrets (API
+/// keys) and private conversation content, so they must never be group- or
+/// world-readable regardless of the caller's umask.
+#[cfg(unix)]
+const FILE_MODE: u32 = 0o600;
+#[cfg(unix)]
+const DIR_MODE: u32 = 0o700;
+
+/// Create the leaf parent directory of `path` (and any missing ancestors),
+/// then best-effort tighten the leaf to owner-only on Unix.
+fn create_parent_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Best-effort: an already-existing dir keeps its mode; we only
+            // tighten, never loosen, and a failure here is non-fatal.
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(DIR_MODE));
+        }
+    }
+    Ok(())
+}
+
+/// Create `path` for writing with owner-only permissions from the moment it
+/// exists, so there is never a window where the file is group/world-readable.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(FILE_MODE)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(path)
+    }
+}
+
 /// Write `bytes` atomically: serialise to `<path>.tmp`, `fsync`, `rename` over
 /// `path`, then best-effort `fsync` of `path`'s parent directory.
+///
+/// On Unix the temp file is created `rw-------` and its parent directory
+/// tightened to `rwx------`, so secrets (API keys, conversation history) never
+/// land on disk group- or world-readable.
 ///
 /// Returns the original [`std::io::Error`] on any failure. The temporary file
 /// is best-effort cleaned up on failure (its presence is not itself corrupting —
 /// the next successful write will overwrite it).
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    create_parent_dir(path)?;
     let temporary = path.with_extension("tmp");
     let result = (|| -> std::io::Result<()> {
-        let mut file = File::create(&temporary)?;
+        let mut file = create_private_file(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -79,6 +125,20 @@ mod tests {
             !dir.join("payload.tmp").exists(),
             "temp file must be cleaned up"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("neenee-fsutil-{}-perm", uuid::Uuid::new_v4()));
+        let path = dir.join("secret.json");
+        atomic_write_json(&path, &Sample { name: "k", n: 1 }).unwrap();
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "secret file must be rw-------");
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "secret dir must be rwx------");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -1520,9 +1520,9 @@ pub fn draw_tool_step_detail_overlay(
                     marker_style,
                 )));
             }
-            if matches!(exit, Some(c) if *c != 0) {
+            if let Some(code) = exit.filter(|c| *c != 0) {
                 lines.push(Line::from(Span::styled(
-                    format!("exit {}", exit.unwrap()),
+                    format!("exit {}", code),
                     marker_style,
                 )));
             }
