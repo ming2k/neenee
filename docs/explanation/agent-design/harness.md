@@ -152,10 +152,39 @@ replayed.
 Distinct tool calls and autonomous loop iterations are both **uncapped**,
 matching the codex / claude-code agentic-loop model. Context compaction
 (`compaction_max_chars` plus mid-turn pruning) is the backstop that keeps
-unbounded loops from exhausting the context window; the user can interrupt
-at any time with `Esc` or `/loop stop`. See ADR-0009 for the rationale and
+unbounded loops from exhausting the context window; the user can interrupt at
+any time with `Esc` or `/pursue stop`. See ADR-0009 for the rationale and
 the prior caps (32 tool rounds per turn, 50 autonomous iterations per
 `/loop`) that this decision removed.
+
+### Session review (ADR-0016)
+
+Because an uncapped loop can still *appear* stuck (distinct-but-unproductive
+tool calls that loop without converging), the harness runs a periodic
+**session-review** diagnostic on long turns — a smarter, non-terminating
+replacement for the old read-only "stall detector" that ADR-0009's uncapping
+made redundant:
+
+- After `[agent.review] review_start_round` (default **64**) tool rounds in a
+  turn, and every `review_interval_rounds` (default **16**) thereafter, the
+  harness spawns a bounded read-only diagnostic sub-agent (the `REVIEW`
+  profile) that reads a compact snapshot of the live transcript and returns a
+  verdict per registered review dimension.
+- The worst verdict is surfaced as a visible activity-bar alert (empty verdict
+  = clear). An explicit **stuck** verdict also pushes a one-shot hidden
+  reflection nudge so the model gets a chance to recover.
+- Review **never aborts the turn**. The only execution cap is an explicit,
+  opt-in `hard_stop_rounds` (default **0** = off); a finite value is a
+  user-declared budget and the sole thing that hard-stops a turn.
+- "Is the agent looping?" is the first dimension (`LoopingReview`); adding more
+  (context bloat, tool-error storms, …) is a `SessionReview` trait impl, no
+  dispatch changes and no extra model call per dimension.
+- Sub-agents (`task`, `verify_plan_execution`) run with review **disabled**, so
+  a short-lived read-only research sub-agent never pays for a diagnostic and
+  review cannot recurse.
+
+Configure or inspect live via the `/review` slash command
+(`/review off`, `/review N [M]`, `/review default`).
 
 These are execution bounds, not a security sandbox. Tool permission policy is
 a separate future layer.

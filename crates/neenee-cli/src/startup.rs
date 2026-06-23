@@ -18,7 +18,7 @@ pub const BUILTIN_COMMANDS: &[&str] = &[
     "mcp",
     "permissions",
     "auto-approve",
-    "stall-threshold",
+    "review",
     "verify-nudge",
     "session",
     "sessions",

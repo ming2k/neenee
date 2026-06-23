@@ -73,10 +73,10 @@ pub(super) struct UiRuntime {
     /// Set from `AgentResponse::RoundStarted`; reset to 0 at the turn
     /// boundary so the pre-request phase does not show a stale round.
     pub current_round: Arc<Mutex<u64>>,
-    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
-    /// Mirrored into `App::stall_rounds` each frame; while > 0 the activity bar
-    /// appends a `⚠ stalled` segment.
-    pub stall_rounds: Arc<Mutex<u64>>,
+    /// Session-review alert (ADR-0016), or empty when inactive. Mirrored into
+    /// `App::review_alert` each frame; while non-empty the activity bar appends
+    /// a `⚠ <alert>` segment.
+    pub review_alert: Arc<Mutex<String>>,
     /// Wall-clock instant the current turn started, or `None` between turns.
     /// Set by the response listener on a "running" `HarnessState` and cleared
     /// on idle; drives the muted `<elapsed>` segment in the activity bar.
@@ -139,7 +139,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.plan_progress = runtime.plan_progress.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
-            app.stall_rounds = *runtime.stall_rounds.lock().await;
+            app.review_alert = runtime.review_alert.lock().await.clone();
             app.turn_started_at = *runtime.turn_started_at.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
             app.pending_question = runtime.pending_question.lock().await.front().cloned();
@@ -333,24 +333,20 @@ pub(super) async fn run_app_loop<B: Backend>(
             //   flows that carry their own input UI or want a clean slate
             //   (Sessions / Provider / ModelEditor / Question).
             // - "Blur" group: the footer keeps its height so the backdrop
-            //   layout is stable across modal open/close, but the composer
-            //   is rendered with `focused=false` so it visibly recedes while
-            //   the overlay is in front (Help / ToolStepDetail / Session /
-            //   PlanPreview / Activity).
+            //   layout is stable across modal open/close (Help / ToolStepDetail
+            //   / Session / PlanPreview / Activity). The composer stays in its
+            //   normal Compose-zone palette — the modal's full-screen backdrop
+            //   is the single signal that the surface has receded, so an extra
+            //   per-row dim would only make the input box inconsistent with the
+            //   activity bar and hint bar sitting beside it. The caret is still
+            //   suppressed (see `show_caret` below) since the modal owns the
+            //   keyboard.
             // HistorySearch borrows the input line and Permission replaces
             // only the composer with its own sheet, so neither hides the
             // rest of the chrome.
             let chrome_hidden = matches!(
                 app.active_modal,
                 Modal::Provider | Modal::ModelEditor | Modal::Sessions | Modal::Question
-            );
-            let input_blurred = matches!(
-                app.active_modal,
-                Modal::Help
-                    | Modal::ToolStepDetail
-                    | Modal::Session
-                    | Modal::PlanPreview
-                    | Modal::Activity
             );
 
             // When zoomed into a sub-agent, render its child messages and show
@@ -392,7 +388,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     subagent_bar,
                     turn_count: app.turn_count,
                     current_round: app.current_round,
-                    stall_rounds: app.stall_rounds,
+                    review_alert: app.review_alert.clone(),
                     current_model: app.current_model.as_str(),
                     turn_started_at: app.turn_started_at,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
@@ -475,15 +471,18 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // The composer stays mounted for the "blur" modal group
                     // (Help / ToolStepDetail / Session / PlanPreview / Activity)
                     // so the footer layout doesn't shift when the overlay opens
-                    // or closes; it just renders unfocused while the modal owns
-                    // the keyboard.
-                    let compose_focused = app.focus_zone.is_compose() && !input_blurred;
+                    // or closes. It keeps its normal Compose-zone palette (the
+                    // modal backdrop is the recede signal); the caret is hidden
+                    // whenever any modal owns the keyboard.
+                    let compose_focused = app.focus_zone.is_compose();
+                    let show_caret = compose_focused && app.active_modal == Modal::None;
                     render::draw_composer(
                         f,
                         input_rect,
                         &app.input,
                         app.byte_cursor(),
                         compose_focused,
+                        show_caret,
                         &app.theme,
                         &mut layout_map,
                         true,
@@ -637,7 +636,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                         plan: app.plan_progress.as_ref(),
                         turn_count: app.turn_count,
                         current_round: app.current_round,
-                        stall_rounds: app.stall_rounds,
+                        review_alert: &app.review_alert,
                         current_model: app.current_model.as_str(),
                         turn_started_at: app.turn_started_at,
                         activity: &status,
@@ -670,6 +669,12 @@ pub(super) async fn run_app_loop<B: Backend>(
             }
 
             app.layout_map = layout_map;
+
+            // Record the open modal's panel rect (when one is dismissable) so a
+            // click on the backdrop outside it can close it. Computed from the
+            // frame here, the same geometry the modal just drew with.
+            let modal_rect = render::modal_outer_rect(&app.active_modal, f);
+            app.modal_rect = modal_rect;
         })?;
 
         // Cursor visibility follows the focus zone so the caret only shows up
@@ -1957,10 +1962,26 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    // Activity bar: open the Activity modal, which gathers the
-                    // pursuit, plan progress, and live activity into one overlay
-                    // (replacing the always-pinned pursuit bar + plan panel).
-                    if app.activity_rect.is_some_and(|r| {
+                    // Click-to-dismiss: while a dismissable overlay modal is
+                    // open, the full-screen backdrop owns the click — a press
+                    // outside the panel closes the modal (mirroring Esc), and a
+                    // press inside is a no-op (these info modals have no click
+                    // targets yet). Either way the click is consumed so it does
+                    // not also fall through to the transcript behind the
+                    // backdrop. Modals that need their own restore path
+                    // (Provider / ModelEditor / HistorySearch) report no rect
+                    // and are skipped here, so a stray click never discards an
+                    // in-progress filter or API key.
+                    if let Some(r) = app.modal_rect {
+                        let inside =
+                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height;
+                        if !inside {
+                            app.active_modal = Modal::None;
+                        }
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.activity_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         app.active_modal = Modal::Activity;

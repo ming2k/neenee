@@ -1051,8 +1051,8 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 progress.as_ref().map(|p| p.sections.len())
             ),
             AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
-            AgentEvent::StallWarning { consecutive_rounds } => {
-                format!("stall-warning rounds={consecutive_rounds}")
+            AgentEvent::SessionReview { alert } => {
+                format!("session-review alert={alert:?}")
             }
             AgentEvent::PermissionRequest(request) => {
                 format!("permission-request {} {}", request.tool, request.scope)
@@ -1441,12 +1441,13 @@ async fn agent_without_project_root_never_writes_permissions_file() {
 
 #[tokio::test]
 async fn turn_runs_uncapped_until_model_emits_text() {
-    // 64 distinct tool rounds — well past the stall hard-stop — followed
-    // by a text answer. Each read round uses a distinct argument so the
-    // repeated-call guard never trips, and every 4th round is a Write so
-    // the stall detector's read-only streak resets before it can trip.
-    // This mirrors the new contract: the agent is bounded by *productive*
-    // rounds, not by raw round count (ADR-0009 + stalled-agent-detection).
+    // 64 distinct tool rounds — well past any historical cap — followed by a
+    // text answer. Each read round uses a distinct argument so the
+    // repeated-call guard never trips, and every 4th round is a Write. This
+    // mirrors the uncapped contract: the turn is bounded by the model
+    // choosing to stop, not by raw round count (ADR-0009). Review is disabled
+    // so the periodic diagnostic does not consume the shared scripted stream
+    // at round 64 (ADR-0016).
     let write = RecordingTool::write("writer", "WROTE");
     let read = RecordingTool::read("alpha", "out");
     let mut rounds: Vec<Vec<ProviderStreamEvent>> = Vec::new();
@@ -1465,6 +1466,7 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
+    agent.set_review_config(ReviewConfig::disabled());
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
 
@@ -1472,49 +1474,94 @@ async fn turn_runs_uncapped_until_model_emits_text() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
-        "interleaved writes must keep the streak under the threshold"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|event| { matches!(event, AgentEvent::StallWarning { .. }) }),
-        "no convergence nudge should be injected anymore"
+            .any(|event| matches!(event, AgentEvent::SessionReview { .. })),
+        "review disabled must keep the uncapped turn free of review events"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Stall detection (stalled-agent-detection.md)
+// Session review (ADR-0016)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Build a turn of N distinct read-only `read_file` calls (each with a
-/// different path so `guard_repeated_call` does not trip), followed by a
-/// final text round. Used to drive the streak counter without touching
-/// the exact-repeat guard.
-fn readonly_rounds(n: usize, suffix: &str) -> Vec<Vec<ProviderStreamEvent>> {
+/// Build a turn of N distinct read-only `alpha` calls (each with a different
+/// path so `guard_repeated_call` does not trip), optionally followed by a
+/// final text round. Drives the round counter past a review/hard-stop line
+/// without tripping the exact-repeat guard.
+fn distinct_read_rounds(n: usize, suffix: Option<&str>) -> Vec<Vec<ProviderStreamEvent>> {
     let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..n)
         .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"f{i}\"}}"))]))
         .collect();
-    rounds.push(text_round(suffix));
+    if let Some(s) = suffix {
+        rounds.push(text_round(s));
+    }
     rounds
 }
 
+#[test]
+fn review_config_getter_round_trips_setter() {
+    // The /review slash command reads via `get_review_config` after writing
+    // via `set_review_config`; the pair must round-trip, including the
+    // disabled sentinel and a custom hard-stop budget.
+    let agent = agent();
+    assert_eq!(agent.get_review_config(), ReviewConfig::default());
+    let mut cfg = agent.get_review_config();
+    cfg.review_start_round = 5;
+    cfg.review_interval_rounds = 4;
+    cfg.hard_stop_rounds = 99;
+    agent.set_review_config(cfg);
+    let live = agent.get_review_config();
+    assert_eq!(live.review_start_round, 5);
+    assert_eq!(live.review_interval_rounds, 4);
+    assert_eq!(live.hard_stop_rounds, 99);
+    // disabled() suppresses review entirely.
+    agent.set_review_config(ReviewConfig::disabled());
+    assert!(!agent.review_enabled());
+}
+
+#[test]
+fn render_review_alert_collapses_verdicts() {
+    use crate::agent::Agent;
+    // All healthy → empty string (clears the activity-bar alert).
+    let healthy = vec![ReviewVerdict::healthy("looping")];
+    assert_eq!(Agent::render_review_alert(&healthy, 64), "");
+    // Stuck dominates Watch; both non-healthy details fold in, round count
+    // surfaces, and the worst status label wins.
+    let mixed = vec![
+        ReviewVerdict {
+            dimension: "looping".into(),
+            status: ReviewStatus::Watch,
+            detail: "slow".into(),
+        },
+        ReviewVerdict {
+            dimension: "other".into(),
+            status: ReviewStatus::Stuck,
+            detail: "re-reading f.rs".into(),
+        },
+    ];
+    let alert = Agent::render_review_alert(&mixed, 80);
+    assert!(alert.starts_with("review: stuck"), "{alert}");
+    assert!(alert.contains("80 rounds"), "{alert}");
+    assert!(alert.contains("re-reading f.rs"), "{alert}");
+    assert!(alert.contains("slow"), "{alert}");
+}
+
 #[tokio::test]
-async fn stall_warning_fires_once_when_threshold_reached() {
-    // STALL_THRESHOLD read-only rounds, then the model gives a text
-    // answer. The streak trips exactly at the threshold, emitting one
-    // StallWarning and one reflection nudge message.
+async fn review_disabled_emits_no_event() {
+    // start = 0 disables review: even with many distinct read rounds, no
+    // SessionReview event fires and no reflection nudge is pushed. This is
+    // pure ADR-0009 behaviour, and also the config sub-agents get.
     let tool = RecordingTool::read("alpha", "A-out");
     let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(readonly_rounds(
-            STALL_THRESHOLD,
-            "done",
+        Arc::new(ScriptedProvider::new(distinct_read_rounds(
+            20,
+            Some("done"),
         ))),
         vec![Arc::new(tool)],
         AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
+    agent.set_review_config(ReviewConfig::disabled());
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let mut events = Vec::new();
@@ -1523,128 +1570,107 @@ async fn stall_warning_fires_once_when_threshold_reached() {
             events.push(event);
         })
         .await
-        .expect("turn completes after threshold + final text");
+        .expect("disabled review → turn runs to completion");
 
     assert_eq!(outcome.message.content, "done");
-    let warnings: Vec<_> = events
-        .iter()
-        .filter(|event| matches!(event, AgentEvent::StallWarning { .. }))
-        .collect();
-    assert_eq!(
-        warnings.len(),
-        1,
-        "stall warning must fire exactly once per episode, got {warnings:?}"
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::SessionReview { .. })),
+        "review disabled must suppress all review events"
     );
-    assert!(messages
-        .iter()
-        .any(|m| { m.role == Role::User && m.hidden && m.content.contains("exploration loop") }));
 }
 
 #[tokio::test]
-async fn stall_hard_stops_after_nudge_is_ignored() {
-    // The model keeps issuing distinct read-only calls well past the
-    // hard-stop line. The harness aborts with a clear error rather than
-    // looping indefinitely. Only one reflection nudge should ever fire
-    // per episode (it's one-shot); subsequent StallWarning events do
-    // keep firing so the activity-bar counter ticks up.
-    let hard_stop = STALL_THRESHOLD + STALL_HARD_STOP_DELTA;
+async fn hard_stop_aborts_when_budget_configured() {
+    // hard_stop_rounds is the only opt-in execution cap. With it set to 3 and
+    // review disabled, the 3rd tool round trips the budget and the turn
+    // aborts with the budget in the message.
     let tool = RecordingTool::read("alpha", "A-out");
     let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(readonly_rounds(
-            hard_stop + 1,
-            "done",
-        ))),
+        Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
         vec![Arc::new(tool)],
         AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
+    let mut cfg = ReviewConfig::disabled();
+    cfg.hard_stop_rounds = 3;
+    agent.set_review_config(cfg);
 
     let mut messages = vec![Message::new(Role::User, "go")];
-    let mut events = Vec::new();
     let error = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
-            events.push(event);
-        })
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
         .await
-        .expect_err("hard-stop must abort the turn");
+        .expect_err("hard-stop budget must abort the turn");
 
     let message = match error {
         HarnessError::Other(message) => message,
         other => panic!("expected HarnessError::Other, got {other:?}"),
     };
     assert!(
-        message.contains("exploration loop"),
-        "error must explain the stall, got: {message}"
+        message.contains("hard-stop budget of 3"),
+        "error must name the budget, got: {message}"
     );
-    let warnings = events
-        .iter()
-        .filter(|event| matches!(event, AgentEvent::StallWarning { .. }))
-        .count();
-    // One StallWarning fires every round at/above the threshold (so the
-    // TUI counter ticks up live), so over (hard_stop - threshold) rounds
-    // we expect that many warnings — but only one reflection-nudge
-    // message, since the nudge is one-shot.
-    let expected_warnings = (hard_stop + 1) - STALL_THRESHOLD;
-    assert_eq!(
-        warnings, expected_warnings,
-        "StallWarning must fire every round while stalled, but got {warnings}"
-    );
-    let nudges = messages
-        .iter()
-        .filter(|m| m.role == Role::User && m.hidden && m.content.contains("exploration loop"))
-        .count();
-    assert_eq!(nudges, 1, "reflection nudge must be one-shot per episode");
 }
 
 #[tokio::test]
-async fn stall_streak_resets_after_a_productive_round() {
-    // STALL_THRESHOLD - 1 read-only rounds (just under the threshold),
-    // then a Write round resets the streak, then STALL_THRESHOLD - 1
-    // more read-only rounds, then a final text round. Neither half
-    // reaches the threshold on its own, so no StallWarning ever fires
-    // and the turn ends cleanly.
-    let read = RecordingTool::read("alpha", "A-out");
-    let write = RecordingTool::write("writer", "WROTE");
-    let sub = STALL_THRESHOLD - 1;
-    let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..sub)
-        .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"a{i}\"}}"))]))
-        .collect();
-    rounds.push(tool_round(&[("cw", "writer", "{\"path\":\"x\"}")]));
-    rounds
-        .extend((0..sub).map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"b{i}\"}}"))])));
+async fn review_fires_at_start_and_emits_event() {
+    // With a low start line, the diagnostic fires after the start round. The
+    // reviewer sub-agent shares the scripted provider: after the main loop's
+    // two read rounds, it pops the next scripted round (a JSON verdict) and
+    // returns it, emitting exactly one SessionReview event. A "stuck" verdict
+    // also pushes the one-shot reflection nudge.
+    let verdict_json =
+        r#"{"verdicts":[{"dimension":"looping","status":"stuck","detail":"re-reading"}]}"#;
+    let mut rounds = distinct_read_rounds(2, None);
+    rounds.push(text_round(verdict_json));
     rounds.push(text_round("done"));
 
+    let tool = RecordingTool::read("alpha", "A-out");
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(rounds)),
-        vec![Arc::new(read), Arc::new(write)],
+        vec![Arc::new(tool)],
         AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
+    agent.set_review_config(ReviewConfig {
+        review_start_round: 2,
+        review_interval_rounds: 16,
+        hard_stop_rounds: 0,
+    });
 
-    let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
-    assert_eq!(outcome.unwrap().message.content, "done");
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
-        "productive round must reset the streak so neither half trips the threshold"
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let mut events = Vec::new();
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
+            events.push(event);
+        })
+        .await
+        .expect("turn completes after the review + final text");
+
+    assert_eq!(outcome.message.content, "done");
+    let alerts: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::SessionReview { alert } if !alert.is_empty() => Some(alert.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        alerts.len(),
+        1,
+        "exactly one non-empty SessionReview alert must fire, got {alerts:?}"
     );
-}
-
-#[test]
-fn call_was_productive_recognises_mutating_read_tools() {
-    // The mutating Read tools must count as productive for stall detection,
-    // alongside any name we don't recognise (the access-bit lookup happens
-    // elsewhere; the name list is the fallback for the text-fallback path).
-    use crate::agent::call_was_productive;
-    assert!(call_was_productive("plan_enter"));
-    assert!(call_was_productive("plan_exit"));
-    assert!(call_was_productive("update_plan_progress"));
-    assert!(!call_was_productive("read_file"));
-    assert!(!call_was_productive("grep"));
-    assert!(!call_was_productive("verify_plan_execution"));
+    assert!(alerts[0].contains("stuck"), "{}", alerts[0]);
+    // The stuck verdict pushes the one-shot reflection nudge.
+    assert!(messages.iter().any(|m| {
+        m.role == Role::User
+            && m.hidden
+            && m.content
+                .contains("session-health review judged this turn stuck")
+    }));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1717,89 +1743,6 @@ async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
 }
 
 #[tokio::test]
-async fn stall_detection_disabled_when_threshold_is_zero() {
-    // `set_stall_threshold(0)` opts out of detection entirely: even with
-    // an unbounded stream of distinct read-only calls, no StallWarning
-    // fires and no hard-stop trips. This is the documented escape hatch
-    // for users who want pure ADR-0009 behaviour.
-    let tool = RecordingTool::read("alpha", "A-out");
-    let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(readonly_rounds(
-            STALL_THRESHOLD + STALL_HARD_STOP_DELTA + 4,
-            "done",
-        ))),
-        vec![Arc::new(tool)],
-        AgentMode::Build,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_stall_threshold(0);
-
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let mut events = Vec::new();
-    let outcome = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
-            events.push(event);
-        })
-        .await
-        .expect("detection disabled → turn runs to completion");
-
-    assert_eq!(outcome.message.content, "done");
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::StallWarning { .. })),
-        "threshold = 0 must suppress all stall warnings"
-    );
-    assert!(
-        !messages.iter().any(|m| {
-            m.role == Role::User && m.hidden && m.content.contains("exploration loop")
-        }),
-        "threshold = 0 must suppress the reflection nudge"
-    );
-}
-
-#[tokio::test]
-async fn stall_threshold_can_be_lowered_at_runtime() {
-    // A user-supplied threshold lower than the default must trip
-    // proportionally sooner, confirming the runtime setter actually
-    // reroutes detection (not just the seeded const).
-    let custom = 3;
-    let tool = RecordingTool::read("alpha", "A-out");
-    let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(readonly_rounds(custom, "done"))),
-        vec![Arc::new(tool)],
-        AgentMode::Build,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_stall_threshold(custom);
-
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let mut events = Vec::new();
-    let _ = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
-            events.push(event);
-        })
-        .await;
-
-    let warning_rounds: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            AgentEvent::StallWarning { consecutive_rounds } if *consecutive_rounds > 0 => {
-                Some(*consecutive_rounds)
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        warning_rounds.first().copied(),
-        Some(custom),
-        "first warning must fire at the configured threshold, got {warning_rounds:?}"
-    );
-}
-
-#[tokio::test]
 async fn verify_nudge_disabled_when_toggle_off() {
     // `set_verify_nudge_enabled(false)` opts out of the gate: the model
     // can end the turn with an approved plan and no verify call, and the
@@ -1831,26 +1774,16 @@ async fn verify_nudge_disabled_when_toggle_off() {
 
 #[test]
 fn agent_config_defaults_match_runtime_constants() {
-    // The config struct's defaults must match the const seeds the agent
-    // uses when no config is loaded, so a missing `[agent]` table is
-    // indistinguishable from one that explicitly sets the defaults.
+    // The config struct's defaults must match the seeds the agent uses when
+    // no config is loaded, so a missing `[agent]` table is indistinguishable
+    // from one that explicitly sets the defaults (ADR-0016).
     use neenee_store::config::AgentConfig;
     let cfg = AgentConfig::default();
-    assert_eq!(cfg.stall_threshold, STALL_THRESHOLD);
+    assert_eq!(cfg.review, ReviewConfig::default());
     assert!(cfg.verify_nudge_enabled);
-}
-
-#[test]
-fn stall_threshold_getter_round_trips_setter() {
-    // The /stall-threshold slash command reads via `get_stall_threshold`
-    // after writing via `set_stall_threshold`; the pair must round-trip
-    // exactly, including the disable sentinel.
+    // The agent seeds the same review config by default.
     let agent = agent();
-    assert_eq!(agent.get_stall_threshold(), STALL_THRESHOLD);
-    agent.set_stall_threshold(3);
-    assert_eq!(agent.get_stall_threshold(), 3);
-    agent.set_stall_threshold(0);
-    assert_eq!(agent.get_stall_threshold(), 0);
+    assert_eq!(agent.get_review_config(), ReviewConfig::default());
 }
 
 #[test]

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Session review replaces the round-counting stall detector (ADR-0016).**
+  The read-only "stall detector" (a reflection nudge at 8 read-only rounds and
+  a hard abort at 14) is removed — it was an arbitrary cap ADR-0009 had
+  rejected, and "no write fired" is a poor proxy for "stuck" (it mis-flagged
+  legitimate exploration, especially read-only research sub-agents). In its
+  place, after `review_start_round` (default 64) tool rounds and every
+  `review_interval_rounds` (default 16) thereafter, the harness spawns a
+  bounded read-only diagnostic sub-agent that reads the live transcript and
+  returns a verdict per pluggable review dimension (`LoopingReview` first).
+  Review surfaces an alert (and a one-shot reflection nudge on a `Stuck`
+  verdict) but **never aborts the turn**; the only execution cap is an opt-in
+  `hard_stop_rounds` (default 0 = off). Sub-agents run with review disabled.
+  - Config: `[agent] stall_threshold` → `[agent.review]` (`review_start_round`,
+    `review_interval_rounds`, `hard_stop_rounds`).
+  - Slash command: `/stall-threshold` → `/review` (`/review off`,
+    `/review N [M]`, `/review default`).
+  - Events: `StallWarning` → `SessionReview { alert }`.
+
 ## [0.1.0] - 2026-06-24
 
 ### Added

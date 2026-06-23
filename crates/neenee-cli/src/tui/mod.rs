@@ -32,9 +32,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Pursuit,
-    HarnessSnapshot, Message, PermissionRequest, PlanProgress, PlanSectionStatus,
-    ProviderPickerSnapshot, Role, SessionContextSnapshot, SessionOverview, UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
+    PermissionRequest, PlanProgress, PlanSectionStatus, ProviderPickerSnapshot, Pursuit, Role,
+    SessionContextSnapshot, SessionOverview, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
@@ -116,10 +116,11 @@ pub async fn run_tui(
     let current_round_clone = current_round.clone();
     // Stall alert level (consecutive read-only rounds). Bumped by future stall-
     // detection logic; reset at each turn boundary. Dormant until that logic
-    // lands, but wired through so the activity bar's `⚠ stalled` segment is
-    // ready.
-    let stall_rounds: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let stall_rounds_clone = stall_rounds.clone();
+    // Session-review alert (ADR-0016). Updated when a `SessionReview`
+    // response lands; cleared (empty) on turn reset so the activity bar's
+    // `⚠ <alert>` segment clears between turns.
+    let review_alert: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let review_alert_clone = review_alert.clone();
     // Wall-clock instant the current turn started. Stamped on a "running"
     // HarnessState so the activity bar can render a live `<elapsed>` segment.
     let turn_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
@@ -481,16 +482,16 @@ pub async fn run_tui(
                         // A new turn resets the round counter; it stays 0
                         // until the first `RoundStarted` of the turn lands.
                         *current_round_clone.lock().await = 0;
-                        // Reset the stall alert and stamp the turn timer so the
+                        // Reset the review alert and stamp the turn timer so the
                         // activity bar can render a live `<elapsed>` segment.
-                        *stall_rounds_clone.lock().await = 0;
+                        *review_alert_clone.lock().await = String::new();
                         *turn_started_at_clone.lock().await = Some(std::time::Instant::now());
                     }
                     ir_clone.store(running, Ordering::SeqCst);
                     if !running {
                         activity_clone.lock().await.clear();
                         *current_round_clone.lock().await = 0;
-                        *stall_rounds_clone.lock().await = 0;
+                        *review_alert_clone.lock().await = String::new();
                         *turn_started_at_clone.lock().await = None;
                     }
                     // A harness state change is always a turn boundary
@@ -579,15 +580,14 @@ pub async fn run_tui(
                     *cp_clone.lock().await = provider;
                     *cm_clone.lock().await = model;
                 }
-                AgentResponse::StallWarning { consecutive_rounds } => {
-                    // Mirror the live streak into the runtime cell so the
-                    // activity bar's "⚠ stalled: N read-only rounds"
-                    // segment ticks up each round while stalled and
-                    // clears (N = 0) when the model recovers. The frame
-                    // loop copies this into `App::stall_rounds`, which
-                    // `draw_activity_bar` reads. Cast usize → u64 to
-                    // match the activity bar's counter type.
-                    *stall_rounds_clone.lock().await = consecutive_rounds as u64;
+                AgentResponse::SessionReview { alert } => {
+                    // Mirror the latest review verdict into the runtime cell
+                    // so the activity bar's `⚠ <alert>` segment shows the
+                    // diagnostic's summary (or clears it when `alert` is
+                    // empty — a healthy review). The frame loop copies this
+                    // into `App::review_alert`, which `draw_activity_bar`
+                    // reads.
+                    *review_alert_clone.lock().await = alert;
                 }
             }
         }
@@ -606,6 +606,7 @@ pub async fn run_tui(
         sticky_step: None,
         sticky_rect: None,
         activity_rect: None,
+        modal_rect: None,
         sticky_summary_line: None,
         pin_summary_line: None,
         focus_stack: Vec::new(),
@@ -632,7 +633,7 @@ pub async fn run_tui(
         plan_progress: None,
         turn_count: 0,
         current_round: 0,
-        stall_rounds: 0,
+        review_alert: String::new(),
         turn_started_at: None,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
@@ -701,7 +702,7 @@ pub async fn run_tui(
             plan_progress,
             turn_count,
             current_round,
-            stall_rounds,
+            review_alert,
             turn_started_at,
             open_plan_preview,
             trigger_verification,

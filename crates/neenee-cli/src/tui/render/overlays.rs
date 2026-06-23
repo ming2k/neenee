@@ -1738,8 +1738,8 @@ pub struct ActivityModalView<'a> {
     /// Current tool round within the turn (1-indexed; `0` before the first
     /// model request).
     pub current_round: u64,
-    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
-    pub stall_rounds: u64,
+    /// Session-review alert (ADR-0016), or empty when inactive.
+    pub review_alert: &'a str,
     /// Display id of the currently active model.
     pub current_model: &'a str,
     /// Wall-clock instant the current turn started, or `None` between turns.
@@ -1779,7 +1779,7 @@ pub fn draw_activity_modal(
         plan,
         turn_count,
         current_round,
-        stall_rounds,
+        review_alert,
         current_model,
         turn_started_at,
         activity,
@@ -1925,11 +1925,11 @@ pub fn draw_activity_modal(
             status_style,
         ),
     ]));
-    if stall_rounds > 0 {
+    if !review_alert.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("⚠ stalled: {stall_rounds} read-only rounds — Esc to interrupt"),
+                format!("⚠ {review_alert}"),
                 Style::default().fg(theme.warn()),
             ),
         ]));

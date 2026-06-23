@@ -1,0 +1,390 @@
+//! Session-review runner (ADR-0016): the orchestration side of the periodic
+//! transcript diagnostic that replaces the round-counting stall detector.
+//!
+//! Domain types ([`SessionReview`], [`ReviewVerdict`], [`ReviewConfig`]) live
+//! in `neenee-core`; this module owns the LLM-backed runner that lives next to
+//! [`crate::TaskTool`] because — like the `task` tool — it spawns a bounded
+//! read-only sub-agent via [`crate::Agent`]. The difference is who drives it:
+//! `task` is a *model* tool call, whereas the review runner is *harness*
+//! driven, firing on a round cadence rather than on demand.
+//!
+//! ## The built-in dimension
+//!
+//! [`LoopingReview`] is the first registered dimension ("is the agent stuck in
+//! an exploration loop?"). Adding a dimension is a new [`SessionReview`] impl
+//! registered on the agent — no dispatch changes, no extra model calls, since
+//! the runner asks one sub-agent to verdict every dimension at once.
+
+use std::sync::Arc;
+
+use neenee_core::{
+    AgentMode, Message, ReviewConfig, ReviewStatus, ReviewVerdict, Role, SessionReview, REVIEW,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::agent::Agent;
+use crate::skills::SkillRegistry;
+
+/// Character budget for the transcript snapshot handed to the diagnostic
+/// sub-agent. Keeps the reviewer's prompt cheap while still showing enough
+/// recent tool traffic to judge progress. The most recent messages are kept.
+const TRANSCRIPT_SNAPSHOT_BUDGET_CHARS: usize = 8_000;
+
+/// The first session-review dimension: is the agent stuck in an unproductive
+/// exploration loop? Distinct from a model that is legitimately reading its
+/// way through a large task — the reviewer is asked to tell those apart from
+/// the transcript, which a dumb round counter cannot.
+#[derive(Debug, Default)]
+pub struct LoopingReview;
+
+impl SessionReview for LoopingReview {
+    fn id(&self) -> &'static str {
+        "looping"
+    }
+    fn label(&self) -> &'static str {
+        "Exploration loop"
+    }
+    fn instruction(&self) -> &'static str {
+        "Is the agent stuck in an unproductive loop — repeating the same or \
+         similar read-only actions without making changes or converging on an \
+         answer? Distinguish a genuinely stuck loop from a model that is \
+         methodically working through a large but productive task. Consider \
+         whether the same files or queries are being revisited and whether any \
+         edit or command has actually landed."
+    }
+}
+
+/// The default set of review dimensions registered on a primary agent.
+/// Sub-agents register none (review is disabled on them), so this is only
+/// consulted when [`Agent::review_due`] fires.
+pub fn default_reviews() -> Vec<Arc<dyn SessionReview>> {
+    vec![Arc::new(LoopingReview)]
+}
+
+impl Agent {
+    /// Run the periodic session-review diagnostic against the live transcript
+    /// snapshot and return one verdict per registered dimension.
+    ///
+    /// Spawns a bounded read-only sub-agent (the [`REVIEW`] profile) with its
+    /// own review disabled (so it cannot recurse) and a tight hard stop (so a
+    /// runaway reviewer cannot loop). The sub-agent reasons over a compact,
+    /// most-recent-first transcript excerpt and returns structured verdicts.
+    ///
+    /// Failures are deliberately soft: a provider error or unparseable answer
+    /// degrades to a single `Watch` verdict carrying the raw text rather than
+    /// silently reporting healthy — the signal is worth surfacing even when
+    /// degraded, but it never escalates to a `Stuck` nudge without an explicit
+    /// verdict.
+    pub(crate) async fn run_session_review(
+        &self,
+        messages: &[Message],
+        tool_rounds: usize,
+    ) -> Vec<ReviewVerdict> {
+        let dimensions = self.effective_reviews();
+        if dimensions.is_empty() {
+            return Vec::new();
+        }
+
+        // Read-only, non-interactive, non-recursive toolset — the reviewer may
+        // open a file to check a looping claim but cannot mutate anything or
+        // spawn further agents.
+        let sub_tools = REVIEW.select_tools(&self.tools);
+        let pursuit_store = match neenee_core::PursuitStore::open_in_memory().await {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to open reviewer pursuit store; skipping review");
+                return Vec::new();
+            }
+        };
+        let reviewer = Agent::new(
+            self.provider.clone(),
+            sub_tools,
+            AgentMode::Build,
+            neenee_core::PursuitService::new(pursuit_store),
+            SkillRegistry::empty(),
+        );
+        // The reviewer must not run its own reviews (recursion) and is bounded
+        // by a tight hard stop so it cannot loop.
+        reviewer.set_review_config(ReviewConfig::for_reviewer());
+
+        let system = build_reviewer_system_prompt(&dimensions);
+        let transcript = serialize_transcript(messages, TRANSCRIPT_SNAPSHOT_BUDGET_CHARS);
+        let user = format!(
+            "The agent under review has completed {tool_rounds} tool rounds this turn. \
+             Here is a compact, most-recent-last snapshot of its transcript:\n\n\
+             {transcript}\n\n\
+             Evaluate every dimension listed above and return the JSON object now."
+        );
+        let mut child_messages = vec![
+            Message::new(Role::System, system),
+            Message::new(Role::User, user),
+        ];
+
+        let cancel = CancellationToken::new();
+        // Box the recursive call: `run_session_review` is reached from inside
+        // a turn loop, and the reviewer runs that same turn loop, so without
+        // indirection the future would be infinitely sized.
+        let result =
+            Box::pin(reviewer.run_streaming_with_events(&mut child_messages, &cancel, |_| {}))
+                .await;
+
+        match result {
+            Ok(outcome) => parse_verdicts(&outcome.message.content, &dimensions),
+            Err(err) => {
+                tracing::warn!(error = %err, "session-review sub-agent failed");
+                vec![ReviewVerdict {
+                    dimension: "review".to_string(),
+                    status: ReviewStatus::Watch,
+                    detail: format!("reviewer error: {err}"),
+                }]
+            }
+        }
+    }
+}
+
+/// Assemble the reviewer's system prompt: the [`REVIEW`] role framing, the
+/// list of dimensions to evaluate, and the exact JSON contract the runner
+/// parses. Pinning the contract here keeps parsing and prompting in sync.
+fn build_reviewer_system_prompt(dimensions: &[Arc<dyn SessionReview>]) -> String {
+    let mut prompt = String::from(REVIEW.system_prompt);
+    prompt.push_str(
+        "\n\nYou are evaluating the health of another agent's turn. \
+                     Assess each of these dimensions:\n\n",
+    );
+    for dim in dimensions {
+        prompt.push_str(&format!(
+            "- `{}` — {}. {}\n",
+            dim.id(),
+            dim.label(),
+            dim.instruction()
+        ));
+    }
+    prompt.push_str(
+        "\nReturn ONLY a JSON object (no markdown, no prose) of this exact shape:\n\
+         {\"verdicts\":[{\"dimension\":\"<id>\",\"status\":\"healthy|watch|stuck\",\
+         \"detail\":\"<one short sentence>\"}]}\n\
+         Use status \"healthy\" when there is no concern, \"watch\" when progress is \
+         slow or risky but not stuck, and \"stuck\" only when the agent is clearly \
+         looping without converging. Include one entry per dimension.",
+    );
+    prompt
+}
+
+/// Flatten the transcript into a compact text excerpt the reviewer can read in
+/// one glance. Keeps the most recent messages within `budget` chars (older
+/// traffic is dropped from the front once the budget is exceeded) because the
+/// signal for "stuck now" lives in recent rounds, not the turn's opening.
+///
+/// Tool calls are summarised by name + arguments; results are truncated to a
+/// short prefix so the reviewer sees *what* was called and *whether* it
+/// produced output, without the full payload blowing the prompt.
+fn serialize_transcript(messages: &[Message], budget: usize) -> String {
+    /// One flattened line per message, newest last.
+    fn line_for(msg: &Message) -> String {
+        let role = match msg.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        let mut parts = vec![format!("[{role}]")];
+        if !msg.content.trim().is_empty() {
+            parts.push(truncate(&msg.content, 160));
+        }
+        if let Some(calls) = &msg.tool_calls {
+            for call in calls {
+                parts.push(format!(
+                    "call {}({})",
+                    call.name,
+                    truncate(&call.arguments, 80)
+                ));
+            }
+        }
+        if role == "tool" {
+            // Tool-role messages carry their result in content; keep a taste.
+            if msg.content.trim().is_empty() {
+                parts.push("<empty result>".to_string());
+            }
+        }
+        parts.join(" ")
+    }
+
+    let lines: Vec<String> = messages
+        .iter()
+        .filter(|m| !m.hidden && m.role != Role::System)
+        .map(line_for)
+        .collect();
+    if lines.is_empty() {
+        return "(no visible tool traffic yet)".to_string();
+    }
+    // Keep the most recent lines within the budget. Walk newest-first, stop
+    // once adding another line would exceed the budget, then reverse so the
+    // excerpt reads oldest-to-newest (natural reading order).
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = 0usize;
+    for line in lines.iter().rev() {
+        let cost = line.len() + 1; // +1 for the joining newline
+        if total + cost > budget && !kept.is_empty() {
+            break;
+        }
+        total += cost;
+        kept.push(line.as_str());
+    }
+    kept.reverse();
+    kept.join("\n")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Parse the reviewer's JSON response into verdicts, keyed back to the
+/// registered dimensions. Unknown dimensions in the response are dropped;
+/// dimensions the response omitted get a healthy default so a partial answer
+/// never reads as "all clear" falsely. On any parse failure, fall back to a
+/// single `Watch` verdict carrying the raw text — degraded but not silent,
+/// and never an unstated `Stuck`.
+fn parse_verdicts(raw: &str, dimensions: &[Arc<dyn SessionReview>]) -> Vec<ReviewVerdict> {
+    #[derive(serde::Deserialize)]
+    struct Payload {
+        #[serde(default)]
+        verdicts: Vec<RawVerdict>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawVerdict {
+        dimension: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        detail: String,
+    }
+
+    let cleaned = strip_code_fence(raw).trim();
+    match serde_json::from_str::<Payload>(cleaned) {
+        Ok(payload) => {
+            let by_id: std::collections::HashMap<&str, &RawVerdict> = payload
+                .verdicts
+                .iter()
+                .map(|v| (v.dimension.as_str(), v))
+                .collect();
+            dimensions
+                .iter()
+                .map(|dim| match by_id.get(dim.id()) {
+                    Some(raw) => ReviewVerdict {
+                        dimension: dim.id().to_string(),
+                        status: parse_status(&raw.status),
+                        detail: raw.detail.clone(),
+                    },
+                    None => ReviewVerdict::healthy(dim.id()),
+                })
+                .collect()
+        }
+        Err(_) => {
+            // Unparseable: degrade to a Watch with the raw text so the user
+            // still sees *something* happened, but no Stuck nudge fires.
+            vec![ReviewVerdict {
+                dimension: "review".to_string(),
+                status: ReviewStatus::Watch,
+                detail: truncate(raw.trim(), 120),
+            }]
+        }
+    }
+}
+
+fn parse_status(s: &str) -> ReviewStatus {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "stuck" | "loop" | "looping" => ReviewStatus::Stuck,
+        "watch" | "slow" | "risky" | "warning" => ReviewStatus::Watch,
+        _ => ReviewStatus::Healthy,
+    }
+}
+
+/// Strip a single surrounding ``` fence if the model wrapped its JSON despite
+/// being told not to. Only the outermost fence is removed so nested content is
+/// untouched.
+fn strip_code_fence(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(after_open) = trimmed.strip_prefix("```") {
+        // Skip an optional language tag on the opening fence (```json).
+        let after_tag = match after_open.find('\n') {
+            Some(idx) => &after_open[idx + 1..],
+            None => after_open,
+        };
+        if let Some(end) = after_tag.rfind("```") {
+            return after_tag[..end].trim();
+        }
+    }
+    trimmed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_verdicts_maps_known_dimensions() {
+        let dims: Vec<Arc<dyn SessionReview>> = default_reviews();
+        let raw = r#"{"verdicts":[{"dimension":"looping","status":"stuck","detail":"re-reading f.rs repeatedly"}]}"#;
+        let verdicts = parse_verdicts(raw, &dims);
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].dimension, "looping");
+        assert_eq!(verdicts[0].status, ReviewStatus::Stuck);
+    }
+
+    #[test]
+    fn parse_verdicts_fills_missing_dimensions_as_healthy() {
+        let dims: Vec<Arc<dyn SessionReview>> = default_reviews();
+        let raw = r#"{"verdicts":[]}"#;
+        let verdicts = parse_verdicts(raw, &dims);
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].status, ReviewStatus::Healthy);
+    }
+
+    #[test]
+    fn parse_verdicts_degrades_unparseable_to_watch() {
+        let dims: Vec<Arc<dyn SessionReview>> = default_reviews();
+        let verdicts = parse_verdicts("the agent seems fine overall", &dims);
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].status, ReviewStatus::Watch);
+        assert_eq!(verdicts[0].dimension, "review");
+    }
+
+    #[test]
+    fn strip_code_fence_removes_json_fence() {
+        assert_eq!(
+            strip_code_fence("```json\n{\"verdicts\":[]}\n```"),
+            "{\"verdicts\":[]}"
+        );
+        assert_eq!(strip_code_fence("{\"verdicts\":[]}"), "{\"verdicts\":[]}");
+    }
+
+    #[test]
+    fn serialize_transcript_keeps_recent_within_budget() {
+        let msgs: Vec<Message> = (0..50)
+            .map(|i| {
+                let mut m = Message::new(
+                    Role::User,
+                    format!("round {i} with {}", "padding ".repeat(20)),
+                );
+                m.tool_calls = Some(vec![neenee_core::ToolCall {
+                    id: format!("c{i}"),
+                    name: "read_file".to_string(),
+                    arguments: format!("{{\"path\":\"f{i}\"}}"),
+                }]);
+                m
+            })
+            .collect();
+        let out = serialize_transcript(&msgs, 500);
+        // Budget honoured and the newest round survived the cut.
+        assert!(out.len() <= 600);
+        assert!(out.contains("round 49"));
+        assert!(!out.contains("round 0"));
+    }
+}

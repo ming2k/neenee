@@ -143,6 +143,28 @@ never the implementer's claims.",
     },
 };
 
+/// The diagnostic role used by session review (ADR-0016). Read-only,
+/// non-interactive, non-recursive — like [`EXPLORE`] in capability, but framed
+/// as a health auditor that reasons over a handed-off transcript snapshot and
+/// returns structured verdicts rather than free-form research findings. Bound
+/// by `TaskTool`-style machinery in `neenee-agent` (`Agent::run_session_review`),
+/// never by a model tool call.
+pub const REVIEW: SubagentProfile = SubagentProfile {
+    name: "review",
+    system_prompt: "\
+You are a session-health diagnostic sub-agent. You are handed a snapshot of \
+another agent's live transcript and asked whether it is making progress or \
+stuck. Judge from what you see — the sequence of tool calls, whether the same \
+ground is being revisited, whether edits or commands are actually landing. \
+You may read files to check a claim, but you must not modify anything. You are \
+non-interactive: never ask a question; if you cannot tell, say so. Answer with \
+the requested structured verdict only, no preamble.",
+    tool_policy: ToolPolicy {
+        access: ToolAccess::Read,
+        allow_user_interaction: false,
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

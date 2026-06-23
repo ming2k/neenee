@@ -4,10 +4,8 @@ pub mod cron;
 pub use cron::CronExpr;
 pub mod pursuits;
 pub mod repeat;
+pub use pursuits::{Pursuit, PursuitService, PursuitStore, TokenUsage, TurnOutcome, TurnTimer};
 pub use repeat::{RepeatJob, RepeatStore, DEFAULT_MAX_AGE_DAYS};
-pub use pursuits::{
-    Pursuit, PursuitService, PursuitStore, TokenUsage, TurnOutcome, TurnTimer,
-};
 
 pub const PURSUIT_COMPLETE_MARKER: &str = "[NEENEE_PURSUIT_COMPLETE]";
 
@@ -31,6 +29,7 @@ pub mod model;
 pub mod plan;
 pub use plan::{PlanProgress, PlanSection, PlanSectionStatus};
 pub mod pressure;
+pub mod session_review;
 pub mod skillsconfig;
 pub mod subagent;
 pub mod tool_call;
@@ -48,7 +47,11 @@ pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
     estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
 };
+pub use session_review::{
+    ReviewConfig, ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEW_INTERVAL_ROUNDS,
+    DEFAULT_REVIEW_START_ROUND,
+};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, VERIFY};
+pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, REVIEW, VERIFY};
 pub use tool_output::truncate_utf8;
 pub use webconfig::WebSearchConfig;

@@ -2,7 +2,7 @@
 //! responses ([`AgentResponse`]), live turn events ([`AgentEvent`]), and the
 //! small data records they carry.
 
-use crate::{Pursuit, ImagePart, Message, ToolAccess, ToolOutput, ToolStream};
+use crate::{ImagePart, Message, Pursuit, ToolAccess, ToolOutput, ToolStream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -132,10 +132,10 @@ pub enum AgentResponse {
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     AutoApproveChanged(bool),
-    /// Mirrors [`AgentEvent::StallWarning`]. The TUI should render a
-    /// non-modal alert so the user can decide whether to interrupt.
-    StallWarning {
-        consecutive_rounds: usize,
+    /// Mirrors [`AgentEvent::SessionReview`]. The TUI renders a non-modal
+    /// alert with `alert` (or clears it when `alert` is empty).
+    SessionReview {
+        alert: String,
     },
     RetryScheduled {
         attempt: usize,
@@ -310,13 +310,14 @@ pub enum AgentEvent {
     PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The auto-approve toggle changed (via `/auto-approve`).
     AutoApproveChanged(bool),
-    /// The agent appears stalled: N consecutive read-only tool rounds with
-    /// no write / mode / plan / pursuit mutation. The TUI should surface a
-    /// visible alert so the user can decide whether to interrupt. Carries
-    /// the streak length. Emitted exactly once per stall episode (a
-    /// productive round resets the streak and clears the alert).
-    StallWarning {
-        consecutive_rounds: usize,
+    /// A periodic session-review diagnostic ran (ADR-0016). `alert` is a
+    /// pre-rendered, human-facing summary of the worst verdict across all
+    /// review dimensions (empty string when the turn is healthy — the TUI
+    /// treats empty as "clear any prior alert"). Surfaced as a non-modal
+    /// banner so the user can decide whether to interrupt; it does not abort
+    /// the turn unless an opt-in `hard_stop_rounds` budget is configured.
+    SessionReview {
+        alert: String,
     },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),

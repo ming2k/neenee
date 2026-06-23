@@ -71,6 +71,35 @@ use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest
 #[cfg(test)]
 use std::collections::HashMap;
 
+/// Outer centered rect of the currently-open dismissable overlay modal, so the
+/// event loop can close it when the user clicks on the backdrop (i.e. outside
+/// the panel) — mirroring Esc.
+///
+/// Only the read-only / info overlays are covered: modals that paint no
+/// full-screen backdrop (Permission) or that borrow the composer input and
+/// therefore need their own Esc/restore path (Provider / ModelEditor /
+/// HistorySearch) return `None`, so a stray click never discards an in-progress
+/// filter or API key. The percentages mirror the `centered_rect(...)` call each
+/// of these modals paints in `overlays.rs`; if a modal's geometry changes
+/// there, update it here too so the click-outside hit-test stays exact.
+pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option<Rect> {
+    use crate::tui::app::Modal;
+    let (percent_x, percent_y) = match modal {
+        Modal::Help => (58, 70),
+        Modal::ToolStepDetail => (92, 84),
+        Modal::PlanPreview => (80, 70),
+        Modal::Activity => (72, 70),
+        Modal::Session => (76, 70),
+        Modal::Sessions => (80, 64),
+        _ => return None,
+    };
+    Some(primitives::centered_rect(
+        percent_x,
+        percent_y,
+        viewport_rect(frame),
+    ))
+}
+
 /// Inner rect of a transcript-area region after reserving the uniform
 /// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. Use this as the render target
 /// for any solid-background band (step headers/bodies, child tool steps) so
@@ -113,8 +142,10 @@ pub struct TranscriptView<'a> {
     /// before the first model request lands). Shown in the activity bar as
     /// `turn N · round M · <status>`.
     pub current_round: u64,
-    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
-    pub stall_rounds: u64,
+    /// Session-review alert (ADR-0016), or empty when inactive. While
+    /// non-empty the activity bar appends a `⚠ <alert> — Esc to interrupt`
+    /// segment.
+    pub review_alert: String,
     /// Display id of the currently active model. Surfaced in the activity bar
     /// as a muted `<model>` segment.
     pub current_model: &'a str,
@@ -195,7 +226,7 @@ pub fn draw_transcript(
         subagent_bar,
         turn_count,
         current_round,
-        stall_rounds,
+        review_alert,
         current_model,
         turn_started_at,
         hovered_step,
@@ -459,7 +490,7 @@ pub fn draw_transcript(
             Rect::new(footer_x, status_y, footer_w, STATUS_BAR_ROWS),
             turn_count,
             current_round,
-            stall_rounds,
+            &review_alert,
             current_model,
             turn_started_at,
             activity,
@@ -613,7 +644,7 @@ mod tests {
                         subagent_bar: None,
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
@@ -626,6 +657,7 @@ mod tests {
                     Rect::new(0, 21, 80, 3),
                     "hello",
                     5,
+                    true,
                     true,
                     &theme,
                     &mut LayoutMap::new(),
@@ -884,7 +916,7 @@ mod tests {
                         subagent_bar: None,
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
@@ -920,7 +952,7 @@ mod tests {
                         }),
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
@@ -1045,7 +1077,7 @@ mod tests {
                             subagent_bar: None,
                             turn_count: 0,
                             current_round: 0,
-                            stall_rounds: 0,
+                            review_alert: String::new(),
                             current_model: "",
                             turn_started_at: None,
                             hovered_step: None,
@@ -1099,6 +1131,7 @@ mod tests {
                     "",
                     0,
                     true,
+                    true,
                     &theme,
                     &mut layout_map,
                     true,
@@ -1138,6 +1171,7 @@ mod tests {
                     Rect::new(0, 0, 20, 8),
                     input,
                     input.len(),
+                    true,
                     true,
                     &theme,
                     &mut LayoutMap::new(),
@@ -1194,7 +1228,7 @@ mod tests {
                         subagent_bar: None,
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
@@ -1208,6 +1242,7 @@ mod tests {
                     render.input_rect,
                     &long_input,
                     0,
+                    true,
                     true,
                     &theme,
                     &mut layout_map,
@@ -1338,7 +1373,7 @@ mod tests {
                         subagent_bar: None,
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
@@ -1417,7 +1452,7 @@ mod tests {
                         subagent_bar: None,
                         turn_count: 0,
                         current_round: 0,
-                        stall_rounds: 0,
+                        review_alert: String::new(),
                         current_model: "",
                         turn_started_at: None,
                         hovered_step: None,

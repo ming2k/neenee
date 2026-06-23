@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, Pursuit, ImagePart, PermissionRequest, PlanProgress,
-    ProviderPickerRow, ProviderPickerSnapshot, Role, SessionOverview, UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, PlanProgress,
+    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -163,6 +163,14 @@ pub struct App {
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
     /// streaming, sub-agent view, or chrome hidden).
     pub activity_rect: Option<ratatui::layout::Rect>,
+    /// Screen rect of the currently-open dismissable overlay modal (the
+    /// centered panel, not the full-screen backdrop), so a click that lands
+    /// outside it closes the modal — mirroring Esc. Written each render via
+    /// [`crate::tui::render::modal_outer_rect`]. `None` when no modal is open,
+    /// when the modal paints no full backdrop (Permission), or when it borrows
+    /// the composer input and therefore must close through its own restore
+    /// path (Provider / ModelEditor / HistorySearch).
+    pub modal_rect: Option<ratatui::layout::Rect>,
     /// Content-line index of the sticky step's real summary. Used to re-anchor
     /// the scroll offset when the user collapses the pinned step so the summary
     /// lands at the top of the viewport instead of jumping to unrelated content.
@@ -238,10 +246,10 @@ pub struct App {
     /// from the response listener; shown in the activity bar as
     /// `turn N · round M · <status>`.
     pub current_round: u64,
-    /// Stall alert level (consecutive read-only rounds), or `0` when inactive.
-    /// While > 0 the activity bar appends a `⚠ stalled: N — Esc to interrupt`
+    /// Session-review alert (ADR-0016), or empty when inactive. While
+    /// non-empty the activity bar appends a `⚠ <alert> — Esc to interrupt`
     /// segment. Mirrored each frame from the response listener.
-    pub stall_rounds: u64,
+    pub review_alert: String,
     /// Wall-clock instant the current turn started, or `None` between turns.
     /// Drives the muted `<elapsed>` segment in the activity bar.
     pub turn_started_at: Option<std::time::Instant>,

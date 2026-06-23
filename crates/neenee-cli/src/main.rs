@@ -3,8 +3,7 @@ use neenee_agent::catalog;
 use neenee_agent::orchestration::{
     compact_turn_history, emit_pursuit_updated, refresh_agent_pursuit, send_compaction,
     send_harness_state, start_interactive_turn, start_pursuit, start_repeat_scheduler,
-    CompactionSettings,
-    InteractiveTurnContext, MidTurnCompactionGate, ProxyProvider,
+    CompactionSettings, InteractiveTurnContext, MidTurnCompactionGate, ProxyProvider,
     PursuitContext, RelayCompactionHooks, TurnInput,
 };
 #[cfg(test)]
@@ -18,8 +17,8 @@ use neenee_agent::TaskTool;
 #[cfg(test)]
 use neenee_core::{async_trait, Message, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, CronExpr, Pursuit, PursuitService, PursuitStore, Provider,
-    RepeatStore, Tool, EXPLORE,
+    AgentMode, AgentRequest, AgentResponse, CronExpr, Provider, Pursuit, PursuitService,
+    PursuitStore, RepeatStore, Tool, EXPLORE,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
@@ -250,11 +249,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })));
     }
 
-    // Wire the `[agent]` config table: stall detector threshold (0
-    // disables) and verify hard-nudge toggle. Both default to sensible
-    // values when the table is absent, so this is a no-op for the common
-    // case.
-    agent.set_stall_threshold(config.agent.stall_threshold);
+    // Wire the `[agent]` config table: session-review cadence + opt-in
+    // hard-stop budget, and the verify hard-nudge toggle. All default to
+    // sensible values when the table is absent, so this is a no-op for the
+    // common case.
+    agent.set_review_config(config.agent.review);
     agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
 
     // Tie the agent and its pursuit persistence to this session/thread.
@@ -262,7 +261,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_thread_id(&thread_id);
     if pursuit_service.get_pursuit(&thread_id).await?.is_none() {
         if let Some(pursuit) = load_legacy_pursuit_from_config() {
-            let _ = pursuit_service.set_pursuit(&thread_id, &pursuit.objective).await;
+            let _ = pursuit_service
+                .set_pursuit(&thread_id, &pursuit.objective)
+                .await;
         }
     }
     refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
@@ -684,53 +685,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
-                        "/stall-threshold" => {
-                            // /stall-threshold        → show current value
-                            // /stall-threshold N      → set to N (0 disables)
-                            // /stall-threshold default → restore the config default
-                            match parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        "/review" => {
+                            // /review             → show current cadence
+                            // /review off         → disable review (pure ADR-0009)
+                            // /review N           → set start line (keeps interval)
+                            // /review N M         → set start line + interval
+                            // /review default     → reset to the config values
+                            let tokens: Vec<&str> = parts
+                                .iter()
+                                .skip(1)
+                                .map(|s| s.trim())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            match tokens.first().copied() {
                                 None => {
-                                    let current = agent.get_stall_threshold();
-                                    let label = if current == 0 {
-                                        "0 (detection disabled)".to_string()
+                                    let cfg = agent.get_review_config();
+                                    let cadence = if !cfg.review_enabled() {
+                                        "review disabled (start = 0)".to_string()
                                     } else {
-                                        current.to_string()
+                                        format!(
+                                            "start at {} rounds, every {} rounds",
+                                            cfg.review_start_round, cfg.review_interval_rounds
+                                        )
+                                    };
+                                    let hard = if cfg.hard_stop_rounds > 0 {
+                                        format!("hard-stop at {} rounds", cfg.hard_stop_rounds)
+                                    } else {
+                                        "no hard stop (uncapped)".to_string()
                                     };
                                     let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Stall threshold: {label}. Use `/stall-threshold N` \
-                                         to set (0 disables), `/stall-threshold default` to \
-                                         reset to the config value ({}).",
-                                        config.agent.stall_threshold
+                                        "Session review: {cadence}; {hard}. \
+                                         `/review off` disables, `/review N [M]` sets cadence, \
+                                         `/review default` resets to config (start {}, interval {}).",
+                                        config.agent.review.review_start_round,
+                                        config.agent.review.review_interval_rounds,
                                     )));
                                 }
+                                Some("off") => {
+                                    let mut cfg = agent.get_review_config();
+                                    cfg.review_start_round = 0;
+                                    agent.set_review_config(cfg);
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "Session review disabled (start = 0). Turns are uncapped \
+                                         with no periodic diagnostic."
+                                            .to_string(),
+                                    ));
+                                }
                                 Some("default") => {
-                                    let value = config.agent.stall_threshold;
-                                    agent.set_stall_threshold(value);
+                                    agent.set_review_config(config.agent.review);
                                     let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Stall threshold reset to config default ({value})."
+                                        "Session review reset to config default (start {}, \
+                                         interval {}, hard-stop {}).",
+                                        config.agent.review.review_start_round,
+                                        config.agent.review.review_interval_rounds,
+                                        config.agent.review.hard_stop_rounds,
                                     )));
                                 }
                                 Some(raw) => {
-                                    let parsed = raw.parse::<usize>();
-                                    let value = match parsed {
+                                    let mut cfg = agent.get_review_config();
+                                    let start = match raw.parse::<usize>() {
                                         Ok(v) => v,
                                         Err(_) => {
                                             let _ = resp_tx.send(AgentResponse::Error(format!(
-                                                "Unknown value '{raw}'. Use \
-                                                     `/stall-threshold N` (non-negative integer) \
-                                                     or `/stall-threshold default`.",
+                                                "Unknown value '{raw}'. Use `/review`, \
+                                                 `/review off`, `/review N [M]`, or \
+                                                 `/review default`."
                                             )));
                                             continue;
                                         }
                                     };
-                                    agent.set_stall_threshold(value);
-                                    let label = if value == 0 {
-                                        "0 (detection disabled)".to_string()
-                                    } else {
-                                        value.to_string()
-                                    };
+                                    cfg.review_start_round = start;
+                                    if let Some(interval_token) = tokens.get(1) {
+                                        match interval_token.parse::<usize>() {
+                                            Ok(v) if v > 0 => cfg.review_interval_rounds = v,
+                                            _ => {
+                                                let _ = resp_tx.send(AgentResponse::Error(
+                                                    "Interval must be a positive integer."
+                                                        .to_string(),
+                                                ));
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    agent.set_review_config(cfg);
+                                    let live = agent.get_review_config();
                                     let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Stall threshold set to {label}."
+                                        "Session review: start at {} rounds, every {} rounds.",
+                                        live.review_start_round, live.review_interval_rounds,
                                     )));
                                 }
                             }
@@ -1085,8 +1126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         m
                                     }
-                                    None => "No active pursuit. Start one with /pursue <condition>."
-                                        .to_string(),
+                                    None => {
+                                        "No active pursuit. Start one with /pursue <condition>."
+                                            .to_string()
+                                    }
                                 };
                                 let _ = resp_tx.send(AgentResponse::Text(message));
                             } else if rest == "clear" {
@@ -1094,8 +1137,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match pursuit_service.clear_pursuit(&thread_id).await {
                                     Ok(true) => {
                                         agent.clear_pursuit();
-                                        let _ = resp_tx
-                                            .send(AgentResponse::Text("Pursuit cleared.".to_string()));
+                                        let _ = resp_tx.send(AgentResponse::Text(
+                                            "Pursuit cleared.".to_string(),
+                                        ));
                                     }
                                     Ok(false) => {
                                         let _ = resp_tx.send(AgentResponse::Text(
@@ -1237,10 +1281,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             if rest == "list" {
-                                let jobs = repeat_store_for_commands.list().await.unwrap_or_default();
+                                let jobs =
+                                    repeat_store_for_commands.list().await.unwrap_or_default();
                                 if jobs.is_empty() {
-                                    let _ = resp_tx
-                                        .send(AgentResponse::Text("No /repeat jobs scheduled.".to_string()));
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "No /repeat jobs scheduled.".to_string(),
+                                    ));
                                 } else {
                                     let mut lines = vec!["Scheduled /repeat jobs:".to_string()];
                                     for j in &jobs {
@@ -1290,8 +1336,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let parsed = match CronExpr::parse(&cron) {
                                 Ok(p) => p,
                                 Err(error) => {
-                                    let _ = resp_tx
-                                        .send(AgentResponse::Error(format!("Invalid cron: {error}")));
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                                        "Invalid cron: {error}"
+                                    )));
                                     continue;
                                 }
                             };
@@ -1300,7 +1347,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(n) => n,
                                 None => {
                                     let _ = resp_tx.send(AgentResponse::Error(
-                                        "That cron expression never fires within the next year.".to_string(),
+                                        "That cron expression never fires within the next year."
+                                            .to_string(),
                                     ));
                                     continue;
                                 }
@@ -1494,7 +1542,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /clear    — Clear the conversation history\n\
                                                                 /permissions [clear] — Show or clear always-allowed tool rules
                                 /auto-approve [on|off] — Toggle bypassing write-tool permission prompts
-                                /stall-threshold [N] — Show or set the agent stall threshold (0 disables)
+                                /review [N [M]|off|default] — Show or set session-review cadence (ADR-0016); 0 disables
                                 /verify-nudge [on|off] — Toggle the verify-plan hard nudge at turn end
                                 /search <query> — Semantic search over the project's session history
 \n\
@@ -1857,8 +1905,9 @@ mod tests {
             std::env::temp_dir().join(format!("neenee-retry-test-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
         let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let pursuit_service =
-            PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
+        let pursuit_service = PursuitService::new(
+            PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
+        );
         let agent = Arc::new(Agent::new(
             Arc::new(RetryOnceProvider(AtomicUsize::new(0))),
             Vec::new(),
@@ -1939,8 +1988,9 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-retry-tool-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
-        let pursuit_service =
-            PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
+        let pursuit_service = PursuitService::new(
+            PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
+        );
         let agent = Arc::new(Agent::new(
             Arc::new(ToolThenRetryProvider(AtomicUsize::new(0))),
             vec![Arc::new(RetryReadTool)],

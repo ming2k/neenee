@@ -82,7 +82,7 @@ pub fn draw_activity_bar(
     rect: Rect,
     turn: u64,
     current_round: u64,
-    stall_rounds: u64,
+    review_alert: &str,
     current_model: &str,
     turn_started_at: Option<Instant>,
     status: &str,
@@ -136,17 +136,17 @@ pub fn draw_activity_bar(
             .add_modifier(Modifier::ITALIC),
     ));
 
-    // Stall alert (ADR-0009 safety net): surfaced while the harness considers
-    // the agent stalled on consecutive read-only tool rounds. Rendered with
-    // the same breathing luminance sweep as the running-indicator dot so the
-    // alert pulses gently rather than sitting as a flat warning chip — the
-    // motion draws the eye without being frantic. An `Esc to interrupt`
-    // hint tells the user they can stop it.
-    if stall_rounds > 0 {
+    // Session-review alert (ADR-0016): surfaced when a periodic diagnostic
+    // judged the turn watch-worthy or stuck. Rendered with the same breathing
+    // luminance sweep as the running-indicator dot so the alert pulses gently
+    // rather than sitting as a flat warning chip — the motion draws the eye
+    // without being frantic. An `Esc to interrupt` hint tells the user they
+    // can stop it. Empty alert = clear (nothing rendered).
+    if !review_alert.is_empty() {
         let warn = breathing_color(spinner_phase, theme.warning, theme.surface());
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("⚠ stalled: {stall_rounds} read-only rounds — Esc to interrupt"),
+            format!("⚠ {review_alert}"),
             Style::default().fg(warn).add_modifier(Modifier::BOLD),
         ));
     }

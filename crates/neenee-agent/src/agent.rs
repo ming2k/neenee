@@ -95,12 +95,16 @@ pub struct Agent {
     context_budget_chars: Arc<std::sync::Mutex<usize>>,
     /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
     compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
-    /// Consecutive read-only tool rounds before stall detection fires a
-    /// `StallWarning` and pushes a reflection nudge. Seeded from
-    /// `STALL_THRESHOLD` (matching `Config::agent.stall_threshold`'s
-    /// default); mutated at runtime via `set_stall_threshold`. `0`
-    /// disables detection entirely (pure ADR-0009 behaviour).
-    stall_threshold: Arc<std::sync::Mutex<usize>>,
+    /// Session-review cadence + opt-in hard-stop budget (ADR-0016). Seeded
+    /// from `Config::agent.review` (matching `ReviewConfig::default`) and
+    /// mutated at runtime via `set_review_config`. The disabled config
+    /// (`review_start_round = 0`) suppresses the periodic diagnostic
+    /// entirely (pure ADR-0009 behaviour) and is what sub-agents get.
+    review_config: Arc<std::sync::Mutex<ReviewConfig>>,
+    /// Registered review dimensions evaluated by the periodic diagnostic
+    /// sub-agent. Defaults to [`crate::default_reviews`] (looping); empty on
+    /// sub-agents (which disable review anyway).
+    reviews: Vec<Arc<dyn SessionReview>>,
     /// Whether the verify hard-nudge gate is active. Seeded to `true` and
     /// mutated at runtime via `set_verify_nudge_enabled`. When `false` the
     /// harness never injects the "you forgot to call verify_plan_execution"
@@ -115,20 +119,11 @@ pub(crate) struct TurnState {
     /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
     previous_call: Option<(String, String)>,
     repeated_calls: usize,
-    /// Whether every tool call in the most recent round was read-only
-    /// (`ToolAccess::Read` and not one of the mutating Read tools:
-    /// `plan_enter` / `plan_exit` / `update_plan_progress`). Set by
-    /// `dispatch_tool_calls` so the outer loop can maintain
-    /// `consecutive_readonly_rounds`.
-    pub(crate) last_round_was_readonly: bool,
-    /// Consecutive read-only rounds so far this turn. Reset to 0 by any
-    /// productive round. Drives the stall detector (`STALL_THRESHOLD` for
-    /// the reflection nudge, `STALL_HARD_STOP` for the hard abort).
-    pub(crate) consecutive_readonly_rounds: usize,
-    /// One-shot flag so the stall reflection nudge fires at most once per
-    /// stall episode. Reset implicitly when `consecutive_readonly_rounds`
-    /// returns to 0 — a new stall is a new episode.
-    pub(crate) stall_nudged: bool,
+    /// One-shot flag so the session-review reflection nudge fires at most once
+    /// per review episode. A subsequent healthy review re-arms it, so a fresh
+    /// stall later in the same turn gets a fresh nudge. See
+    /// [`Agent::update_review_state`].
+    pub(crate) review_nudged: bool,
     /// True once the model has invoked `verify_plan_execution` at any
     /// point during this turn. Drives the verify-nudge gate at turn end.
     pub(crate) verify_called_this_turn: bool,
@@ -136,26 +131,6 @@ pub(crate) struct TurnState {
     /// Without this the harness and model could ping-pong indefinitely
     /// (nudge → text-only reply → nudge → …).
     pub(crate) verify_nudged: bool,
-}
-
-/// Names of Read-access tools that nonetheless count as "productive" for
-/// stall detection because they mutate durable state the harness tracks
-/// (plan/mode transitions, plan-section progress). Any round containing one
-/// of these is treated as making progress even though no Write tool fired.
-const PRODUCTIVE_READ_TOOLS: &[&str] = &[
-    "plan_enter",
-    "plan_exit",
-    "update_plan_progress",
-];
-
-/// Whether a single tool name counts as productive for the text-fallback
-/// path, where we cannot recover the registered `Tool`'s access bit
-/// cheaply. The text fallback is only used by simpler chat models, which
-/// never carry the Write tools that matter here, so a name-only check is
-/// sufficient: a hit on `PRODUCTIVE_READ_TOOLS` is productive, anything
-/// else is read-only.
-pub(crate) fn call_was_productive(name: &str) -> bool {
-    PRODUCTIVE_READ_TOOLS.contains(&name)
 }
 
 impl Agent {
@@ -188,16 +163,18 @@ impl Agent {
         tools.retain(|tool| {
             !matches!(
                 tool.name(),
-                "get_pursuit"
-                    | "start_pursuit"
-                    | "complete_pursuit"
-                    | "plan_enter"
-                    | "plan_exit"
+                "get_pursuit" | "start_pursuit" | "complete_pursuit" | "plan_enter" | "plan_exit"
             )
         });
-        tools.push(Arc::new(pursuits::tools::GetPursuitTool::new(context.clone())));
-        tools.push(Arc::new(pursuits::tools::StartPursuitTool::new(context.clone())));
-        tools.push(Arc::new(pursuits::tools::CompletePursuitTool::new(context.clone())));
+        tools.push(Arc::new(pursuits::tools::GetPursuitTool::new(
+            context.clone(),
+        )));
+        tools.push(Arc::new(pursuits::tools::StartPursuitTool::new(
+            context.clone(),
+        )));
+        tools.push(Arc::new(pursuits::tools::CompletePursuitTool::new(
+            context.clone(),
+        )));
 
         // Plan-mode workflow tools share the mode handle, the active plan
         // path, and the plan progress snapshot — the same `Arc`s the agent
@@ -246,7 +223,8 @@ impl Agent {
             thread_id,
             context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
             compaction_gate: Arc::new(std::sync::Mutex::new(None)),
-            stall_threshold: Arc::new(std::sync::Mutex::new(STALL_THRESHOLD)),
+            review_config: Arc::new(std::sync::Mutex::new(ReviewConfig::default())),
+            reviews: crate::default_reviews(),
             verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
         }
     }
@@ -260,25 +238,38 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) = budget;
     }
 
-    /// Override the per-turn stall detector threshold. `0` disables
-    /// detection entirely (no `StallWarning`, no reflection nudge, no
-    /// hard-stop). Mirrors `[agent] stall_threshold` in `config.toml` but
-    /// can be flipped at runtime.
-    pub fn set_stall_threshold(&self, threshold: usize) {
-        *self
-            .stall_threshold
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = threshold;
+    /// Override the session-review cadence + opt-in hard-stop budget. Mirrors
+    /// `[agent.review]` in `config.toml` but can be flipped at runtime. The
+    /// disabled config (`review_start_round = 0`) suppresses the periodic
+    /// diagnostic entirely (pure ADR-0009 behaviour); sub-agents are seeded
+    /// disabled by the TaskTool/reviewer constructors.
+    pub fn set_review_config(&self, config: ReviewConfig) {
+        *self.review_config.lock().unwrap_or_else(|e| e.into_inner()) = config;
     }
 
-    /// Current stall-detector threshold. Read by the `/stall-threshold`
-    /// slash command to show the live value (which may differ from
-    /// `Config::agent.stall_threshold` after a runtime override).
-    pub fn get_stall_threshold(&self) -> usize {
-        *self
-            .stall_threshold
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    /// Current review config. Read by the `/review` slash command to show the
+    /// live value (which may differ from `Config::agent.review` after a
+    /// runtime override).
+    pub fn get_review_config(&self) -> ReviewConfig {
+        *self.review_config.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the periodic session-review diagnostic is enabled. Convenience
+    /// over `get_review_config().review_enabled()`.
+    pub fn review_enabled(&self) -> bool {
+        self.get_review_config().review_enabled()
+    }
+
+    /// The review dimensions effective for this agent: its registered set, or
+    /// the built-in defaults ([`crate::default_reviews`]) when none are
+    /// registered. Centralizes the "empty → default" fallback so the runner in
+    /// `session_review` does not touch private fields.
+    pub(crate) fn effective_reviews(&self) -> Vec<Arc<dyn SessionReview>> {
+        if self.reviews.is_empty() {
+            crate::default_reviews()
+        } else {
+            self.reviews.to_vec()
+        }
     }
 
     /// Override whether the verify hard-nudge gate is active. Mirrors
@@ -455,7 +446,10 @@ impl Agent {
     }
 
     pub fn get_pursuit(&self) -> Option<Pursuit> {
-        self.pursuit.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.pursuit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_pursuit(&self, pursuit: Pursuit) {
@@ -463,7 +457,10 @@ impl Agent {
     }
 
     pub fn restore_pursuit(&self, pursuit: Pursuit) {
-        *self.pursuit.lock().unwrap_or_else(|error| error.into_inner()) = Some(pursuit);
+        *self
+            .pursuit
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(pursuit);
     }
 
     pub fn clear_pursuit(&self) {
@@ -486,7 +483,10 @@ impl Agent {
 
     /// Arm the pursuit stop-gate and reset the iteration counter.
     pub fn arm_pursuit(&self) {
-        *self.pursuit_iterations.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+        *self
+            .pursuit_iterations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = 0;
         *self.pursuit_armed.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
@@ -500,7 +500,10 @@ impl Agent {
     }
 
     pub fn pursuit_iterations(&self) -> u32 {
-        *self.pursuit_iterations.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .pursuit_iterations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Returns a continuation prompt to force another model round, or `None`
@@ -905,6 +908,7 @@ impl Agent {
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState::default();
+        let mut tool_rounds = 0;
 
         loop {
             if cancel.is_cancelled() {
@@ -914,6 +918,9 @@ impl Agent {
             remove_empty_assistant_messages(messages);
             self.ensure_system_prompt(messages);
             self.inject_implicit_skills(messages);
+            on_event(AgentEvent::ModelRequestStarted {
+                tool_round: tool_rounds,
+            });
 
             let response = match tokio::time::timeout(
                 CHAT_RESPONSE_TIMEOUT,
@@ -955,12 +962,13 @@ impl Agent {
                 )
                 .await?
             {
+                tool_rounds += 1;
                 if self
-                    .update_stall_state(messages, &mut state, &mut on_event)
+                    .update_review_state(messages, &mut state, tool_rounds, &mut on_event)
                     .await?
                     .is_break()
                 {
-                    return Err(self.stall_hard_stop_error(&state));
+                    return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 continue;
@@ -1195,11 +1203,11 @@ impl Agent {
             {
                 tool_rounds += 1;
                 if self
-                    .update_stall_state(messages, &mut state, &mut on_event)
+                    .update_review_state(messages, &mut state, tool_rounds, &mut on_event)
                     .await?
                     .is_break()
                 {
-                    return Err(self.stall_hard_stop_error(&state));
+                    return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 continue;
@@ -1288,12 +1296,10 @@ impl Agent {
                     &mut state.repeated_calls,
                 )?;
             }
-            // Detect whether this round was productive (any Write-capable
-            // tool or any of the mutating Read tools), and whether the
-            // model invoked the plan verifier. Both feed gates in the
-            // outer loop: the productivity flag drives the stall detector,
-            // the verify flag drives the completion-time nudge.
-            state.last_round_was_readonly = !self.round_was_productive(tool_calls);
+            // Track whether the model invoked the plan verifier this round —
+            // it feeds the completion-time verify nudge in the outer loop.
+            // (Round productivity no longer needs bookkeeping: session review
+            // reads the transcript directly, see ADR-0016.)
             if tool_calls
                 .iter()
                 .any(|call| call.name == "verify_plan_execution")
@@ -1350,10 +1356,9 @@ impl Agent {
             }
             self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls)?;
             tracing::debug!(tool = %call.name, "tool call (text fallback)");
-            // Mirror the native path's gate signals so the outer loop's
-            // stall detector and verify nudge behave identically for
-            // text-emitted tool calls.
-            state.last_round_was_readonly = !call_was_productive(&call.name);
+            // Mirror the native path's verify-flag tracking so the completion
+            // nudge behaves identically for text-emitted tool calls. Round
+            // productivity is no longer tracked here (ADR-0016).
             if call.name == "verify_plan_execution" {
                 state.verify_called_this_turn = true;
             }
@@ -1479,124 +1484,114 @@ impl Agent {
         Ok(())
     }
 
-    /// Whether a round of tool calls counts as productive for stall
-    /// detection. A round is productive if any of its calls resolves to an
-    /// above-Read tool (`Execute` or `Write` — running a command counts as
-    /// an action, not idle reading), or names one of the mutating Read tools
-    /// in [`PRODUCTIVE_READ_TOOLS`] (pursuit checklist, plan/mode transitions,
-    /// plan-section progress). Unknown tool names default to read-only so a
-    /// model hallucinating a Write-looking name cannot bypass the detector.
-    fn round_was_productive(&self, calls: &[ToolCall]) -> bool {
-        calls.iter().any(|call| {
-            if call_was_productive(&call.name) {
-                return true;
-            }
-            let access = self
-                .tools
-                .iter()
-                .find(|tool| tool.name() == call.name)
-                .map(|tool| tool.access())
-                .unwrap_or(ToolAccess::Read);
-            access != ToolAccess::Read
-        })
-    }
-
-    /// Update the per-turn read-only streak based on the productivity of
-    /// the round that just finished (`state.last_round_was_readonly` was
-    /// set by `dispatch_tool_calls`). When the streak hits the configured
-    /// threshold for the first time in this episode, emit a
-    /// [`AgentEvent::StallWarning`] and push a hidden reflection nudge so
-    /// the model breaks out of distinct-but-unproductive exploration
-    /// loops. While stalled, every subsequent read-only round re-emits
-    /// `StallWarning` with the latest count so the TUI alert ticks up
-    /// live. Returns `ControlFlow::Break` when the streak has reached
-    /// `threshold + STALL_HARD_STOP_DELTA` after the nudge — the caller
-    /// converts that into a terminal `HarnessError` via
-    /// [`Self::stall_hard_stop_error`].
+    /// Drive the periodic session-review diagnostic and the opt-in hard stop
+    /// (ADR-0016). Called once per tool round with the count of rounds that
+    /// have already run this turn.
     ///
-    /// No-op when the configured threshold is `0` (detection disabled,
-    /// pure ADR-0009 behaviour).
-    async fn update_stall_state<F>(
+    /// - **Review**: when `rounds` lands on a configured review point
+    ///   (`review_start_round`, then every `review_interval_rounds`), spawn a
+    ///   bounded read-only diagnostic sub-agent ([`Self::run_session_review`])
+    ///   that reads the live transcript and returns one verdict per registered
+    ///   dimension. The worst verdict is collapsed into a pre-rendered alert
+    ///   string and emitted as [`AgentEvent::SessionReview`] (empty alert when
+    ///   healthy, which clears any prior banner). An explicit `Stuck` verdict
+    ///   also pushes a one-shot hidden reflection nudge so the model gets a
+    ///   chance to recover; the nudge re-arms once a healthy review intervenes,
+    ///   so a fresh stall later in the turn is caught again.
+    /// - **Hard stop**: only when the user opted in via a finite
+    ///   `hard_stop_rounds` and `rounds` has reached it. This is the sole
+    ///   execution cap; the default (`0`) keeps the turn uncapped, exactly
+    ///   matching ADR-0009.
+    ///
+    /// Returns `ControlFlow::Break` when the hard-stop budget is exhausted —
+    /// the caller converts that into a terminal `HarnessError` via
+    /// [`Self::hard_stop_error`]. The review itself never breaks: it only
+    /// informs.
+    async fn update_review_state<F>(
         &self,
         messages: &mut Vec<Message>,
         state: &mut TurnState,
+        rounds: usize,
         on_event: &mut F,
     ) -> Result<std::ops::ControlFlow<()>, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
-        let threshold = *self
-            .stall_threshold
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // `0` is the documented sentinel for "detection disabled". Bypass
-        // all bookkeeping so an over-eager streak from a prior threshold
-        // cannot fire a stale warning after the user lowers it mid-run.
-        if threshold == 0 {
-            return Ok(std::ops::ControlFlow::Continue(()));
-        }
-        let hard_stop = threshold.saturating_add(STALL_HARD_STOP_DELTA);
+        let config = self.get_review_config();
 
-        let was_stalled = state.consecutive_readonly_rounds >= threshold;
-        if state.last_round_was_readonly {
-            state.consecutive_readonly_rounds += 1;
-        } else {
-            state.consecutive_readonly_rounds = 0;
-            // A productive round ends the stall episode, so a future
-            // stall in the same turn gets a fresh nudge. Also clear the
-            // TUI alert when one was active — without this the banner
-            // would linger after recovery, which is misleading.
-            state.stall_nudged = false;
-            if was_stalled {
-                on_event(AgentEvent::StallWarning {
-                    consecutive_rounds: 0,
-                });
-            }
-        }
-
-        // Re-emit the live count every round while stalled so the
-        // activity bar's "N read-only rounds" counter ticks up. The
-        // reflection nudge message is pushed exactly once per episode
-        // (one-shot `stall_nudged` flag).
-        if state.consecutive_readonly_rounds >= threshold {
-            if !state.stall_nudged {
-                state.stall_nudged = true;
-                let n = state.consecutive_readonly_rounds;
+        // Periodic diagnostic. Runs only on a review point and only when
+        // enabled; skipped entirely otherwise (zero cost for normal turns and
+        // for sub-agents, which are seeded disabled).
+        if config.review_due_at(rounds) {
+            let verdicts = self.run_session_review(messages, rounds).await;
+            let alert = Self::render_review_alert(&verdicts, rounds);
+            let stuck = verdicts.iter().any(|v| v.status == ReviewStatus::Stuck);
+            if stuck && !state.review_nudged {
+                state.review_nudged = true;
                 messages.push(Message::hidden(
                     Role::User,
-                    format!(
-                        "You have made {n} consecutive read-only tool calls without \
-                         producing any changes or updating plan/pursuit state. You may \
-                         be stuck in an exploration loop. Step back: re-read the \
-                         task, decide whether you already have the information you \
-                         need, and either act (write/edit/run) or report to the \
-                         user. Do not continue gathering information you already have."
-                    ),
+                    "A session-health review judged this turn stuck in an \
+                     unproductive loop. Step back: re-read the task, decide \
+                     whether you already have the information you need, and \
+                     either act (write/edit/run) or report to the user. Do \
+                     not continue gathering information you already have."
+                        .to_string(),
                 ));
+            } else if !stuck {
+                // A non-stuck review re-arms the one-shot nudge so a later
+                // stall in the same turn can fire it again.
+                state.review_nudged = false;
             }
-            let n = state.consecutive_readonly_rounds;
-            on_event(AgentEvent::StallWarning {
-                consecutive_rounds: n,
-            });
+            on_event(AgentEvent::SessionReview { alert });
         }
 
-        if state.consecutive_readonly_rounds >= hard_stop && state.stall_nudged {
+        // Opt-in execution budget only. Default (0) keeps the turn uncapped.
+        if config.hard_stop_rounds > 0 && rounds >= config.hard_stop_rounds {
             return Ok(std::ops::ControlFlow::Break(()));
         }
         Ok(std::ops::ControlFlow::Continue(()))
     }
 
-    /// Terminal error surfaced when the agent ignored the stall nudge and
-    /// kept burning read-only rounds up to the hard-stop line. The
-    /// message echoes the streak length so the user can tell this apart
-    /// from a normal completion in the transcript.
-    fn stall_hard_stop_error(&self, state: &TurnState) -> HarnessError {
+    /// Terminal error surfaced when an opt-in `hard_stop_rounds` budget is
+    /// exhausted. Echoes the configured budget so the user can tell this apart
+    /// from a normal completion in the transcript. The review itself never
+    /// produces this — only an explicit user-configured budget does.
+    fn hard_stop_error(&self) -> HarnessError {
+        let budget = self.get_review_config().hard_stop_rounds;
         HarnessError::Other(format!(
-            "Agent stopped: {} consecutive read-only tool rounds with no \
-             progress after a reflection nudge. This looks like an \
-             exploration loop.",
-            state.consecutive_readonly_rounds
+            "Agent stopped: the configured hard-stop budget of {budget} tool \
+             rounds was reached. This budget is opt-in (`hard_stop_rounds`); \
+             raise it or set it to 0 (the default) for an uncapped turn."
         ))
+    }
+
+    /// Collapse a set of review verdicts into one human-facing alert string.
+    /// Empty when every dimension is healthy (the TUI treats empty as "clear
+    /// any prior alert"). Otherwise the worst status wins, with each
+    /// non-healthy dimension's detail folded in. The round count gives the
+    /// user a sense of how long the turn has run. Associated (no `&self`) so
+    /// tests can call `Agent::render_review_alert` without constructing one.
+    pub(crate) fn render_review_alert(verdicts: &[ReviewVerdict], rounds: usize) -> String {
+        let worst = verdicts.iter().map(|v| v.status).max();
+        match worst {
+            None | Some(ReviewStatus::Healthy) => String::new(),
+            Some(status) => {
+                let label = status.label();
+                let details: Vec<&str> = verdicts
+                    .iter()
+                    .filter(|v| v.status != ReviewStatus::Healthy && !v.detail.trim().is_empty())
+                    .map(|v| v.detail.trim())
+                    .collect();
+                if details.is_empty() {
+                    format!("review: {label} · {rounds} rounds — Esc to interrupt")
+                } else {
+                    format!(
+                        "review: {label} · {rounds} rounds — {} — Esc to interrupt",
+                        details.join("; ")
+                    )
+                }
+            }
+        }
     }
 
     /// Whether the harness should fire the verify-hard-nudge gate before

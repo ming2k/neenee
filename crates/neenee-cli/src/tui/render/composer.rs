@@ -77,6 +77,7 @@ pub fn draw_composer(
     input: &str,
     byte_cursor: usize,
     focused: bool,
+    show_caret: bool,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     record: bool,
@@ -87,9 +88,13 @@ pub fn draw_composer(
     // continuations. The top and bottom edges are half-block rows so the panel
     // floats a half row off the app background.
     //
-    // When the prompt is blurred (Browse zone), the panel drops to the dimmer
-    // `user_panel_bg` and the prompt glyph uses `text_muted`, matching the
-    // already-sent user-message styling so the live box visibly recedes.
+    // `focused` drives only the palette: when the prompt is blurred (Browse
+    // zone) the panel drops to the dimmer `user_panel_bg` and the prompt glyph
+    // uses `text_muted`, matching the already-sent user-message styling so the
+    // live box visibly recedes. The caret is gated separately by `show_caret`:
+    // it is suppressed whenever a modal owns the keyboard (the full-screen
+    // modal backdrop already signals "typing lands elsewhere"), so the panel
+    // never shows a live caret inside a surface that no longer accepts input.
     let panel_bg = if focused {
         theme.input_surface()
     } else {
@@ -229,10 +234,11 @@ pub fn draw_composer(
     }
 
     // Position the caret relative to the visible slice, after the `> ` /
-    // indent prefix. Skipped when the prompt is blurred (Browse zone): the
-    // caret would otherwise sit visibly inside a box that no longer accepts
-    // input, contradicting the dimmed styling.
-    if focused {
+    // indent prefix. Gated by `show_caret` rather than `focused`: the caret is
+    // hidden whenever keyboard focus is elsewhere (Browse zone, or any modal
+    // that takes over input), so it never sits inside a box that doesn't
+    // accept keypresses.
+    if show_caret {
         let visible_cursor_line = cursor_line.saturating_sub(scroll);
         let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
         let cursor_x =

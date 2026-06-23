@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Agent;
 use neenee_core::{
-    AgentEvent, AgentRequest, AgentResponse, CronExpr, Pursuit, PursuitService, HarnessError,
-    HarnessSnapshot, ImagePart, Message, Provider, ProviderStreamEvent, RepeatStore, Role,
+    AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
+    Message, Provider, ProviderStreamEvent, Pursuit, PursuitService, RepeatStore, Role,
     PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
@@ -488,7 +488,10 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
                 )));
             }
         }
-    } else if agent.get_pursuit().is_some_and(|pursuit| pursuit.is_complete) {
+    } else if agent
+        .get_pursuit()
+        .is_some_and(|pursuit| pursuit.is_complete)
+    {
         completed = true;
     }
 
@@ -565,9 +568,12 @@ pub fn relay_agent_event(
             streamed_text.store(true, Ordering::SeqCst);
             AgentResponse::StreamDelta(delta)
         }
-        AgentEvent::AssistantEnd(content) => {
-            AgentResponse::StreamEnd(content.replace(PURSUIT_COMPLETE_MARKER, "").trim().to_string())
-        }
+        AgentEvent::AssistantEnd(content) => AgentResponse::StreamEnd(
+            content
+                .replace(PURSUIT_COMPLETE_MARKER, "")
+                .trim()
+                .to_string(),
+        ),
         AgentEvent::AssistantDiscard => AgentResponse::StreamDiscard,
         AgentEvent::ReasoningDelta { delta, start } => {
             if start {
@@ -605,9 +611,7 @@ pub fn relay_agent_event(
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PlanProgressUpdated(progress) => AgentResponse::PlanProgressUpdated(progress),
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
-        AgentEvent::StallWarning { consecutive_rounds } => {
-            AgentResponse::StallWarning { consecutive_rounds }
-        }
+        AgentEvent::SessionReview { alert } => AgentResponse::SessionReview { alert },
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
         AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),
         AgentEvent::SubTask {
@@ -861,7 +865,9 @@ pub async fn run_repeat_tick(
     let mut dispatched = 0;
     for job in due {
         let next = match CronExpr::parse(&job.cron) {
-            Ok(cron) => cron.next_fire(now).unwrap_or(now + chrono::Duration::days(1)),
+            Ok(cron) => cron
+                .next_fire(now)
+                .unwrap_or(now + chrono::Duration::days(1)),
             Err(err) => {
                 tracing::warn!(
                     "repeat job {} has unparseable cron '{}': {err}; skipping",

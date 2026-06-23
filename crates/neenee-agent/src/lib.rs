@@ -62,15 +62,14 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Pursuit,
-    PursuitService, PursuitStore, HarnessError, HarnessSnapshot, ImagePart,
-    McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision, PermissionRequest,
-    Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent,
-    PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
-    SubagentProfile, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult,
-    ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
-    UserQuestionReply, UserQuestionRequest, WebSearchConfig, EXPLORE, PRUNED_TOOL_PLACEHOLDER,
-    VERIFY,
+    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, HarnessError, HarnessSnapshot,
+    ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
+    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
+    ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService, PursuitStore, RetryableError, Role,
+    SessionOverview, SkillsConfig, SubTaskEvent, SubagentProfile, TokenUsage, Tool, ToolAccess,
+    ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
+    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
+    EXPLORE, PRUNED_TOOL_PLACEHOLDER, VERIFY,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -97,23 +96,6 @@ const MAX_REPEATED_TOOL_CALLS: usize = 3;
 /// design — a well-behaved pursuit completes by signalling the marker well
 /// before this.
 const MAX_PURSUIT_ITERATIONS: u32 = 50;
-
-/// Default for the per-turn stall detector threshold. The live value is
-/// held in `Agent::stall_threshold` (mutated by
-/// `Agent::set_stall_threshold`, seeded from `Config::agent.stall_threshold`)
-/// so this const only seeds the default — it must match
-/// `neenee_store::config::DEFAULT_STALL_THRESHOLD` so a `config.toml`
-/// with no `[agent]` table behaves identically to one that explicitly
-/// sets the default.
-const STALL_THRESHOLD: usize = 8;
-
-/// Delta added to the stall threshold to derive the hard-stop line.
-/// Exposed as a const (not a config field) because the window between
-/// the reflection nudge and the hard stop is a tuning knob for *how
-/// forgiving the recovery window is*, not for *whether detection fires*;
-/// conflating them via a single threshold keeps the user-facing config
-/// minimal.
-const STALL_HARD_STOP_DELTA: usize = 6;
 
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
 /// deltas) before the stream is considered stalled. All LLM providers use
@@ -145,10 +127,12 @@ pub mod catalog;
 pub mod orchestration;
 mod plan_verify;
 mod prompt;
+pub mod session_review;
 pub mod skills;
 pub mod task_tool;
 
 pub use plan_verify::VerifyPlanExecutionTool;
+pub use session_review::{default_reviews, LoopingReview};
 pub use task_tool::TaskTool;
 
 #[cfg(test)]

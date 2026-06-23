@@ -1,6 +1,7 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::McpServerConfig;
+use neenee_core::ReviewConfig;
 use neenee_core::SkillsConfig;
 use neenee_core::WebSearchConfig;
 use serde::{Deserialize, Serialize};
@@ -12,17 +13,11 @@ use std::path::PathBuf;
 /// Reasoning isn't a tool, so each frontend addresses it by name.
 pub const THINKING_KEY: &str = "thinking";
 
-/// Default for [`AgentConfig::stall_threshold`]. Chosen so a normal
-/// "explore + edit + edit + verify + update" cadence never trips the
-/// detector, but a model that abandons writes after the first few reads
-/// does. Exposed as a named const so `Agent::new`'s default matches the
-/// config default without one side hardcoding a magic number.
-pub const DEFAULT_STALL_THRESHOLD: usize = 8;
-
-/// Delta added to [`AgentConfig::stall_threshold`] to derive the hard-stop
-/// line. The window between the reflection nudge and the hard stop gives
-/// the model a fair chance to recover before the harness aborts the turn.
-pub const STALL_HARD_STOP_DELTA: usize = 6;
+/// Re-export of the core default so `Agent::new`'s seed matches the config
+/// default without either side hardcoding a magic number.
+pub use neenee_core::{
+    DEFAULT_REVIEW_INTERVAL_ROUNDS as DEFAULT_REVIEW_INTERVAL, DEFAULT_REVIEW_START_ROUND,
+};
 
 /// User-tunable agent behaviour, deserialized from the optional `[agent]`
 /// table of `config.toml`. All fields default sensibly, so a
@@ -31,9 +26,16 @@ pub const STALL_HARD_STOP_DELTA: usize = 6;
 ///
 /// ```toml
 /// [agent]
-/// # Consecutive read-only tool rounds before a stall warning + reflection
-/// # nudge. 0 disables detection entirely (pure ADR-0009 behaviour).
-/// stall_threshold = 8
+/// # Periodic session review: after this many tool rounds in a turn, a
+/// # read-only diagnostic sub-agent reads the live transcript and reports
+/// # whether the agent appears stuck (looping, etc). 0 disables review
+/// # entirely (pure ADR-0009 behaviour: uncapped, no alert).
+/// # review_start_round = 64
+/// # Interval between review runs once the start line is passed.
+/// # review_interval_rounds = 16
+/// # Hard-stop the turn after this many total tool rounds. 0 (the default)
+/// # means no hard stop — opt-in execution budget only.
+/// # hard_stop_rounds = 0
 /// # When true, the harness injects a hidden reminder if the model tries
 /// # to end a turn with an approved plan but without calling
 /// # `verify_plan_execution`. Disable for trusted fast models or
@@ -43,11 +45,10 @@ pub const STALL_HARD_STOP_DELTA: usize = 6;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Consecutive read-only tool rounds before stall detection fires a
-    /// `StallWarning` and pushes a hidden reflection nudge. `0` disables
-    /// detection entirely (pure ADR-0009 behaviour, no nudge, no
-    /// hard-stop). Mutated at runtime via `Agent::set_stall_threshold`.
-    pub stall_threshold: usize,
+    /// Periodic session-review cadence + opt-in hard-stop budget. See
+    /// [`ReviewConfig`] for per-field semantics. Mutated at runtime via
+    /// `Agent::set_review_config`.
+    pub review: ReviewConfig,
     /// Whether the verify hard-nudge gate is active. When `true` the
     /// harness injects a hidden reminder before letting a turn end with
     /// an approved plan but no `verify_plan_execution` call. Mutated at
@@ -58,7 +59,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            stall_threshold: DEFAULT_STALL_THRESHOLD,
+            review: ReviewConfig::default(),
             verify_nudge_enabled: true,
         }
     }
@@ -203,9 +204,9 @@ pub struct Config {
     /// TUI presentation (`[tui]` table): per-step-kind default expand state.
     #[serde(default)]
     pub tui: TuiConfig,
-    /// Agent behaviour (`[agent]` table): stall detector threshold and the
-    /// verify hard-nudge toggle. See [`AgentConfig`] for the per-field
-    /// semantics and TOML examples.
+    /// Agent behaviour (`[agent]` table): session-review cadence, opt-in
+    /// hard-stop budget, and the verify hard-nudge toggle. See
+    /// [`AgentConfig`] for the per-field semantics and TOML examples.
     #[serde(default)]
     pub agent: AgentConfig,
 }
@@ -294,38 +295,54 @@ mod tests {
     #[test]
     fn agent_table_round_trips_through_toml() {
         // The `[agent]` table must round-trip: partial TOML keeps defaults,
-        // full TOML preserves explicit overrides, and the disabled-stall
-        // sentinel (`stall_threshold = 0`) survives intact rather than
+        // full TOML preserves explicit overrides, and the disabled-review
+        // sentinel (`review_start_round = 0`) survives intact rather than
         // being coerced back to the default.
         let toml_full = r#"
             [agent]
-            stall_threshold = 3
             verify_nudge_enabled = false
+            [agent.review]
+            review_start_round = 10
+            review_interval_rounds = 5
+            hard_stop_rounds = 40
         "#;
         let cfg: Config = toml::from_str(toml_full).unwrap();
-        assert_eq!(cfg.agent.stall_threshold, 3);
+        assert_eq!(cfg.agent.review.review_start_round, 10);
+        assert_eq!(cfg.agent.review.review_interval_rounds, 5);
+        assert_eq!(cfg.agent.review.hard_stop_rounds, 40);
         assert!(!cfg.agent.verify_nudge_enabled);
 
         // Missing `[agent]` table → defaults match the documented values.
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.agent.stall_threshold, DEFAULT_STALL_THRESHOLD);
+        assert_eq!(
+            cfg.agent.review.review_start_round,
+            DEFAULT_REVIEW_START_ROUND
+        );
+        assert_eq!(
+            cfg.agent.review.review_interval_rounds,
+            DEFAULT_REVIEW_INTERVAL
+        );
+        assert_eq!(cfg.agent.review.hard_stop_rounds, 0);
         assert!(cfg.agent.verify_nudge_enabled);
 
         // The disable sentinel survives.
         let toml_disabled = r#"
-            [agent]
-            stall_threshold = 0
+            [agent.review]
+            review_start_round = 0
         "#;
         let cfg: Config = toml::from_str(toml_disabled).unwrap();
-        assert_eq!(cfg.agent.stall_threshold, 0);
+        assert_eq!(cfg.agent.review.review_start_round, 0);
+        assert!(!cfg.agent.review.review_enabled());
 
         // Round-trip through save+load format (serialize then parse).
         let mut cfg = Config::default();
-        cfg.agent.stall_threshold = 5;
+        cfg.agent.review.review_start_round = 5;
+        cfg.agent.review.hard_stop_rounds = 99;
         cfg.agent.verify_nudge_enabled = false;
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.agent.stall_threshold, 5);
+        assert_eq!(parsed.agent.review.review_start_round, 5);
+        assert_eq!(parsed.agent.review.hard_stop_rounds, 99);
         assert!(!parsed.agent.verify_nudge_enabled);
     }
 }

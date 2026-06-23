@@ -186,6 +186,11 @@ impl TaskTool {
             pursuit_service,
             SkillRegistry::empty(),
         );
+        // Sub-agents are short-lived and read-only by profile; periodic
+        // session review is for the primary agent's long-running turns. Disable
+        // it here so a research sub-agent never pays for a diagnostic (and so
+        // review can never recurse). ADR-0016.
+        sub_agent.set_review_config(neenee_core::ReviewConfig::disabled());
 
         let system = format!("{}\n\nTask: {}", self.profile.system_prompt, description);
         let mut messages = vec![

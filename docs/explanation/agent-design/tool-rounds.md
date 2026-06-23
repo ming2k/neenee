@@ -180,6 +180,11 @@ surface — authorization, plan gating — is the gates above. For the full
 bound table and how it interacts with retry, see
 [Request flow](../request-flow.md) and [Harness architecture](harness.md).
 
+Because an uncapped loop can still *appear* stuck (distinct-but-unproductive
+calls), long turns are periodically audited by a read-only session-review
+sub-agent rather than a round counter; see [Harness architecture → Session
+review](harness.md#session-review-adr-0016) and ADR-0016.
+
 ## See also
 
 - [Built-in tools](../../reference/tools/index.md) — the catalog that gets declared
