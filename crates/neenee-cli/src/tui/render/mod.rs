@@ -84,6 +84,11 @@ use std::collections::HashMap;
 /// there, update it here too so the click-outside hit-test stays exact.
 pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option<Rect> {
     use crate::tui::app::Modal;
+    // Single source of truth for *which* modals are click-dismissable lives
+    // on the `Modal` type itself; this fn only adds the geometry.
+    if !modal.dismissable_by_outside_click() {
+        return None;
+    }
     let (percent_x, percent_y) = match modal {
         Modal::Help => (58, 70),
         Modal::ToolStepDetail => (92, 84),

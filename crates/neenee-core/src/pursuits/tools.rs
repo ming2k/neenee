@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn create_goal_exposes_user_friendly_permission_text() {
+    fn create_pursuit_exposes_user_friendly_permission_text() {
         let tool = StartPursuitTool::new(make_context());
         assert_eq!(tool.permission_label(), "Create pursuit");
         // The model-facing description is full of model instructions; the
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn update_goal_exposes_user_friendly_permission_text() {
+    fn update_pursuit_exposes_user_friendly_permission_text() {
         let tool = CompletePursuitTool::new(make_context());
         assert_eq!(tool.permission_label(), "Mark pursuit complete");
         let desc = tool.permission_description();
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_goal_tools_keep_trait_default_label() {
+    fn read_only_pursuit_tools_keep_trait_default_label() {
         // `get_pursuit` is Read and does not override permission_label, so the
         // default (the raw tool name) is used. This guards against the
         // override accidentally leaking onto tools that never prompt.

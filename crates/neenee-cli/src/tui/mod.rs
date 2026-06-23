@@ -34,7 +34,7 @@ use crossterm::{
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
     PermissionRequest, PlanProgress, PlanSectionStatus, ProviderPickerSnapshot, Pursuit, Role,
-    SessionContextSnapshot, SessionOverview, UserQuestionRequest,
+    SessionContextSnapshot, SessionOverview, TodoList, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
@@ -107,6 +107,10 @@ pub async fn run_tui(
     let harness_clone = harness.clone();
     let plan_progress: Arc<Mutex<Option<PlanProgress>>> = Arc::new(Mutex::new(None));
     let plan_progress_clone = plan_progress.clone();
+    // Unified task list, mirrored from `AgentResponse::TodosUpdated`. Empty
+    // (`None`) hides the sticky panel.
+    let todos: Arc<Mutex<Option<TodoList>>> = Arc::new(Mutex::new(None));
+    let todos_clone = todos.clone();
     let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let turn_count_clone = turn_count.clone();
     // Current tool round within the active turn. Reset to 0 at each turn
@@ -537,6 +541,9 @@ pub async fn run_tui(
                         }
                     }
                 }
+                AgentResponse::TodosUpdated(list) => {
+                    *todos_clone.lock().await = Some(list);
+                }
                 AgentResponse::OpenPlanPreview(path) => {
                     *open_plan_preview_clone.lock().await = Some(path);
                 }
@@ -631,6 +638,7 @@ pub async fn run_tui(
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        todos: None,
         turn_count: 0,
         current_round: 0,
         review_alert: String::new(),
@@ -700,6 +708,7 @@ pub async fn run_tui(
             open_sessions,
             session_context,
             plan_progress,
+            todos,
             turn_count,
             current_round,
             review_alert,

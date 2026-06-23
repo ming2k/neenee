@@ -58,6 +58,12 @@ pub enum SessionEvent {
     PlanProgressSet {
         progress: Option<neenee_core::PlanProgress>,
     },
+    /// The unified task list changed (`todo` / `todo_update` / `plan_exit`
+    /// seed / `plan_enter` or `/todos clear`). Mirrored from `Agent::todos`
+    /// so resume restores the sticky panel. The full list is stored on every
+    /// change (snapshot semantics, matching `PlanProgressSet`); history of
+    /// individual items is reconstructable from the log itself.
+    TodosSet { todos: neenee_core::TodoList },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and

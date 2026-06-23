@@ -1,137 +1,43 @@
-//! Session review: a periodic, transcript-aware diagnostic that replaces the
-//! old round-counting stall detector (ADR-0016).
+//! Session review: an on-demand, transcript-aware diagnostic (ADR-0018,
+//! superseding the periodic round-cadence design of ADR-0016).
 //!
 //! ## Why this exists
 //!
 //! ADR-0009 uncapped the agentic loop on purpose: a finite per-turn round cap
 //! is an arbitrary budget that trips legitimate long refactors just as readily
-//! as a genuinely stuck model, and the compaction backstop plus user interrupt
-//! are the right shape for keeping an unbounded loop bounded. The read-only
-//! "stall detector" that came later (a hidden reflection nudge at 8 read-only
-//! rounds, a hard abort at 14) walked that decision back — it re-introduced an
-//! arbitrary round ceiling, and worse, its signal ("no write tool fired") is a
-//! poor proxy for "stuck": a model methodically reading its way through a large
-//! codebase before a refactor is *correctly* read-only for many rounds.
+//! as a genuinely stuck model. The stall detector that came later walked that
+//! back; ADR-0016 replaced it with a periodic diagnostic that fired on a fixed
+//! round cadence (every `review_interval_rounds` past `review_start_round`).
 //!
-//! This module replaces that heuristic with a smarter, cheaper-by-frequency
-//! mechanism: after a generous round budget (`review_start_round`), every
-//! `review_interval_rounds` the harness spawns a bounded, read-only diagnostic
-//! sub-agent that actually *reads* the live transcript and renders a verdict
-//! across one or more pluggable dimensions. "Is the agent looping?" is the
-//! first dimension; future dimensions (context bloat, tool-error storms, plan
-//! drift, …) slot in by implementing [`SessionReview`] without touching the
-//! dispatch path.
+//! ADR-0018 drops the automatic cadence entirely. The periodic trigger cost a
+//! diagnostic sub-agent call on *every* long turn — including legitimate ones
+//! — and, because ADR-0016 kept the turn uncapped by default, the auto-trigger's
+//! value during truly unattended runs was already muted: it could only nudge,
+//! never abort, and an alert no one is watching does no good. The user is the
+//! best judge of "this feels stuck", so review is now **on-demand**: the
+//! `/review` command spawns the same bounded, read-only diagnostic sub-agent
+//! against the live transcript and reports the verdict. No automatic firing,
+//! no cadence knobs.
 //!
-//! The diagnostic is advisory: it surfaces a visible alert (and, on a "stuck"
-//! verdict, a one-shot reflection nudge so the model gets a chance to recover)
-//! but does **not** abort the turn by default. A hard stop is opt-in via
-//! `hard_stop_rounds` (default `0` = off), restoring ADR-0009's default
-//! posture exactly.
+//! The diagnostic stays advisory: it surfaces a visible verdict the user can
+//! act on (interrupt with `Esc`) but does **not** abort the turn. A hard stop
+//! remains opt-in via `[agent] hard_stop_rounds` (default `0` = off), the only
+//! execution cap, preserving ADR-0009's uncapped default posture.
 //!
 //! ## Extensibility
 //!
 //! Each dimension is a [`SessionReview`] impl that contributes an instruction
-//! fragment. The runner runs a *single* diagnostic sub-agent per review point
-//! and asks it to return one verdict per registered dimension, so adding a
+//! fragment. The runner runs a *single* diagnostic sub-agent per review and
+//! asks it to return one verdict per registered dimension, so adding a
 //! dimension costs no extra model calls — just a new impl registered on the
 //! agent. Dimensions stay in domain vocabulary (this module); the LLM-backed
 //! runner that spawns the sub-agent lives in `neenee-agent` next to `TaskTool`.
 
 use serde::{Deserialize, Serialize};
 
-/// Cadence and budget knobs for session review, seeded from
-/// `[agent]` in `config.toml` and mutable at runtime.
-///
-/// `review_start_round = 0` disables the periodic diagnostic entirely (pure
-/// ADR-0009 behaviour: uncapped, no review, no alert). A finite
-/// `hard_stop_rounds` is an explicit, opt-in execution budget; `0` (the
-/// default) means the turn runs until the model stops, the user interrupts,
-/// or context compaction cannot relieve pressure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReviewConfig {
-    /// Total tool rounds that must elapse in a turn before the first periodic
-    /// review fires. `0` disables review entirely. Chosen large enough that a
-    /// normal turn never pays for a diagnostic; a long-running turn that might
-    /// be stuck starts getting checked in.
-    pub review_start_round: usize,
-    /// Interval between review runs once `review_start_round` has passed.
-    /// Must be `>= 1` when review is enabled; a smaller value checks more
-    /// often at higher token cost.
-    pub review_interval_rounds: usize,
-    /// Hard-stop the turn after this many *total* tool rounds. `0` (default)
-    /// means no hard stop. This is the only opt-in execution cap, kept as an
-    /// escape hatch for users who want an explicit budget — the default
-    /// matches ADR-0009's uncapped posture.
-    pub hard_stop_rounds: usize,
-}
-
-impl Default for ReviewConfig {
-    fn default() -> Self {
-        Self {
-            review_start_round: DEFAULT_REVIEW_START_ROUND,
-            review_interval_rounds: DEFAULT_REVIEW_INTERVAL_ROUNDS,
-            hard_stop_rounds: 0,
-        }
-    }
-}
-
-impl ReviewConfig {
-    /// Pure ADR-0009 posture: no review, no hard stop. Bound for autonomous
-    /// sub-agents (TaskTool) and the diagnostic sub-agent itself, so review
-    /// never recurses and short-lived sub-agents never pay for a diagnostic.
-    pub const fn disabled() -> Self {
-        Self {
-            review_start_round: 0,
-            review_interval_rounds: DEFAULT_REVIEW_INTERVAL_ROUNDS,
-            hard_stop_rounds: 0,
-        }
-    }
-
-    /// Bound for the diagnostic sub-agent itself: review off (it is the
-    /// reviewer) plus a tight hard stop so a runaway diagnostic cannot loop.
-    /// The diagnostic only reasons over a handed-off transcript, so a small
-    /// round budget is ample.
-    pub const fn for_reviewer() -> Self {
-        Self {
-            review_start_round: 0,
-            review_interval_rounds: DEFAULT_REVIEW_INTERVAL_ROUNDS,
-            hard_stop_rounds: DEFAULT_REVIEWER_HARD_STOP,
-        }
-    }
-
-    /// Whether the periodic diagnostic is enabled (`review_start_round > 0`).
-    pub fn review_enabled(&self) -> bool {
-        self.review_start_round > 0
-    }
-
-    /// Whether a review should fire after exactly `rounds` tool rounds this
-    /// turn. True when review is enabled and `rounds` lands on a review point
-    /// (`start`, `start + interval`, `start + 2*interval`, …). Returns `false`
-    /// before the start line and on every round in between.
-    pub fn review_due_at(&self, rounds: usize) -> bool {
-        if !self.review_enabled() || self.review_interval_rounds == 0 {
-            return false;
-        }
-        if rounds < self.review_start_round {
-            return false;
-        }
-        let offset = rounds - self.review_start_round;
-        offset.is_multiple_of(self.review_interval_rounds)
-    }
-}
-
-/// Default for [`ReviewConfig::review_start_round`]. Large enough that an
-/// ordinary turn (explore + edit + verify + update) never triggers a
-/// diagnostic; only genuinely long turns start getting checked.
-pub const DEFAULT_REVIEW_START_ROUND: usize = 64;
-
-/// Default for [`ReviewConfig::review_interval_rounds`]. The window between
-/// checks balances signal freshness against diagnostic token cost.
-pub const DEFAULT_REVIEW_INTERVAL_ROUNDS: usize = 16;
-
 /// Default hard stop for the diagnostic sub-agent's own turn, so a misbehaving
-/// reviewer cannot loop. See [`ReviewConfig::for_reviewer`].
+/// reviewer cannot loop. Applied by the runner when it constructs the reviewer
+/// (see `neenee_agent::session_review`).
 pub const DEFAULT_REVIEWER_HARD_STOP: usize = 12;
 
 /// The outcome of one review dimension.
@@ -172,9 +78,8 @@ pub enum ReviewStatus {
     /// showing the user but not worth nudging the model. Surfaced as a
     /// visible, non-alarming alert.
     Watch,
-    /// The agent appears stuck (e.g. looping without converging). Triggers a
-    /// one-shot reflection nudge so the model gets a chance to recover, plus
-    /// the visible alert.
+    /// The agent appears stuck (e.g. looping without converging). Surfaced as
+    /// the most prominent visible alert so the user can decide to interrupt.
     Stuck,
 }
 
@@ -189,8 +94,8 @@ impl ReviewStatus {
     }
 }
 
-/// One dimension of session health, evaluated by the periodic diagnostic
-/// sub-agent (ADR-0016).
+/// One dimension of session health, evaluated by the on-demand diagnostic
+/// sub-agent (ADR-0018).
 ///
 /// A dimension is a *prompt fragment*: its [`instruction`](Self::instruction)
 /// is appended to the diagnostic's system prompt alongside every other
@@ -215,37 +120,6 @@ pub trait SessionReview: Send + Sync + std::fmt::Debug {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn review_due_at_lands_on_review_points_only() {
-        let cfg = ReviewConfig {
-            review_start_round: 64,
-            review_interval_rounds: 16,
-            hard_stop_rounds: 0,
-        };
-        // Before the start line: never due.
-        for r in 0..64 {
-            assert!(
-                !cfg.review_due_at(r),
-                "round {r} before start must not be due"
-            );
-        }
-        // On the start line and every interval thereafter.
-        assert!(cfg.review_due_at(64));
-        assert!(!cfg.review_due_at(65));
-        assert!(cfg.review_due_at(80));
-        assert!(cfg.review_due_at(96));
-        assert!(!cfg.review_due_at(100));
-    }
-
-    #[test]
-    fn review_disabled_when_start_is_zero() {
-        let cfg = ReviewConfig::disabled();
-        assert!(!cfg.review_enabled());
-        // No round ever triggers a review when disabled.
-        assert!(!cfg.review_due_at(0));
-        assert!(!cfg.review_due_at(1000));
-    }
 
     #[test]
     fn status_ordering_makes_stuck_dominate() {

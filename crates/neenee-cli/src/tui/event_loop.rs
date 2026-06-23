@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use neenee_core::{
     AgentRequest, HarnessSnapshot, PermissionDecision, PermissionRequest, PlanProgress,
-    ProviderPickerSnapshot, Role, SessionOverview, UserQuestionRequest,
+    ProviderPickerSnapshot, Role, SessionOverview, TodoList, UserQuestionRequest,
 };
 
 use crate::tui::clipboard;
@@ -65,6 +65,10 @@ pub(super) struct UiRuntime {
     /// `App::plan_progress` each frame so the sticky panel above the input
     /// box stays in sync with the agent's state.
     pub plan_progress: Arc<Mutex<Option<PlanProgress>>>,
+    /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. The
+    /// render loop copies it into `App::todos` each frame so the sticky panel
+    /// above the input box stays in sync with the agent's state.
+    pub todos: Arc<Mutex<Option<TodoList>>>,
     /// Live harness turn counter, mirrored from the harness snapshot so the
     /// plan panel can compute "not updated for N turns" without an extra
     /// event channel.
@@ -137,6 +141,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
             app.plan_progress = runtime.plan_progress.lock().await.clone();
+            app.todos = runtime.todos.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
             app.review_alert = runtime.review_alert.lock().await.clone();

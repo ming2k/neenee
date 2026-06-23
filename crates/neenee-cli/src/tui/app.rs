@@ -17,7 +17,8 @@ use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
     mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, PlanProgress,
-    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, UserQuestionRequest,
+    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList,
+    UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -95,6 +96,31 @@ pub enum Modal {
     /// status. Opened by clicking the activity bar. The body scrolls via
     /// [`App::activity_scroll`].
     Activity,
+}
+
+impl Modal {
+    /// Whether this modal closes when the user clicks outside its rect
+    /// (click-outside-to-dismiss). True only for read-only / info overlays
+    /// (Help, ToolStepDetail, Session, Sessions, PlanPreview, Activity).
+    /// Entry modals (Provider, ModelEditor, Question) and the permission
+    /// sheet stay open so an accidental click never discards in-progress
+    /// input or a pending decision; HistorySearch borrows the input line and
+    /// restores through its own path.
+    ///
+    /// This is the single source of truth for *which* modals are
+    /// click-dismissable; `render::modal_outer_rect` defers to it and only
+    /// adds geometry, so the two can never disagree.
+    pub fn dismissable_by_outside_click(self) -> bool {
+        matches!(
+            self,
+            Modal::Help
+                | Modal::ToolStepDetail
+                | Modal::Session
+                | Modal::Sessions
+                | Modal::PlanPreview
+                | Modal::Activity
+        )
+    }
 }
 
 /// Active pane inside the session-context modal. The variant order defines the
@@ -237,6 +263,10 @@ pub struct App {
     /// footer reclaims the vertical space. `None` outside Build mode with an
     /// active plan.
     pub plan_progress: Option<PlanProgress>,
+    /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. `None`
+    /// (or an empty list) hides the sticky panel. Absorbs the former
+    /// plan-progress section tracker and the scratchpad todo tool.
+    pub todos: Option<TodoList>,
     /// Harness turn counter, mirrored each frame. Surfaced inside the
     /// Activity modal as `turn N`, and shown in the activity bar.
     pub turn_count: u64,

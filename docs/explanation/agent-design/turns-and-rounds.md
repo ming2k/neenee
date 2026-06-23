@@ -90,7 +90,7 @@ be incoherent.
 | Pursuit token and time accounting | Turn | Cost is booked once the turn's outcome is final, not partway through |
 | Plan staleness | Turn | "Turns since the plan was last updated" is the signal that the model has drifted |
 | Session durability | Turn | The transcript commits at the turn boundary, never mid-loop |
-| Autonomous loop budget | Turn | `/loop` counts completed turns (iterations) for status display and durable resume — uncapped, see ADR-0009 |
+| Autonomous loop budget | Turn | A pursuit (driven by `/pursue`'s stop-gate) counts stop-gate iterations for status display and durable resume — bounded by the 50-round safety cap, see ADR-0009 and ADR-0015 |
 
 The rule of thumb: if a concern watches the loop body, it is round-scoped;
 if it books a result or measures passage of work, it is turn-scoped.

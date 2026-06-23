@@ -8,13 +8,31 @@ use crate::skills;
 use crate::{Agent, AgentMode, Message, Role};
 
 impl Agent {
-    /// Build a system prompt that includes tool definitions and skills index.
-    pub(crate) fn build_system_prompt(&self) -> String {
+    /// Build the system-role message that frames every turn.
+    ///
+    /// Reassembled from the live mode, pursuit, tool list, and skills index.
+    /// The content is bound to [`Role::System`] here, at the construction site,
+    /// rather than later at insertion — so the role is traceable from where the
+    /// text is assembled, not from a separate function.
+    pub(crate) fn build_system_message(&self) -> Message {
         let mode = self.get_mode();
         let mut parts = vec![
             "You are neenee, an expert AI coding assistant with tool access.".to_string(),
             format!("Current mode: {:?}.", mode),
         ];
+
+        parts.push(
+            "Tone and output: be concise and direct. Answer the actual question with the \
+             minimum needed — short replies, one word when that suffices — and skip preamble, \
+             recaps of what you just did, and unsolicited explanations. Do not add code \
+             comments unless asked, and never commit unless explicitly asked. Take the \
+             reasonable action with ordinary tools instead of asking permission; reserve \
+             questions for genuine ambiguity or trade-offs. Prefer the dedicated tools \
+             (read, edit, grep, glob) over shelling out for file work, match existing code \
+             style and conventions, and verify with the project's build, tests, or linter \
+             when the task implies correctness."
+                .to_string(),
+        );
 
         parts.push(
             "Plan workflow: in Build mode, if a request is complex, spans multiple files, or \
@@ -144,19 +162,17 @@ impl Agent {
             ));
         }
 
-        parts.join("\n")
+        Message::new(Role::System, parts.join("\n"))
     }
 
-    /// Inject or update the system message in the message list.
+    /// Place the freshly built system message at the head of the conversation,
+    /// replacing an existing system message in place or inserting a new one.
     pub(crate) fn ensure_system_prompt(&self, messages: &mut Vec<Message>) {
-        let prompt = self.build_system_prompt();
-        if let Some(first) = messages.first_mut() {
-            if first.role == Role::System {
-                first.content = prompt;
-                return;
-            }
+        let system = self.build_system_message();
+        match messages.first_mut() {
+            Some(first) if first.role == Role::System => *first = system,
+            _ => messages.insert(0, system),
         }
-        messages.insert(0, Message::new(Role::System, prompt));
     }
 
     /// Auto-load skills whose names are mentioned in the latest user turn.

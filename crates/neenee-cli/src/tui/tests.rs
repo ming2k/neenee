@@ -513,6 +513,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         activity_status: String::new(),
         auto_approve: false,
         plan_progress: None,
+        todos: None,
         turn_count: 0,
         current_round: 0,
         review_alert: String::new(),

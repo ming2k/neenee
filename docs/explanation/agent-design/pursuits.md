@@ -28,7 +28,7 @@ The pursuit carries **no status machine, no token/time budget, and no
 checklist**. Earlier revisions had all three; they were removed because the
 statuses were user-only, the budget flip was a footgun, and the checklist
 added a second completion gate that rarely changed outcomes. See
-[ADR-0010](../../../adr/0010-slim-pursuit-primitive.md) and
+[ADR-0010](../../../adr/0010-slim-goal-primitive.md) and
 [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) for that
 history.
 
@@ -159,6 +159,6 @@ multi-turn loop.
   `complete_pursuit` parameter schemas
 - [Slash commands](../../reference/commands.md) — `/pursue` and `/repeat`
 - [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — the
-  decision to replace `/pursuit` + `/loop` with the stop-gate + cron scheduler
-- [ADR-0010](../../../adr/0010-slim-pursuit-primitive.md) — slimming the pursuit
+  decision to replace `/goal` + `/loop` with the stop-gate + cron scheduler
+- [ADR-0010](../../../adr/0010-slim-goal-primitive.md) — slimming the pursuit
   primitive

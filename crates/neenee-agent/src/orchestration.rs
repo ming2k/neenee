@@ -532,6 +532,18 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         }
     }
 
+    // Mirror the unified task list so resume restores the sticky panel. As
+    // with plan progress, the value is compared against the session's current
+    // list to skip the write (and avoid an event-log entry) on turns where
+    // nothing changed — the common case.
+    let agent_todos = agent.todos();
+    let stored_todos = session.todos().await;
+    if agent_todos != stored_todos {
+        if let Err(err) = session.set_todos(agent_todos).await {
+            tracing::warn!(error = %err, "could not persist todos");
+        }
+    }
+
     Ok(completed)
 }
 
@@ -610,6 +622,7 @@ pub fn relay_agent_event(
         AgentEvent::PursuitUpdated(pursuit) => AgentResponse::PursuitUpdated(pursuit),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PlanProgressUpdated(progress) => AgentResponse::PlanProgressUpdated(progress),
+        AgentEvent::TodosUpdated(todos) => AgentResponse::TodosUpdated(todos),
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
         AgentEvent::SessionReview { alert } => AgentResponse::SessionReview { alert },
         AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),

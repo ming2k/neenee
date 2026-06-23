@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The base system prompt now directs the agent to be concise and direct.**
+  `build_system_prompt` previously stated only the agent's identity and current
+  mode; it now also sets explicit output norms — answer with the minimum
+  needed, skip preamble and recaps, no unsolicited explanations or code
+  comments, never commit unless asked, take the reasonable action with ordinary
+  tools instead of asking permission, prefer dedicated file tools over shell
+  pipelines, and verify with the project's build/tests/linter when correctness
+  is implied. This brings neenee's default conversational behavior in line with
+  the conciseness baseline that other coding agents (codex, opencode,
+  claude-code) ship in their base prompts. No mechanism change; only the
+  assembled system message wording.
+
 - **Session review replaces the round-counting stall detector (ADR-0016).**
   The read-only "stall detector" (a reflection nudge at 8 read-only rounds and
   a hard abort at 14) is removed — it was an arbitrary cap ADR-0009 had

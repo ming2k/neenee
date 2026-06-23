@@ -47,7 +47,16 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 /// Fake an alpha backdrop by filling an area with a dim solid color.
+///
+/// `Clear` is rendered first so the fill *replaces* whatever was drawn
+/// underneath (glyph + style) rather than merging via `set_style`. Without
+/// it, half-block glyphs that carry their color in the foreground — e.g. the
+/// composer's `▄`/`▀` edges — survive the backdrop as colored slivers next to
+/// cells whose color lived in the background (the composer's text rows),
+/// producing an inconsistent "black middle, colored edges" look behind a
+/// modal. Clearing first makes the whole area uniformly the backdrop color.
 pub(super) fn draw_dim_backdrop(frame: &mut Frame, area: Rect, color: Color) {
+    frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(Style::default().bg(color)), area);
 }
 

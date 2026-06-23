@@ -120,6 +120,11 @@ pub enum AgentResponse {
     /// `update_plan_progress`, cleared by `plan_enter`). Mirrors
     /// [`AgentEvent::PlanProgressUpdated`].
     PlanProgressUpdated(Option<crate::plan::PlanProgress>),
+    /// The task list changed (full-replace via `todo`, surgical update via
+    /// `todo_update`, seeded by `plan_exit`, cleared by `plan_enter` or
+    /// `/todos clear`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
+    /// means "no active task list" and hides the sticky panel.
+    TodosUpdated(crate::todos::TodoList),
     /// User asked the TUI to open the plan preview modal (via `/plan` or
     /// clicking the sticky panel). Carries the active plan path; the TUI
     /// loads the file content from disk into `App::plan_preview_content`.
@@ -308,14 +313,19 @@ pub enum AgentEvent {
     /// `update_plan_progress`, cleared by `plan_enter`). The TUI uses this
     /// to refresh the sticky panel above the input box.
     PlanProgressUpdated(Option<crate::plan::PlanProgress>),
+    /// The task list changed (`todo` / `todo_update` / `plan_exit` seed /
+    /// `plan_enter` or `/todos clear`). The TUI uses this to refresh the
+    /// unified sticky panel above the input box.
+    TodosUpdated(crate::todos::TodoList),
     /// The auto-approve toggle changed (via `/auto-approve`).
     AutoApproveChanged(bool),
-    /// A periodic session-review diagnostic ran (ADR-0016). `alert` is a
-    /// pre-rendered, human-facing summary of the worst verdict across all
-    /// review dimensions (empty string when the turn is healthy — the TUI
-    /// treats empty as "clear any prior alert"). Surfaced as a non-modal
-    /// banner so the user can decide whether to interrupt; it does not abort
-    /// the turn unless an opt-in `hard_stop_rounds` budget is configured.
+    /// An on-demand session-review diagnostic ran (ADR-0018, superseding the
+    /// periodic ADR-0016 design). `alert` is a pre-rendered, human-facing
+    /// summary of the worst verdict across all review dimensions (empty string
+    /// when the turn is healthy — the TUI treats empty as "clear any prior
+    /// alert"). Surfaced as a non-modal banner so the user can decide whether
+    /// to interrupt; it does not abort the turn unless an opt-in
+    /// `hard_stop_rounds` budget is configured.
     SessionReview {
         alert: String,
     },

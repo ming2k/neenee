@@ -15,15 +15,21 @@ Project and user-defined commands are covered under
 | `/mode` | Show or switch mode (build, plan) |
 | `/mcp` | Show configured MCP server status |
 | `/compact` | Compact older complete turns now |
-| `/export` | Export the current conversation to the clipboard as Markdown |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
+| `/auto-approve [on\|off]` | Toggle bypassing write-tool permission prompts |
+| `/review [N [M]\|off\|default]` | Show or set session-review cadence ([ADR-0016](../adr/0016-session-review-cadence.md)); `0` disables |
+| `/verify-nudge [on\|off]` | Toggle the verify-plan hard nudge at turn end |
+| `/search <query>` | Semantic search over the project's session history |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
 | `/sessions` | Browse past sessions |
 | `/resume [id]` | Resume the most recent or selected session |
 | `/pursue [condition\|status\|stop\|done\|edit\|clear]` | Pursue a pursuit: the harness keeps the turn going until the condition is met |
 | `/repeat [cron prompt\|list\|cancel id]` | Schedule a prompt on a cron expression |
 | `/init [path]` | Initialize a `.neenee/` config tree |
+| `/skills [list\|reload]` | List or reload available skills |
+| `/skill <name>` | Load a skill by name |
+| `/export` | Export the current conversation to the clipboard as Markdown |
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
 
@@ -93,6 +99,66 @@ clock-driven scheduler, independent of `/pursue`. See
 |------|--------|
 | `/permissions` | List always-allowed tool rules for this process |
 | `/permissions clear` | Clear process-local always-allow rules |
+
+### `/auto-approve`
+
+| Form | Effect |
+|------|--------|
+| `/auto-approve` | Toggle auto-approve on/off |
+| `/auto-approve on` | Enable bypassing write-tool permission prompts |
+| `/auto-approve off` | Disable bypassing write-tool permission prompts |
+
+When on, the harness stops prompting for confirmation before write tools
+(`bash`, `write_file`, `edit_file`, …) run. Affects the live process only.
+
+### `/review`
+
+| Form | Effect |
+|------|--------|
+| `/review` | Show the current review cadence (start line, interval) |
+| `/review off` | Disable periodic review (pure [ADR-0009](../adr/0009-review-tool.md)) |
+| `/review <N>` | Set the start line; keep the current interval |
+| `/review <N> <M>` | Set the start line `<N>` and interval `<M>` |
+| `/review default` | Reset to the config values |
+
+Sets the session-review cadence ([ADR-0016](../adr/0016-session-review-cadence.md)).
+`0` disables review. After `<N>` lines a periodic review runs, then every `<M>`
+lines, emitting diagnostics into the conversation.
+
+### `/verify-nudge`
+
+| Form | Effect |
+|------|--------|
+| `/verify-nudge` | Show whether the verify-plan hard nudge is on or off |
+| `/verify-nudge on` | Enable the hard nudge at turn end |
+| `/verify-nudge off` | Disable the hard nudge at turn end |
+
+When on, at the end of each turn the harness re-injects a plan-verification
+nudge if the active plan looks unfinished. See
+[Plan mode](../explanation/agent-design/plan-mode.md).
+
+### `/search`
+
+| Form | Effect |
+|------|--------|
+| `/search <query>` | Semantic search over the project's session history |
+
+Returns the most relevant past messages for the query (see the
+`search_history` tool). Useful for recalling earlier decisions.
+
+### `/skills`
+
+| Form | Effect |
+|------|--------|
+| `/skills` | List available skills (alias for `/skills list`) |
+| `/skills list` | List available skills |
+| `/skills reload` | Rescan local skill directories and refetch remote repositories |
+
+### `/skill`
+
+| Form | Effect |
+|------|--------|
+| `/skill <name>` | Load a skill by name into the conversation context |
 
 ### `/init`
 

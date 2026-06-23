@@ -2,8 +2,8 @@
 
 `get_pursuit`, `start_pursuit`, and `complete_pursuit` are force-injected by `Agent::new`
 from `crates/neenee-core/src/pursuits/tools.rs` (any externally supplied copies
-are stripped first). They share a `GoalToolContext` carrying the session/thread
-id and the `GoalService`, which persists pursuit state in SQLite.
+are stripped first). They share a `PursuitToolContext` carrying the session/thread
+id and the `PursuitService`, which persists pursuit state in SQLite.
 
 `get_pursuit` is `Read` and bypasses the permission broker; `start_pursuit` and
 `complete_pursuit` are `Write`. Both `Write` tools override `permission_label` and

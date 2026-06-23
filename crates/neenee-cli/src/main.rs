@@ -32,7 +32,7 @@ use neenee_tools::{
     mcp::load_mcp_tools,
     project::{init_neenee_config, CreateProjectTool, InitConfigTool},
     AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
-    TodoWriteTool, WebFetchTool, WebSearchTool, WriteFileTool,
+    WebFetchTool, WebSearchTool, WriteFileTool,
 };
 #[allow(dead_code)]
 mod tui;
@@ -186,7 +186,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(ListDirTool),
         Arc::new(WebFetchTool::with_config(config.websearch.clone())),
         Arc::new(WebSearchTool::with_config(config.websearch.clone())),
-        Arc::new(TodoWriteTool::new()),
         Arc::new(CreateProjectTool),
         Arc::new(InitConfigTool),
         Arc::new(UseSkillTool {
@@ -249,11 +248,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })));
     }
 
-    // Wire the `[agent]` config table: session-review cadence + opt-in
-    // hard-stop budget, and the verify hard-nudge toggle. All default to
-    // sensible values when the table is absent, so this is a no-op for the
-    // common case.
-    agent.set_review_config(config.agent.review);
+    // Wire the `[agent]` config table: the opt-in hard-stop budget and the
+    // verify hard-nudge toggle. (Session review is on-demand via `/review`,
+    // so it has no config to seed.) All default to sensible values when the
+    // table is absent, so this is a no-op for the common case.
+    agent.set_hard_stop_rounds(config.agent.hard_stop_rounds);
     agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
 
     // Tie the agent and its pursuit persistence to this session/thread.
@@ -278,6 +277,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(progress) = session.plan_progress().await {
         agent.set_plan_progress(Some(progress));
+    }
+
+    // Restore the unified task list so resume re-shows the sticky panel with
+    // the same items (and identity) the model last persisted. An empty list
+    // is the "no active task list" state and needs no restore.
+    let persisted_todos = session.todos().await;
+    if !persisted_todos.is_empty() {
+        agent.set_todos(persisted_todos);
     }
 
     // Load history
@@ -686,95 +693,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
                         "/review" => {
-                            // /review             → show current cadence
-                            // /review off         → disable review (pure ADR-0009)
-                            // /review N           → set start line (keeps interval)
-                            // /review N M         → set start line + interval
-                            // /review default     → reset to the config values
-                            let tokens: Vec<&str> = parts
-                                .iter()
-                                .skip(1)
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            match tokens.first().copied() {
-                                None => {
-                                    let cfg = agent.get_review_config();
-                                    let cadence = if !cfg.review_enabled() {
-                                        "review disabled (start = 0)".to_string()
-                                    } else {
-                                        format!(
-                                            "start at {} rounds, every {} rounds",
-                                            cfg.review_start_round, cfg.review_interval_rounds
-                                        )
-                                    };
-                                    let hard = if cfg.hard_stop_rounds > 0 {
-                                        format!("hard-stop at {} rounds", cfg.hard_stop_rounds)
-                                    } else {
-                                        "no hard stop (uncapped)".to_string()
-                                    };
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Session review: {cadence}; {hard}. \
-                                         `/review off` disables, `/review N [M]` sets cadence, \
-                                         `/review default` resets to config (start {}, interval {}).",
-                                        config.agent.review.review_start_round,
-                                        config.agent.review.review_interval_rounds,
-                                    )));
-                                }
-                                Some("off") => {
-                                    let mut cfg = agent.get_review_config();
-                                    cfg.review_start_round = 0;
-                                    agent.set_review_config(cfg);
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "Session review disabled (start = 0). Turns are uncapped \
-                                         with no periodic diagnostic."
-                                            .to_string(),
-                                    ));
-                                }
-                                Some("default") => {
-                                    agent.set_review_config(config.agent.review);
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Session review reset to config default (start {}, \
-                                         interval {}, hard-stop {}).",
-                                        config.agent.review.review_start_round,
-                                        config.agent.review.review_interval_rounds,
-                                        config.agent.review.hard_stop_rounds,
-                                    )));
-                                }
-                                Some(raw) => {
-                                    let mut cfg = agent.get_review_config();
-                                    let start = match raw.parse::<usize>() {
-                                        Ok(v) => v,
-                                        Err(_) => {
-                                            let _ = resp_tx.send(AgentResponse::Error(format!(
-                                                "Unknown value '{raw}'. Use `/review`, \
-                                                 `/review off`, `/review N [M]`, or \
-                                                 `/review default`."
-                                            )));
-                                            continue;
-                                        }
-                                    };
-                                    cfg.review_start_round = start;
-                                    if let Some(interval_token) = tokens.get(1) {
-                                        match interval_token.parse::<usize>() {
-                                            Ok(v) if v > 0 => cfg.review_interval_rounds = v,
-                                            _ => {
-                                                let _ = resp_tx.send(AgentResponse::Error(
-                                                    "Interval must be a positive integer."
-                                                        .to_string(),
-                                                ));
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    agent.set_review_config(cfg);
-                                    let live = agent.get_review_config();
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Session review: start at {} rounds, every {} rounds.",
-                                        live.review_start_round, live.review_interval_rounds,
-                                    )));
-                                }
+                            // /review — on-demand session review (ADR-0018,
+                            // superseding the periodic ADR-0016 design).
+                            // Runs the bounded read-only REVIEW sub-agent
+                            // against the current transcript and reports the
+                            // verdict(s). Review no longer fires on a round
+                            // schedule; it only runs when asked. Takes no
+                            // arguments.
+                            if parts.iter().skip(1).any(|t| !t.trim().is_empty()) {
+                                let _ = resp_tx.send(AgentResponse::Error(
+                                    "`/review` takes no arguments. Usage: `/review` runs an \
+                                     on-demand diagnostic of the current turn."
+                                        .to_string(),
+                                ));
+                                continue;
                             }
+                            let transcript = session.transcript().await;
+                            let rounds = Agent::estimate_tool_rounds(&transcript);
+                            if rounds == 0 {
+                                let _ = resp_tx.send(AgentResponse::Text(
+                                    "Nothing to review yet — no tool rounds in the current \
+                                     transcript."
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                            let _ = resp_tx.send(AgentResponse::Activity(
+                                "running session review…".to_string(),
+                            ));
+                            let verdicts = agent.review_now(&transcript).await;
+                            // Mirror the worst verdict into the activity-bar
+                            // banner (empty alert clears it when healthy).
+                            let alert = Agent::render_review_alert(&verdicts, rounds);
+                            let _ = resp_tx.send(AgentResponse::SessionReview { alert });
+                            let _ = resp_tx
+                                .send(AgentResponse::Text(format_review_report(&verdicts, rounds)));
                         }
                         "/verify-nudge" => {
                             // /verify-nudge        → show current state
@@ -1542,7 +1495,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /clear    — Clear the conversation history\n\
                                                                 /permissions [clear] — Show or clear always-allowed tool rules
                                 /auto-approve [on|off] — Toggle bypassing write-tool permission prompts
-                                /review [N [M]|off|default] — Show or set session-review cadence (ADR-0016); 0 disables
+                                /review — Run an on-demand session-review diagnostic of the current turn (ADR-0018)
                                 /verify-nudge [on|off] — Toggle the verify-plan hard nudge at turn end
                                 /search <query> — Semantic search over the project's session history
 \n\
@@ -1666,6 +1619,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Render the verdicts of an on-demand `/review` as a durable text report for
+/// the conversation stream. Complements the transient activity-bar alert
+/// (which carries only the worst status + details) by listing every dimension
+/// with its status label and the reviewer's detail sentence.
+fn format_review_report(verdicts: &[neenee_core::ReviewVerdict], rounds: usize) -> String {
+    use neenee_core::ReviewStatus;
+    let worst = verdicts.iter().map(|v| v.status).max();
+    let headline = match worst {
+        None => {
+            return format!(
+                "Session review (~{rounds} tool rounds): no review dimensions registered."
+            );
+        }
+        Some(ReviewStatus::Healthy) => {
+            format!("Session review (~{rounds} tool rounds): no concerns found.")
+        }
+        Some(status) => {
+            format!(
+                "Session review (~{rounds} tool rounds) — verdict: {}.",
+                status.label()
+            )
+        }
+    };
+    let mut lines = vec![headline];
+    for verdict in verdicts {
+        let detail = verdict.detail.trim();
+        if detail.is_empty() {
+            lines.push(format!(
+                "  • {} — {}",
+                verdict.dimension,
+                verdict.status.label()
+            ));
+        } else {
+            lines.push(format!(
+                "  • {} — {}: {}",
+                verdict.dimension,
+                verdict.status.label(),
+                detail
+            ));
+        }
+    }
+    lines.push("Interrupt the turn with Esc if it looks stuck.".to_string());
+    lines.join("\n")
 }
 
 /// Execute a `!`-prefixed shell command directly through the `bash` tool,

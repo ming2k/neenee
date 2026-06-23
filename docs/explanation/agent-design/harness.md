@@ -95,7 +95,7 @@ broker, and result-message format apply to native and fallback calls.
 SQLite (`pursuits.db`) keyed by thread id, so it survives restarts and `/resume`.
 A pursuit is a slim primitive: an objective and a single `is_complete` flag (no
 status machine, no token or time budget, no checklist — all removed; see
-[ADR-0010](../../../adr/0010-slim-pursuit-primitive.md) and
+[ADR-0010](../../../adr/0010-slim-goal-primitive.md) and
 [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). The model
 reads and completes pursuits through `get_pursuit`, `start_pursuit`, and
 `complete_pursuit`, and signals completion with `[NEENEE_PURSUIT_COMPLETE]`. See
@@ -139,7 +139,7 @@ bounded exponential backoff using `provider_retry_base_ms` and
 `provider_retry_max_ms`.
 
 The TUI shows the next attempt and countdown without adding transcript noise.
-`Esc`, `/loop stop`, session switching, or a newer request cancels the wait.
+`Esc`, `/pursue stop`, session switching, or a newer request cancels the wait.
 Partial streamed assistant text is withdrawn before retry. Once any tool call
 event has occurred, retryable errors become terminal so side effects are never
 replayed.
@@ -238,7 +238,7 @@ branch snapshots under `sessions/<id>.json`:
 
 Loop checkpoints record pursuit, current iteration, and final status (the
 iteration budget is uncapped — `usize::MAX` on the wire, see ADR-0009).
-`/session status` exposes the checkpoint, `/loop resume` continues an
+`/session status` exposes the checkpoint, `/resume` continues an
 unfinished checkpoint, and `/session new` cancels old work and creates a
 fresh session id.
 

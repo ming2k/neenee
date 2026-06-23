@@ -42,7 +42,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn goal_status_shows_active_state() {
+    fn pursuit_status_shows_active_state() {
         let pursuit = Pursuit {
             objective: "ship".to_string(),
             is_complete: false,
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_status_shows_complete_state() {
+    fn pursuit_status_shows_complete_state() {
         let pursuit = Pursuit {
             objective: "ship".to_string(),
             is_complete: true,

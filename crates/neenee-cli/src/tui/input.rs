@@ -399,6 +399,14 @@ pub fn process_event(
                     if context.active_modal == super::Modal::None {
                         drag.start(SemanticCursor::new(0, 0, 0));
                         InputAction::SelectionStart { x, y }
+                    } else if context.active_modal.dismissable_by_outside_click() {
+                        // A dismissable modal owns this click — forward it as
+                        // a SelectionStart without arming a drag; the event
+                        // loop's SelectionStart handler closes the modal when
+                        // the press lands outside the panel (and consumes it
+                        // either way so it never reaches the transcript
+                        // behind the backdrop). Entry modals keep swallowing.
+                        InputAction::SelectionStart { x, y }
                     } else {
                         InputAction::None
                     }

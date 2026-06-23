@@ -55,6 +55,12 @@ pub struct Agent {
     /// and updated by the `update_plan_progress` tool. Drives the sticky
     /// TUI panel above the input box. Shared with the plan tools.
     plan_progress: Arc<std::sync::Mutex<Option<plan::PlanProgress>>>,
+    /// Unified task list, the single source of truth for "what is left to
+    /// do." Drives the sticky panel and persists across restarts. Shared
+    /// with the `todo` / `todo_update` tools via `TodoToolContext`. Absorbs
+    /// the role of the plan-progress section tracker (a plan approved by
+    /// `plan_exit` seeds this list) and the former scratchpad `todo` tool.
+    todos: Arc<std::sync::Mutex<neenee_core::TodoList>>,
     /// Harness turn counter, bumped at the start of every `execute_turn`.
     /// Shared with `PlanToolContext` and `UpdatePlanProgressTool` so the
     /// latter can stamp `PlanProgress::updated_at_turn` for the TUI stale
@@ -95,15 +101,15 @@ pub struct Agent {
     context_budget_chars: Arc<std::sync::Mutex<usize>>,
     /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
     compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
-    /// Session-review cadence + opt-in hard-stop budget (ADR-0016). Seeded
-    /// from `Config::agent.review` (matching `ReviewConfig::default`) and
-    /// mutated at runtime via `set_review_config`. The disabled config
-    /// (`review_start_round = 0`) suppresses the periodic diagnostic
-    /// entirely (pure ADR-0009 behaviour) and is what sub-agents get.
-    review_config: Arc<std::sync::Mutex<ReviewConfig>>,
-    /// Registered review dimensions evaluated by the periodic diagnostic
-    /// sub-agent. Defaults to [`crate::default_reviews`] (looping); empty on
-    /// sub-agents (which disable review anyway).
+    /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
+    /// tool rounds. Seeded from `Config::agent.hard_stop_rounds` (default `0`
+    /// = uncapped, matching ADR-0009) and mutated at runtime via
+    /// `set_hard_stop_rounds`. This is the sole execution cap; session review
+    /// is on-demand (`/review`) and never aborts a turn.
+    hard_stop_rounds: Arc<std::sync::Mutex<usize>>,
+    /// Registered review dimensions evaluated by the on-demand diagnostic
+    /// sub-agent (`/review`). Defaults to [`crate::default_reviews`] (looping);
+    /// empty on sub-agents (which have no `/review` path).
     reviews: Vec<Arc<dyn SessionReview>>,
     /// Whether the verify hard-nudge gate is active. Seeded to `true` and
     /// mutated at runtime via `set_verify_nudge_enabled`. When `false` the
@@ -119,11 +125,6 @@ pub(crate) struct TurnState {
     /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
     previous_call: Option<(String, String)>,
     repeated_calls: usize,
-    /// One-shot flag so the session-review reflection nudge fires at most once
-    /// per review episode. A subsequent healthy review re-arms it, so a fresh
-    /// stall later in the same turn gets a fresh nudge. See
-    /// [`Agent::update_review_state`].
-    pub(crate) review_nudged: bool,
     /// True once the model has invoked `verify_plan_execution` at any
     /// point during this turn. Drives the verify-nudge gate at turn end.
     pub(crate) verify_called_this_turn: bool,
@@ -203,6 +204,18 @@ impl Agent {
             plan_context,
         )));
 
+        // The unified task list shares the same turn counter as the plan
+        // tools so the stale detector (panel not updated for N turns) works
+        // identically. The tools mutate the shared cell, so a call is visible
+        // to the next system prompt and the TUI immediately.
+        let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
+        let todo_context = neenee_core::TodoToolContext::shared(
+            Arc::clone(&todos),
+            Arc::clone(&turn_counter),
+        );
+        tools.push(Arc::new(neenee_core::TodoWriteTool::new(todo_context.clone())));
+        tools.push(Arc::new(neenee_core::TodoUpdateTool::new(todo_context)));
+
         Self {
             provider,
             tools,
@@ -210,6 +223,7 @@ impl Agent {
             mode,
             active_plan_path,
             plan_progress,
+            todos,
             turn_counter,
             pursuit,
             pursuit_armed: Arc::new(std::sync::Mutex::new(false)),
@@ -223,7 +237,7 @@ impl Agent {
             thread_id,
             context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
             compaction_gate: Arc::new(std::sync::Mutex::new(None)),
-            review_config: Arc::new(std::sync::Mutex::new(ReviewConfig::default())),
+            hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
             verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
         }
@@ -238,26 +252,24 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) = budget;
     }
 
-    /// Override the session-review cadence + opt-in hard-stop budget. Mirrors
-    /// `[agent.review]` in `config.toml` but can be flipped at runtime. The
-    /// disabled config (`review_start_round = 0`) suppresses the periodic
-    /// diagnostic entirely (pure ADR-0009 behaviour); sub-agents are seeded
-    /// disabled by the TaskTool/reviewer constructors.
-    pub fn set_review_config(&self, config: ReviewConfig) {
-        *self.review_config.lock().unwrap_or_else(|e| e.into_inner()) = config;
+    /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_rounds`
+    /// in `config.toml` but can be flipped at runtime. `0` (the default) leaves
+    /// the turn uncapped, matching ADR-0009. The reviewer sub-agent gets a
+    /// tight non-zero bound so a runaway diagnostic cannot loop.
+    pub fn set_hard_stop_rounds(&self, rounds: usize) {
+        *self
+            .hard_stop_rounds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = rounds;
     }
 
-    /// Current review config. Read by the `/review` slash command to show the
-    /// live value (which may differ from `Config::agent.review` after a
-    /// runtime override).
-    pub fn get_review_config(&self) -> ReviewConfig {
-        *self.review_config.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Whether the periodic session-review diagnostic is enabled. Convenience
-    /// over `get_review_config().review_enabled()`.
-    pub fn review_enabled(&self) -> bool {
-        self.get_review_config().review_enabled()
+    /// Current hard-stop budget. Read by the `/hard-stop` slash command (if
+    /// present) and by `check_hard_stop` each round.
+    pub fn get_hard_stop_rounds(&self) -> usize {
+        *self
+            .hard_stop_rounds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// The review dimensions effective for this agent: its registered set, or
@@ -416,6 +428,24 @@ impl Agent {
     pub fn clear_plan_progress(&self) {
         if let Ok(mut guard) = self.plan_progress.lock() {
             *guard = None;
+        }
+    }
+
+    /// Current task list snapshot. Read by the harness to mirror into the
+    /// session and by the TUI to render the sticky panel.
+    pub fn todos(&self) -> neenee_core::TodoList {
+        self.todos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the task list. Used by `plan_exit` (to seed from the approved
+    /// plan), `plan_enter` / `/todos clear` (to clear), and session-restore
+    /// paths on resume.
+    pub fn set_todos(&self, todos: neenee_core::TodoList) {
+        if let Ok(mut guard) = self.todos.lock() {
+            *guard = todos;
         }
     }
 
@@ -963,11 +993,7 @@ impl Agent {
                 .await?
             {
                 tool_rounds += 1;
-                if self
-                    .update_review_state(messages, &mut state, tool_rounds, &mut on_event)
-                    .await?
-                    .is_break()
-                {
+                if self.check_hard_stop(tool_rounds).is_break() {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
@@ -1202,11 +1228,7 @@ impl Agent {
                 .await?
             {
                 tool_rounds += 1;
-                if self
-                    .update_review_state(messages, &mut state, tool_rounds, &mut on_event)
-                    .await?
-                    .is_break()
-                {
+                if self.check_hard_stop(tool_rounds).is_break() {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
@@ -1428,6 +1450,7 @@ impl Agent {
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_mode_change(call, on_event);
         self.emit_plan_progress_change(call, on_event);
+        self.emit_todos_change(call, on_event);
         if emit_event {
             on_event(AgentEvent::ToolResult {
                 id: call_id.to_string(),
@@ -1484,72 +1507,23 @@ impl Agent {
         Ok(())
     }
 
-    /// Drive the periodic session-review diagnostic and the opt-in hard stop
-    /// (ADR-0016). Called once per tool round with the count of rounds that
-    /// have already run this turn.
+    /// The opt-in hard-stop gate (ADR-0018). Called once per tool round with
+    /// the count of rounds that have already run this turn. Returns
+    /// `ControlFlow::Break` only when a finite `hard_stop_rounds` budget was
+    /// configured and `rounds` has reached it — the caller converts that into
+    /// a terminal `HarnessError` via [`Self::hard_stop_error`]. The default
+    /// budget (`0`) keeps the turn uncapped, exactly matching ADR-0009.
     ///
-    /// - **Review**: when `rounds` lands on a configured review point
-    ///   (`review_start_round`, then every `review_interval_rounds`), spawn a
-    ///   bounded read-only diagnostic sub-agent ([`Self::run_session_review`])
-    ///   that reads the live transcript and returns one verdict per registered
-    ///   dimension. The worst verdict is collapsed into a pre-rendered alert
-    ///   string and emitted as [`AgentEvent::SessionReview`] (empty alert when
-    ///   healthy, which clears any prior banner). An explicit `Stuck` verdict
-    ///   also pushes a one-shot hidden reflection nudge so the model gets a
-    ///   chance to recover; the nudge re-arms once a healthy review intervenes,
-    ///   so a fresh stall later in the turn is caught again.
-    /// - **Hard stop**: only when the user opted in via a finite
-    ///   `hard_stop_rounds` and `rounds` has reached it. This is the sole
-    ///   execution cap; the default (`0`) keeps the turn uncapped, exactly
-    ///   matching ADR-0009.
-    ///
-    /// Returns `ControlFlow::Break` when the hard-stop budget is exhausted —
-    /// the caller converts that into a terminal `HarnessError` via
-    /// [`Self::hard_stop_error`]. The review itself never breaks: it only
-    /// informs.
-    async fn update_review_state<F>(
-        &self,
-        messages: &mut Vec<Message>,
-        state: &mut TurnState,
-        rounds: usize,
-        on_event: &mut F,
-    ) -> Result<std::ops::ControlFlow<()>, HarnessError>
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        let config = self.get_review_config();
-
-        // Periodic diagnostic. Runs only on a review point and only when
-        // enabled; skipped entirely otherwise (zero cost for normal turns and
-        // for sub-agents, which are seeded disabled).
-        if config.review_due_at(rounds) {
-            let verdicts = self.run_session_review(messages, rounds).await;
-            let alert = Self::render_review_alert(&verdicts, rounds);
-            let stuck = verdicts.iter().any(|v| v.status == ReviewStatus::Stuck);
-            if stuck && !state.review_nudged {
-                state.review_nudged = true;
-                messages.push(Message::hidden(
-                    Role::User,
-                    "A session-health review judged this turn stuck in an \
-                     unproductive loop. Step back: re-read the task, decide \
-                     whether you already have the information you need, and \
-                     either act (write/edit/run) or report to the user. Do \
-                     not continue gathering information you already have."
-                        .to_string(),
-                ));
-            } else if !stuck {
-                // A non-stuck review re-arms the one-shot nudge so a later
-                // stall in the same turn can fire it again.
-                state.review_nudged = false;
-            }
-            on_event(AgentEvent::SessionReview { alert });
+    /// Session review no longer fires from the turn loop: it is on-demand via
+    /// `/review` ([`Self::review_now`]), which runs the diagnostic sub-agent
+    /// against the live transcript and reports a verdict without aborting.
+    fn check_hard_stop(&self, rounds: usize) -> std::ops::ControlFlow<()> {
+        let budget = self.get_hard_stop_rounds();
+        if budget > 0 && rounds >= budget {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
         }
-
-        // Opt-in execution budget only. Default (0) keeps the turn uncapped.
-        if config.hard_stop_rounds > 0 && rounds >= config.hard_stop_rounds {
-            return Ok(std::ops::ControlFlow::Break(()));
-        }
-        Ok(std::ops::ControlFlow::Continue(()))
     }
 
     /// Terminal error surfaced when an opt-in `hard_stop_rounds` budget is
@@ -1557,7 +1531,7 @@ impl Agent {
     /// from a normal completion in the transcript. The review itself never
     /// produces this — only an explicit user-configured budget does.
     fn hard_stop_error(&self) -> HarnessError {
-        let budget = self.get_review_config().hard_stop_rounds;
+        let budget = self.get_hard_stop_rounds();
         HarnessError::Other(format!(
             "Agent stopped: the configured hard-stop budget of {budget} tool \
              rounds was reached. This budget is opt-in (`hard_stop_rounds`); \
@@ -1570,8 +1544,8 @@ impl Agent {
     /// any prior alert"). Otherwise the worst status wins, with each
     /// non-healthy dimension's detail folded in. The round count gives the
     /// user a sense of how long the turn has run. Associated (no `&self`) so
-    /// tests can call `Agent::render_review_alert` without constructing one.
-    pub(crate) fn render_review_alert(verdicts: &[ReviewVerdict], rounds: usize) -> String {
+    /// the `/review` handler and tests can call it without an `Agent` handle.
+    pub fn render_review_alert(verdicts: &[ReviewVerdict], rounds: usize) -> String {
         let worst = verdicts.iter().map(|v| v.status).max();
         match worst {
             None | Some(ReviewStatus::Healthy) => String::new(),
@@ -1592,6 +1566,30 @@ impl Agent {
                 }
             }
         }
+    }
+
+    /// On-demand session review (ADR-0018): run the bounded read-only
+    /// diagnostic sub-agent against `messages` and return one verdict per
+    /// registered dimension. Driven by the `/review` command — the harness no
+    /// longer fires review on a round cadence. Safe to call while a turn is
+    /// running: the reviewer is an independent child agent that only reads a
+    /// transcript snapshot and cannot mutate the parent's turn state.
+    pub async fn review_now(&self, messages: &[Message]) -> Vec<ReviewVerdict> {
+        let rounds = Self::estimate_tool_rounds(messages);
+        self.run_session_review(messages, rounds).await
+    }
+
+    /// Rough count of tool rounds represented by `messages`: the number of
+    /// assistant messages that carry tool calls. Used to label on-demand
+    /// review output with a sense of how long the turn has run, since the
+    /// `/review` handler does not own the live round counter.
+    pub fn estimate_tool_rounds(messages: &[Message]) -> usize {
+        messages
+            .iter()
+            .filter(|m| {
+                m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            })
+            .count()
     }
 
     /// Whether the harness should fire the verify-hard-nudge gate before
@@ -1639,6 +1637,22 @@ impl Agent {
             "plan_enter" | "plan_exit" | "update_plan_progress"
         ) {
             on_event(AgentEvent::PlanProgressUpdated(self.plan_progress()));
+        }
+    }
+
+    /// Emit a [`AgentEvent::TodosUpdated`] snapshot whenever a tool mutates
+    /// the task list (`todo` full-replace, `todo_update` surgical edit, or a
+    /// plan workflow transition that reseeds/clears it). The TUI stores the
+    /// snapshot and re-renders the sticky panel above the input box.
+    fn emit_todos_change<F>(&self, call: &ToolCall, on_event: &mut F)
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        if matches!(
+            call.name.as_str(),
+            "todo" | "todo_update" | "plan_enter" | "plan_exit"
+        ) {
+            on_event(AgentEvent::TodosUpdated(self.todos()));
         }
     }
 

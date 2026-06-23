@@ -175,7 +175,7 @@ fn pursuit_is_injected_into_system_prompt() {
     let agent = agent();
     agent.set_pursuit(active_pursuit("ship the harness"));
 
-    let prompt = agent.build_system_prompt();
+    let prompt = agent.build_system_message().content;
 
     assert!(prompt.contains("ship the harness"));
     assert!(prompt.contains("complete_pursuit"));
@@ -244,7 +244,7 @@ fn pursuit_gate_lets_turn_end_on_completion_marker() {
 }
 
 #[test]
-fn pursuit_gate_lets_turn_end_without_active_goal() {
+fn pursuit_gate_lets_turn_end_without_active_pursuit() {
     let agent = agent();
     agent.arm_pursuit();
     let resp = Message::new(Role::Assistant, "working".to_string());
@@ -252,7 +252,7 @@ fn pursuit_gate_lets_turn_end_without_active_goal() {
 }
 
 #[test]
-fn pursuit_gate_lets_turn_end_when_goal_already_complete() {
+fn pursuit_gate_lets_turn_end_when_pursuit_already_complete() {
     let agent = agent();
     let mut done = active_pursuit("ship");
     done.is_complete = true;
@@ -1061,6 +1061,9 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("user-question {}", request.questions.len())
             }
             AgentEvent::SubTask { .. } => "subtask".to_string(),
+            AgentEvent::TodosUpdated(list) => {
+                format!("todos {} items", list.len())
+            }
         })
         .collect()
 }
@@ -1445,9 +1448,9 @@ async fn turn_runs_uncapped_until_model_emits_text() {
     // text answer. Each read round uses a distinct argument so the
     // repeated-call guard never trips, and every 4th round is a Write. This
     // mirrors the uncapped contract: the turn is bounded by the model
-    // choosing to stop, not by raw round count (ADR-0009). Review is disabled
-    // so the periodic diagnostic does not consume the shared scripted stream
-    // at round 64 (ADR-0016).
+    // choosing to stop, not by raw round count (ADR-0009). Session review is
+    // on-demand only (`/review`), so the turn loop never fires a diagnostic
+    // to consume the shared scripted stream (ADR-0018).
     let write = RecordingTool::write("writer", "WROTE");
     let read = RecordingTool::read("alpha", "out");
     let mut rounds: Vec<Vec<ProviderStreamEvent>> = Vec::new();
@@ -1466,7 +1469,6 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
-    agent.set_review_config(ReviewConfig::disabled());
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
 
@@ -1475,12 +1477,12 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         !events
             .iter()
             .any(|event| matches!(event, AgentEvent::SessionReview { .. })),
-        "review disabled must keep the uncapped turn free of review events"
+        "the turn loop must not emit review events; review is on-demand only"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Session review (ADR-0016)
+// Session review (ADR-0018, superseding the periodic ADR-0016 design)
 // ─────────────────────────────────────────────────────────────────────
 
 /// Build a turn of N distinct read-only `alpha` calls (each with a different
@@ -1498,24 +1500,16 @@ fn distinct_read_rounds(n: usize, suffix: Option<&str>) -> Vec<Vec<ProviderStrea
 }
 
 #[test]
-fn review_config_getter_round_trips_setter() {
-    // The /review slash command reads via `get_review_config` after writing
-    // via `set_review_config`; the pair must round-trip, including the
-    // disabled sentinel and a custom hard-stop budget.
+fn hard_stop_rounds_getter_round_trips_setter() {
+    // The `/hard-stop` path (and config seed) writes via `set_hard_stop_rounds`
+    // and reads via `get_hard_stop_rounds`; the pair must round-trip. Default
+    // is 0 (uncapped, ADR-0009).
     let agent = agent();
-    assert_eq!(agent.get_review_config(), ReviewConfig::default());
-    let mut cfg = agent.get_review_config();
-    cfg.review_start_round = 5;
-    cfg.review_interval_rounds = 4;
-    cfg.hard_stop_rounds = 99;
-    agent.set_review_config(cfg);
-    let live = agent.get_review_config();
-    assert_eq!(live.review_start_round, 5);
-    assert_eq!(live.review_interval_rounds, 4);
-    assert_eq!(live.hard_stop_rounds, 99);
-    // disabled() suppresses review entirely.
-    agent.set_review_config(ReviewConfig::disabled());
-    assert!(!agent.review_enabled());
+    assert_eq!(agent.get_hard_stop_rounds(), 0);
+    agent.set_hard_stop_rounds(99);
+    assert_eq!(agent.get_hard_stop_rounds(), 99);
+    agent.set_hard_stop_rounds(0);
+    assert_eq!(agent.get_hard_stop_rounds(), 0);
 }
 
 #[test]
@@ -1545,47 +1539,42 @@ fn render_review_alert_collapses_verdicts() {
     assert!(alert.contains("slow"), "{alert}");
 }
 
-#[tokio::test]
-async fn review_disabled_emits_no_event() {
-    // start = 0 disables review: even with many distinct read rounds, no
-    // SessionReview event fires and no reflection nudge is pushed. This is
-    // pure ADR-0009 behaviour, and also the config sub-agents get.
-    let tool = RecordingTool::read("alpha", "A-out");
-    let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(distinct_read_rounds(
-            20,
-            Some("done"),
-        ))),
-        vec![Arc::new(tool)],
-        AgentMode::Build,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_review_config(ReviewConfig::disabled());
-
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let mut events = Vec::new();
-    let outcome = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
-            events.push(event);
-        })
-        .await
-        .expect("disabled review → turn runs to completion");
-
-    assert_eq!(outcome.message.content, "done");
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::SessionReview { .. })),
-        "review disabled must suppress all review events"
-    );
+#[test]
+fn estimate_tool_rounds_counts_assistant_tool_call_messages() {
+    use crate::agent::Agent;
+    // No messages → 0.
+    assert_eq!(Agent::estimate_tool_rounds(&[]), 0);
+    let mut msgs = vec![
+        Message::new(Role::User, "go"),
+        Message::new(Role::Assistant, "thinking"),
+    ];
+    // Assistant without tool calls → not a round.
+    assert_eq!(Agent::estimate_tool_rounds(&msgs), 0);
+    // Two assistant messages carrying tool calls → two rounds; a plain text
+    // assistant message in between does not inflate the count.
+    let mut with_calls = msgs[1].clone();
+    with_calls.tool_calls = Some(vec![neenee_core::ToolCall {
+        id: "c1".into(),
+        name: "read_file".into(),
+        arguments: "{}".into(),
+    }]);
+    msgs[1] = with_calls;
+    msgs.push(Message::new(Role::Assistant, "more text"));
+    let mut third = Message::new(Role::Assistant, String::new());
+    third.tool_calls = Some(vec![neenee_core::ToolCall {
+        id: "c2".into(),
+        name: "edit_file".into(),
+        arguments: "{}".into(),
+    }]);
+    msgs.push(third);
+    assert_eq!(Agent::estimate_tool_rounds(&msgs), 2);
 }
 
 #[tokio::test]
 async fn hard_stop_aborts_when_budget_configured() {
-    // hard_stop_rounds is the only opt-in execution cap. With it set to 3 and
-    // review disabled, the 3rd tool round trips the budget and the turn
-    // aborts with the budget in the message.
+    // hard_stop_rounds is the only opt-in execution cap. With it set to 3, the
+    // 3rd tool round trips the budget and the turn aborts with the budget in
+    // the message.
     let tool = RecordingTool::read("alpha", "A-out");
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
@@ -1594,9 +1583,7 @@ async fn hard_stop_aborts_when_budget_configured() {
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
-    let mut cfg = ReviewConfig::disabled();
-    cfg.hard_stop_rounds = 3;
-    agent.set_review_config(cfg);
+    agent.set_hard_stop_rounds(3);
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let error = agent
@@ -1615,62 +1602,44 @@ async fn hard_stop_aborts_when_budget_configured() {
 }
 
 #[tokio::test]
-async fn review_fires_at_start_and_emits_event() {
-    // With a low start line, the diagnostic fires after the start round. The
-    // reviewer sub-agent shares the scripted provider: after the main loop's
-    // two read rounds, it pops the next scripted round (a JSON verdict) and
-    // returns it, emitting exactly one SessionReview event. A "stuck" verdict
-    // also pushes the one-shot reflection nudge.
+async fn review_now_runs_diagnostic_and_returns_verdict() {
+    // On-demand review (`/review` → `Agent::review_now`) feeds the transcript
+    // to the REVIEW sub-agent, which shares the scripted provider. The next
+    // scripted round is the reviewer's verdict JSON; `review_now` parses it
+    // back into a `ReviewVerdict` keyed to the `looping` dimension.
     let verdict_json =
         r#"{"verdicts":[{"dimension":"looping","status":"stuck","detail":"re-reading"}]}"#;
-    let mut rounds = distinct_read_rounds(2, None);
-    rounds.push(text_round(verdict_json));
-    rounds.push(text_round("done"));
-
     let tool = RecordingTool::read("alpha", "A-out");
     let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(rounds)),
+        Arc::new(ScriptedProvider::new(vec![text_round(verdict_json)])),
         vec![Arc::new(tool)],
         AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
-    agent.set_review_config(ReviewConfig {
-        review_start_round: 2,
-        review_interval_rounds: 16,
-        hard_stop_rounds: 0,
-    });
 
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let mut events = Vec::new();
-    let outcome = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |event| {
-            events.push(event);
-        })
-        .await
-        .expect("turn completes after the review + final text");
+    // A transcript with one tool round so the estimate is meaningful.
+    let mut transcript = vec![Message::new(Role::User, "go")];
+    let mut assistant = Message::new(Role::Assistant, String::new());
+    assistant.tool_calls = Some(vec![neenee_core::ToolCall {
+        id: "c1".into(),
+        name: "read_file".into(),
+        arguments: "{\"path\":\"f\"}".into(),
+    }]);
+    transcript.push(assistant);
 
-    assert_eq!(outcome.message.content, "done");
-    let alerts: Vec<String> = events
-        .iter()
-        .filter_map(|event| match event {
-            AgentEvent::SessionReview { alert } if !alert.is_empty() => Some(alert.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        alerts.len(),
-        1,
-        "exactly one non-empty SessionReview alert must fire, got {alerts:?}"
+    let verdicts = agent.review_now(&transcript).await;
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0].dimension, "looping");
+    assert_eq!(verdicts[0].status, ReviewStatus::Stuck);
+    assert_eq!(verdicts[0].detail, "re-reading");
+    // The on-demand alert renders with the estimated round count.
+    let alert = crate::agent::Agent::render_review_alert(
+        &verdicts,
+        crate::agent::Agent::estimate_tool_rounds(&transcript),
     );
-    assert!(alerts[0].contains("stuck"), "{}", alerts[0]);
-    // The stuck verdict pushes the one-shot reflection nudge.
-    assert!(messages.iter().any(|m| {
-        m.role == Role::User
-            && m.hidden
-            && m.content
-                .contains("session-health review judged this turn stuck")
-    }));
+    assert!(alert.contains("review: stuck"), "{alert}");
+    assert!(alert.contains("1 rounds"), "{alert}");
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1776,14 +1745,14 @@ async fn verify_nudge_disabled_when_toggle_off() {
 fn agent_config_defaults_match_runtime_constants() {
     // The config struct's defaults must match the seeds the agent uses when
     // no config is loaded, so a missing `[agent]` table is indistinguishable
-    // from one that explicitly sets the defaults (ADR-0016).
+    // from one that explicitly sets the defaults (ADR-0018).
     use neenee_store::config::AgentConfig;
     let cfg = AgentConfig::default();
-    assert_eq!(cfg.review, ReviewConfig::default());
+    assert_eq!(cfg.hard_stop_rounds, 0);
     assert!(cfg.verify_nudge_enabled);
-    // The agent seeds the same review config by default.
+    // The agent seeds the same hard-stop budget by default (uncapped).
     let agent = agent();
-    assert_eq!(agent.get_review_config(), ReviewConfig::default());
+    assert_eq!(agent.get_hard_stop_rounds(), 0);
 }
 
 #[test]

@@ -31,7 +31,7 @@ impl PursuitService {
         self.store
             .get_pursuit(thread_id)
             .await
-            .map(|pursuit| pursuit.map(runtime_goal_from_persisted))
+            .map(|pursuit| pursuit.map(runtime_pursuit_from_persisted))
     }
 
     /// Set or replace the pursuit for a thread. Always creates an active,
@@ -45,8 +45,8 @@ impl PursuitService {
         if objective.chars().count() > 4000 {
             return Err("pursuit objective must be at most 4000 characters".to_string());
         }
-        let pursuit = self.store.replace_goal(thread_id, objective).await?;
-        Ok(runtime_goal_from_persisted(pursuit))
+        let pursuit = self.store.replace_pursuit(thread_id, objective).await?;
+        Ok(runtime_pursuit_from_persisted(pursuit))
     }
 
     /// Rewrite the objective of the existing pursuit. Returns `None` if no pursuit
@@ -64,17 +64,17 @@ impl PursuitService {
             return Err("pursuit objective must be at most 4000 characters".to_string());
         }
         let pursuit = self.store.update_objective(thread_id, objective).await?;
-        Ok(pursuit.map(runtime_goal_from_persisted))
+        Ok(pursuit.map(runtime_pursuit_from_persisted))
     }
 
     pub async fn clear_pursuit(&self, thread_id: &str) -> Result<bool, String> {
-        let deleted = self.store.delete_goal(thread_id).await?;
+        let deleted = self.store.delete_pursuit(thread_id).await?;
         Ok(deleted.is_some())
     }
 
     pub async fn mark_complete(&self, thread_id: &str) -> Result<Option<Pursuit>, String> {
         let pursuit = self.store.mark_complete(thread_id).await?;
-        Ok(pursuit.map(runtime_goal_from_persisted))
+        Ok(pursuit.map(runtime_pursuit_from_persisted))
     }
 
     /// Convenience: fetch the current pursuit only if it is still active
@@ -86,7 +86,7 @@ impl PursuitService {
     }
 }
 
-fn runtime_goal_from_persisted(pursuit: ThreadPursuit) -> Pursuit {
+fn runtime_pursuit_from_persisted(pursuit: ThreadPursuit) -> Pursuit {
     Pursuit {
         objective: pursuit.objective,
         is_complete: pursuit.is_complete,

@@ -68,6 +68,13 @@ struct SessionData {
     /// Drives the sticky panel above the input box on resume.
     #[serde(default)]
     plan_progress: Option<neenee_core::PlanProgress>,
+    /// Unified task list, mirrored from `Agent::todos`. The single source of
+    /// truth for "what is left to do" — absorbs the former plan-progress
+    /// section tracker and the former scratchpad `todo` tool state. An empty
+    /// list means no active task list. `#[serde(default)]` so legacy
+    /// snapshots load as an empty list with no migration.
+    #[serde(default)]
+    todos: neenee_core::TodoList,
     /// Schema version of this session file. Migrations increment this and are
     /// applied lazily on load.
     schema_version: u32,
@@ -92,6 +99,7 @@ impl Default for SessionData {
             project_root: default_project_root(),
             active_plan_path: None,
             plan_progress: None,
+            todos: neenee_core::TodoList::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
             checksum: None,
         }
@@ -274,6 +282,9 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
             SessionEvent::PlanProgressSet { progress } => {
                 data.plan_progress = progress.clone();
             }
+            SessionEvent::TodosSet { todos } => {
+                data.todos = todos.clone();
+            }
             SessionEvent::Reset { id } => {
                 let project_root = data.project_root.clone();
                 let schema_version = data.schema_version;
@@ -346,6 +357,15 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             timestamp: data.updated_at,
             event: SessionEvent::PlanProgressSet {
                 progress: Some(progress.clone()),
+            },
+        });
+    }
+    if !data.todos.is_empty() {
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::TodosSet {
+                todos: data.todos.clone(),
             },
         });
     }
@@ -565,6 +585,25 @@ impl SessionStore {
         ensure_event_log_started(&self.event_log, &data)?;
         self.event_log
             .append(SessionEvent::PlanProgressSet { progress })?;
+        self.persist(&data)
+    }
+
+    /// The unified task list, mirrored from `Agent::todos`. Empty means no
+    /// active task list. Read on resume to seed the agent and the sticky
+    /// panel.
+    pub async fn todos(&self) -> neenee_core::TodoList {
+        self.data.lock().await.todos.clone()
+    }
+
+    /// Replace the task list. Persists both the snapshot and the event log so
+    /// resume restores the same list (and so per-item history is retained in
+    /// the log).
+    pub async fn set_todos(&self, todos: neenee_core::TodoList) -> Result<(), String> {
+        let mut data = self.data.lock().await;
+        data.todos = todos.clone();
+        data.updated_at = unix_timestamp();
+        ensure_event_log_started(&self.event_log, &data)?;
+        self.event_log.append(SessionEvent::TodosSet { todos })?;
         self.persist(&data)
     }
 
@@ -2132,6 +2171,50 @@ mod tests {
         reloaded.set_plan_progress(None).await.unwrap();
         assert_eq!(reloaded.active_plan_path().await, None);
         assert_eq!(reloaded.plan_progress().await, None);
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn todos_round_trip_through_disk() {
+        let directory =
+            std::env::temp_dir().join(format!("neenee-todos-state-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore {
+            project_root: directory.clone(),
+            path: path.clone(),
+            archive_dir: directory.join("sessions"),
+            event_log: EventLog::new(path.with_extension("jsonl")),
+            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
+            data: Mutex::new(SessionData::default()),
+        };
+        assert!(store.todos().await.is_empty());
+
+        // Seed via the domain helper (same path plan_exit will use) and persist.
+        let mut list = neenee_core::TodoList::from_plan_markdown(
+            "## Summary\n## Key Changes\n## Test Plan\n",
+            1000,
+            3,
+        );
+        store.set_todos(list.clone()).await.unwrap();
+
+        // Mutate (mark progress) and persist again — identity must survive.
+        list.update("summary", neenee_core::TodoStatus::Completed, 2000, 4);
+        store.set_todos(list.clone()).await.unwrap();
+
+        // Reload from disk via the event log + snapshot and confirm round-trip.
+        let reloaded = SessionStore::for_path(path.clone());
+        let loaded = reloaded.todos().await;
+        assert_eq!(loaded.len(), 3, "all items round-trip through disk");
+        assert_eq!(loaded.items[0].content, "Summary");
+        assert_eq!(loaded.items[0].status, neenee_core::TodoStatus::Completed);
+        assert_eq!(loaded.updated_at_turn, 4);
+        // Identity is stable: the first item's id is unchanged after the update.
+        assert_eq!(loaded.items[0].id, list.items[0].id);
+
+        // Clearing persists (empty list is the "no active list" state).
+        reloaded.set_todos(neenee_core::TodoList::default()).await.unwrap();
+        assert!(reloaded.todos().await.is_empty());
 
         let _ = fs::remove_dir_all(directory);
     }

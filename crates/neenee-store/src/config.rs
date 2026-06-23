@@ -1,7 +1,6 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::McpServerConfig;
-use neenee_core::ReviewConfig;
 use neenee_core::SkillsConfig;
 use neenee_core::WebSearchConfig;
 use serde::{Deserialize, Serialize};
@@ -13,12 +12,6 @@ use std::path::PathBuf;
 /// Reasoning isn't a tool, so each frontend addresses it by name.
 pub const THINKING_KEY: &str = "thinking";
 
-/// Re-export of the core default so `Agent::new`'s seed matches the config
-/// default without either side hardcoding a magic number.
-pub use neenee_core::{
-    DEFAULT_REVIEW_INTERVAL_ROUNDS as DEFAULT_REVIEW_INTERVAL, DEFAULT_REVIEW_START_ROUND,
-};
-
 /// User-tunable agent behaviour, deserialized from the optional `[agent]`
 /// table of `config.toml`. All fields default sensibly, so a
 /// `config.toml` with no `[agent]` table (or a partially specified one)
@@ -26,15 +19,10 @@ pub use neenee_core::{
 ///
 /// ```toml
 /// [agent]
-/// # Periodic session review: after this many tool rounds in a turn, a
-/// # read-only diagnostic sub-agent reads the live transcript and reports
-/// # whether the agent appears stuck (looping, etc). 0 disables review
-/// # entirely (pure ADR-0009 behaviour: uncapped, no alert).
-/// # review_start_round = 64
-/// # Interval between review runs once the start line is passed.
-/// # review_interval_rounds = 16
-/// # Hard-stop the turn after this many total tool rounds. 0 (the default)
-/// # means no hard stop — opt-in execution budget only.
+/// # Hard-stop a turn after this many total tool rounds. 0 (the default)
+/// # means no hard stop — an opt-in execution budget only. This is the sole
+/// # turn cap; the loop otherwise runs until the model stops, the user
+/// # interrupts, or context compaction cannot relieve pressure (ADR-0009).
 /// # hard_stop_rounds = 0
 /// # When true, the harness injects a hidden reminder if the model tries
 /// # to end a turn with an approved plan but without calling
@@ -45,10 +33,10 @@ pub use neenee_core::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Periodic session-review cadence + opt-in hard-stop budget. See
-    /// [`ReviewConfig`] for per-field semantics. Mutated at runtime via
-    /// `Agent::set_review_config`.
-    pub review: ReviewConfig,
+    /// Opt-in hard-stop budget: abort a turn after this many total tool
+    /// rounds. `0` (the default) means uncapped. Mutated at runtime via
+    /// `Agent::set_hard_stop_rounds`.
+    pub hard_stop_rounds: usize,
     /// Whether the verify hard-nudge gate is active. When `true` the
     /// harness injects a hidden reminder before letting a turn end with
     /// an approved plan but no `verify_plan_execution` call. Mutated at
@@ -59,7 +47,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            review: ReviewConfig::default(),
+            hard_stop_rounds: 0,
             verify_nudge_enabled: true,
         }
     }
@@ -204,9 +192,9 @@ pub struct Config {
     /// TUI presentation (`[tui]` table): per-step-kind default expand state.
     #[serde(default)]
     pub tui: TuiConfig,
-    /// Agent behaviour (`[agent]` table): session-review cadence, opt-in
-    /// hard-stop budget, and the verify hard-nudge toggle. See
-    /// [`AgentConfig`] for the per-field semantics and TOML examples.
+    /// Agent behaviour (`[agent]` table): opt-in hard-stop budget and the
+    /// verify hard-nudge toggle. See [`AgentConfig`] for the per-field
+    /// semantics and TOML examples.
     #[serde(default)]
     pub agent: AgentConfig,
 }
@@ -295,54 +283,41 @@ mod tests {
     #[test]
     fn agent_table_round_trips_through_toml() {
         // The `[agent]` table must round-trip: partial TOML keeps defaults,
-        // full TOML preserves explicit overrides, and the disabled-review
-        // sentinel (`review_start_round = 0`) survives intact rather than
-        // being coerced back to the default.
+        // full TOML preserves explicit overrides. Legacy `[agent.review]`
+        // sub-tables (ADR-0016) are accepted but ignored — `hard_stop_rounds`
+        // now lives directly under `[agent]` (ADR-0018).
         let toml_full = r#"
             [agent]
-            verify_nudge_enabled = false
-            [agent.review]
-            review_start_round = 10
-            review_interval_rounds = 5
             hard_stop_rounds = 40
+            verify_nudge_enabled = false
         "#;
         let cfg: Config = toml::from_str(toml_full).unwrap();
-        assert_eq!(cfg.agent.review.review_start_round, 10);
-        assert_eq!(cfg.agent.review.review_interval_rounds, 5);
-        assert_eq!(cfg.agent.review.hard_stop_rounds, 40);
+        assert_eq!(cfg.agent.hard_stop_rounds, 40);
         assert!(!cfg.agent.verify_nudge_enabled);
 
         // Missing `[agent]` table → defaults match the documented values.
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(
-            cfg.agent.review.review_start_round,
-            DEFAULT_REVIEW_START_ROUND
-        );
-        assert_eq!(
-            cfg.agent.review.review_interval_rounds,
-            DEFAULT_REVIEW_INTERVAL
-        );
-        assert_eq!(cfg.agent.review.hard_stop_rounds, 0);
+        assert_eq!(cfg.agent.hard_stop_rounds, 0);
         assert!(cfg.agent.verify_nudge_enabled);
 
-        // The disable sentinel survives.
-        let toml_disabled = r#"
+        // A legacy `[agent.review]` block no longer maps to anything; it must
+        // not break parsing (unknown sub-tables are ignored) and the new
+        // direct field still round-trips.
+        let toml_legacy = r#"
             [agent.review]
-            review_start_round = 0
+            review_start_round = 64
+            hard_stop_rounds = 99
         "#;
-        let cfg: Config = toml::from_str(toml_disabled).unwrap();
-        assert_eq!(cfg.agent.review.review_start_round, 0);
-        assert!(!cfg.agent.review.review_enabled());
+        let cfg: Config = toml::from_str(toml_legacy).unwrap();
+        assert_eq!(cfg.agent.hard_stop_rounds, 0);
 
         // Round-trip through save+load format (serialize then parse).
         let mut cfg = Config::default();
-        cfg.agent.review.review_start_round = 5;
-        cfg.agent.review.hard_stop_rounds = 99;
+        cfg.agent.hard_stop_rounds = 99;
         cfg.agent.verify_nudge_enabled = false;
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.agent.review.review_start_round, 5);
-        assert_eq!(parsed.agent.review.hard_stop_rounds, 99);
+        assert_eq!(parsed.agent.hard_stop_rounds, 99);
         assert!(!parsed.agent.verify_nudge_enabled);
     }
 }

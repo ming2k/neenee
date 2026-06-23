@@ -20,7 +20,7 @@ use super::ThreadPursuit;
 const THREAD_PURSUITS_SCHEMA: &str = r#"
                 CREATE TABLE IF NOT EXISTS thread_pursuits (
                     thread_id TEXT PRIMARY KEY,
-                    goal_id TEXT NOT NULL,
+                    pursuit_id TEXT NOT NULL,
                     objective TEXT NOT NULL,
                     status TEXT NOT NULL,
                     token_budget INTEGER,
@@ -108,6 +108,13 @@ impl PursuitStore {
             // goals.db by `open`) so its rows survive under the new name.
             // "no such table" on fresh databases is expected and ignored.
             let _ = conn.execute("ALTER TABLE thread_goals RENAME TO thread_pursuits", []);
+            // Rename the legacy `goal_id` column (carried over from goals.db
+            // or from a pre-rename thread_pursuits schema) to `pursuit_id`.
+            // "no such column" on fresh databases is expected and ignored.
+            let _ = conn.execute(
+                "ALTER TABLE thread_pursuits RENAME COLUMN goal_id TO pursuit_id",
+                [],
+            );
             conn.execute(THREAD_PURSUITS_SCHEMA, [])
                 .map_err(|err| format!("failed to create thread_pursuits table: {err}"))?;
             Ok::<_, String>(())
@@ -125,14 +132,14 @@ impl PursuitStore {
                 .prepare(
                     r#"
                     SELECT
-                        thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
+                        thread_id, pursuit_id, objective, status, created_at_ms, updated_at_ms
                     FROM thread_pursuits
                     WHERE thread_id = ?1
                     "#,
                 )
                 .map_err(|err| format!("prepare get_pursuit failed: {err}"))?;
             let mut rows = stmt
-                .query_map([&thread_id], thread_goal_from_row)
+                .query_map([&thread_id], thread_pursuit_from_row)
                 .map_err(|err| format!("query get_pursuit failed: {err}"))?;
             rows.next().transpose().map_err(|err| err.to_string())
         })
@@ -141,7 +148,7 @@ impl PursuitStore {
     }
 
     /// Replace any existing pursuit with a brand-new active, incomplete pursuit.
-    pub async fn replace_goal(
+    pub async fn replace_pursuit(
         &self,
         thread_id: &str,
         objective: &str,
@@ -150,7 +157,7 @@ impl PursuitStore {
         let thread_id_for_get = thread_id.clone();
         let objective = objective.to_string();
         let now_ms = Utc::now().timestamp_millis();
-        let goal_id = Uuid::new_v4().to_string();
+        let pursuit_id = Uuid::new_v4().to_string();
 
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
@@ -158,11 +165,11 @@ impl PursuitStore {
             conn.execute(
                 r#"
                 INSERT INTO thread_pursuits (
-                    thread_id, goal_id, objective, status, token_budget,
+                    thread_id, pursuit_id, objective, status, token_budget,
                     tokens_used, time_used_seconds, created_at_ms, updated_at_ms
                 ) VALUES (?1, ?2, ?3, 'active', NULL, 0, 0, ?4, ?4)
                 ON CONFLICT(thread_id) DO UPDATE SET
-                    goal_id = excluded.goal_id,
+                    pursuit_id = excluded.pursuit_id,
                     objective = excluded.objective,
                     status = excluded.status,
                     token_budget = excluded.token_budget,
@@ -171,17 +178,17 @@ impl PursuitStore {
                     created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms
                 "#,
-                params![thread_id, goal_id, objective, now_ms],
+                params![thread_id, pursuit_id, objective, now_ms],
             )
-            .map_err(|err| format!("replace_goal failed: {err}"))?;
+            .map_err(|err| format!("replace_pursuit failed: {err}"))?;
             Ok::<_, String>(())
         })
         .await
-        .map_err(|err| format!("replace_goal task failed: {err}"))??;
+        .map_err(|err| format!("replace_pursuit task failed: {err}"))??;
 
         self.get_pursuit(&thread_id_for_get)
             .await?
-            .ok_or_else(|| "replace_goal succeeded but row is missing".to_string())
+            .ok_or_else(|| "replace_pursuit succeeded but row is missing".to_string())
     }
 
     /// Rewrite the objective of an existing pursuit. Returns `None` if no row
@@ -249,7 +256,7 @@ impl PursuitStore {
         self.get_pursuit(&thread_id_for_get).await
     }
 
-    pub async fn delete_goal(&self, thread_id: &str) -> Result<Option<ThreadPursuit>, String> {
+    pub async fn delete_pursuit(&self, thread_id: &str) -> Result<Option<ThreadPursuit>, String> {
         let thread_id = thread_id.to_string();
         let pursuit = self.get_pursuit(&thread_id).await?;
         if pursuit.is_none() {
@@ -263,17 +270,17 @@ impl PursuitStore {
                 "DELETE FROM thread_pursuits WHERE thread_id = ?1",
                 [&thread_id],
             )
-            .map_err(|err| format!("delete_goal failed: {err}"))?;
+            .map_err(|err| format!("delete_pursuit failed: {err}"))?;
             Ok::<_, String>(())
         })
         .await
-        .map_err(|err| format!("delete_goal task failed: {err}"))??;
+        .map_err(|err| format!("delete_pursuit task failed: {err}"))??;
 
         Ok(pursuit)
     }
 }
 
-fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadPursuit, rusqlite::Error> {
+fn thread_pursuit_from_row(row: &rusqlite::Row) -> Result<ThreadPursuit, rusqlite::Error> {
     let status: String = row.get(3)?;
     // Post-ADR-0010 only "active" and "complete" are written. Any pre-0010
     // status (paused / blocked / usage_limited / budget_limited) maps to
@@ -284,7 +291,7 @@ fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadPursuit, rusqlite::
     let updated_at_ms: i64 = row.get(5)?;
     Ok(ThreadPursuit {
         thread_id: row.get(0)?,
-        goal_id: row.get(1)?,
+        pursuit_id: row.get(1)?,
         objective: row.get(2)?,
         is_complete,
         created_at: DateTime::from_timestamp_millis(created_at_ms).unwrap_or_else(Utc::now),

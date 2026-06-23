@@ -1,12 +1,12 @@
-//! Session-review runner (ADR-0016): the orchestration side of the periodic
-//! transcript diagnostic that replaces the round-counting stall detector.
+//! Session-review runner (ADR-0018, superseding the periodic ADR-0016 design):
+//! the orchestration side of the on-demand transcript diagnostic.
 //!
-//! Domain types ([`SessionReview`], [`ReviewVerdict`], [`ReviewConfig`]) live
-//! in `neenee-core`; this module owns the LLM-backed runner that lives next to
-//! [`crate::TaskTool`] because — like the `task` tool — it spawns a bounded
-//! read-only sub-agent via [`crate::Agent`]. The difference is who drives it:
-//! `task` is a *model* tool call, whereas the review runner is *harness*
-//! driven, firing on a round cadence rather than on demand.
+//! Domain types ([`SessionReview`], [`ReviewVerdict`]) live in `neenee-core`;
+//! this module owns the LLM-backed runner that lives next to [`crate::TaskTool`]
+//! because — like the `task` tool — it spawns a bounded read-only sub-agent via
+//! [`crate::Agent`]. The difference is who drives it: `task` is a *model* tool
+//! call, whereas the review runner is *user* driven, fired by the `/review`
+//! command ([`Agent::review_now`]) rather than on a round cadence.
 //!
 //! ## The built-in dimension
 //!
@@ -18,7 +18,8 @@
 use std::sync::Arc;
 
 use neenee_core::{
-    AgentMode, Message, ReviewConfig, ReviewStatus, ReviewVerdict, Role, SessionReview, REVIEW,
+    AgentMode, Message, ReviewStatus, ReviewVerdict, Role, SessionReview,
+    DEFAULT_REVIEWER_HARD_STOP, REVIEW,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -55,8 +56,8 @@ impl SessionReview for LoopingReview {
 }
 
 /// The default set of review dimensions registered on a primary agent.
-/// Sub-agents register none (review is disabled on them), so this is only
-/// consulted when [`Agent::review_due`] fires.
+/// Sub-agents register none (they have no `/review` path), so this is only
+/// consulted when [`Agent::review_now`] runs.
 pub fn default_reviews() -> Vec<Arc<dyn SessionReview>> {
     vec![Arc::new(LoopingReview)]
 }
@@ -105,7 +106,7 @@ impl Agent {
         );
         // The reviewer must not run its own reviews (recursion) and is bounded
         // by a tight hard stop so it cannot loop.
-        reviewer.set_review_config(ReviewConfig::for_reviewer());
+        reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);
 
         let system = build_reviewer_system_prompt(&dimensions);
         let transcript = serialize_transcript(messages, TRANSCRIPT_SNAPSHOT_BUDGET_CHARS);

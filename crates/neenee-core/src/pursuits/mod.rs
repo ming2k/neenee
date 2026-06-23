@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadPursuit {
     pub thread_id: String,
-    pub goal_id: String,
+    pub pursuit_id: String,
     pub objective: String,
     pub is_complete: bool,
     pub created_at: DateTime<Utc>,
