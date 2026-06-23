@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-agent"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "dirs",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arboard",
  "chrono",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-providers"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-store"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-tools"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "dirs",
