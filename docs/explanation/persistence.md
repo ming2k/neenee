@@ -91,7 +91,7 @@ Two categories of file deliberately live outside XDG:
   (`.neenee/plans/`) live with the project. They travel with the
   repository and are owned by the project, not the user's environment.
 - **External applications' conventions.** neenee *reads* skills from
-  `~/.agents/skills/`, `~/.claude/skills/`, `~/.kimi-code/skills/`
+  `~/.agents/skills/`, `~/.claude/skills/`
   because those are other tools' locations. neenee never writes to them.
 
 The bundled system skills are not on disk at all — they are
@@ -132,21 +132,3 @@ absolute values win.
 | `$XDG_DATA_HOME/neenee/projects/<bucket>/` | That project loses its session history and embeddings. |
 | `$XDG_DATA_HOME/neenee/` | All history, blobs, skills, commands, goals. Effectively a factory reset; `config.toml` survives. |
 | `$XDG_CONFIG_HOME/neenee/` | Loses user-edited configuration. Sessions and skills survive. |
-
-## The legacy `~/.neenee/` location
-
-Pre-XDG versions of neenee stored user skills and commands at
-`~/.neenee/skills/` and `~/.neenee/commands/`. neenee still scans these
-as a low-priority fallback and emits a one-time deprecation warning
-directing the user to the XDG location. The XDG copy wins on a name
-collision. The legacy paths will be removed in a future release.
-
-The migration is a `mv`:
-
-```bash
-mv ~/.neenee/skills/*   $XDG_DATA_HOME/neenee/skills/   2>/dev/null || true
-mv ~/.neenee/commands/* $XDG_DATA_HOME/neenee/commands/ 2>/dev/null || true
-rmdir ~/.neenee/skills ~/.neenee/commands ~/.neenee     2>/dev/null || true
-```
-
-Where `$XDG_DATA_HOME` defaults to `~/.local/share`.

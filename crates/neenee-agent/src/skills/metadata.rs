@@ -13,8 +13,7 @@ pub enum SkillScope {
     /// Skills downloaded from a remote skill repository.
     Remote,
     /// User-global skills: XDG (`$XDG_DATA_HOME/neenee/skills`), external
-    /// conventions (`~/.agents/skills`, `~/.claude/skills`, `~/.kimi-code/skills`),
-    /// or the deprecated `~/.neenee/skills` fallback. See ADR-0013/0014.
+    /// conventions (`~/.agents/skills`, `~/.claude/skills`). See ADR-0013/0014.
     User,
     /// Additional paths configured in `config.toml`.
     Extra,

@@ -5,18 +5,14 @@ use super::metadata::{parse_skill_file, Skill, SkillScope};
 use super::remote::fetch_remote_repo;
 use super::SkillsConfig;
 use neenee_store::paths;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Project-local neenee skills directory (relative to project root).
 const PROJECT_NEENEE_SKILLS_DIR: &str = ".neenee/skills";
 /// External skill directory conventions (someone else's app; we read but do
 /// not own these locations).
-const EXTERNAL_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills", ".kimi-code/skills"];
-/// Legacy pre-XDG user skills directory. Scanned as a deprecated fallback so
-/// existing users do not lose their skills on upgrade; XDG path wins on name
-/// collision. See ADR-0013.
-const LEGACY_USER_SKILLS_DIR: &str = ".neenee/skills";
+const EXTERNAL_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
 const MAX_SCAN_DEPTH: usize = 8;
 
 /// Result of scanning every configured skill source.
@@ -34,25 +30,25 @@ pub struct DiscoveryResult {
 /// is filesystem-derived.
 pub async fn discover_all(config: &SkillsConfig) -> DiscoveryResult {
     let mut result = DiscoveryResult::default();
-    let mut seen: HashSet<String> = HashSet::new();
+    // name -> position in `result.skills`. Scanning runs lowest- to
+    // highest-priority; `upsert_skill` makes the last claimant of a name win
+    // while preserving the first-seen position for stable catalog ordering.
+    let mut index: HashMap<String, usize> = HashMap::new();
 
     // 0. Bundled system skills (compile-time embedded; lowest priority).
     if config.bundled {
-        for skill in bundled::discover() {
-            let mut skill = skill;
+        for mut skill in bundled::discover() {
             if config.is_disabled(&skill.name) {
                 skill.enabled = false;
             }
-            if seen.insert(skill.name.clone()) {
-                result.skills.push(skill);
-            }
+            upsert_skill(&mut result.skills, &mut index, skill);
         }
     }
 
     for source in skill_sources(config).await {
         match source {
             SkillSource::Local { root, scope } => {
-                discover_local_skills(&root, scope, config, &mut seen, &mut result);
+                discover_local_skills(&root, scope, config, &mut index, &mut result);
             }
             SkillSource::Remote { roots } => {
                 for root in roots {
@@ -60,7 +56,7 @@ pub async fn discover_all(config: &SkillsConfig) -> DiscoveryResult {
                         &root,
                         SkillScope::Remote,
                         config,
-                        &mut seen,
+                        &mut index,
                         &mut result,
                     );
                 }
@@ -93,27 +89,7 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
         }
     }
 
-    // 2. Legacy user-global neenee skills (`~/.neenee/skills/`). Deprecated
-    //    pre-XDG location; scanned with a one-time warning so upgrades do not
-    //    silently lose user content. The XDG path (step 3) wins on collision
-    //    because it is registered later in this list.
-    if let Some(home) = dirs::home_dir() {
-        let legacy = home.join(LEGACY_USER_SKILLS_DIR);
-        if has_discoverable_skills(&legacy) {
-            tracing::warn!(
-                "reading skills from legacy location '{}'; move them to '{}' (XDG). \
-                 Support for this path will be removed in a future release.",
-                legacy.display(),
-                dirs.user_skills_dir().display(),
-            );
-            sources.push(SkillSource::Local {
-                root: legacy,
-                scope: SkillScope::User,
-            });
-        }
-    }
-
-    // 3. User-global external skill formats (someone else's app convention).
+    // 2. User-global external skill formats (someone else's app convention).
     if let Some(home) = dirs::home_dir() {
         for dir in EXTERNAL_SKILL_DIRS {
             sources.push(SkillSource::Local {
@@ -123,13 +99,13 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
         }
     }
 
-    // 4. User-global neenee skills (XDG; the canonical user location).
+    // 3. User-global neenee skills (XDG; the canonical user location).
     sources.push(SkillSource::Local {
         root: dirs.user_skills_dir(),
         scope: SkillScope::User,
     });
 
-    // 5. Configured extra paths.
+    // 4. Configured extra paths.
     for path in &config.paths {
         let expanded = expand_tilde(path);
         sources.push(SkillSource::Local {
@@ -138,7 +114,7 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
         });
     }
 
-    // 6. Project-local external skills.
+    // 5. Project-local external skills.
     let project_root =
         find_project_root(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     for dir in EXTERNAL_SKILL_DIRS {
@@ -148,7 +124,7 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
         });
     }
 
-    // 7. Project-local neenee skills (highest priority).
+    // 6. Project-local neenee skills (highest priority).
     sources.push(SkillSource::Local {
         root: project_root.join(PROJECT_NEENEE_SKILLS_DIR),
         scope: SkillScope::Repo,
@@ -157,34 +133,29 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
     sources
 }
 
-/// Cheap check: does `root` contain at least one `SKILL.md` within
-/// [`MAX_SCAN_DEPTH`]? Used to decide whether the legacy path merits a
-/// deprecation warning. We deliberately do not surface parse errors here.
-fn has_discoverable_skills(root: &Path) -> bool {
-    if !root.is_dir() {
-        return false;
+/// Insert a skill, or — when a higher-priority source already claimed the
+/// same name — override the earlier entry in place. Scanning runs from lowest
+/// to highest priority, so the last source to claim a name wins, while the
+/// first-seen position is preserved for stable catalog ordering.
+fn upsert_skill(
+    skills: &mut Vec<Skill>,
+    index: &mut HashMap<String, usize>,
+    skill: Skill,
+) {
+    match index.get(&skill.name).copied() {
+        Some(i) => skills[i] = skill,
+        None => {
+            index.insert(skill.name.clone(), skills.len());
+            skills.push(skill);
+        }
     }
-    walkdir::WalkDir::new(root)
-        .max_depth(MAX_SCAN_DEPTH)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .any(|entry| {
-            entry.file_type().is_file()
-                && !is_inside_hidden_dir(root, entry.path())
-                && entry
-                    .file_name()
-                    .to_str()
-                    .map(|n| n == "SKILL.md")
-                    .unwrap_or(false)
-        })
 }
 
 fn discover_local_skills(
     root: &Path,
     scope: SkillScope,
     config: &SkillsConfig,
-    seen: &mut HashSet<String>,
+    index: &mut HashMap<String, usize>,
     result: &mut DiscoveryResult,
 ) {
     if !root.is_dir() {
@@ -217,10 +188,7 @@ fn discover_local_skills(
                     if config.is_disabled(&skill.name) {
                         skill.enabled = false;
                     }
-                    // Higher-priority source wins.
-                    if seen.insert(skill.name.clone()) {
-                        result.skills.push(skill);
-                    }
+                    upsert_skill(&mut result.skills, index, skill);
                 }
                 Err(e) => result.errors.push(e),
             }
@@ -297,40 +265,68 @@ mod tests {
     }
 
     #[test]
-    fn has_discoverable_skills_returns_false_for_missing_dir() {
-        assert!(!has_discoverable_skills(Path::new(
-            "/nonexistent-neenee-test-path"
-        )));
+    fn higher_priority_source_overrides_lower_on_name_collision() {
+        // Scanning order encodes priority (lowest first). A skill with the same
+        // name in a later-scanned (higher-priority) source must override the
+        // earlier one, while keeping the first-seen catalog position.
+        let low = std::env::temp_dir().join(format!("neenee-skill-{}", uuid::Uuid::new_v4()));
+        let high = std::env::temp_dir().join(format!("neenee-skill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(low.join("shared")).unwrap();
+        std::fs::create_dir_all(high.join("shared")).unwrap();
+        std::fs::write(
+            low.join("shared").join("SKILL.md"),
+            "---\nname: shared\ndescription: low\n---\nlow body",
+        )
+        .unwrap();
+        std::fs::write(
+            high.join("shared").join("SKILL.md"),
+            "---\nname: shared\ndescription: high\n---\nhigh body",
+        )
+        .unwrap();
+
+        let config = SkillsConfig::default();
+        let mut result = DiscoveryResult::default();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        // User scope first (lower priority), then Repo (higher priority).
+        discover_local_skills(&low, SkillScope::User, &config, &mut index, &mut result);
+        discover_local_skills(&high, SkillScope::Repo, &config, &mut index, &mut result);
+
+        assert_eq!(result.skills.len(), 1, "collision should not duplicate");
+        let skill = &result.skills[0];
+        assert_eq!(skill.scope, SkillScope::Repo, "higher-priority source wins");
+        assert_eq!(skill.description, "high");
+        assert_eq!(skill.content, "high body");
+
+        let _ = std::fs::remove_dir_all(&low);
+        let _ = std::fs::remove_dir_all(&high);
     }
 
     #[test]
-    fn has_discoverable_skills_returns_false_for_empty_dir() {
-        let root = std::env::temp_dir().join(format!("neenee-skills-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(!has_discoverable_skills(&root));
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    fn disabled_flag_survives_override() {
+        // A higher-priority source still honours [skills] disabled for its name.
+        let low = std::env::temp_dir().join(format!("neenee-skill-{}", uuid::Uuid::new_v4()));
+        let high = std::env::temp_dir().join(format!("neenee-skill-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(low.join("x")).unwrap();
+        std::fs::create_dir_all(high.join("x")).unwrap();
+        std::fs::write(low.join("x").join("SKILL.md"), "---\nname: x\n---\nlow").unwrap();
+        std::fs::write(high.join("x").join("SKILL.md"), "---\nname: x\n---\nhigh").unwrap();
 
-    #[test]
-    fn has_discoverable_skills_returns_true_when_skill_md_present() {
-        let root = std::env::temp_dir().join(format!("neenee-skills-{}", uuid::Uuid::new_v4()));
-        let skill_dir = root.join("my-skill");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\nbody").unwrap();
-        assert!(has_discoverable_skills(&root));
-        let _ = std::fs::remove_dir_all(&root);
-    }
+        let config = SkillsConfig {
+            disabled: vec!["x".to_string()],
+            ..SkillsConfig::default()
+        };
+        let mut result = DiscoveryResult::default();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        discover_local_skills(&low, SkillScope::User, &config, &mut index, &mut result);
+        discover_local_skills(&high, SkillScope::Repo, &config, &mut index, &mut result);
 
-    #[test]
-    fn has_discoverable_skills_ignores_hidden_subtrees() {
-        // Mirrors the on-disk scanner: a SKILL.md inside a hidden directory
-        // (e.g. a `.git` worktree or the historical `.system` hack) does not
-        // by itself qualify the root as discoverable.
-        let root = std::env::temp_dir().join(format!("neenee-skills-{}", uuid::Uuid::new_v4()));
-        let hidden = root.join(".hidden").join("skill");
-        std::fs::create_dir_all(&hidden).unwrap();
-        std::fs::write(hidden.join("SKILL.md"), "---\nname: x\n---\nbody").unwrap();
-        assert!(!has_discoverable_skills(&root));
-        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.skills.len(), 1);
+        assert!(
+            !result.skills[0].enabled,
+            "disabled config applies to the overriding skill"
+        );
+
+        let _ = std::fs::remove_dir_all(&low);
+        let _ = std::fs::remove_dir_all(&high);
     }
 }

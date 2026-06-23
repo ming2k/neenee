@@ -96,7 +96,7 @@ Lives with the project root; travels with the repository.
 | `.neenee/commands/<name>.md` | Project-local slash commands (highest discovery priority) |
 | `.neenee/plans/<name>.md` | Plan-mode plan files (only location writable during planning) |
 | `.neenee/session.json`, `.neenee/sessions/` | Legacy in-project session storage ( transitional) |
-| `.agents/skills/`, `.claude/skills/`, `.kimi-code/skills/` | External application conventions (read-only) |
+| `.agents/skills/`, `.claude/skills/` | External application conventions (read-only) |
 | `.agents/commands/` | External application conventions (read-only) |
 
 The project root is located by walking upward from the current directory
@@ -108,25 +108,6 @@ or `package.json`.
 System skills are embedded into the binary at build time. They have no
 on-disk location and surface as the lowest-priority discovery source. See
 [ADR-0013](../adr/0013-skills-xdg-paths-and-bundled-embed.md).
-
-## Legacy deprecated locations
-
-Pre-XDG paths still scanned as low-priority fallbacks. A one-time
-deprecation warning directs the user to the XDG location. The XDG copy
-wins on name collision. Will be removed in a future release.
-
-| Path | Replacement |
-|------|-------------|
-| `~/.neenee/skills/` | `$XDG_DATA_HOME/neenee/skills/` |
-| `~/.neenee/commands/` | `$XDG_DATA_HOME/neenee/commands/` |
-
-Migration:
-
-```bash
-mv ~/.neenee/skills/*   $XDG_DATA_HOME/neenee/skills/   2>/dev/null || true
-mv ~/.neenee/commands/* $XDG_DATA_HOME/neenee/commands/ 2>/dev/null || true
-rmdir ~/.neenee/skills ~/.neenee/commands ~/.neenee     2>/dev/null || true
-```
 
 ## macOS and Windows defaults
 

@@ -5,6 +5,31 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **Legacy pre-XDG skill and command paths.** neenee no longer scans
+  `~/.neenee/skills/` or `~/.neenee/commands/`. Move their contents to the
+  XDG locations to keep them loaded:
+  ```bash
+  mv ~/.neenee/skills/*   $XDG_DATA_HOME/neenee/skills/   2>/dev/null || true
+  mv ~/.neenee/commands/* $XDG_DATA_HOME/neenee/commands/ 2>/dev/null || true
+  rmdir ~/.neenee/skills ~/.neenee/commands ~/.neenee     2>/dev/null || true
+  ```
+- **`~/.kimi-code/skills/` external skill directory.** Only `~/.agents/skills/`
+  and `~/.claude/skills/` are read as external application conventions now
+  (both user-global and project-local). Move any kimi-code skills into one of
+  the remaining external directories or the neenee XDG skill directory.
+
+### Fixed
+
+- **Skill discovery priority now overrides as documented.** A higher-priority
+  source (project-local, then configured paths, then user-global, then remote,
+  then bundled) now correctly overrides a lower-priority source that defines a
+  skill with the same name. Previously the first source scanned won, which
+  inverted the intended priority.
+
 ## [0.0.1] - 2026-06-24
 
 First usable release. neenee is now a working AI coding agent with a semantic
@@ -47,4 +72,5 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/ming2k/neenee/releases/tag/v0.0.1

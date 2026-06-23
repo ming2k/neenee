@@ -1,7 +1,7 @@
 # Agent design
 
 This section is the design canon for neenee's agent — a bounded, tool-using,
-semi-autonomous coding agent. The eight pages here are not independent
+semi-autonomous coding agent. The nine pages here are not independent
 features; they are facets of one system. Read together they describe how a
 single agent turn is steered, gated, isolated, made durable, and kept honest.
 
@@ -59,6 +59,10 @@ model of one agent turn.
 8. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
    to resolve ambiguity. The reference for the oneshot-channel blocking
    pattern the permission broker also uses.
+9. [Skills](skills.md) — on-demand domain expertise: the two-channel model
+   (catalog in the system prompt, body on demand), the source/priority
+   cascade, and explicit versus implicit invocation. The reference for the
+   extension surface that adds instructions rather than tools.
 
 ## How a turn flows through the canon
 

@@ -50,15 +50,11 @@ skills from, in priority order (later sources override earlier ones):
    `config.toml`, cached under `$XDG_CACHE_HOME/neenee/skills/remote/`.
 3. **User-global skills (XDG)** — `$XDG_DATA_HOME/neenee/skills/`
    (`~/.local/share/neenee/skills/` on Linux by default).
-4. **External user-global formats** — `~/.agents/skills/`, `~/.claude/skills/`,
-   `~/.kimi-code/skills/` (someone else's app convention).
-5. **Legacy user-global skills** — `~/.neenee/skills/`. Deprecated pre-XDG
-   fallback; emits a one-time warning on load directing you to move files to
-   the XDG location. Will be removed in a future release.
-6. **Extra local paths** configured under `[skills] paths` in `config.toml`.
-7. **Project-repo skills** — `.neenee/skills/`, `.agents/skills/`,
-   `.claude/skills/`, `.kimi-code/skills/` in the project root (highest
-   priority).
+4. **External user-global formats** — `~/.agents/skills/`, `~/.claude/skills/`
+   (someone else's app convention).
+5. **Extra local paths** configured under `[skills] paths` in `config.toml`.
+6. **Project-repo skills** — `.neenee/skills/`, `.agents/skills/`,
+   `.claude/skills/` in the project root (highest priority).
 
 All user-level paths resolve through the central `Dirs` layer
 (`crates/neenee-store/src/paths.rs`) and honour the standard XDG overrides

@@ -6,10 +6,9 @@
 //!     `crates/neenee-agent/skills/bundled/` (see [`bundled`]).
 //!   - Remote skill repositories fetched into `$XDG_CACHE_HOME/neenee/skills/remote/`.
 //!   - User-global skills: `$XDG_DATA_HOME/neenee/skills/` (XDG-resolved via
-//!     [`neenee_store::paths`]); legacy `~/.neenee/skills/` is still scanned
-//!     with a deprecation warning.
-//!   - External user-global formats: `~/.agents/skills/`, `~/.claude/skills/`,
-//!     `~/.kimi-code/skills/` (someone else's convention).
+//!     [`neenee_store::paths`]).
+//!   - External user-global formats: `~/.agents/skills/`, `~/.claude/skills/`
+//!     (someone else's convention).
 //!   - Configured extra paths (`[skills] paths = [...]` in `config.toml`).
 //!   - Project-local skills: `.neenee/skills/<name>/SKILL.md` (highest priority).
 //!
