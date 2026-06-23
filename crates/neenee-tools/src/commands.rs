@@ -2,8 +2,11 @@
 //!
 //! Commands are markdown files stored in:
 //!   - Project-local: `.neenee/commands/` (highest priority)
-//!   - User-global: `~/.neenee/commands/` (fallback)
+//!   - User-global (XDG): `$XDG_DATA_HOME/neenee/commands/`
+//!   - Legacy user-global: `~/.neenee/commands/` (deprecated fallback with
+//!     warning; see ADR-0013).
 
+use neenee_store::paths;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,7 +26,24 @@ struct Frontmatter {
 }
 
 pub fn discover_commands() -> Vec<CustomCommand> {
-    discover_commands_in(&[project_commands_dir(), user_commands_dir()])
+    let project = project_commands_dir();
+    let user = paths::get().user_commands_dir();
+    let legacy = legacy_user_commands_dir();
+
+    // Warn once if the legacy path has content, so users know to migrate.
+    if let Some(legacy) = legacy.as_ref().filter(|d| has_markdown_files(d)) {
+        tracing::warn!(
+            "reading commands from legacy location '{}'; move them to '{}' (XDG). \
+             Support for this path will be removed in a future release.",
+            legacy.display(),
+            user.display(),
+        );
+    }
+
+    // Order encodes priority: project (highest) → user (XDG) → legacy.
+    let mut dirs = vec![project, user];
+    dirs.extend(legacy);
+    discover_commands_in(&dirs)
 }
 
 fn discover_commands_in(dirs: &[PathBuf]) -> Vec<CustomCommand> {
@@ -149,15 +169,26 @@ fn split_arguments(input: &str) -> Vec<String> {
     arguments
 }
 
-fn user_commands_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".neenee")
-        .join("commands")
-}
-
 fn project_commands_dir() -> PathBuf {
     PathBuf::from(".neenee/commands")
+}
+
+/// Pre-XDG user-global commands location. Returns `None` when the home
+/// directory itself cannot be resolved. The directory may not exist; callers
+/// decide whether to scan it.
+fn legacy_user_commands_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".neenee").join("commands"))
+}
+
+/// Cheap pre-check used to gate the legacy-path deprecation warning: true iff
+/// `dir` exists and contains at least one `.md` entry (depth one).
+fn has_markdown_files(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().extension().and_then(|v| v.to_str()) == Some("md"))
 }
 
 #[cfg(test)]
@@ -201,5 +232,27 @@ mod tests {
         assert_eq!(commands[0].template, "Inspect $ARGUMENTS");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn has_markdown_files_detects_md_entries() {
+        let root = std::env::temp_dir().join(format!("neenee-cmd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!has_markdown_files(&root));
+
+        std::fs::write(root.join("README.md"), "x").unwrap();
+        assert!(has_markdown_files(&root));
+
+        std::fs::write(root.join("notes.txt"), "y").unwrap();
+        assert!(has_markdown_files(&root));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn has_markdown_files_returns_false_for_missing_dir() {
+        assert!(!has_markdown_files(Path::new(
+            "/nonexistent-neenee-commands-path"
+        )));
     }
 }

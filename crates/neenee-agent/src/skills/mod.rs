@@ -1,12 +1,17 @@
 //! Skills system: discover, load, and inject domain-specific expertise.
 //!
-//! Skills are markdown files with YAML frontmatter, stored in:
-//!   - Project-local: `.neenee/skills/<name>/SKILL.md` (highest priority)
-//!   - User-global: `~/.neenee/skills/<name>/SKILL.md`
-//!   - External formats: `.agents/skills/**/SKILL.md`, `.claude/skills/**/SKILL.md`,
-//!     `.kimi-code/skills/**/SKILL.md`
-//!   - Configured extra paths and remote skill repositories (`[skills]` in
-//!     `config.toml`).
+//! Skills are markdown files with YAML frontmatter, stored (in priority order,
+//! lowest first) across:
+//!   - Bundled system skills: compile-time-embedded under
+//!     `crates/neenee-agent/skills/bundled/` (see [`bundled`]).
+//!   - Remote skill repositories fetched into `$XDG_CACHE_HOME/neenee/skills/remote/`.
+//!   - User-global skills: `$XDG_DATA_HOME/neenee/skills/` (XDG-resolved via
+//!     [`neenee_store::paths`]); legacy `~/.neenee/skills/` is still scanned
+//!     with a deprecation warning.
+//!   - External user-global formats: `~/.agents/skills/`, `~/.claude/skills/`,
+//!     `~/.kimi-code/skills/` (someone else's convention).
+//!   - Configured extra paths (`[skills] paths = [...]` in `config.toml`).
+//!   - Project-local skills: `.neenee/skills/<name>/SKILL.md` (highest priority).
 //!
 //! Frontmatter schema:
 //!   ```yaml
@@ -25,6 +30,7 @@
 //!   ---
 //!   ```
 
+pub mod bundled;
 pub mod discovery;
 pub mod metadata;
 pub mod remote;

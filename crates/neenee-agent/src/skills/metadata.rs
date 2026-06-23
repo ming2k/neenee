@@ -138,8 +138,20 @@ pub fn parse_skill_file(
 ) -> Result<Skill, String> {
     let raw = std::fs::read_to_string(source)
         .map_err(|e| format!("failed to read '{}': {}", source.display(), e))?;
+    parse_skill_from_str(source, root, scope, enabled, &raw)
+}
 
-    let (frontmatter, body) = split_frontmatter(&raw);
+/// Parse skill content already loaded into memory (e.g. from a compile-time
+/// embed). Shares schema interpretation with [`parse_skill_file`] so the
+/// on-disk and embedded paths can never drift.
+pub fn parse_skill_from_str(
+    source: &Path,
+    root: &Path,
+    scope: SkillScope,
+    enabled: bool,
+    raw: &str,
+) -> Result<Skill, String> {
+    let (frontmatter, body) = split_frontmatter(raw);
     let meta: SkillFrontmatter = if frontmatter.is_empty() {
         SkillFrontmatter::default()
     } else {

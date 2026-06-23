@@ -18,8 +18,9 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use neenee_store::paths;
+
 const INDEX_FILE: &str = "index.json";
-const REMOTE_SUBDIR: &str = "remote";
 
 #[derive(Debug, Deserialize)]
 pub struct RemoteSkillEntry {
@@ -34,14 +35,11 @@ pub struct RemoteSkillIndex {
     pub skills: Vec<RemoteSkillEntry>,
 }
 
-/// Directory where remote skill repos are cached.
+/// Directory where remote skill repos are cached. Resolved via the project's
+/// central XDG `Dirs` so `--cache-dir` / `$XDG_CACHE_HOME` / `NEENEE_CACHE_DIR`
+/// overrides all land in one place. See ADR-0013.
 pub fn remote_cache_root() -> PathBuf {
-    dirs::cache_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("neenee")
-        .join("skills")
-        .join(REMOTE_SUBDIR)
+    paths::get().remote_skills_cache()
 }
 
 /// Clear every cached remote skill repo.

@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 neenee-core = { path = "../neenee-core" }
+neenee-store = { path = "../neenee-store" }
 async-trait = "0.1"
 futures = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "socks", "gzip", "brotli"] }

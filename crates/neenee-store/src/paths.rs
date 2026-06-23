@@ -44,10 +44,9 @@ pub struct Dirs {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,
-    /// `$XDG_CACHE_HOME/neenee`. Currently written only lazily (remote-skill
-    /// cache) and read by `remote_skills_cache` / `ensure`, which are themselves
-    /// not yet wired into the production startup — kept as structural XDG state.
-    #[allow(dead_code)]
+    /// `$XDG_CACHE_HOME/neenee`. Written by the remote-skill cache (see
+    /// [`Self::remote_skills_cache`]) and otherwise kept lazily by `fsutil`
+    /// on first write.
     pub cache_dir: PathBuf,
     /// `$XDG_RUNTIME_DIR/neenee` when set, otherwise `None` (callers fall back
     /// to `state_dir` for portability and to avoid surprising tmpfs use).
@@ -121,17 +120,24 @@ impl Dirs {
         self.data_dir.join("goals.db")
     }
 
-    /// Locally installed skills (per-project skills still live under the
-    /// project's working directory and are not stored here).
-    #[allow(dead_code)]
-    pub fn local_skills_dir(&self) -> PathBuf {
-        self.data_dir.join("skills").join("local")
+    /// User-global skills (`$XDG_DATA_HOME/neenee/skills`). Per-project skills
+    /// still live under the project's working directory (`.neenee/skills/`)
+    /// and are not stored here. Bundled system skills are compile-time
+    /// embedded, not disk-resident — see `neenee_agent::skills::bundled`.
+    pub fn user_skills_dir(&self) -> PathBuf {
+        self.data_dir.join("skills")
     }
 
-    /// Cached remote skills (safe to delete).
-    #[allow(dead_code)]
+    /// Cached remote skills (`$XDG_CACHE_HOME/neenee/skills/remote`). Safe to
+    /// delete; repopulated on next `fetch_remote_repo`.
     pub fn remote_skills_cache(&self) -> PathBuf {
         self.cache_dir.join("skills").join("remote")
+    }
+
+    /// User-global slash commands (`$XDG_DATA_HOME/neenee/commands`). Project
+    /// commands still live under `.neenee/commands/` in the working directory.
+    pub fn user_commands_dir(&self) -> PathBuf {
+        self.data_dir.join("commands")
     }
 
     /// Pointer to the currently active session id per project. Rebuildable, so
@@ -213,7 +219,8 @@ impl Dirs {
             &self.cache_dir,
             &self.projects_dir(),
             &self.legacy_sessions_dir(),
-            &self.local_skills_dir(),
+            &self.user_skills_dir(),
+            &self.user_commands_dir(),
             &self.remote_skills_cache(),
             &self.log_dir(),
         ] {

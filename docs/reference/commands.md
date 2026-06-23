@@ -118,9 +118,11 @@ back to OSC52 or surfaces the underlying clipboard error.
 ## Custom commands
 
 Markdown files discovered in `.neenee/commands/` (project-local, higher
-priority) and `~/.neenee/commands/` (user-global, fallback). The filename stem
-or frontmatter `name` becomes `/name` after lowercasing and stripping a leading
-`/`. Names allow ASCII letters, digits, `-`, and `_`.
+priority), `$XDG_DATA_HOME/neenee/commands/` (user-global, XDG; default
+`~/.local/share/neenee/commands/`), and `~/.neenee/commands/` (legacy
+pre-XDG fallback, emits a deprecation warning — see ADR-0013). The filename
+stem or frontmatter `name` becomes `/name` after lowercasing and stripping a
+leading `/`. Names allow ASCII letters, digits, `-`, and `_`.
 
 Optional YAML frontmatter:
 
