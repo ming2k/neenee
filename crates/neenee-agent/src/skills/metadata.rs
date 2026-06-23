@@ -8,15 +8,18 @@ use std::path::{Path, PathBuf};
 /// scopes when two skills share the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillScope {
-    /// Bundled system skills shipped with neenee.
+    /// Bundled system skills shipped with neenee (compile-time embedded).
     System,
     /// Skills downloaded from a remote skill repository.
     Remote,
-    /// User-global skills (under `~/.neenee/skills`, `~/.agents/skills`, etc.).
+    /// User-global skills: XDG (`$XDG_DATA_HOME/neenee/skills`), external
+    /// conventions (`~/.agents/skills`, `~/.claude/skills`, `~/.kimi-code/skills`),
+    /// or the deprecated `~/.neenee/skills` fallback. See ADR-0013/0014.
     User,
     /// Additional paths configured in `config.toml`.
     Extra,
-    /// Project-local skills (under `.neenee/skills`, `.agents/skills`, etc.).
+    /// Project-local skills (`.neenee/skills`, `.agents/skills`, etc., in the
+    /// project working tree).
     Repo,
 }
 

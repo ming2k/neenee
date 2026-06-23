@@ -12,6 +12,11 @@ Lookup-oriented documentation — tables, lists, and exact values.
 
 - [Slash commands](commands.md) — built-in commands, subcommands, custom commands
 
+## Files and persistence
+
+- [Paths](paths.md) — every file neenee reads or writes, by XDG category,
+  with override precedence and cleanup quick reference
+
 ## TUI
 
 - [TUI overview](tui/) — component map, file responsibilities

@@ -63,7 +63,9 @@ skills from, in priority order (later sources override earlier ones):
 All user-level paths resolve through the central `Dirs` layer
 (`crates/neenee-store/src/paths.rs`) and honour the standard XDG overrides
 (`$XDG_DATA_HOME`, `$XDG_CACHE_HOME`) plus the app-specific overrides
-(`$NEENEE_DATA_DIR`, `$NEENEE_CACHE_DIR`).
+(`$NEENEE_DATA_DIR`, `$NEENEE_CACHE_DIR`). See [Paths](../paths.md) for
+the full override stack and [Persistence and the XDG
+layout](../../explanation/persistence.md) for the conceptual model.
 
 The catalog is built by `build_skills_index` and injected into the system
 prompt by `Agent::build_system_prompt`. Skills whose names are mentioned in a

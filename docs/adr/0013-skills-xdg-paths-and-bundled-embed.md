@@ -146,3 +146,5 @@ Where `$XDG_DATA_HOME` defaults to `~/.local/share` on Linux.
   `neenee-store` for `paths::get()`. The new edge keeps the strict layering
   intact: `neenee-store` does not depend on `neenee-tools`, so no cycle is
   introduced.
+- ADR-0014 — codifies the unified XDG persistence architecture as
+  project-wide policy (this ADR is the skills-specific application).

@@ -120,9 +120,13 @@ back to OSC52 or surfaces the underlying clipboard error.
 Markdown files discovered in `.neenee/commands/` (project-local, higher
 priority), `$XDG_DATA_HOME/neenee/commands/` (user-global, XDG; default
 `~/.local/share/neenee/commands/`), and `~/.neenee/commands/` (legacy
-pre-XDG fallback, emits a deprecation warning — see ADR-0013). The filename
-stem or frontmatter `name` becomes `/name` after lowercasing and stripping a
-leading `/`. Names allow ASCII letters, digits, `-`, and `_`.
+pre-XDG fallback, emits a deprecation warning — see
+[ADR-0013](../adr/0013-skills-xdg-paths-and-bundled-embed.md)). The
+filename stem or frontmatter `name` becomes `/name` after lowercasing and
+stripping a leading `/`. Names allow ASCII letters, digits, `-`, and `_`.
+
+See [Paths](paths.md) for the full override stack and the project-vs-XDG
+boundary.
 
 Optional YAML frontmatter:
 

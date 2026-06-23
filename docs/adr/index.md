@@ -24,3 +24,4 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0011](0011-subagent-profiles.md) | Sub-agent profiles: capability-axis tool admission (`requires_user` / `spawns_subagent` + `EXPLORE` profile) | Accepted |
 | [0012](0012-toolaccess-tier-split.md) | `ToolAccess` tier split (`Read < Execute < Write`) and the `VERIFY` profile | Accepted |
 | [0013](0013-skills-xdg-paths-and-bundled-embed.md) | Skills & commands: XDG paths + compile-time-embedded bundled skills | Accepted |
+| [0014](0014-xdg-persistence-architecture.md) | Unified XDG persistence architecture (single `Dirs` policy, four-category model, fixed override precedence) | Accepted |

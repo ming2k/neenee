@@ -2,6 +2,15 @@
 
 Conceptual background and design rationale.
 
+## Storage and persistence
+
+How neenee decides where each file lives, why it follows the XDG Base
+Directory Specification, and what is safe to delete.
+
+| Page | Purpose |
+|------|--------|
+| [Persistence and the XDG layout](persistence.md) | The four-category model (config / data / state / cache), override precedence, and what each category means operationally |
+
 ## Agent design
 
 The design canon for neenee's agent — how a turn is steered, gated, isolated,
