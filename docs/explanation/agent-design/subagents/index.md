@@ -64,9 +64,9 @@ mutate files.
 
 ## In this section
 
-- [Profiles](profiles.md) — the `SubagentProfile` primitive, and why there are
-  two built-in roles (`EXPLORE`, `VERIFY`).
-- [Admission](admission.md) — how `ToolPolicy::admits` decides which tools a
+- [Profiles](profiles.md) — the profile primitive, and why there are two
+  built-in roles (`EXPLORE`, `VERIFY`).
+- [Admission](admission.md) — how the admission rule decides which tools a
   sub-agent may use, and why `ask_user` is excluded.
 - [Runtime](runtime.md) — event streaming, the TUI zoom view, failure and
   cancellation, and Plan-mode interaction.

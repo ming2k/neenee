@@ -46,20 +46,16 @@ by the agent backend.
 
 | Form | Effect |
 |------|--------|
-| `/goal` or `/goal status` | Show the current goal, status, and checklist |
+| `/goal` or `/goal status` | Show the current goal, completion state, and checklist |
 | `/goal <objective>` | Set or replace the active goal |
 | `/goal edit <objective>` | Rewrite the objective of the current goal |
 | `/goal done` | Mark the active goal completed |
-| `/goal pause` | Pause an active goal |
-| `/goal resume` | Resume a paused, blocked, usage- or budget-limited goal |
-| `/goal budget <tokens>` | Set a positive token budget for the goal |
-| `/goal budget clear` | Remove the goal's token budget |
 | `/goal clear` | Remove the active goal |
 
 Goal state is persisted per session in a SQLite store, so it survives restarts
-and is restored on `/resume`. Each turn's token and elapsed-time cost is
-accounted against the active goal; reaching the token budget moves the goal to
-`budget_limited` until you raise the budget or `/goal resume`.
+and is restored on `/resume`. The goal carries no token or time budget, and the
+autonomous loop has no iteration cap. See
+[Goals](../explanation/agent-design/goals.md).
 
 ### `/loop`
 

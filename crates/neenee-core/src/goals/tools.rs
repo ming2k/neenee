@@ -6,7 +6,6 @@ use serde_json::json;
 use crate::{Tool, ToolAccess};
 
 use super::service::GoalService;
-use super::{Goal, GoalChecklistItem, GoalChecklistStatus};
 
 /// Shared context injected into goal-aware tools so they know the current
 /// thread/session id and can reach the goal service.
@@ -43,7 +42,7 @@ impl Tool for GetGoalTool {
     }
 
     fn description(&self) -> &str {
-        "Get the current goal for this thread, including objective, completion state, and checklist."
+        "Get the current goal for this thread, including objective and completion state."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -150,7 +149,7 @@ impl Tool for UpdateGoalTool {
     }
 
     fn description(&self) -> &str {
-        "Mark the existing goal as complete. Use this tool only when the objective has actually been achieved and no required work remains (the checklist, if any, must be fully resolved). Do not mark a goal complete merely because you are stopping work or because progress is slow."
+        "Mark the existing goal as complete. Use this tool only when the objective has actually been achieved and no required work remains. Do not mark a goal complete merely because you are stopping work or because progress is slow."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -160,7 +159,7 @@ impl Tool for UpdateGoalTool {
                 "status": {
                     "type": "string",
                     "enum": ["complete"],
-                    "description": "Set to `complete` only when the objective is achieved and the checklist, if any, is fully resolved."
+                    "description": "Set to `complete` only when the objective is achieved."
                 }
             },
             "required": ["status"],
@@ -197,111 +196,6 @@ impl Tool for UpdateGoalTool {
             }
             other => Err(format!("invalid update_goal status: {other}")),
         }
-    }
-}
-
-pub struct GoalChecklistTool {
-    goal: Arc<Mutex<Option<Goal>>>,
-}
-
-impl GoalChecklistTool {
-    pub fn new(_context: GoalToolContext, goal: Arc<Mutex<Option<Goal>>>) -> Self {
-        Self { goal }
-    }
-}
-
-#[async_trait]
-impl Tool for GoalChecklistTool {
-    fn name(&self) -> &str {
-        "goal_checklist"
-    }
-
-    fn description(&self) -> &str {
-        "Replace the active goal's structured checklist. Use this to expose concrete progress. Keep exactly one item in_progress while working; mark verified work completed."
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "maxItems": 50,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": { "type": "string" },
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"]
-                            }
-                        },
-                        "required": ["content", "status"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["items"],
-            "additionalProperties": false
-        })
-    }
-
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
-
-    async fn call(&self, arguments: &str) -> Result<String, String> {
-        #[derive(serde::Deserialize)]
-        struct Args {
-            items: Vec<GoalChecklistItem>,
-        }
-
-        let args: Args =
-            serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
-        if args.items.len() > 50 {
-            return Err("Goal checklist is limited to 50 items.".to_string());
-        }
-        if args.items.iter().any(|item| item.content.trim().is_empty()) {
-            return Err("Goal checklist item content cannot be empty.".to_string());
-        }
-        let in_progress = args
-            .items
-            .iter()
-            .filter(|item| item.status == GoalChecklistStatus::InProgress)
-            .count();
-        if in_progress > 1 {
-            return Err("At most one goal checklist item may be in_progress.".to_string());
-        }
-
-        let mut guard = self.goal.lock().map_err(|err| err.to_string())?;
-        let goal = guard
-            .as_mut()
-            .ok_or_else(|| "No active goal. Set one with /goal <objective>.".to_string())?;
-        if goal.is_complete {
-            return Err("The goal is already complete.".to_string());
-        }
-        if args.items.is_empty() && !goal.checklist.is_empty() {
-            return Err(
-                "An active checklist cannot be cleared. Mark each item completed or cancelled."
-                    .to_string(),
-            );
-        }
-        goal.checklist = args.items;
-        let resolved = goal
-            .checklist
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item.status,
-                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-                )
-            })
-            .count();
-        Ok(format!(
-            "Goal checklist updated: {}/{} resolved.",
-            resolved,
-            goal.checklist.len()
-        ))
     }
 }
 

@@ -90,9 +90,6 @@ fn runtime_goal_from_persisted(goal: ThreadGoal) -> Goal {
     Goal {
         objective: goal.objective,
         is_complete: goal.is_complete,
-        // The checklist is intentionally not persisted — it lives in memory
-        // on the Agent and is re-attached by `refresh_agent_goal`.
-        checklist: Vec::new(),
     }
 }
 

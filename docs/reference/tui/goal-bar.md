@@ -1,7 +1,7 @@
 # Goal bar
 
 Transient goal indicator shown directly above the status bar (and thus above
-the input box). Only visible while a goal is in the `Active` state.
+the input box). Only visible while an active, incomplete goal is set.
 
 ## Appearance
 
@@ -21,16 +21,15 @@ the input box). Only visible while a goal is in the `Active` state.
 ## Interaction
 
 Clicking anywhere on the goal bar triggers `/goal status`, which surfaces the
-full goal detail (objective, status, and checklist) in the transcript.
+full goal detail (objective, completion state, and checklist) in the transcript.
 
 ## Visibility
 
 | Condition | Visible? |
 |-----------|----------|
 | No goal set | No |
-| Goal `Active` | Yes |
-| Goal `Paused` / `Blocked` / `UsageLimited` | No |
-| Goal `Complete` / `BudgetLimited` (terminal) | No |
+| Active, incomplete goal | Yes |
+| Completed goal | No |
 | Overlay modal open | No |
 | Sub-agent zoom view | No |
 

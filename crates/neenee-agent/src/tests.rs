@@ -167,7 +167,6 @@ fn active_goal(objective: &str) -> Goal {
     Goal {
         objective: objective.to_string(),
         is_complete: false,
-        checklist: Vec::new(),
     }
 }
 
@@ -204,96 +203,74 @@ fn goal_lifecycle_is_explicit() {
     assert_eq!(agent.get_goal(), None);
 }
 
-#[tokio::test]
-async fn goal_checklist_controls_completion_readiness() {
+// ── Pursuit stop-gate ──────────────────────────────────────────────────
+
+#[test]
+fn pursuit_gate_is_inert_until_armed() {
     let agent = agent();
-    agent.set_goal(active_goal("ship verified work"));
-    let tool = agent
-        .tools
-        .iter()
-        .find(|tool| tool.name() == "goal_checklist")
-        .unwrap();
-
-    tool.call(
-        r#"{"items":[
-                {"content":"implement","status":"completed"},
-                {"content":"verify","status":"in_progress"}
-            ]}"#,
-    )
-    .await
-    .unwrap();
-    assert!(!agent.goal_can_complete());
-
-    tool.call(
-        r#"{"items":[
-                {"content":"implement","status":"completed"},
-                {"content":"verify","status":"completed"}
-            ]}"#,
-    )
-    .await
-    .unwrap();
-    assert!(agent.goal_can_complete());
-}
-
-#[tokio::test]
-async fn goal_checklist_rejects_multiple_in_progress_items() {
-    let agent = agent();
-    agent.set_goal(active_goal("track work"));
-    let tool = agent
-        .tools
-        .iter()
-        .find(|tool| tool.name() == "goal_checklist")
-        .unwrap();
-
-    let error = tool
-        .call(
-            r#"{"items":[
-                    {"content":"one","status":"in_progress"},
-                    {"content":"two","status":"in_progress"}
-                ]}"#,
-        )
-        .await
-        .unwrap_err();
-
-    assert!(error.contains("At most one"));
-}
-
-#[tokio::test]
-async fn goal_checklist_cannot_be_silently_cleared() {
-    let agent = agent();
-    agent.set_goal(active_goal("track work"));
-    let tool = agent
-        .tools
-        .iter()
-        .find(|tool| tool.name() == "goal_checklist")
-        .unwrap();
-    tool.call(r#"{"items":[{"content":"verify","status":"pending"}]}"#)
-        .await
-        .unwrap();
-
-    let error = tool.call(r#"{"items":[]}"#).await.unwrap_err();
-
-    assert!(error.contains("cannot be cleared"));
-    assert!(!agent.goal_can_complete());
+    agent.set_goal(active_goal("ship"));
+    let resp = Message::new(Role::Assistant, "working".to_string());
+    assert!(!agent.is_pursuit_armed());
+    assert!(agent.pursuit_continuation(&resp).is_none());
 }
 
 #[test]
-fn goal_checklist_updates_emit_harness_state() {
+fn pursuit_gate_returns_continuation_when_armed_and_active() {
     let agent = agent();
-    agent.set_goal(active_goal("track"));
-    let call = ToolCall {
-        id: "call".to_string(),
-        name: "goal_checklist".to_string(),
-        arguments: "{}".to_string(),
-    };
-    let mut events = Vec::new();
+    agent.set_goal(active_goal("ship the feature"));
+    agent.arm_pursuit();
+    assert!(agent.is_pursuit_armed());
+    assert_eq!(agent.pursuit_iterations(), 0);
 
-    agent.emit_goal_update(&call, &mut |event| events.push(event));
+    let resp = Message::new(Role::Assistant, "I will keep working".to_string());
+    let prompt = agent
+        .pursuit_continuation(&resp)
+        .expect("armed + active goal + no marker => continue");
+    assert!(prompt.contains("ship the feature"));
+    // The predicate does not bump the counter; the turn loop does, on consume.
+    assert_eq!(agent.pursuit_iterations(), 0);
+}
 
-    assert!(matches!(
-        events.as_slice(),
-        [AgentEvent::GoalUpdated(Goal { objective, .. })] if objective == "track"
-    ));
+#[test]
+fn pursuit_gate_lets_turn_end_on_completion_marker() {
+    let agent = agent();
+    agent.set_goal(active_goal("ship"));
+    agent.arm_pursuit();
+    let resp = Message::new(
+        Role::Assistant,
+        format!("all done {}", crate::GOAL_COMPLETE_MARKER),
+    );
+    assert!(agent.pursuit_continuation(&resp).is_none());
+}
+
+#[test]
+fn pursuit_gate_lets_turn_end_without_active_goal() {
+    let agent = agent();
+    agent.arm_pursuit();
+    let resp = Message::new(Role::Assistant, "working".to_string());
+    assert!(agent.pursuit_continuation(&resp).is_none());
+}
+
+#[test]
+fn pursuit_gate_lets_turn_end_when_goal_already_complete() {
+    let agent = agent();
+    let mut done = active_goal("ship");
+    done.is_complete = true;
+    agent.set_goal(done);
+    agent.arm_pursuit();
+    let resp = Message::new(Role::Assistant, "working".to_string());
+    assert!(agent.pursuit_continuation(&resp).is_none());
+}
+
+#[test]
+fn disarm_pursuit_turns_the_gate_off() {
+    let agent = agent();
+    agent.set_goal(active_goal("ship"));
+    agent.arm_pursuit();
+    let resp = Message::new(Role::Assistant, "working".to_string());
+    assert!(agent.pursuit_continuation(&resp).is_some());
+    agent.disarm_pursuit();
+    assert!(agent.pursuit_continuation(&resp).is_none());
 }
 
 #[tokio::test]
@@ -1658,12 +1635,10 @@ async fn stall_streak_resets_after_a_productive_round() {
 
 #[test]
 fn call_was_productive_recognises_mutating_read_tools() {
-    // The four mutating Read tools must count as productive for stall
-    // detection, alongside any name we don't recognise (the access-bit
-    // lookup happens elsewhere; the name list is the fallback for the
-    // text-fallback path).
+    // The mutating Read tools must count as productive for stall detection,
+    // alongside any name we don't recognise (the access-bit lookup happens
+    // elsewhere; the name list is the fallback for the text-fallback path).
     use crate::agent::call_was_productive;
-    assert!(call_was_productive("goal_checklist"));
     assert!(call_was_productive("plan_enter"));
     assert!(call_was_productive("plan_exit"));
     assert!(call_was_productive("update_plan_progress"));

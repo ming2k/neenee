@@ -212,10 +212,7 @@ pub async fn refresh_agent_goal(
 ) -> Option<Goal> {
     match goal_service.get_goal(thread_id).await {
         Ok(Some(db_goal)) => {
-            let mut goal = db_goal;
-            if let Some(mut current) = agent.get_goal() {
-                goal.checklist = std::mem::take(&mut current.checklist);
-            }
+            let goal = db_goal;
             agent.set_goal(goal.clone());
             Some(goal)
         }
@@ -473,10 +470,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     let outcome = result?;
 
     // Marker-based completion: if the model explicitly emitted the completion
-    // marker and the goal checklist allows completion, mark it complete in the
-    // DB. The pre-ADR-0010 token/time accounting step is gone — per-turn
-    // telemetry stays on `outcome.token_usage` but is no longer booked
-    // against a goal.
+    // marker and an active goal exists, mark it complete in the DB.
     let requested_completion = outcome.message.content.contains(GOAL_COMPLETE_MARKER);
     let mut completed = false;
     if requested_completion && agent.goal_can_complete() {
@@ -508,8 +502,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     }
     if requested_completion && !completed {
         let _ = tx.send(AgentResponse::Text(
-            "Goal completion was deferred because the checklist still has unfinished items."
-                .to_string(),
+            "Goal completion marker ignored: no active goal is set.".to_string(),
         ));
     }
     if completed {

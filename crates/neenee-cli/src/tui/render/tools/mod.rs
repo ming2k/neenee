@@ -177,7 +177,6 @@ pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
         "task" => &meta::TaskPresenter,
         "use_skill" => &meta::UseSkillPresenter,
         "create_project" => &meta::CreateProjectPresenter,
-        "goal_checklist" => &meta::GoalChecklistPresenter,
         _ => &fallback::FallbackPresenter,
     }
 }

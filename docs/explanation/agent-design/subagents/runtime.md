@@ -21,9 +21,9 @@ The forwarded events carry the same shapes the parent stream does — streaming
 deltas, tool calls, tool results, activity — so the zoomed view renders through
 the same transcript pipeline as the top-level conversation. Parent-only events
 that have no read-only-researcher meaning (goal updates, mode changes,
-permission requests) are dropped on the way through. A `UserQuestionRequest`
-that somehow reaches the forwarder is dropped with a defensive
-`tracing::error!` rather than silently deadlocking (see
+permission requests) are dropped on the way through. A question request
+that somehow reaches the forwarder is dropped with a defensive error log
+rather than silently deadlocking (see
 [Admission](admission.md)).
 
 ## TUI zoom view
@@ -50,7 +50,7 @@ snapshot. The detailed rendering reference is
 
 ## Failure and cancellation
 
-A sub-agent that hits a harness safety bound (too many tool rounds, repeated
+A sub-agent that hits a harness safety bound (a read-only stall, repeated
 identical calls) or a provider error still returns its result payload. Its
 summary is prefixed so the existing failure classifier and the TUI's Failed
 badge both trigger, and the partial transcript is preserved so the user can

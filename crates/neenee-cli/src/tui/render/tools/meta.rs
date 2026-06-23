@@ -41,11 +41,3 @@ impl ToolPresenter for CreateProjectPresenter {
             .unwrap_or_else(|| "Create project".to_string())
     }
 }
-
-pub struct GoalChecklistPresenter;
-
-impl ToolPresenter for GoalChecklistPresenter {
-    fn summary(&self, _view: &ToolView) -> String {
-        "Update goal checklist".to_string()
-    }
-}

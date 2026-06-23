@@ -1,9 +1,9 @@
 # Providers
 
 The agent talks to LLM providers through the `Provider` trait
-(`crates/neenee-core/src/lib.rs`). Every provider implementation lives in
-`crates/neenee-core/src/providers.rs`. Provider selection happens at startup
-and on `/provider switch` in `crates/neenee/src/main.rs`.
+(`crates/neenee-core/src/capability.rs`). Every provider implementation lives
+in `crates/neenee-providers/src/`. Provider selection happens at startup and
+on `/provider switch` in `crates/neenee-cli/src/main.rs`.
 
 ## Capability matrix
 
@@ -21,11 +21,11 @@ Three capability surfaces matter for tool-using agents:
 
 | Provider | Native tools | Reasoning | Structured streaming | Source |
 |----------|--------------|-----------|----------------------|--------|
-| `OpenAiCompatProvider` | yes | yes | yes | `providers.rs` (`OpenAiCompatProvider`) |
+| `OpenAiCompatProvider` | yes | yes | yes | `openai_compat.rs` |
 | OpenAI-compatible registry presets | yes | yes | yes | `OpenAiProviderSpec` (delegates to `OpenAiCompatProvider`) |
-| `GeminiProvider` | no | no | no | `providers.rs` (`GeminiProvider`) |
-| `LlamaServerProvider` | no | no | no | `providers.rs` (`LlamaServerProvider`) |
-| `MockProvider` | no | no | no | `providers.rs` (`MockProvider`) |
+| `GeminiProvider` | no | no | no | `gemini.rs` |
+| `LlamaServerProvider` | no | no | no | `llama.rs` |
+| `MockProvider` | no | no | no | `mock.rs` |
 
 The four OpenAI-compatible presets in `OPENAI_PROVIDER_SPECS`
 (`kimi-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `zai-code`) are built by
@@ -46,8 +46,8 @@ separate `<NAME>_MODEL` env var.
 ### OpenAI-compatible presets
 
 Each row corresponds to one entry in the `OPENAI_PROVIDER_SPECS` table in
-`providers.rs`. The endpoint, default model, and env vars are data in that
-table, not hard-coded per struct.
+`crates/neenee-providers/src/registry.rs`. The endpoint, default model, and
+env vars are data in that table, not hard-coded per struct.
 
 | `default_provider` | Endpoint | API key env | Model env | Default / popular models |
 |--------------------|----------|-------------|-----------|--------------------------|
@@ -82,7 +82,7 @@ Notes:
 
 Provider construction is centralized in the model catalog
 (`catalog::build_provider_for` / `catalog::build_catalog` in
-`crates/neenee/src/catalog.rs`). Every provider id — registry preset or
+`crates/neenee-agent/src/catalog.rs`). Every provider id — registry preset or
 bespoke — is materialized into a `Channel` carrying fully resolved
 credentials, model id, and transport, so startup and runtime switching share
 one source of truth for the env-var-then-config resolution rules.
@@ -101,7 +101,8 @@ one source of truth for the env-var-then-config resolution rules.
 | API-key status | `provider_key_status` | Reports per-provider readiness to the TUI (derived from the catalog) |
 | Model-name mirror | `catalog::resolved_model_name` | Friendly default model label for the TUI header |
 
-Runtime provider switching uses `ProxyProvider` (`main.rs`), an
+Runtime provider switching uses `ProxyProvider`
+(`crates/neenee-agent/src/orchestration.rs`), an
 `Arc<RwLock<Arc<dyn Provider>>>` holder that hot-swaps the active provider
 without rebuilding the `Agent`.
 
@@ -109,10 +110,12 @@ without rebuilding the `Agent`.
 
 Transient HTTP `408`, `429`, `5xx`, connection, and timeout failures are
 wrapped in `RetryableError` (`crates/neenee-core/src/error.rs`) by
-`ensure_success` and `transport_error` in `providers.rs`. The marker prefix
+`ensure_success` and `transport_error` in `crates/neenee-providers/src/lib.rs`.
+The marker prefix
 is `[NEENEE_RETRYABLE]`.
 
-Retry is a turn-level loop inside `execute_turn` (`crates/neenee/src/main.rs`),
+Retry is a turn-level loop inside `execute_turn`
+(`crates/neenee-agent/src/orchestration.rs`),
 not a provider decorator. Configuration:
 
 | Config key | Default | Hard maximum |
@@ -123,7 +126,8 @@ not a provider decorator. Configuration:
 
 Backoff is computed by `retry_delay_ms` as exponential
 `base_ms * 2^(attempt-1)` capped at `max_ms`. Server `Retry-After` or
-`retry-after-ms` headers (parsed by `retry_after_ms` in `providers.rs`) take
+`retry-after-ms` headers (parsed by `retry_after_ms` in
+`crates/neenee-providers/src/lib.rs`) take
 priority. Once any tool has run in the current turn, retryable errors become
 terminal so tool side effects are never replayed.
 

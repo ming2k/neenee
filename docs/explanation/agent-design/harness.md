@@ -5,7 +5,7 @@ inside explicit state, execution, and safety boundaries.
 
 ## Turn execution
 
-Every CLI turn uses `Agent::run_streaming_with_events()`:
+Every CLI turn runs the streaming agent loop:
 
 1. Refresh the system context with mode, goal, tools, and skill metadata.
 2. Stream provider text and reconstruct native tool-call deltas by index.
@@ -35,38 +35,29 @@ see [Provider capabilities](../provider-capabilities.md) and
 
 ### Declared: tools
 
-Tool schemas live inside the provider, not the conversation. Each turn calls
-`provider.prepare_tools(&self.tools)` before any network work, caching every
-tool's OpenAI function schema (`Tool::to_openai_function()`) in
-`OpenAiCompatProvider.tools`. Every HTTP request then re-injects the full cached
-set:
-
-```text
-body["tools"]       = all cached schemas
-body["tool_choice"] = "auto"
-```
+Tool schemas live inside the provider, not the conversation. Each turn caches
+every tool's OpenAI function schema before any network work. Every HTTP
+request then re-injects the full cached set as the `tools` field with
+`tool_choice: "auto"`.
 
 Tool schemas are request-scoped. Every ReAct round, including the round that
 carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
-`OpenAiCompatProvider` declares schemas natively. The OpenAI-compatible registry
+The OpenAI-compatible providers declare schemas natively: the registry
 presets (`kimi-code`, `deepseek-v4-flash`, `deepseek-v4-pro`, `zai-code`) and
-the bespoke `openai` entry all inherit the same path: each is built by
-`OpenAiProviderSpec::build` (or `OpenAiCompatProvider::with_base_url` for
-`openai`) into an `OpenAiCompatProvider`, so they delegate to its
-`prepare_tools`. `GeminiProvider` and `LlamaServerProvider` do not override
-the default `prepare_tools` and never send a `tools` field; tool calls on
-those providers travel only through the universal fallback below.
+the bespoke `openai` entry all share one adapter, so they inherit native tool
+declaration. The Gemini and Llama adapters do not override the default and
+never send a `tools` field; tool calls on those providers travel only through
+the universal fallback below.
 
 ### Observed: reasoning
 
 The harness never declares reasoning support and never sends a flag that
 requests it. Providers passively read `reasoning_content` from stream deltas
-(`parse_openai_stream_data`) and complete messages (`chat`), forwarding it as
-`ProviderStreamEvent::ReasoningDelta`. Only models that emit the field
-(`deepseek-v4-flash` thinking mode, reasoning-tuned GLM and Qwen variants) surface
-reasoning; other models produce no `ReasoningDelta` events.
+and complete messages, forwarding it as a reasoning event. Only models that
+emit the field (`deepseek-v4-flash` thinking mode, reasoning-tuned GLM and
+Qwen variants) surface reasoning; other models produce none.
 
 Reasoning is rendering metadata. It is not summarized, not re-injected as
 follow-up context, and not used for control flow.
@@ -77,22 +68,22 @@ Both execution paths feed one shared registry:
 
 | Path | Transport | Tool calls |
 |------|-----------|-----------|
-| `chat()` | Single HTTP round trip | `choices[0].message.tool_calls` complete |
-| `stream_chat_events()` | SSE stream | `delta.tool_calls` fragments accumulated by `index` |
+| Non-streaming | Single HTTP round trip | `choices[0].message.tool_calls` complete |
+| Streaming | SSE stream | `delta.tool_calls` fragments accumulated by `index` |
 
 The streaming path accumulates `id`, `name`, and `arguments` per index while
 text and reasoning deltas render live. After the stream reaches `[DONE]`,
 calls with an empty `id` are assigned `call_<uuid>`, calls with an empty
-`name` are dropped, and the survivors are handed to `execute_tool`. Side
-effects never fire mid-stream.
+`name` are dropped, and the survivors are executed. Side effects never fire
+mid-stream.
 
 ### Universal fallback
 
-For providers without native function calling, `Agent::parse_tool_call()`
-extracts `{"tool": "<name>", "arguments": {…}}` from assistant text.
-`Agent::attach_fallback_tool_call()` then promotes the parsed call onto the
-preceding assistant message as a native `tool_calls` entry so
-OpenAI-compatible `tool_call_id` pairing stays valid on the next round.
+For providers without native function calling, the harness extracts
+`{"tool": "<name>", "arguments": {…}}` from assistant text and promotes the
+parsed call onto the preceding assistant message as a native `tool_calls`
+entry so OpenAI-compatible `tool_call_id` pairing stays valid on the next
+round.
 
 Fallback text is withdrawn from the visible transcript before the tool step
 is emitted, matching the native streaming path. The same registry, permission
@@ -102,14 +93,13 @@ broker, and result-message format apply to native and fallback calls.
 
 `/goal <objective>` creates a durable, per-session objective persisted in
 SQLite (`goals.db`) keyed by thread id, so it survives restarts and `/resume`.
-A goal carries a status machine (`active` / `paused` / `blocked` /
-`usage_limited` / `budget_limited` / `complete`); each completed turn's token
-and elapsed-time cost is accounted against it, and a token budget flips the
-status to `budget_limited` inside the accounting SQL. The model drives goals
-through `get_goal`, `create_goal`, `update_goal`, and `goal_checklist`, and
-signals completion with `[NEENEE_GOAL_COMPLETE]` — which the harness defers
-while any checklist item remains pending. See [Goals](goals.md) for the status
-transition table, the checklist rules, and the persistence model.
+A goal is a slim primitive: an objective, an in-memory checklist, and a
+single `is_complete` flag (no status machine, no token or time budget — both
+were removed in ADR-0010). The model drives goals through `get_goal`,
+`create_goal`, `update_goal`, and `goal_checklist`, and signals completion
+with `[NEENEE_GOAL_COMPLETE]` — which the harness defers while any checklist
+item remains pending. See [Goals](goals.md) for the primitive, the checklist
+rules, and the persistence model.
 
 ## Autonomous loop
 
@@ -170,7 +160,8 @@ the prior caps (32 tool rounds per turn, 50 autonomous iterations per
 These are execution bounds, not a security sandbox. Tool permission policy is
 a separate future layer.
 
-Plan mode is enforced per-invocation through `Tool::allowed_in_plan_mode`, which
+Plan mode is enforced per-invocation through each tool's plan-mode access
+check, which
 defaults to read-only access and exempts writes under `.neenee/plans/`. MCP
 servers are therefore blocked in Plan mode unless their config explicitly sets
 `read_only = true`. The model can also switch modes itself via the injected
@@ -180,7 +171,7 @@ workflow and the write exemption.
 ## Permission broker
 
 Write-capable Build-mode tools pass through a core permission broker before
-`Tool::call()`:
+execution:
 
 1. Core stores a one-shot waiter and emits `PermissionRequest`.
 2. The CLI projects the request to the TUI.
@@ -195,9 +186,9 @@ Interrupting or superseding a task rejects all pending waiters and clears the
 TUI blocker. `/permissions` makes cached rules observable and
 `/permissions clear` revokes them.
 
-`Agent::run()` is the headless-safe entry point and automatically rejects
-write permissions. Interactive clients must use `run_with_events()` and reply
-to emitted requests.
+The headless entry point automatically rejects write permissions.
+Interactive clients use the event-driven entry point and reply to emitted
+requests.
 
 ## Durable session
 
@@ -226,10 +217,10 @@ fresh session id.
 
 The runner relieves context pressure in three layers, cheapest first:
 
-1. **Tool-result pruning** (`compaction_prune`, on by default). Old `Tool`-role
+1. **Tool-result pruning** (`compaction_prune`, on by default). Old tool-role
    results are cleared in place to `[Old tool result content cleared]`,
    protecting the most recent `compaction_prune_protect_chars` of tool output.
-   This runs both before a turn and, via a mid-turn `CompactionGate`, between
+   This runs both before a turn and, via a mid-turn relief gate, between
    tool rounds once pressure crosses ~¾ of `compaction_max_chars`. Pruned
    originals are archived for durability; the `tool_call_id` chain is preserved
    so providers that require it stay valid.
@@ -255,6 +246,6 @@ is terminal so tool side effects are never replayed.
 - Skills add on-demand model instructions.
 - MCP servers add dynamically discovered tools.
 - Built-in tools and MCP tools share the `Tool` trait and event pipeline.
-- Future permissions should wrap tool execution in `Agent::execute_tool()`.
+- Future permissions should wrap tool execution in the shared execution path.
 - Future durable sessions should persist messages and loop checkpoints without
   changing the provider abstraction.

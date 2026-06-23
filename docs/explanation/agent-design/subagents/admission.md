@@ -5,18 +5,18 @@ The profile primitive and the two built-in roles are covered in
 [Profiles](profiles.md); this page is the per-tool decision rule and the
 rationale for the exclusions.
 
-## `ToolPolicy::admits`
+## The admission check
 
-Each profile carries a `ToolPolicy` (`crates/neenee-core/src/subagent.rs`) with
-an `access` ceiling and an `allow_user_interaction` flag. Admission checks
-three capability axes on each tool. The access axis is an ordered ceiling
-(`Read < Execute < Write`); the other two are gates:
+Each profile carries a `ToolPolicy` with an `access` ceiling and an
+`allow_user_interaction` flag. Admission checks three capability axes on each
+tool. The access axis is an ordered ceiling (`Read < Execute < Write`); the
+other two are gates:
 
-| Axis | Method | Rule |
-|------|--------|------|
-| Filesystem access | `Tool::access()` | Admitted when `tool.access() <= profile.access` — so `EXPLORE` drops `bash`/`Write`, `VERIFY` drops only `Write` |
-| Needs a human | `Tool::requires_user()` | Excluded unless the profile opts in — `ask_user` and any future approval-gated tool |
-| Spawns a sub-agent | `Tool::spawns_subagent()` | Always excluded, in *every* profile — this is what prevents recursion |
+| Axis | Rule |
+|------|------|
+| Filesystem access | Admitted when the tool's access tier is at or below the profile's ceiling — so `EXPLORE` drops `bash`/`Write`, `VERIFY` drops only `Write` |
+| Needs a human | Excluded unless the profile opts in — `ask_user` and any future approval-gated tool |
+| Spawns a sub-agent | Always excluded, in *every* profile — this is what prevents recursion |
 
 ## What falls out of the policy
 
@@ -25,8 +25,8 @@ three capability axes on each tool. The access axis is an ordered ceiling
   `verify_plan_execution` does the same. No name list is involved — a new
   dispatch tool that declares the axis is covered automatically.
 - **The sub-agent cannot hang on the user.** `ask_user` is `Read` but
-  `requires_user()`, so both built-in profiles exclude it. A sub-agent has no
-  user reachable — its `UserQuestionRequest` events are dropped by the
+  requires a human, so both built-in profiles exclude it. A sub-agent has no
+  user reachable — its question-request events are dropped by the
   dispatch tool's forwarder — so admitting `ask_user` would deadlock until the
   parent turn is cancelled. Excluding it by capability is what closes that
   hole. The forwarder still has a defensive `tracing::error!` arm in case a
@@ -51,7 +51,8 @@ that snapshot — so admission has two stages (snapshot membership, then
 
 ## Why capability axes, not a name list
 
-An earlier design filtered with `access() == Read && name != "task"`. That was
+An earlier design filtered by access tier plus a name exclusion (`Read` and
+not `task`). That was
 name-driven and missed `ask_user` (which is `Read`), so the sub-agent could
 call it and deadlock. The capability-axis model makes each exclusion semantic:
 a tool is excluded because of *what it does* (blocks on a human, spawns an

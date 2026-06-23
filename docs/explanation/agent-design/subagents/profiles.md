@@ -3,8 +3,7 @@
 A sub-agent's behaviour is not hardcoded in the dispatch tool. It is the output
 of a declarative **profile** — a name, a system-prompt fragment that frames the
 role, and a [`ToolPolicy`](admission.md) that scopes what it may touch.
-Profiles live in `crates/neenee-core/src/subagent.rs` (domain vocabulary), and
-the dispatch tools in `neenee-agent` bind them by reference.
+Profiles are domain vocabulary; the dispatch tools bind them by reference.
 
 ## The two built-in profiles
 
@@ -15,9 +14,9 @@ the dispatch tools in `neenee-agent` bind them by reference.
 
 Both are non-interactive (`allow_user_interaction: false`) and non-recursive
 (recursion is excluded absolutely, not per-profile — see
-[Admission](admission.md)). The profile is the single source of truth;
-`TaskTool::new` takes the profile explicitly, and the verifier path goes
-through the same `TaskTool`.
+[Admission](admission.md)). The profile is the single source of truth; the
+dispatch tool takes the profile explicitly, and the verifier path goes through
+the same dispatch tool.
 
 ## Why two roles instead of one
 
@@ -41,10 +40,10 @@ by a single Read/Write ceiling. Resolving that is what the
 
 ## Extending
 
-Adding a third role is a new `const SubagentProfile` plus a binding at the
-dispatch site — no orchestration surgery, no changes to `ToolPolicy::admits`.
+Adding a third role is a new profile constant plus a binding at the dispatch
+site — no orchestration surgery, no changes to the admission rule.
 A future write-capable "executor" role, or an interactive role (one where
-`UserQuestionRequest` is genuinely forwarded to the user), would land here. The
+question requests are genuinely forwarded to the user), would land here. The
 profile primitive was introduced in
 [ADR-0011](../../../adr/0011-subagent-profiles.md) and extended to two roles +
 the tier split in [ADR-0012](../../../adr/0012-toolaccess-tier-split.md).

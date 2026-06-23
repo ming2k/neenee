@@ -32,7 +32,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal, GoalChecklistStatus,
+    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal,
     HarnessSnapshot, Message, PermissionRequest, PlanProgress, PlanSectionStatus,
     ProviderPickerSnapshot, Role, SessionContextSnapshot, SessionOverview, UserQuestionRequest,
 };
@@ -752,17 +752,6 @@ pub async fn start_tui(
     .await
 }
 
-/// Lowercase word for a goal-checklist status, used in inline transcript
-/// notices so a status flip reads as `run tests → in progress`.
-fn goal_status_label(status: GoalChecklistStatus) -> &'static str {
-    match status {
-        GoalChecklistStatus::Pending => "pending",
-        GoalChecklistStatus::InProgress => "in progress",
-        GoalChecklistStatus::Completed => "done",
-        GoalChecklistStatus::Cancelled => "cancelled",
-    }
-}
-
 /// Lowercase word for a plan-section status, used in inline transcript notices
 /// so a section change reads as `Key Changes → done`.
 fn plan_status_label(status: PlanSectionStatus) -> &'static str {
@@ -779,42 +768,13 @@ fn plan_status_label(status: PlanSectionStatus) -> &'static str {
 /// goal). The goal bar is gone from the footer; these notices are how goal
 /// changes now scroll with the transcript instead of living in a pinned bar.
 fn describe_goal_change(prev: Option<&Goal>, new: &Goal) -> Option<String> {
-    let done = new
-        .checklist
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.status,
-                GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-            )
-        })
-        .count();
-    let total = new.checklist.len();
-    let summary = |prefix: &str| -> String {
-        let mut s = format!("{prefix} · {}", new.objective);
-        if total > 0 {
-            s.push_str(&format!(" [{}/{}]", done, total));
-        }
-        s
-    };
+    let summary = |prefix: &str| -> String { format!("{prefix} · {}", new.objective) };
     if new.is_complete && prev.is_none_or(|p| !p.is_complete) {
         return Some(summary("✓ goal complete"));
     }
     let prev = prev?;
-    if prev.objective != new.objective || prev.checklist.len() != new.checklist.len() {
+    if prev.objective != new.objective {
         return Some(summary("goal set"));
-    }
-    // Same objective + length: surface the first checklist item whose status
-    // changed so the user sees which task moved.
-    for (a, b) in prev.checklist.iter().zip(new.checklist.iter()) {
-        if a.status != b.status {
-            return Some(format!(
-                "{} · {} → {}",
-                new.objective,
-                b.content,
-                goal_status_label(b.status),
-            ));
-        }
     }
     None
 }

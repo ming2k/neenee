@@ -1,34 +1,70 @@
 # How to add a provider
 
-This guide walks through wiring a new LLM provider into neenee. It assumes
-the provider speaks either the OpenAI Chat Completions contract or a custom
-HTTP contract. For the existing provider matrix, see
-[Providers](../reference/providers.md). For the capability model that
-decides which path to take, see
+This guide walks through wiring a new LLM provider into neenee. For the
+existing provider matrix, see [Providers](../reference/providers.md). For the
+capability model that decides which path to take, see
 [Provider capabilities](../explanation/provider-capabilities.md).
 
-All provider implementations live in
-`crates/neenee-core/src/providers.rs`. Construction dispatch (turning a
-provider name into a concrete provider) lives in
-`crates/neenee/src/main.rs`.
+neenee resolves every provider through one catalog
+(`build_catalog` in `crates/neenee-agent/src/catalog.rs`): it materializes
+registry presets, bespoke built-ins, and user-defined entries into channels
+with fully resolved credentials, then constructs the concrete `Provider` via
+`build_provider_for_channel` in `crates/neenee-providers/src/registry.rs`.
+Startup and `/provider switch` share this single path — there is no separate
+dispatch `match` to edit for presets or user entries.
 
 ## Choose a path
 
 | Provider speaks... | Path | Effort |
 |--------------------|------|--------|
-| OpenAI Chat Completions (`/v1/chat/completions`, `tools`, `tool_choice`, `reasoning_content`, SSE) | Add a `OPENAI_PROVIDER_SPECS` registry entry | Tiny |
-| A custom contract (different roles, no `tools` field, different streaming) | Standalone adapter | Medium |
+| OpenAI Chat Completions, or any endpoint reachable with a URL + key | User-defined entry in `config.toml` | None (no code) |
+| OpenAI Chat Completions, and you want it shipped as a built-in | Registry entry in `OPENAI_PROVIDER_SPECS` | Small |
+| A genuinely incompatible contract (different roles, no `tools` field) | Standalone adapter | Medium |
 
-Pick the registry path whenever possible. A registry entry inherits native
-tools, reasoning, and structured streaming for free by delegating to
-`OpenAiCompatProvider`.
+Prefer the config path for private or self-hosted endpoints, and the registry
+path for a vendor preset every neenee user would want.
 
-## Add a registry entry
+## Path 1: User-defined entry (no code)
 
-The `OPENAI_PROVIDER_SPECS` const table in `providers.rs` is the source of
-truth for every OpenAI-compatible vendor. Each row is an `OpenAiProviderSpec`
-spec; adding a provider is a single new entry instead of a delegating struct
-plus trait boilerplate.
+Any OpenAI-compatible, Gemini-native, or Llama endpoint can be added from
+`config.toml` without touching code. Add a `[[providers]]` table whose `id`
+either overrides a built-in or introduces a new model:
+
+```toml
+default_provider = "acme"
+
+[[providers]]
+id = "acme"
+name = "Acme"
+
+[[providers.channels]]
+label = "default"
+transport = "OpenAiCompat"          # or "GeminiNative" or "Llama"
+base_url = "https://api.acme.example/v1/chat/completions"
+api_key_env = "ACME_API_KEY"        # env var wins over the inline key below
+model = "acme-1"
+```
+
+Per-channel fields:
+
+| Field | Meaning |
+|-------|---------|
+| `transport` | `OpenAiCompat`, `GeminiNative`, or `Llama` |
+| `base_url` | Full chat-completions URL (OpenAI-compatible) or server root (Llama) |
+| `api_key_env` | Env var name read first; empty values fall through |
+| `api_key` | Inline key, used when `api_key_env` is unset or empty |
+| `model` | Wire model id; falls back to the entry `id` when omitted |
+| `user_agent` | OpenAI-compatible only |
+
+An entry whose `id` matches a built-in replaces it entirely; a new `id` is
+appended. One entry may carry several `channels` (e.g. a model reachable
+through several relays), with `default_channel` selecting the active one. See
+[ADR-0002](../adr/0002-model-channel-abstraction.md) for the channel model.
+
+## Path 2: Registry entry (built-in OpenAI-compatible preset)
+
+Add one row to the `OPENAI_PROVIDER_SPECS` const table in
+`crates/neenee-providers/src/registry.rs`:
 
 ```rust
 OpenAiProviderSpec {
@@ -49,86 +85,63 @@ OpenAiProviderSpec {
 | `default_model` | Model used when neither config nor environment specifies one |
 | `env_api_key` | Environment variable consulted for the API key |
 | `env_model` | Environment variable consulted for a model override |
-| `fixed_model` | When set, the endpoint pins this model and ignores any override (e.g. the Kimi coding endpoint) |
-| `default_user_agent` | When set, the endpoint requires this user agent unless overridden |
+| `fixed_model` | When set, pins the model and ignores any override |
+| `default_user_agent` | When set, requires this user agent unless overridden |
 
-`OpenAiProviderSpec::build` turns the spec into a concrete `OpenAiCompatProvider`,
-calling `OpenAiCompatProvider::with_base_url_and_user_agent` and setting the
-provider's `id` field so assistant messages are attributed correctly. The
-built provider inherits `prepare_tools`, `stream_chat_events`, and the full
-`chat`/`stream_chat` implementations from `OpenAiCompatProvider`.
+That single entry is the whole change for a pure-env-var preset. The catalog
+loops over `OPENAI_PROVIDER_SPECS` automatically, so no `match` arm is needed.
+`OpenAiProviderSpec::build` constructs the concrete `OpenAiCompatProvider`,
+stamping the preset `id` so assistant messages are attributed correctly. The
+preset inherits `prepare_tools`, `stream_chat_events`, and the full
+`chat` / `stream_chat` implementations.
 
-That single table entry is the entire core change. The remaining steps wire
-the new `id` into the per-provider config fields and TUI status reporting in
-`main.rs`.
+### Optional: persist the key in config
 
-## Register the config fields
+By default a registry preset reads its API key and model from the environment
+variables above. To also let users persist them in `config.toml`, add the
+field pair to `Config` in `crates/neenee-store/src/config.rs` and an arm to
+`config_key_for` / `config_model_for` in
+`crates/neenee-agent/src/catalog.rs`, keyed by the same `id`. This is a
+convenience layer over env vars, not a requirement — a preset with no config
+arms still works through its env vars.
 
-`crates/neenee/src/main.rs` keeps a `Config` field per provider for the
-API key and model so values entered in the TUI survive a restart. Add the
-new provider to these helpers, all keyed by the same `id` string:
+## Path 3: Standalone adapter (incompatible contract)
 
-| Helper | What to add |
-|--------|-------------|
-| `config_api_key` | An arm returning `config.acme_api_key.clone()` |
-| `config_model` | An arm returning `config.acme_model.clone()` |
-| `provider_key_status` | A row checking `ACME_API_KEY` and the config field |
-| `AgentRequest::SwitchProvider` api-key persistence match | An arm assigning `config.acme_api_key = Some(key)` |
-| `AgentRequest::SwitchProvider` model persistence match | An arm assigning `config.acme_model = Some(model.clone())` |
+Use this path only when the provider's contract is genuinely incompatible with
+OpenAI Chat Completions. `GeminiProvider` and `LlamaServerProvider` are the
+existing examples, in `crates/neenee-providers/src/`.
 
-Add the matching `acme_api_key` and `acme_model` fields to the `Config`
-struct in `crates/neenee/src/config.rs`, with serde rename rules matching
-the existing providers.
-
-The startup dispatch and runtime switch already route through
-`make_provider`, which consults `openai_provider_spec` first. Because the
-new `id` is in the registry, no new `match` arm is needed in
-`make_provider` itself.
-
-Mirror the env var names, model env var, and default model in the
-[Providers](../reference/providers.md) catalog table.
-
-### Optional: model-name mirror
-
-If the TUI header should show a friendly default model name when no model is
-configured, the registry entry already supplies it through
-`spec.resolve_model(...)`, which the `initial_m_name` block consults. No
-extra code is needed for registry providers.
-
-## Build a standalone adapter
-
-Use this path only when the provider's contract is genuinely incompatible
-with OpenAI Chat Completions. `GeminiProvider` and `LlamaServerProvider` are
-the existing examples.
-
-The standalone adapter must implement at minimum `chat` and `stream_chat`.
-Decide explicitly for each optional method:
+Implement a `Provider` struct with at minimum `chat` and `stream_chat`, and
+decide explicitly for each optional method:
 
 | Method | If implemented | If omitted (trait default) |
 |--------|----------------|---------------------------|
 | `prepare_tools` | Provider declares tool schemas; native function calling works | Provider never sends `tools`; tool calls fall back to text |
 | `stream_chat_events` | Provider emits `TextDelta`, `ReasoningDelta`, `ToolCallDelta` | Provider emits only `TextDelta`; reasoning and tool-call deltas are lost |
 
-Standalone adapters that omit `prepare_tools` should hard-code
-`tool_calls: None` and `reasoning_content: None` in the returned `Message`,
-matching `LlamaServerProvider`. This keeps the internal contract honest: the
-agent knows the provider cannot deliver those fields and routes through
-`parse_tool_call` instead.
+Adapters that omit `prepare_tools` should return `tool_calls: None` and
+`reasoning_content: None` from their messages, matching `LlamaServerProvider`.
+The agent then routes tool calls through `tool_call::parse_text_tool_call`
+instead of native `tool_calls`.
+
+Then wire the adapter into the two construction sites:
+
+1. Add a `Transport` variant in `crates/neenee-core/src/catalog.rs` and an arm
+   in `build_provider_for_channel`
+   (`crates/neenee-providers/src/registry.rs`) that constructs the adapter from
+   the channel.
+2. Materialize the entry in `build_catalog`
+   (`crates/neenee-agent/src/catalog.rs`) so the catalog exposes it by `id`.
 
 Map neenee's `Role` enum to the provider's role names in both `chat` and
 `stream_chat`. The universal fallback assumes assistant text is reachable
 through the standard message channel; a misnamed role breaks it.
 
-Add a `match` arm for the new `id` in `make_provider` so the standalone
-constructor is reached, and add the config/status rows described above.
-
 ## Verify
 
-Run the test suite first:
-
 ```bash
-cargo test -p neenee-core providers
-cargo test -p neenee
+cargo test -p neenee-providers
+cargo test -p neenee-agent catalog
 ```
 
 Then exercise the provider end-to-end:
@@ -137,32 +150,32 @@ Then exercise the provider end-to-end:
    `default_provider = "acme"` in `config.toml`.
 2. Send a prompt that should trigger a tool call. Confirm the tool step
    renders with the right arguments and result.
-3. If the model advertises reasoning support (for example an
-   `acme-reasoner` variant), switch to it and confirm a thinking step
-   appears.
+3. If the model advertises reasoning support (e.g. an `acme-reasoner`
+   variant), switch to it and confirm a thinking step appears.
 4. Run `/provider switch acme <model>` from inside the TUI and confirm the
    header updates and the new model is used.
-5. Repeat the tool-call test on a provider that uses the universal
-   fallback (`gemini` or `llama`) to confirm the new provider behaves
-   consistently across both transports.
+5. Repeat the tool-call test on a provider that uses the universal fallback
+   (`gemini` or `llama`) to confirm the new provider behaves consistently
+   across both transports.
 
 ## Update documentation
 
-Update these surfaces in the same change:
-
 - Add a row to the appropriate table in [Providers](../reference/providers.md)
-  (registry preset table for OpenAI-compatible providers, bespoke table for
-  standalone adapters).
-- If the provider introduces a new capability shape (for example a third
-  standalone adapter), update
+  (registry preset table for OpenAI-compatible presets, bespoke table for
+  standalone adapters). User-defined entries need no doc change — they are
+  config, not code.
+- If the provider introduces a new capability shape (e.g. a third standalone
+  adapter), update
   [Provider capabilities](../explanation/provider-capabilities.md).
-- If the provider's env vars or `default_provider` key differ from the
-  obvious naming, call that out explicitly.
+- If the provider's env vars or `default_provider` key differ from the obvious
+  naming, call that out explicitly.
 
 ## See also
 
 - [Providers](../reference/providers.md) — existing provider matrix
-- [Provider capabilities](../explanation/provider-capabilities.md) —
-  capability layering and why providers differ
-- [Tool rounds](../explanation/agent-design/tool-rounds.md) — what the registry path
-  inherits
+- [Provider capabilities](../explanation/provider-capabilities.md) — capability
+  layering and why providers differ
+- [Request flow](../explanation/request-flow.md) — the wire contract registry
+  presets inherit
+- [ADR-0002](../adr/0002-model-channel-abstraction.md) — the catalog and
+  channel abstraction

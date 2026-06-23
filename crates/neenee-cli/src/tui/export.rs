@@ -13,7 +13,7 @@
 //! so the export stays scannable.
 
 use chrono::Utc;
-use neenee_core::{Goal, GoalChecklistStatus, Message, Role, ToolCall};
+use neenee_core::{Goal, Message, Role, ToolCall};
 
 /// Metadata carried from the harness into the exporter so the header reflects
 /// the live session state at the moment of export.
@@ -55,20 +55,6 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
         out.push_str(&format!("- **Active plan:** {}\n", plan.display()));
     }
     out.push_str(&format!("- **Exported at:** {}\n\n", exported_at));
-
-    if let Some(checklist) = ctx.goal.map(|g| &g.checklist).filter(|c| !c.is_empty()) {
-        out.push_str("## Goal checklist\n\n");
-        for item in checklist {
-            let mark = match item.status {
-                GoalChecklistStatus::Completed => "[x]",
-                GoalChecklistStatus::Cancelled => "[~]",
-                GoalChecklistStatus::InProgress => "[~]",
-                GoalChecklistStatus::Pending => "[ ]",
-            };
-            out.push_str(&format!("- {} {}\n", mark, item.content));
-        }
-        out.push('\n');
-    }
 
     out.push_str(
         "The transcript below records what was done in this session. A fresh \
@@ -318,24 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn includes_goal_objective_and_checklist() {
+    fn includes_goal_objective() {
         let goal = Goal {
             objective: "Ship /export".to_string(),
             is_complete: false,
-            checklist: vec![
-                neenee_core::GoalChecklistItem {
-                    content: "Design".to_string(),
-                    status: GoalChecklistStatus::Completed,
-                },
-                neenee_core::GoalChecklistItem {
-                    content: "Implement".to_string(),
-                    status: GoalChecklistStatus::InProgress,
-                },
-                neenee_core::GoalChecklistItem {
-                    content: "Document".to_string(),
-                    status: GoalChecklistStatus::Pending,
-                },
-            ],
         };
         let out = format_export_markdown(
             ExportContext {
@@ -349,10 +321,6 @@ mod tests {
             &[user("hi")],
         );
         assert!(out.contains("Ship /export"));
-        assert!(out.contains("## Goal checklist"));
-        assert!(out.contains("- [x] Design"));
-        assert!(out.contains("- [~] Implement"));
-        assert!(out.contains("- [ ] Document"));
     }
 
     #[test]

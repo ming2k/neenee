@@ -1749,18 +1749,6 @@ pub struct ActivityModalView<'a> {
     pub activity: &'a str,
 }
 
-/// Glyph for a goal-checklist status, mirroring the plan-section glyphs so the
-/// two checklists read consistently inside the modal.
-fn goal_checklist_glyph(status: neenee_core::GoalChecklistStatus) -> &'static str {
-    use neenee_core::GoalChecklistStatus;
-    match status {
-        GoalChecklistStatus::Completed => "✓",
-        GoalChecklistStatus::InProgress => "●",
-        GoalChecklistStatus::Pending => "○",
-        GoalChecklistStatus::Cancelled => "—",
-    }
-}
-
 /// Foreground color for a plan-section status glyph. Done/in-progress pop in
 /// `ok`/`warn`; pending/skipped stay muted so the eye is drawn to active work.
 fn plan_section_glyph_color(
@@ -1773,21 +1761,6 @@ fn plan_section_glyph_color(
         PlanSectionStatus::Done => theme.ok(),
         PlanSectionStatus::InProgress => theme.warn(),
         PlanSectionStatus::Pending | PlanSectionStatus::Skipped => muted,
-    }
-}
-
-/// Foreground color for a goal-checklist status glyph. Mirrors the plan-section
-/// mapping so the two read consistently.
-fn goal_checklist_glyph_color(
-    status: neenee_core::GoalChecklistStatus,
-    theme: &Theme,
-    muted: Color,
-) -> Color {
-    use neenee_core::GoalChecklistStatus;
-    match status {
-        GoalChecklistStatus::Completed => theme.ok(),
-        GoalChecklistStatus::InProgress => theme.warn(),
-        GoalChecklistStatus::Pending | GoalChecklistStatus::Cancelled => muted,
     }
 }
 
@@ -1854,38 +1827,6 @@ pub fn draw_activity_modal(
                 Style::default().fg(theme.fg()),
             ),
         ]));
-        if !goal.checklist.is_empty() {
-            let done = goal
-                .checklist
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.status,
-                        neenee_core::GoalChecklistStatus::Completed
-                            | neenee_core::GoalChecklistStatus::Cancelled
-                    )
-                })
-                .count();
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    format!("{} of {} tasks done", done, goal.checklist.len()),
-                    Style::default().fg(muted),
-                ),
-            ]));
-            for item in &goal.checklist {
-                let glyph_color = goal_checklist_glyph_color(item.status, theme, muted);
-                lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(
-                        goal_checklist_glyph(item.status),
-                        Style::default().fg(glyph_color),
-                    ),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(item.content.clone(), Style::default().fg(theme.fg())),
-                ]));
-            }
-        }
     }
 
     // ── Plan ──

@@ -27,9 +27,9 @@ A dedicated tool gives three advantages:
 
 ## Request shape
 
-The model calls `ask_user` with a `questions` array. Each question contains the
-display text, an optional header tag, an options array, and an optional
-`multi_select` flag. The schema lives in `crates/neenee-tools/src/lib.rs`.
+The model calls `ask_user` with a `questions` array. Each question contains
+the display text, an optional header tag, an options array, and an optional
+`multi_select` flag.
 
 The TUI does not trust the model to provide a catch-all option. It appends an
 **Other** option to every question and, when that option is highlighted, shows
@@ -39,38 +39,37 @@ prompt to remember to include an escape hatch.
 ## Execution flow
 
 ```text
- model ──ToolCall ask_user──► agent core
+ model ──tool call ask_user──► agent core
                                 │
                                 ▼
-                    AgentEvent::UserQuestionRequest
+                    emit question-request event
                                 │
                                 ▼
               harness relay ──► TUI queues request
                                 │
                                 ▼
-              TUI opens Modal::Question
+              TUI opens question modal
                                 │
                                 ▼
               user selects options / types Other
                                 │
                                 ▼
-              AgentRequest::UserQuestionReply
+              TUI sends question reply
+                                │
+                ▼
+              agent resolves blocked future
                                 │
                                 ▼
-              agent resolves oneshot receiver
-                                │
-                                ▼
-              ToolResult with selected labels
+              tool result with selected labels
 ```
 
-The blocking primitive is a `tokio::sync::oneshot` channel. When the agent
-receives the tool call, it creates a `UserQuestionRequest`, stores the sender
-in `Agent.ask_user.pending`, emits the event, and awaits the receiver. The TUI
-keeps the receiver alive by holding the request in a queue; once the user
-answers, the TUI sends `AgentRequest::UserQuestionReply`, the agent removes the
-sender, and the tool future completes.
+The blocking primitive is a oneshot channel. When the agent receives the tool
+call, it stores the sender in a pending-question slot, emits the event, and
+awaits the receiver. The TUI keeps the receiver alive by holding the request
+in a queue; once the user answers, the TUI sends the reply, the agent resolves
+the sender, and the tool future completes.
 
-This design intentionally mirrors the permission broker (`Agent.permissions`)
+This design intentionally mirrors the permission broker
 because that broker already solves the same problem: suspend a tool future,
 queue the request, render a modal, and resume on user input. The key
 difference is that questions are independent—cancelling or rejecting one
@@ -79,8 +78,7 @@ rejection which aborts the whole turn.
 
 ## TUI rendering
 
-The question modal is a centered overlay (`draw_question_modal` in
-`crates/neenee-cli/src/tui/render/overlays.rs`). It shows one question at a time:
+The question modal is a centered overlay. It shows one question at a time:
 
 - Single-select questions use radio buttons (`○` / `●`).
 - Multi-select questions use checkboxes (`[ ]` / `[x]`).
@@ -98,21 +96,21 @@ If the user presses `Esc`, the TUI sends an empty answer. The agent returns a
 text result explaining that no answer was provided, and the model decides how
 to proceed.
 
-If the user interrupts the turn (`Ctrl+C` or the equivalent), the harness calls
-`Agent::reject_pending_user_questions`, which drops every pending sender with
-`None`. Each blocked `ask_user` future then resolves to the cancelled result.
+If the user interrupts the turn (`Ctrl+C` or the equivalent), the harness
+rejects every pending question sender with `None`. Each blocked `ask_user`
+future then resolves to the cancelled result.
 
 ## Plan mode
 
-`ask_user` is marked `ToolAccess::Read` and is explicitly allowed in Plan mode.
+`ask_user` is marked `Read` access and is explicitly allowed in Plan mode.
 Clarifying requirements is a read-only activity, so planners can use it to
 resolve ambiguity before any implementation begins.
 
 ## Sub-agents
 
-`ask_user` also overrides `requires_user() = true`, so the built-in `EXPLORE`
-profile excludes it from sub-agents. A sub-agent has no user reachable — its
-`UserQuestionRequest` events are dropped by the dispatch tool's forwarder — so
+`ask_user` also declares `requires_user`, so the built-in `EXPLORE` profile
+excludes it from sub-agents. A sub-agent has no user reachable — its
+question-request events are dropped by the dispatch tool's forwarder — so
 admitting `ask_user` there would deadlock until the parent turn is cancelled.
 Keeping the question with the parent (which *can* ask) is the contract; a
 sub-agent that hits ambiguity returns it in its written answer instead. See

@@ -19,7 +19,7 @@ variation on these themes rather than a one-off mechanism.
 |-------|---------------|-------------------|
 | **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: Plan mode and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
 | **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; goal state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Goals](goals.md) |
-| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity and budgets are persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents/index.md) |
+| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity is persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents/index.md) |
 | **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents/index.md), [Harness architecture](harness.md) |
 | **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; goal completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Tool rounds](tool-rounds.md), [MCP servers](mcp.md), [Goals](goals.md) |
 | **Control plane vs domain** | The harness owns steering (mode, goal, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents/index.md) |
@@ -40,10 +40,10 @@ model of one agent turn.
 3. [Tool rounds](tool-rounds.md) — the round trip of a tool call as a design
    concept: declaration, gating, execution, and how outcomes re-enter the
    conversation. This is the unit the rest of the canon operates on.
-4. [Goals](goals.md) — durable per-session objectives: the status machine,
-   the checklist that gates completion, token-budget enforcement in SQL, and
-   the legacy migration. How the agent remembers what it is doing across
-   turns and restarts.
+4. [Goals](goals.md) — durable per-session objectives: the slim primitive
+   (objective, checklist, completion flag), the checklist that gates
+   completion, and the completion signal. How the agent remembers what it is
+   doing across turns and restarts.
 5. [Plan mode](plan-mode.md) — a read-only execution surface for researching
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
@@ -82,7 +82,6 @@ user message
             │              stream SubTaskEvent back through the same pipeline
             ├─ [MCP]       if call is `mcp__*`: JSON-RPC over stdio
             └─ [User questions] if call is `ask_user`: block on oneshot
-       └─ [Goals] account token/elapsed cost; maybe flip to budget_limited
        └─ completion marker? [Goals] defer unless checklist is clear
        └─ next tool round, or stop on final message / safety bound
 ```
@@ -101,10 +100,11 @@ for background; this section links to ADRs for the decision trail.
 The canon describes the agent. Two other concerns live alongside it in
 `docs/explanation/` and are intentionally outside this section:
 
-- **Provider protocol** — [Request flow](../request-flow.md),
+- **Provider protocol** — [Chat API primitives](../chat-api-primitives.md),
+  [Request flow](../request-flow.md),
   [Provider capabilities](../provider-capabilities.md),
-  [Guided decoding](../guided-decoding.md): the wire-level contract with model
-  servers, SSE reassembly, and constrained decoding. These belong to the
-  model-serving layer, not the agent.
+  [Guided decoding](../guided-decoding.md): the protocol contract that shapes
+  the agent, its wire-level form, and constrained decoding. These belong to
+  the model-serving layer, not the agent.
 - **Terminal UI** — [Terminal UI](../tui.md): how the semantic document model
   renders the canon's events to the screen.

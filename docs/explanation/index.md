@@ -24,7 +24,7 @@ before the individual docs.
 | [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
 | [Harness architecture](agent-design/harness.md) | Control plane around provider calls, goal state, autonomous loop, safety bounds |
 | [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model: a turn as the user-perceived unit, a round as the ReAct loop iteration inside it, and which concerns attach to each layer |
-| [Goals](agent-design/goals.md) | Durable per-session objectives: status machine, checklist, token budget, and completion deferral |
+| [Goals](agent-design/goals.md) | Durable per-session objectives: the slim primitive, checklist gating, and the completion signal |
 | [Sub-agents](agent-design/subagents/index.md) | The `task` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and Plan-mode gating |
 | [Plan mode](agent-design/plan-mode.md) | Read-only planning surface, autonomous `plan_enter`/`plan_exit`, and the plan-file write exemption |
@@ -34,11 +34,12 @@ before the individual docs.
 
 ## Provider protocol and UI
 
-Layers adjacent to the agent: the wire-level contract with model servers, and
-the terminal rendering surface.
+Layers adjacent to the agent: the chat API primitives that shape it, the
+wire-level contract with model servers, and the terminal rendering surface.
 
 | Page | Purpose |
 |------|--------|
+| [Chat API primitives](chat-api-primitives.md) | The three protocol primitives — role authority, stateless memory, function calling — that shape the agent |
 | [Terminal UI](tui.md) | How the TUI is built (full-screen app, semantic document model, live rendering) and why it is not terminal text |
 | [Request flow](request-flow.md) | HTTP transaction shape, SSE streaming, and the ReAct loop's message evolution |
 | [Provider capabilities](provider-capabilities.md) | Where tool calling and reasoning actually live across model weights, serving runtime, and client |

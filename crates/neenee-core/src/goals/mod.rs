@@ -29,45 +29,13 @@ pub struct ThreadGoal {
 
 /// The runtime view of a goal exposed to the agent, tools, and TUI.
 ///
-/// Carries the durable `objective`, the in-memory `checklist` that gates
-/// completion via [`Goal::can_complete`], and a single `is_complete` flag
-/// that mirrors the persisted column.
+/// Carries the durable `objective` and a single `is_complete` flag that
+/// mirrors the persisted column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Goal {
     pub objective: String,
     #[serde(default)]
     pub is_complete: bool,
-    #[serde(default)]
-    pub checklist: Vec<GoalChecklistItem>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalChecklistStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoalChecklistItem {
-    pub content: String,
-    pub status: GoalChecklistStatus,
-}
-
-impl Goal {
-    /// Whether the goal can be marked complete. Returns `true` when the
-    /// checklist is empty or every item is `Completed` / `Cancelled`.
-    pub fn can_complete(&self) -> bool {
-        self.checklist.is_empty()
-            || self.checklist.iter().all(|item| {
-                matches!(
-                    item.status,
-                    GoalChecklistStatus::Completed | GoalChecklistStatus::Cancelled
-                )
-            })
-    }
 }
 
 /// Token usage reported by a single turn.

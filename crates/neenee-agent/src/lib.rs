@@ -62,8 +62,8 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal, GoalChecklistItem,
-    GoalChecklistStatus, GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
+    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal,
+    GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
     McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision, PermissionRequest,
     Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent,
     PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
@@ -90,6 +90,13 @@ use tokio_util::sync::CancellationToken;
 /// transcript bounded; the user can interrupt at any time with `Esc` or
 /// `/loop stop`.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
+
+/// Safety cap on the number of rounds the `/pursue` stop-gate will drive
+/// within a single turn. Prevents a pursuit that never signals completion
+/// from looping forever; the user can also interrupt with `Esc`. Generous by
+/// design — a well-behaved pursuit completes by signalling the marker well
+/// before this.
+const MAX_PURSUIT_ITERATIONS: u32 = 50;
 
 /// Default for the per-turn stall detector threshold. The live value is
 /// held in `Agent::stall_threshold` (mutated by

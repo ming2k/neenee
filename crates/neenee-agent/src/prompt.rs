@@ -94,22 +94,11 @@ impl Agent {
                 goal.objective
             ));
             if !goal.is_complete {
-                if !goal.checklist.is_empty() {
-                    parts.push(format!(
-                        "Goal checklist:\n{}",
-                        goal.checklist
-                            .iter()
-                            .map(|item| format!("- [{:?}] {}", item.status, item.content))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    ));
-                }
                 parts.push(
                     "Work toward this goal across turns. Use get_goal to read the current goal, \
-                     create_goal when the user asks for a new goal, update_goal to mark the goal \
-                     complete, and goal_checklist to expose concrete progress items. \
-                     Only when the objective is fully achieved, verified, and every checklist item \
-                     is completed or cancelled, call update_goal with status \"complete\"."
+                     create_goal when the user asks for a new goal, and update_goal to mark the \
+                     goal complete. Only when the objective is fully achieved and verified, call \
+                     update_goal with status \"complete\"."
                         .to_string(),
                 );
             }

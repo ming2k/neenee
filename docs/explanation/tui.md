@@ -30,18 +30,8 @@ Every capability below follows from that shift.
 
 ## Terminal underpinnings
 
-`crates/neenee-cli/src/tui/mod.rs` puts the terminal into application mode on
-startup and undoes it on exit:
-
-```rust
-enable_raw_mode()?;
-execute!(
-    stdout,
-    EnterAlternateScreen,
-    EnableMouseCapture,
-    PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-)?;
-```
+On startup the TUI puts the terminal into application mode, and undoes it
+on exit:
 
 Each call removes one limitation of the line-oriented terminal:
 
@@ -56,8 +46,8 @@ Each call removes one limitation of the line-oriented terminal:
   Enter) are reported distinctly. crossterm only emits the request when
   the terminal advertises support, so this is a no-op elsewhere.
 
-A signal guard (`spawn_signal_guard`) catches `SIGTERM`, `SIGINT`,
-`SIGHUP`, and `SIGQUIT`, then calls `restore_terminal()`. Without it, an
+A signal guard catches `SIGTERM`, `SIGINT`, `SIGHUP`, and `SIGQUIT`, then
+restores the terminal. Without it, an
 external `pkill neenee` would terminate the process before normal
 cleanup, leaving the host terminal stranded in raw mode with mouse
 capture on, so every mouse motion would spew SGR escape codes into the
@@ -89,24 +79,10 @@ therefore repaints once instead of once per character.
 Provider streaming and rendering run on separate tasks so streaming
 speed is never gated by frame rate, and a slow frame never drops tokens.
 
-A background tokio task owns the response receiver and pushes updates
-into shared state guarded by `Arc<Mutex<…>>`:
-
-```rust
-tokio::spawn(async move {
-    while let Some(resp) = rx.recv().await {
-        match resp {
-            AgentResponse::StreamDelta(delta) => {
-                let mut msgs = messages_clone.lock().await;
-                if let Some(last) = msgs.last_mut() { last.push_stream(&delta); }
-            }
-            AgentResponse::ToolCall { id, name, arguments } => { /* … */ }
-            AgentResponse::PermissionRequest(request) => { /* … */ }
-            // …
-        }
-    }
-});
-```
+A background task owns the response receiver and pushes updates into shared
+state behind a mutex. Each response variant updates the model in place: a
+stream delta grows the live assistant message, a tool call opens a step, a
+permission request is queued for the modal.
 
 The main loop never holds that lock while rendering. Each frame it takes
 a snapshot — `app.messages = runtime.messages.lock().await.clone()` —
@@ -119,27 +95,18 @@ This is the single biggest difference from terminal text. A line-oriented
 program emits a string; the terminal wraps it and the user can only copy
 the wrapped result. neenee keeps a **structured document** instead.
 
-`crates/neenee-cli/src/tui/document.rs` parses each message with
-[pulldown-cmark] into a `Vec<Block>` and tags it with a `MessageKind`:
+Each message is parsed with [pulldown-cmark] into a sequence of blocks and
+tagged with a kind — plain text, a tool step, or a thinking trace. The block
+types carry the structure that copy and navigation depend on:
 
-```rust
-pub enum MessageKind {
-    Text,
-    ToolStep { id, name, arguments, output, expanded, duration_ms, started_at, children },
-    Thinking { content, duration_ms, expanded },
-}
-
-pub enum Block {
-    Text { content },
-    Code { language, content },
-    Heading { level, content },
-    ListItem { content, ordered, depth, checked },
-    Quote { content },
-    Table { headers, rows, aligns, rendered },
-    Rule,
-    Break,
-}
-```
+| Block | Carries |
+|-------|---------|
+| Text | prose |
+| Code | language + source |
+| Heading | level + text |
+| ListItem | content, ordered/unordered, nesting depth, checkbox |
+| Quote | quoted content |
+| Table | headers, rows, alignment |
 
 Two properties fall out of this. First, copy returns the **original**
 text, not the terminal-wrapped projection of it: a table cell copies as
@@ -152,29 +119,24 @@ seven" that survives any change of terminal width or scroll position.
 Addressing is how mouse interaction becomes meaningful. Coordinates live
 in the document, not on the screen:
 
-```rust
-pub struct SemanticCursor {
-    pub message_idx: usize,
-    pub block_idx: usize,
-    pub byte_offset: usize,
-}
-```
+A position in the document is three coordinates — which message, which
+block within it, and a byte offset — not a screen row and column.
 
-During each draw, the renderer records where every block lands on the
-grid into a `LayoutMap` of `BlockRegion` entries (`message_idx`,
-`block_idx`, byte range, screen `Rect`). Tables additionally register
-per-cell hit boxes. The map is the bridge in both directions:
+During each draw, the renderer records where every block lands on the grid
+into a layout map of block regions (message index, block index, byte range,
+screen rectangle). Tables additionally register per-cell hit boxes. The map is
+the bridge in both directions:
 
-- **Draw → screen**: blocks produce `BlockRegion`s as they are painted.
+- **Draw → screen**: blocks produce regions as they are painted.
 - **Screen → document**: a mouse point is resolved by hit-testing the
-  regions back to a `SemanticCursor`.
+  regions back to a document position.
 
-Because selection is stored as a `SemanticCursor` range rather than as
-screen coordinates, a selection stays correct after the terminal is
-resized or the content reflows. The renderer can repaint freely; the
-selection refers to the document, which is unaffected. `get_selected_text`
-then walks the block model to produce copyable text, stripping box-drawing
-borders from rendered tables.
+Because selection is stored as a document range rather than as screen
+coordinates, a selection stays correct after the terminal is resized or the
+content reflows. The renderer can repaint freely; the selection refers to the
+document, which is unaffected. Extracting the selected text walks the block
+model to produce copyable text, stripping box-drawing borders from rendered
+tables.
 
 ## The live state layer
 
@@ -296,12 +258,12 @@ header off-screen.
 
 ### Selection is a document range, not a screen rectangle
 
-Mouse selection is stored as a `SemanticCursor` range (`message_idx`,
-`block_idx`, byte range), never as terminal row/column coordinates. The
+Mouse selection is stored as a document range (message index, block index,
+byte range), never as terminal row/column coordinates. The
 consequence the user notices is that a selection survives a terminal
 resize, a reflow, or any number of redraws: the renderer repaints freely,
-the selection refers to the document model, and `get_selected_text` walks
-the block model to produce clean copyable text — stripping box-drawing
+the selection refers to the document model, and extracting the selection
+walks the block model to produce clean copyable text — stripping box-drawing
 borders from rendered tables, restoring the original code-block source
 rather than the wrapped projection. This is the single biggest difference
 from line-oriented terminal text.
