@@ -7,7 +7,7 @@ inside explicit state, execution, and safety boundaries.
 
 Every CLI turn runs the streaming agent loop:
 
-1. Refresh the system context with mode, goal, tools, and skill metadata.
+1. Refresh the system context with mode, pursuit, tools, and skill metadata.
 2. Stream provider text and reconstruct native tool-call deltas by index.
 3. Execute native or JSON fallback tool calls through the same registry.
 4. Emit tool call/result events for the TUI.
@@ -89,43 +89,43 @@ Fallback text is withdrawn from the visible transcript before the tool step
 is emitted, matching the native streaming path. The same registry, permission
 broker, and result-message format apply to native and fallback calls.
 
-## Goal state
+## Pursuit state
 
-`/goal <objective>` creates a durable, per-session objective persisted in
-SQLite (`goals.db`) keyed by thread id, so it survives restarts and `/resume`.
-A goal is a slim primitive: an objective, an in-memory checklist, and a
-single `is_complete` flag (no status machine, no token or time budget — both
-were removed in ADR-0010). The model drives goals through `get_goal`,
-`create_goal`, `update_goal`, and `goal_checklist`, and signals completion
-with `[NEENEE_GOAL_COMPLETE]` — which the harness defers while any checklist
-item remains pending. See [Goals](goals.md) for the primitive, the checklist
-rules, and the persistence model.
+`/pursue <condition>` creates a durable, per-session objective persisted in
+SQLite (`pursuits.db`) keyed by thread id, so it survives restarts and `/resume`.
+A pursuit is a slim primitive: an objective and a single `is_complete` flag (no
+status machine, no token or time budget, no checklist — all removed; see
+[ADR-0010](../../../adr/0010-slim-pursuit-primitive.md) and
+[ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). The model
+reads and completes pursuits through `get_pursuit`, `start_pursuit`, and
+`complete_pursuit`, and signals completion with `[NEENEE_PURSUIT_COMPLETE]`. See
+[Pursuits](pursuits.md) for the primitive and the persistence model.
 
-## Autonomous loop
+## Pursue stop-gate
 
-`/loop` runs an uncapped autonomous loop driving the active goal. Each
-iteration is a complete agent turn with current filesystem state and
-conversation history, preceded by a hidden control prompt that re-states
-the goal and asks the model to keep making concrete progress.
+`/pursue` arms a **stop-gate** on the agent and drives one turn. Each time the
+model would end the turn, the gate (at the turn-loop exit, beside the
+verify-nudge gate) re-injects the condition as a hidden user message and
+forces another round instead of returning. The turn therefore runs to
+completion across many rounds.
 
 | Form | Effect |
 |------|--------|
-| `/loop` | Start on the active goal (set one with `/goal <objective>` first) |
-| `/loop <objective>` | Set a fresh goal and start the loop in one step |
-| `/loop resume` | Resume an unfinished durable checkpoint |
+| `/pursue <condition>` | Set the condition, arm the gate, and drive the turn until met |
+| `/pursue` | Re-arm and drive on the existing active pursuit |
 
-The loop stops when:
+The pursuit stops when:
 
-- the completion marker is emitted (and the goal checklist allows completion);
-- the user presses `Esc` or runs `/loop stop`;
-- a newer chat or loop request supersedes it;
+- the model emits `[NEENEE_PURSUIT_COMPLETE]`;
+- the 50-round safety cap is hit (the gate disarms);
+- the user presses `Esc` or runs `/pursue stop`;
+- a newer request supersedes it;
 - the provider or tool pipeline returns an error.
 
-There is no iteration budget. The previous `1..=50` cap was removed
-(ADR-0009) to align with the codex / claude-code agentic-loop model: the
-loop runs until the model itself stops calling tools, with context
-compaction as the backstop that keeps long loops bounded. A legacy
-`/loop <N>` form is rejected with a migration hint.
+This replaces the old outer multi-turn `/loop` (ADR-0009's uncapped loop) with
+within-turn continuation — one driver, no outer loop. The clock-driven
+counterpart is `/repeat`, a cron scheduler; see
+[Pursuits](pursuits.md) for the comparison.
 
 Task generation ids prevent an older task from clearing the cancellation state
 of a newer task.
@@ -207,7 +207,7 @@ branch snapshots under `sessions/<id>.json`:
 - Each turn records its admission session id and refuses a late commit after a
   session switch.
 
-Loop checkpoints record goal, current iteration, and final status (the
+Loop checkpoints record pursuit, current iteration, and final status (the
 iteration budget is uncapped — `usize::MAX` on the wire, see ADR-0009).
 `/session status` exposes the checkpoint, `/loop resume` continues an
 unfinished checkpoint, and `/session new` cancels old work and creates a

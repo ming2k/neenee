@@ -85,13 +85,13 @@ the boundary: the model calls `plan_enter`, researches in Plan mode, writes the
 plan, then calls `plan_exit` and continues implementing in Build mode, all
 within one agent run.
 
-## Relationship to goals and the autonomous loop
+## Relationship to pursuits and the autonomous loop
 
-Plan mode is orthogonal to [goal state](harness.md) and the
-[autonomous loop](harness.md). A goal and a loop can be active in either mode.
+Plan mode is orthogonal to [pursuit state](harness.md) and the
+[autonomous loop](harness.md). A pursuit and a loop can be active in either mode.
 In practice the model usually enters Plan mode first, exits to Build once the
-plan is written, and then pursues the goal with full tool access. The mode does
-not affect goal accounting, the completion marker, or the autonomous loop.
+plan is written, and then pursues the pursuit with full tool access. The mode does
+not affect pursuit accounting, the completion marker, or the autonomous loop.
 
 ## Plan progress panel
 

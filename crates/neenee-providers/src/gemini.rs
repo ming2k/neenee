@@ -228,13 +228,13 @@ mod tests {
     #[test]
     fn gemini_preserves_system_harness_context() {
         let body = gemini_request_body(vec![
-            Message::new(Role::System, "goal and tools"),
+            Message::new(Role::System, "pursuit and tools"),
             Message::new(Role::User, "continue"),
         ]);
 
         assert_eq!(
             body["systemInstruction"]["parts"][0]["text"],
-            "goal and tools"
+            "pursuit and tools"
         );
         assert_eq!(body["contents"][0]["role"], "user");
     }

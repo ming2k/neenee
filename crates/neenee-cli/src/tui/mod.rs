@@ -32,7 +32,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Goal,
+    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, Pursuit,
     HarnessSnapshot, Message, PermissionRequest, PlanProgress, PlanSectionStatus,
     ProviderPickerSnapshot, Role, SessionContextSnapshot, SessionOverview, UserQuestionRequest,
 };
@@ -100,7 +100,7 @@ pub async fn run_tui(
     let ir_clone = is_responding.clone();
     let harness = Arc::new(Mutex::new(HarnessSnapshot {
         mode: AgentMode::Build,
-        goal: None,
+        pursuit: None,
         loop_status: "idle".to_string(),
         auto_approve: false,
     }));
@@ -512,15 +512,15 @@ pub async fn run_tui(
                     let mut msgs = messages_clone.lock().await;
                     finalize_streaming_reasoning(&mut msgs, duration_ms);
                 }
-                AgentResponse::GoalUpdated(goal) => {
-                    let prev = harness_clone.lock().await.goal.clone();
-                    if let Some(text) = describe_goal_change(prev.as_ref(), &goal) {
+                AgentResponse::PursuitUpdated(pursuit) => {
+                    let prev = harness_clone.lock().await.pursuit.clone();
+                    if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
                         messages_clone
                             .lock()
                             .await
                             .push(TranscriptMessage::notice(NoticeSeverity::Info, text));
                     }
-                    harness_clone.lock().await.goal = Some(goal);
+                    harness_clone.lock().await.pursuit = Some(pursuit);
                 }
                 AgentResponse::ModeChanged(mode) => {
                     harness_clone.lock().await.mode = mode;
@@ -624,7 +624,7 @@ pub async fn run_tui(
         current_model: initial_model,
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         path_scan_cache: None,
-        current_goal: None,
+        current_pursuit: None,
         session_context: None,
         loop_status: "idle".to_string(),
         activity_status: String::new(),
@@ -763,18 +763,18 @@ fn plan_status_label(status: PlanSectionStatus) -> &'static str {
     }
 }
 
-/// Format an inline-transcript notice for a goal update, or `None` when the
+/// Format an inline-transcript notice for a pursuit update, or `None` when the
 /// update carries nothing user-visible (a no-op re-broadcast of the same
-/// goal). The goal bar is gone from the footer; these notices are how goal
+/// pursuit). The pursuit bar is gone from the footer; these notices are how pursuit
 /// changes now scroll with the transcript instead of living in a pinned bar.
-fn describe_goal_change(prev: Option<&Goal>, new: &Goal) -> Option<String> {
+fn describe_pursuit_change(prev: Option<&Pursuit>, new: &Pursuit) -> Option<String> {
     let summary = |prefix: &str| -> String { format!("{prefix} · {}", new.objective) };
     if new.is_complete && prev.is_none_or(|p| !p.is_complete) {
-        return Some(summary("✓ goal complete"));
+        return Some(summary("✓ pursuit complete"));
     }
     let prev = prev?;
     if prev.objective != new.objective {
-        return Some(summary("goal set"));
+        return Some(summary("pursue"));
     }
     None
 }

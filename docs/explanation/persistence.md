@@ -47,7 +47,7 @@ Restoring from backup is the right move.
 
 `$XDG_DATA_HOME/neenee/` (default `~/.local/share/neenee/`).
 
-Conversations, content-addressed blobs, the goal database, per-project
+Conversations, content-addressed blobs, the pursuit database, per-project
 embedding indices, cached permission approvals, and user-authored skills
 and commands. This is the irreplaceable history of the work the user has
 done. Back it up.
@@ -130,5 +130,5 @@ absolute values win.
 | `$XDG_CACHE_HOME/neenee/` | None. Cache regenerates. |
 | `$XDG_STATE_HOME/neenee/` | Recency-based sort orders reset; permission caches drop and re-prompt on next session. |
 | `$XDG_DATA_HOME/neenee/projects/<bucket>/` | That project loses its session history and embeddings. |
-| `$XDG_DATA_HOME/neenee/` | All history, blobs, skills, commands, goals. Effectively a factory reset; `config.toml` survives. |
+| `$XDG_DATA_HOME/neenee/` | All history, blobs, skills, commands, pursuits. Effectively a factory reset; `config.toml` survives. |
 | `$XDG_CONFIG_HOME/neenee/` | Loses user-edited configuration. Sessions and skills survive. |

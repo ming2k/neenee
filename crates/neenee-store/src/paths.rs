@@ -115,9 +115,14 @@ impl Dirs {
         self.data_dir.join("sessions")
     }
 
-    /// SQLite goal database, keyed by session id (thread id).
-    pub fn goals_db(&self) -> PathBuf {
-        self.data_dir.join("goals.db")
+    /// SQLite pursuit database, keyed by session id (thread id).
+    pub fn pursuits_db(&self) -> PathBuf {
+        self.data_dir.join("pursuits.db")
+    }
+
+    /// SQLite database for `/repeat` cron jobs (durable recurring prompts).
+    pub fn repeat_db(&self) -> PathBuf {
+        self.data_dir.join("repeat.db")
     }
 
     /// User-global skills (`$XDG_DATA_HOME/neenee/skills`). Per-project skills

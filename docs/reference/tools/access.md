@@ -49,7 +49,7 @@ tool:
 
 - The header title comes from `Tool::permission_label()`, defaulting to
   `Tool::name()`. Override when the name is a synthetic identifier that a
-  user would not recognize (e.g. `create_goal` renders as `Create goal`).
+  user would not recognize (e.g. `start_pursuit` renders as `Create pursuit`).
 - The body shown in the "Details" section comes from
   `Tool::permission_description()`, defaulting to `Tool::description()`.
   Override when `Tool::description()` is model-facing instruction prose
@@ -59,7 +59,7 @@ tool:
 Both `permission_label` and `permission_description` are UI-only strings.
 They never reach the model and are not part of the function schema sent to
 providers, so they can be reworded freely without changing tool behavior.
-Only `create_goal` and `update_goal` currently override them.
+Only `start_pursuit` and `complete_pursuit` currently override them.
 
 ## See also
 

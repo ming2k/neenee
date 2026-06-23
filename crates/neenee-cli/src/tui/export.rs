@@ -4,7 +4,7 @@
 //! clipboard so it can be pasted into another tool's prompt.
 //!
 //! Format is intentionally agent-readable: a metadata header (session id,
-//! provider / model, mode, goal, exported-at) followed by a preamble that
+//! provider / model, mode, pursuit, exported-at) followed by a preamble that
 //! tells the receiving agent how to use the document, then a chronological
 //! transcript of user prompts, assistant replies, tool calls, and tool
 //! results. Hidden and system messages are skipped (mirroring
@@ -13,7 +13,7 @@
 //! so the export stays scannable.
 
 use chrono::Utc;
-use neenee_core::{Goal, Message, Role, ToolCall};
+use neenee_core::{Pursuit, Message, Role, ToolCall};
 
 /// Metadata carried from the harness into the exporter so the header reflects
 /// the live session state at the moment of export.
@@ -23,7 +23,7 @@ pub struct ExportContext<'a> {
     pub provider: &'a str,
     pub model: &'a str,
     pub mode: &'a str,
-    pub goal: Option<&'a Goal>,
+    pub pursuit: Option<&'a Pursuit>,
     pub active_plan_path: Option<&'a std::path::Path>,
 }
 
@@ -39,17 +39,17 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
         ctx.provider, ctx.model
     ));
     out.push_str(&format!("- **Mode:** {}\n", ctx.mode));
-    match ctx.goal {
-        Some(goal) => out.push_str(&format!(
-            "- **Goal [{}]:** {}\n",
-            if goal.is_complete {
+    match ctx.pursuit {
+        Some(pursuit) => out.push_str(&format!(
+            "- **Pursuit [{}]:** {}\n",
+            if pursuit.is_complete {
                 "complete"
             } else {
                 "active"
             },
-            goal.objective
+            pursuit.objective
         )),
-        None => out.push_str("- **Goal:** _none_\n"),
+        None => out.push_str("- **Pursuit:** _none_\n"),
     }
     if let Some(plan) = ctx.active_plan_path {
         out.push_str(&format!("- **Active plan:** {}\n", plan.display()));
@@ -258,7 +258,7 @@ fn choose_fence(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neenee_core::{Goal, ToolCall};
+    use neenee_core::{Pursuit, ToolCall};
 
     fn user(content: &str) -> Message {
         Message::new(Role::User, content)
@@ -291,7 +291,7 @@ mod tests {
                 provider: "kimi-code",
                 model: "kimi-k2.7-code",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &[user("hello")],
@@ -299,13 +299,13 @@ mod tests {
         assert!(out.contains("Session ID:** `abcd1234ef`"));
         assert!(out.contains("Provider / Model:** kimi-code / kimi-k2.7-code"));
         assert!(out.contains("**Mode:** build"));
-        assert!(out.contains("**Goal:** _none_"));
+        assert!(out.contains("**Pursuit:** _none_"));
         assert!(out.contains("A fresh agent can read it as context"));
     }
 
     #[test]
-    fn includes_goal_objective() {
-        let goal = Goal {
+    fn includes_pursuit_objective() {
+        let pursuit = Pursuit {
             objective: "Ship /export".to_string(),
             is_complete: false,
         };
@@ -315,7 +315,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: Some(&goal),
+                pursuit: Some(&pursuit),
                 active_plan_path: None,
             },
             &[user("hi")],
@@ -336,7 +336,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &messages,
@@ -364,7 +364,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &messages,
@@ -399,7 +399,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &messages,
@@ -428,7 +428,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &messages,
@@ -444,7 +444,7 @@ mod tests {
                 provider: "p",
                 model: "m",
                 mode: "build",
-                goal: None,
+                pursuit: None,
                 active_plan_path: None,
             },
             &[],

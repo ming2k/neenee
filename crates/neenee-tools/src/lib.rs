@@ -1033,8 +1033,8 @@ impl Tool for WebSearchTool {
     }
 }
 
-/// A lightweight, standalone task list (decoupled from the persistent goal).
-/// Useful as a scratchpad when no goal is active. State is in-process.
+/// A lightweight, standalone task list (decoupled from the persistent pursuit).
+/// Useful as a scratchpad when no pursuit is active. State is in-process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoItem {
     pub content: String,
@@ -1079,7 +1079,7 @@ impl Tool for TodoWriteTool {
         "todo"
     }
     fn description(&self) -> &str {
-        "Maintain a standalone task list (independent of the active goal). Replace the whole list \
+        "Maintain a standalone task list (independent of the active pursuit). Replace the whole list \
          each call with the current set of concrete steps. Keep at most one item in_progress. \
          The returned list reflects the updated state."
     }

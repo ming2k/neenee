@@ -60,10 +60,10 @@ pub struct Agent {
     /// latter can stamp `PlanProgress::updated_at_turn` for the TUI stale
     /// detector.
     turn_counter: Arc<std::sync::Mutex<u64>>,
-    /// In-memory runtime view of the active goal.
-    goal: Arc<std::sync::Mutex<Option<Goal>>>,
+    /// In-memory runtime view of the active pursuit.
+    pursuit: Arc<std::sync::Mutex<Option<Pursuit>>>,
     /// Whether a pursuit is armed. When armed, the stop-gate re-injects the
-    /// goal condition as a hidden user message and forces another model
+    /// pursuit condition as a hidden user message and forces another model
     /// round instead of ending the turn — until the model signals completion
     /// (emits the completion marker), the safety cap is hit, or the pursuit
     /// is disarmed. This is the `/pursue` mechanism (Claude-Code-style
@@ -87,7 +87,7 @@ pub struct Agent {
     auto_approve: Arc<std::sync::Mutex<bool>>,
     ask_user: std::sync::Mutex<AskUserState>,
     pub(crate) skills_registry: skills::SkillRegistry,
-    goal_service: GoalService,
+    pursuit_service: PursuitService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Context-pressure threshold (in chars) above which the harness asks the
     /// [`CompactionGate`] to relieve pressure between tool rounds. `0` disables
@@ -117,9 +117,9 @@ pub(crate) struct TurnState {
     repeated_calls: usize,
     /// Whether every tool call in the most recent round was read-only
     /// (`ToolAccess::Read` and not one of the mutating Read tools:
-    /// `goal_checklist` / `plan_enter` / `plan_exit` /
-    /// `update_plan_progress`). Set by `dispatch_tool_calls` so the
-    /// outer loop can maintain `consecutive_readonly_rounds`.
+    /// `plan_enter` / `plan_exit` / `update_plan_progress`). Set by
+    /// `dispatch_tool_calls` so the outer loop can maintain
+    /// `consecutive_readonly_rounds`.
     pub(crate) last_round_was_readonly: bool,
     /// Consecutive read-only rounds so far this turn. Reset to 0 by any
     /// productive round. Drives the stall detector (`STALL_THRESHOLD` for
@@ -163,41 +163,41 @@ impl Agent {
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         mode: AgentMode,
-        goal_service: GoalService,
+        pursuit_service: PursuitService,
         skills_registry: skills::SkillRegistry,
     ) -> Self {
         // Clone the provider + tool handles before they move into Self, so
         // the VerifyPlanExecutionTool can construct its own internal TaskTool
         // for spawning clean-context verifier sub-agents. The verifier runs
         // in a clean context, so we snapshot the input toolset before the
-        // goal/plan tools are layered on below; admission (read-only /
+        // pursuit/plan tools are layered on below; admission (read-only /
         // non-interactive / non-recursive) is applied by the explore profile
         // inside that TaskTool, not re-implemented here. See ADR-0011.
         let verify_provider = provider.clone();
         let verify_tools: Vec<Arc<dyn Tool>> = tools.clone();
 
-        let goal = Arc::new(std::sync::Mutex::new(None));
+        let pursuit = Arc::new(std::sync::Mutex::new(None));
         let thread_id = Arc::new(std::sync::Mutex::new(None));
         let mode = Arc::new(std::sync::Mutex::new(mode));
-        let context = goals::tools::GoalToolContext {
+        let context = pursuits::tools::PursuitToolContext {
             thread_id: Arc::clone(&thread_id),
-            goal_service: goal_service.clone(),
+            pursuit_service: pursuit_service.clone(),
         };
 
         let mut tools = tools;
         tools.retain(|tool| {
             !matches!(
                 tool.name(),
-                "get_goal"
-                    | "create_goal"
-                    | "update_goal"
+                "get_pursuit"
+                    | "start_pursuit"
+                    | "complete_pursuit"
                     | "plan_enter"
                     | "plan_exit"
             )
         });
-        tools.push(Arc::new(goals::tools::GetGoalTool::new(context.clone())));
-        tools.push(Arc::new(goals::tools::CreateGoalTool::new(context.clone())));
-        tools.push(Arc::new(goals::tools::UpdateGoalTool::new(context.clone())));
+        tools.push(Arc::new(pursuits::tools::GetPursuitTool::new(context.clone())));
+        tools.push(Arc::new(pursuits::tools::StartPursuitTool::new(context.clone())));
+        tools.push(Arc::new(pursuits::tools::CompletePursuitTool::new(context.clone())));
 
         // Plan-mode workflow tools share the mode handle, the active plan
         // path, and the plan progress snapshot — the same `Arc`s the agent
@@ -234,7 +234,7 @@ impl Agent {
             active_plan_path,
             plan_progress,
             turn_counter,
-            goal,
+            pursuit,
             pursuit_armed: Arc::new(std::sync::Mutex::new(false)),
             pursuit_iterations: Arc::new(std::sync::Mutex::new(0)),
             permissions: std::sync::Mutex::new(PermissionState::default()),
@@ -242,7 +242,7 @@ impl Agent {
             auto_approve: Arc::new(std::sync::Mutex::new(false)),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
-            goal_service,
+            pursuit_service,
             thread_id,
             context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
             compaction_gate: Arc::new(std::sync::Mutex::new(None)),
@@ -454,28 +454,28 @@ impl Agent {
         *self.auto_approve.lock().unwrap_or_else(|e| e.into_inner()) = enabled;
     }
 
-    pub fn get_goal(&self) -> Option<Goal> {
-        self.goal.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    pub fn get_pursuit(&self) -> Option<Pursuit> {
+        self.pursuit.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    pub fn set_goal(&self, goal: Goal) {
-        *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = Some(goal);
+    pub fn set_pursuit(&self, pursuit: Pursuit) {
+        *self.pursuit.lock().unwrap_or_else(|e| e.into_inner()) = Some(pursuit);
     }
 
-    pub fn restore_goal(&self, goal: Goal) {
-        *self.goal.lock().unwrap_or_else(|error| error.into_inner()) = Some(goal);
+    pub fn restore_pursuit(&self, pursuit: Pursuit) {
+        *self.pursuit.lock().unwrap_or_else(|error| error.into_inner()) = Some(pursuit);
     }
 
-    pub fn clear_goal(&self) {
-        *self.goal.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    pub fn clear_pursuit(&self) {
+        *self.pursuit.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub fn goal_can_complete(&self) -> bool {
-        self.get_goal().is_some()
+    pub fn pursuit_can_complete(&self) -> bool {
+        self.get_pursuit().is_some()
     }
 
-    pub fn goal_service(&self) -> &GoalService {
-        &self.goal_service
+    pub fn pursuit_service(&self) -> &PursuitService {
+        &self.pursuit_service
     }
 
     // ── Pursuit stop-gate ───────────────────────────────────────────────
@@ -508,20 +508,20 @@ impl Agent {
     /// return `TurnOutcome`.
     ///
     /// Returns `Some(prompt)` only when: a pursuit is armed, an active
-    /// (incomplete) goal exists, the latest response did not signal
+    /// (incomplete) pursuit exists, the latest response did not signal
     /// completion (via the marker), and the iteration cap is not exhausted.
     /// Hitting the cap disarms the pursuit and stops.
     pub(crate) fn pursuit_continuation(&self, response: &Message) -> Option<String> {
         if !self.is_pursuit_armed() {
             return None;
         }
-        let goal = self.get_goal()?;
-        if goal.is_complete {
+        let pursuit = self.get_pursuit()?;
+        if pursuit.is_complete {
             return None;
         }
         // The model signals completion by emitting the marker; if present,
-        // let the turn end so orchestration can finalize the goal.
-        if response.content.contains(crate::GOAL_COMPLETE_MARKER) {
+        // let the turn end so orchestration can finalize the pursuit.
+        if response.content.contains(crate::PURSUIT_COMPLETE_MARKER) {
             return None;
         }
         let iterations = self.pursuit_iterations();
@@ -530,7 +530,7 @@ impl Agent {
             self.disarm_pursuit();
             return None;
         }
-        Some(goals::prompts::continuation_prompt(&goal))
+        Some(pursuits::prompts::continuation_prompt(&pursuit))
     }
 
     pub fn thread_id(&self) -> Option<String> {
@@ -540,24 +540,24 @@ impl Agent {
             .clone()
     }
 
-    /// Append a hidden user message that asks the model to continue the active goal.
-    pub fn inject_goal_continuation(&self, messages: &mut Vec<Message>) {
-        if let Some(goal) = self.get_goal() {
-            if !goal.is_complete {
+    /// Append a hidden user message that asks the model to continue the active pursuit.
+    pub fn inject_pursuit_continuation(&self, messages: &mut Vec<Message>) {
+        if let Some(pursuit) = self.get_pursuit() {
+            if !pursuit.is_complete {
                 messages.push(Message::hidden(
                     Role::User,
-                    goals::prompts::continuation_prompt(&goal),
+                    pursuits::prompts::continuation_prompt(&pursuit),
                 ));
             }
         }
     }
 
-    /// Append a hidden user message that informs the model the goal objective changed.
+    /// Append a hidden user message that informs the model the pursuit objective changed.
     pub fn inject_objective_updated(&self, messages: &mut Vec<Message>) {
-        if let Some(goal) = self.get_goal() {
+        if let Some(pursuit) = self.get_pursuit() {
             messages.push(Message::hidden(
                 Role::User,
-                goals::prompts::objective_updated_prompt(&goal),
+                pursuits::prompts::objective_updated_prompt(&pursuit),
             ));
         }
     }
@@ -819,13 +819,13 @@ impl Agent {
 
     /// Structured view of every installed tool, for the session modal's Tools
     /// pane. `enabled` reflects the disabled mask; `source` classifies origin
-    /// (`builtin` / `mcp:<server>` / `goal` / `plan`) from the tool's name.
+    /// (`builtin` / `mcp:<server>` / `pursuit` / `plan`) from the tool's name.
     pub fn snapshot_tools(&self) -> Vec<neenee_core::ToolInfo> {
         let disabled = self
             .disabled_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let goal = ["get_goal", "create_goal", "update_goal"];
+        let pursuit = ["get_pursuit", "start_pursuit", "complete_pursuit"];
         let plan = ["plan_enter", "plan_exit"];
         let mut infos: Vec<neenee_core::ToolInfo> = self
             .tools
@@ -835,8 +835,8 @@ impl Agent {
                 let source = if let Some(rest) = name.strip_prefix("mcp__") {
                     let server = rest.split("__").next().unwrap_or(rest);
                     format!("mcp:{}", server)
-                } else if goal.contains(&name) {
-                    "goal".to_string()
+                } else if pursuit.contains(&name) {
+                    "pursuit".to_string()
                 } else if plan.contains(&name) {
                     "plan".to_string()
                 } else {
@@ -1209,7 +1209,7 @@ impl Agent {
             // with an approved plan active but has not run verification
             // yet (and has not already been nudged about it this turn),
             // push a hidden reminder and force one more round. Mirrors
-            // the GOAL_COMPLETE_MARKER gate but for plan completion, and
+            // the PURSUIT_COMPLETE_MARKER gate but for plan completion, and
             // fires at most once per turn so the model can still wrap
             // up if it judges the nudge irrelevant.
             if self.should_nudge_verify(&state) {
@@ -1251,7 +1251,7 @@ impl Agent {
     /// appending tool results to `messages`. Shared by the streaming and
     /// non-streaming loops so the dispatch contract — repeated-call guard,
     /// up-front `ToolCall` events, concurrent execution with FIFO-ordered
-    /// results, and goal/mode updates — lives in exactly one place.
+    /// results, and pursuit/mode updates — lives in exactly one place.
     ///
     /// `streamed_text` is true when the response text was already streamed to
     /// the UI, so a recognised text-fallback tool call retracts it with an
@@ -1421,7 +1421,6 @@ impl Agent {
             }
         }
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
-        self.emit_goal_update(call, on_event);
         self.emit_mode_change(call, on_event);
         self.emit_plan_progress_change(call, on_event);
         if emit_event {
@@ -1484,7 +1483,7 @@ impl Agent {
     /// detection. A round is productive if any of its calls resolves to an
     /// above-Read tool (`Execute` or `Write` — running a command counts as
     /// an action, not idle reading), or names one of the mutating Read tools
-    /// in [`PRODUCTIVE_READ_TOOLS`] (goal checklist, plan/mode transitions,
+    /// in [`PRODUCTIVE_READ_TOOLS`] (pursuit checklist, plan/mode transitions,
     /// plan-section progress). Unknown tool names default to read-only so a
     /// model hallucinating a Write-looking name cannot bypass the detector.
     fn round_was_productive(&self, calls: &[ToolCall]) -> bool {
@@ -1567,7 +1566,7 @@ impl Agent {
                     Role::User,
                     format!(
                         "You have made {n} consecutive read-only tool calls without \
-                         producing any changes or updating plan/goal state. You may \
+                         producing any changes or updating plan/pursuit state. You may \
                          be stuck in an exploration loop. Step back: re-read the \
                          task, decide whether you already have the information you \
                          need, and either act (write/edit/run) or report to the \
@@ -1617,15 +1616,6 @@ impl Agent {
             && !state.verify_called_this_turn
             && self.get_mode() == AgentMode::Build
             && self.active_plan_path().is_some()
-    }
-
-    pub(crate) fn emit_goal_update<F>(&self, _call: &ToolCall, _on_event: &mut F)
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        // Goal-checklist emissions were removed when the checklist primitive
-        // was dropped. Pursuit state-change events will be wired here in a
-        // follow-up slice.
     }
 
     /// Notify the harness that the agent mode changed via `plan_enter` /

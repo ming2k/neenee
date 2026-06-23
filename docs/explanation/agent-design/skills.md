@@ -28,7 +28,7 @@ when a skill is actually relevant. This is why a skills index can list dozens of
 skills in the system prompt at near-zero cost, while their full bodies never
 enter context until invoked.
 
-Each turn the harness rebuilds the system message from the live mode, goal,
+Each turn the harness rebuilds the system message from the live mode, pursuit,
 tool list, and skills catalog. The catalog is the only skills-related content
 that lives in the system prompt; everything else is delivered as a turn-scoped
 message.

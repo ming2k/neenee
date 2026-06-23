@@ -21,8 +21,8 @@ Project and user-defined commands are covered under
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
 | `/sessions` | Browse past sessions |
 | `/resume [id]` | Resume the most recent or selected session |
-| `/goal` | Set, inspect, complete, or clear the active goal |
-| `/loop [objective\|resume\|status\|stop]` | Run an uncapped autonomous goal loop |
+| `/pursue [condition\|status\|stop\|done\|edit\|clear]` | Pursue a pursuit: the harness keeps the turn going until the condition is met |
+| `/repeat [cron prompt\|list\|cancel id]` | Schedule a prompt on a cron expression |
 | `/init [path]` | Initialize a `.neenee/` config tree |
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
@@ -42,37 +42,39 @@ by the agent backend.
 | `/plan` | Open the active plan file in a read-only preview modal. |
 | `/verify` | Trigger independent plan verification — spawns a clean-context sub-agent that re-reads the plan and reports PASS/PARTIAL/FAIL per section. |
 
-### `/goal`
+### `/pursue`
 
 | Form | Effect |
 |------|--------|
-| `/goal` or `/goal status` | Show the current goal, completion state, and checklist |
-| `/goal <objective>` | Set or replace the active goal |
-| `/goal edit <objective>` | Rewrite the objective of the current goal |
-| `/goal done` | Mark the active goal completed |
-| `/goal clear` | Remove the active goal |
+| `/pursue <condition>` | Set the condition as the active pursuit, arm the stop-gate, and drive the turn until it is met |
+| `/pursue` | Re-arm and drive a pursuit on the existing active pursuit |
+| `/pursue status` | Show the current pursuit, armed state, and gate iteration |
+| `/pursue edit <condition>` | Rewrite the condition of the current pursuit |
+| `/pursue done` | Mark the pursuit completed (disarms the gate) |
+| `/pursue stop` | Stop the active pursuit |
+| `/pursue clear` | Remove the pursuit (disarms and clears) |
 
-Goal state is persisted per session in a SQLite store, so it survives restarts
-and is restored on `/resume`. The goal carries no token or time budget, and the
-autonomous loop has no iteration cap. See
-[Goals](../explanation/agent-design/goals.md).
+`/pursue` arms a **stop-gate**: each time the model would end the turn, the
+harness re-injects the condition and forces another round until the model
+signals completion (`[NEENEE_PURSUIT_COMPLETE]`), the 50-round safety cap is hit,
+or the user interrupts (`/pursue stop` / `Esc`). Pursuit state is persisted per
+session in SQLite, so it survives restarts and is restored on `/resume`. See
+[Pursuits and the pursue stop-gate](../explanation/agent-design/pursuits.md).
 
-### `/loop`
+### `/repeat`
 
 | Form | Effect |
 |------|--------|
-| `/loop` | Start an uncapped autonomous loop on the active goal (set one with `/goal <objective>` first) |
-| `/loop <objective>` | Set a fresh goal from `<objective>` and start an uncapped autonomous loop on it |
-| `/loop resume` | Resume an unfinished durable checkpoint |
-| `/loop status` | Show autonomous loop status |
-| `/loop stop` | Stop the active loop |
+| `/repeat <cron> <prompt>` | Schedule `<prompt>` on the five-field `<cron>` and run it now |
+| `/repeat list` | List scheduled jobs (id, cron, next fire, prompt) |
+| `/repeat cancel <id>` | Cancel a scheduled job |
+| `/repeat help` | Show cron syntax help |
 
-The loop runs until the model emits `[NEENEE_GOAL_COMPLETE]` (and the goal
-checklist allows completion), the user runs `/loop stop` or presses `Esc`, an
-error aborts the active turn, or a newer chat or loop request supersedes it.
-There is **no iteration budget**: each iteration is a complete agent turn with
-its own uncapped ReAct loop, and context compaction keeps long loops bounded.
-A legacy `/loop <N>` form (pure number) is rejected with a migration hint.
+`<cron>` is five fields — `minute hour day-of-month month day-of-week` — e.g.
+`*/5 * * * *` (every 5 minutes), `0 9 * * 1-5` (09:00 on weekdays). Jobs are
+durable (survive restarts) and auto-expire after 30 days. `/repeat` is a
+clock-driven scheduler, independent of `/pursue`. See
+[Pursuits and the pursue stop-gate](../explanation/agent-design/pursuits.md).
 
 ### `/session`
 
@@ -102,7 +104,7 @@ A legacy `/loop <N>` form (pure number) is rejected with a migration hint.
 
 | Form | Effect |
 |------|--------|
-| `/export` | Render the live conversation as Markdown — metadata header (session id, provider/model, mode, goal, active plan, exported-at), goal checklist, then a chronological transcript of user prompts, assistant replies, tool calls, and inlined tool results — and copy it to the system clipboard so it can be pasted into another agent to continue the work. |
+| `/export` | Render the live conversation as Markdown — metadata header (session id, provider/model, mode, pursuit, active plan, exported-at), pursuit checklist, then a chronological transcript of user prompts, assistant replies, tool calls, and inlined tool results — and copy it to the system clipboard so it can be pasted into another agent to continue the work. |
 
 The receiving agent gets the full chain of decisions and side effects: hidden
 and system messages are skipped (mirroring TUI rendering), reasoning traces
@@ -139,6 +141,6 @@ are not shadowed by custom commands.
 
 ## See also
 
-- [Harness architecture](../explanation/agent-design/harness.md) — goal state, autonomous
+- [Harness architecture](../explanation/agent-design/harness.md) — pursuit state, autonomous
   loop, durable session, permission broker, context compaction
 - [Modals](tui/modals.md) — the `/provider` and `/sessions` pickers

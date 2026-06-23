@@ -5,7 +5,7 @@
 //! # What lives here
 //!
 //! - **The `Agent` struct** (`agent.rs`) — holds the provider, tool set, mode,
-//!   goal, and skill registry; runs the streaming ReAct loop
+//!   pursuit, and skill registry; runs the streaming ReAct loop
 //!   (`run_streaming_with_events`).
 //! - **System-prompt assembly** (`prompt.rs`) — methods extending `Agent` that
 //!   rebuild the system message each turn and auto-load mentioned skills.
@@ -13,8 +13,8 @@
 //!   remote indices; produces the `UseSkillTool` / `ListSkillsTool` /
 //!   `ReloadSkillsTool` tool implementations.
 //! - **Turn orchestration** (`orchestration.rs`) — the policy that wraps every
-//!   agent turn: compaction, mid-turn pruning, retries with backoff, goal
-//!   accounting, and the autonomous goal loop. Frontends drive the harness
+//!   agent turn: compaction, mid-turn pruning, retries with backoff, the
+//!   `/pursue` stop-gate driver, and the `/repeat` cron scheduler. Frontends drive the harness
 //!   through [`orchestration::execute_turn`] and friends; they own only the
 //!   UI-specific input path (slash commands for the CLI, menus/dialogs for a
 //!   future GUI).
@@ -62,8 +62,8 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Goal,
-    GoalService, GoalStore, HarnessError, HarnessSnapshot, ImagePart,
+    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, Pursuit,
+    PursuitService, PursuitStore, HarnessError, HarnessSnapshot, ImagePart,
     McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision, PermissionRequest,
     Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent,
     PruneOutcome, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
@@ -88,7 +88,7 @@ use tokio_util::sync::CancellationToken;
 /// the agentic loop runs until the model itself stops calling tools. Context
 /// compaction (`compaction_max_chars` plus mid-turn pruning) keeps the
 /// transcript bounded; the user can interrupt at any time with `Esc` or
-/// `/loop stop`.
+/// `/pursue stop`.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
 
 /// Safety cap on the number of rounds the `/pursue` stop-gate will drive

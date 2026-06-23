@@ -22,9 +22,9 @@ before the individual docs.
 | Page | Purpose |
 |------|--------|
 | [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
-| [Harness architecture](agent-design/harness.md) | Control plane around provider calls, goal state, autonomous loop, safety bounds |
+| [Harness architecture](agent-design/harness.md) | Control plane around provider calls, pursuit state, autonomous loop, safety bounds |
 | [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model: a turn as the user-perceived unit, a round as the ReAct loop iteration inside it, and which concerns attach to each layer |
-| [Goals](agent-design/goals.md) | Durable per-session objectives: the slim primitive, checklist gating, and the completion signal |
+| [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-turn condition-driven pursuit) and the `/repeat` cron scheduler |
 | [Sub-agents](agent-design/subagents/index.md) | The `task` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and Plan-mode gating |
 | [Plan mode](agent-design/plan-mode.md) | Read-only planning surface, autonomous `plan_enter`/`plan_exit`, and the plan-file write exemption |

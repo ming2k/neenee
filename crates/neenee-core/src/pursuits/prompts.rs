@@ -1,16 +1,16 @@
-use super::Goal;
+use super::Pursuit;
 
-pub fn continuation_prompt(goal: &Goal) -> String {
+pub fn continuation_prompt(pursuit: &Pursuit) -> String {
     render(
         include_str!("prompts/continuation.md"),
-        &TemplateValues::from(goal),
+        &TemplateValues::from(pursuit),
     )
 }
 
-pub fn objective_updated_prompt(goal: &Goal) -> String {
+pub fn objective_updated_prompt(pursuit: &Pursuit) -> String {
     render(
         include_str!("prompts/objective_updated.md"),
-        &TemplateValues::from(goal),
+        &TemplateValues::from(pursuit),
     )
 }
 
@@ -18,10 +18,10 @@ struct TemplateValues {
     objective: String,
 }
 
-impl From<&Goal> for TemplateValues {
-    fn from(goal: &Goal) -> Self {
+impl From<&Pursuit> for TemplateValues {
+    fn from(pursuit: &Pursuit) -> Self {
         Self {
-            objective: escape_xml_text(&goal.objective),
+            objective: escape_xml_text(&pursuit.objective),
         }
     }
 }

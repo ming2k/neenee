@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/pursue <condition>`** — a Claude-Code-style **stop-gate**. Setting a
+  pursuit persists the condition and drives a single agent turn that refuses
+  to end until the model signals completion (`[NEENEE_PURSUIT_COMPLETE]`), a
+  50-round safety cap is hit, or you interrupt (`/pursue stop` / `Esc`). The
+  gate re-injects the condition on each stop attempt, so the pursuit is
+  within-turn continuation. Subcommands: `/pursue` (re-arm), `status`, `edit`,
+  `done`, `stop`, `clear`.
+- **`/repeat <cron> <prompt>`** — a durable **cron scheduler**. A real
+  five-field cron expression engine fires the prompt as a normal turn on a
+  clock. Jobs persist in `repeat.db` (survive restarts), auto-expire after 30
+  days, and the first run fires immediately. `/repeat list`, `/repeat cancel
+  <id>`, `/repeat help`.
+
 ### Removed
 
+- **`/goal` and `/loop`.** Replaced by `/pursue` (condition-driven stop-gate)
+  and `/repeat` (clock-driven cron). `/loop resume` has no equivalent — a
+  pursuit is a single turn. Migrate: `/goal <x>` + `/loop` → `/pursue <x>`.
+- **The goal checklist primitive** (`goal_checklist` tool, checklist gating,
+  completion-defer). Completion is now a single boolean driven by the
+  completion marker.
 - **Legacy pre-XDG skill and command paths.** neenee no longer scans
   `~/.neenee/skills/` or `~/.neenee/commands/`. Move their contents to the
   XDG locations to keep them loaded:

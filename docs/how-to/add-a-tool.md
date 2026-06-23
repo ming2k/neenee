@@ -142,15 +142,15 @@ the call does*, not *when the model should call it*.
 
 ```rust
 fn permission_label(&self) -> String {
-    "Create goal".to_string()
+    "Create pursuit".to_string()
 }
 
 fn permission_description(&self) -> String {
-    "Start a new active goal for this thread, replacing any completed goal.".to_string()
+    "Start a new active pursuit for this thread, replacing any completed pursuit.".to_string()
 }
 ```
 
-`create_goal` and `update_goal` (`crates/neenee-core/src/goals/tools.rs`)
+`start_pursuit` and `complete_pursuit` (`crates/neenee-core/src/pursuits/tools.rs`)
 are the reference implementation. Both overrides are UI-only: they never
 reach the model and are not part of the function schema.
 

@@ -58,7 +58,7 @@ The live status line comes from `TranscriptMessage::subagent_status_line`
 
 The message stream above is rendered by the same `draw_transcript` pass as
 the root conversation, just against `focused_messages()` instead of
-`self.messages`. The footer (plan panel, goal bar, status bar, input box, hint bar)
+`self.messages`. The footer (plan panel, pursuit bar, status bar, input box, hint bar)
 collapses to 0 height — the zoomed view is read-only, and the navigation
 bar is its only chrome. See [Frame layout → Sub-agent zoom view](layout.md#sub-agent-zoom-view)
 for the rect math.

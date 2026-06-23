@@ -131,7 +131,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.current_provider = runtime.current_provider.lock().await.clone();
             app.current_model = runtime.current_model.lock().await.clone();
             let harness = runtime.harness.lock().await.clone();
-            app.current_goal = harness.goal;
+            app.current_pursuit = harness.pursuit;
             app.loop_status = harness.loop_status;
             app.auto_approve = harness.auto_approve;
             app.activity_status = runtime.activity_status.lock().await.clone();
@@ -633,7 +633,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                 Modal::Activity => render::draw_activity_modal(
                     f,
                     render::ActivityModalView {
-                        goal: app.current_goal.as_ref(),
+                        pursuit: app.current_pursuit.as_ref(),
                         plan: app.plan_progress.as_ref(),
                         turn_count: app.turn_count,
                         current_round: app.current_round,
@@ -1958,8 +1958,8 @@ pub(super) async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::SelectionStart { x, y } => {
                     // Activity bar: open the Activity modal, which gathers the
-                    // goal, plan progress, and live activity into one overlay
-                    // (replacing the always-pinned goal bar + plan panel).
+                    // pursuit, plan progress, and live activity into one overlay
+                    // (replacing the always-pinned pursuit bar + plan panel).
                     if app.activity_rect.is_some_and(|r| {
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
@@ -2160,7 +2160,6 @@ pub(super) fn tool_activity_status(name: &str) -> &'static str {
         "grep" => "searching codebase",
         "write_file" | "edit_file" => "making edits",
         "bash" => "running command",
-        "goal_checklist" => "updating tasks",
         name if name.starts_with("mcp__") => "using MCP",
         _ => "using tool",
     }

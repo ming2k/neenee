@@ -234,7 +234,7 @@ easy to mistake for an unresponsive loop; a slow luminance sweep reads as
 provider round trip.
 
 The breathing dot is also the **single** motion anchor in the TUI: every
-other running indicator (tool-step summary, reasoning marker, goal bar)
+other running indicator (tool-step summary, reasoning marker, pursuit bar)
 holds a steady accent, never a luminance sweep. Concentrating all of the
 motion budget in one place preserves the dot's role as a peripheral
 "system is alive" cue — if every component breathed in unison, the dot

@@ -75,7 +75,7 @@ pub enum ToolOutput {
     /// A read-only sub-agent run (produced by the `task` tool). Carries the
     /// sub-agent's full internal transcript so it can be persisted on the
     /// parent session and replayed on resume, plus the actual token usage so
-    /// parent-side goal accounting no longer under-counts by 100x. `summary`
+    /// parent-side pursuit accounting no longer under-counts by 100x. `summary`
     /// is the short text the parent model sees as the tool result.
     ///
     /// `failed` is the structured failure flag set explicitly by the task tool

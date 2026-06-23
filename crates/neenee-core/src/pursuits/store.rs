@@ -5,11 +5,11 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use super::ThreadGoal;
+use super::ThreadPursuit;
 
-/// Schema for the `thread_goals` table.
+/// Schema for the `thread_pursuits` table.
 ///
-/// ADR-0010 slimmed the runtime/persisted goal primitive to
+/// ADR-0010 slimmed the runtime/persisted pursuit primitive to
 /// `objective` + `is_complete` + timestamps. The SQL schema keeps the
 /// pre-0010 `token_budget` / `tokens_used` / `time_used_seconds` columns
 /// so legacy databases still load cleanly; they are simply never read or
@@ -17,8 +17,8 @@ use super::ThreadGoal;
 /// shape but only two values are written going forward: `"active"` and
 /// `"complete"`. Pre-0010 statuses (`paused`, `blocked`, `usage_limited`,
 /// `budget_limited`) are mapped to `"active"` on read.
-const THREAD_GOALS_SCHEMA: &str = r#"
-                CREATE TABLE IF NOT EXISTS thread_goals (
+const THREAD_PURSUITS_SCHEMA: &str = r#"
+                CREATE TABLE IF NOT EXISTS thread_pursuits (
                     thread_id TEXT PRIMARY KEY,
                     goal_id TEXT NOT NULL,
                     objective TEXT NOT NULL,
@@ -31,11 +31,11 @@ const THREAD_GOALS_SCHEMA: &str = r#"
                 )
                 "#;
 
-pub struct GoalStore {
+pub struct PursuitStore {
     conn: Arc<std::sync::Mutex<Connection>>,
 }
 
-impl Clone for GoalStore {
+impl Clone for PursuitStore {
     fn clone(&self) -> Self {
         Self {
             conn: Arc::clone(&self.conn),
@@ -43,11 +43,25 @@ impl Clone for GoalStore {
     }
 }
 
-impl GoalStore {
+impl PursuitStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref().to_path_buf();
+        // One-time migration from the pre-rename `goals.db`: if the new file
+        // does not yet exist but the legacy one does, copy it across so an
+        // existing active pursuit survives the rename. The copied table is
+        // renamed to `thread_pursuits` in `migrate()`.
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let legacy = parent.join("goals.db");
+                if legacy.exists() {
+                    let _ = std::fs::copy(&legacy, &path);
+                }
+            }
+        }
+        let path_for_task = path;
         let conn = tokio::task::spawn_blocking(move || {
-            Connection::open(&path).map_err(|err| format!("failed to open goals db: {err}"))
+            Connection::open(&path_for_task)
+                .map_err(|err| format!("failed to open pursuits db: {err}"))
         })
         .await
         .map_err(|err| format!("db open task failed: {err}"))??;
@@ -79,8 +93,8 @@ impl GoalStore {
     pub fn open_in_memory_blocking() -> Result<Self, String> {
         let conn = Connection::open_in_memory()
             .map_err(|err| format!("failed to open in-memory db: {err}"))?;
-        conn.execute(THREAD_GOALS_SCHEMA, [])
-            .map_err(|err| format!("failed to create thread_goals table: {err}"))?;
+        conn.execute(THREAD_PURSUITS_SCHEMA, [])
+            .map_err(|err| format!("failed to create thread_pursuits table: {err}"))?;
         Ok(Self {
             conn: Arc::new(std::sync::Mutex::new(conn)),
         })
@@ -90,15 +104,19 @@ impl GoalStore {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|err| err.to_string())?;
-            conn.execute(THREAD_GOALS_SCHEMA, [])
-                .map_err(|err| format!("failed to create thread_goals table: {err}"))?;
+            // Rename a legacy `thread_goals` table (carried over from
+            // goals.db by `open`) so its rows survive under the new name.
+            // "no such table" on fresh databases is expected and ignored.
+            let _ = conn.execute("ALTER TABLE thread_goals RENAME TO thread_pursuits", []);
+            conn.execute(THREAD_PURSUITS_SCHEMA, [])
+                .map_err(|err| format!("failed to create thread_pursuits table: {err}"))?;
             Ok::<_, String>(())
         })
         .await
         .map_err(|err| format!("migrate task failed: {err}"))?
     }
 
-    pub async fn get_goal(&self, thread_id: &str) -> Result<Option<ThreadGoal>, String> {
+    pub async fn get_pursuit(&self, thread_id: &str) -> Result<Option<ThreadPursuit>, String> {
         let thread_id = thread_id.to_string();
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
@@ -108,26 +126,26 @@ impl GoalStore {
                     r#"
                     SELECT
                         thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
-                    FROM thread_goals
+                    FROM thread_pursuits
                     WHERE thread_id = ?1
                     "#,
                 )
-                .map_err(|err| format!("prepare get_goal failed: {err}"))?;
+                .map_err(|err| format!("prepare get_pursuit failed: {err}"))?;
             let mut rows = stmt
                 .query_map([&thread_id], thread_goal_from_row)
-                .map_err(|err| format!("query get_goal failed: {err}"))?;
+                .map_err(|err| format!("query get_pursuit failed: {err}"))?;
             rows.next().transpose().map_err(|err| err.to_string())
         })
         .await
-        .map_err(|err| format!("get_goal task failed: {err}"))?
+        .map_err(|err| format!("get_pursuit task failed: {err}"))?
     }
 
-    /// Replace any existing goal with a brand-new active, incomplete goal.
+    /// Replace any existing pursuit with a brand-new active, incomplete pursuit.
     pub async fn replace_goal(
         &self,
         thread_id: &str,
         objective: &str,
-    ) -> Result<ThreadGoal, String> {
+    ) -> Result<ThreadPursuit, String> {
         let thread_id = thread_id.to_string();
         let thread_id_for_get = thread_id.clone();
         let objective = objective.to_string();
@@ -139,7 +157,7 @@ impl GoalStore {
             let conn = conn.lock().map_err(|err| err.to_string())?;
             conn.execute(
                 r#"
-                INSERT INTO thread_goals (
+                INSERT INTO thread_pursuits (
                     thread_id, goal_id, objective, status, token_budget,
                     tokens_used, time_used_seconds, created_at_ms, updated_at_ms
                 ) VALUES (?1, ?2, ?3, 'active', NULL, 0, 0, ?4, ?4)
@@ -161,18 +179,18 @@ impl GoalStore {
         .await
         .map_err(|err| format!("replace_goal task failed: {err}"))??;
 
-        self.get_goal(&thread_id_for_get)
+        self.get_pursuit(&thread_id_for_get)
             .await?
             .ok_or_else(|| "replace_goal succeeded but row is missing".to_string())
     }
 
-    /// Rewrite the objective of an existing goal. Returns `None` if no row
+    /// Rewrite the objective of an existing pursuit. Returns `None` if no row
     /// matches `thread_id`.
     pub async fn update_objective(
         &self,
         thread_id: &str,
         objective: &str,
-    ) -> Result<Option<ThreadGoal>, String> {
+    ) -> Result<Option<ThreadPursuit>, String> {
         let thread_id = thread_id.to_string();
         let thread_id_for_get = thread_id.clone();
         let objective = objective.to_string();
@@ -183,7 +201,7 @@ impl GoalStore {
             let conn = conn.lock().map_err(|err| err.to_string())?;
             conn.execute(
                 r#"
-                UPDATE thread_goals
+                UPDATE thread_pursuits
                 SET objective = ?1, updated_at_ms = ?2
                 WHERE thread_id = ?3
                 "#,
@@ -195,12 +213,12 @@ impl GoalStore {
         .await
         .map_err(|err| format!("update_objective task failed: {err}"))??;
 
-        self.get_goal(&thread_id_for_get).await
+        self.get_pursuit(&thread_id_for_get).await
     }
 
-    /// Flip the goal's `is_complete` flag to true. Returns `None` if no row
-    /// matches `thread_id` or the goal is already complete.
-    pub async fn mark_complete(&self, thread_id: &str) -> Result<Option<ThreadGoal>, String> {
+    /// Flip the pursuit's `is_complete` flag to true. Returns `None` if no row
+    /// matches `thread_id` or the pursuit is already complete.
+    pub async fn mark_complete(&self, thread_id: &str) -> Result<Option<ThreadPursuit>, String> {
         let thread_id = thread_id.to_string();
         let thread_id_for_get = thread_id.clone();
         let now_ms = Utc::now().timestamp_millis();
@@ -211,7 +229,7 @@ impl GoalStore {
             let rows = conn
                 .execute(
                     r#"
-                    UPDATE thread_goals
+                    UPDATE thread_pursuits
                     SET status = 'complete', updated_at_ms = ?1
                     WHERE thread_id = ?2 AND status = 'active'
                     "#,
@@ -226,15 +244,15 @@ impl GoalStore {
         if affected == 0 {
             // Either no row exists, or it was already complete. Either way,
             // surface the current state to the caller.
-            return self.get_goal(&thread_id_for_get).await;
+            return self.get_pursuit(&thread_id_for_get).await;
         }
-        self.get_goal(&thread_id_for_get).await
+        self.get_pursuit(&thread_id_for_get).await
     }
 
-    pub async fn delete_goal(&self, thread_id: &str) -> Result<Option<ThreadGoal>, String> {
+    pub async fn delete_goal(&self, thread_id: &str) -> Result<Option<ThreadPursuit>, String> {
         let thread_id = thread_id.to_string();
-        let goal = self.get_goal(&thread_id).await?;
-        if goal.is_none() {
+        let pursuit = self.get_pursuit(&thread_id).await?;
+        if pursuit.is_none() {
             return Ok(None);
         }
 
@@ -242,7 +260,7 @@ impl GoalStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|err| err.to_string())?;
             conn.execute(
-                "DELETE FROM thread_goals WHERE thread_id = ?1",
+                "DELETE FROM thread_pursuits WHERE thread_id = ?1",
                 [&thread_id],
             )
             .map_err(|err| format!("delete_goal failed: {err}"))?;
@@ -251,11 +269,11 @@ impl GoalStore {
         .await
         .map_err(|err| format!("delete_goal task failed: {err}"))??;
 
-        Ok(goal)
+        Ok(pursuit)
     }
 }
 
-fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadGoal, rusqlite::Error> {
+fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadPursuit, rusqlite::Error> {
     let status: String = row.get(3)?;
     // Post-ADR-0010 only "active" and "complete" are written. Any pre-0010
     // status (paused / blocked / usage_limited / budget_limited) maps to
@@ -264,7 +282,7 @@ fn thread_goal_from_row(row: &rusqlite::Row) -> Result<ThreadGoal, rusqlite::Err
     let is_complete = status == "complete";
     let created_at_ms: i64 = row.get(4)?;
     let updated_at_ms: i64 = row.get(5)?;
-    Ok(ThreadGoal {
+    Ok(ThreadPursuit {
         thread_id: row.get(0)?,
         goal_id: row.get(1)?,
         objective: row.get(2)?,

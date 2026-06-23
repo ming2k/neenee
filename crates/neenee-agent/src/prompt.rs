@@ -1,7 +1,7 @@
 //! System-prompt assembly and skill injection.
 //!
 //! [`Agent::ensure_system_prompt`] rebuilds the system message each turn from
-//! the live mode, goal, tool list and skills index; [`Agent::inject_implicit_skills`]
+//! the live mode, pursuit, tool list and skills index; [`Agent::inject_implicit_skills`]
 //! auto-loads skills whose names are mentioned in the latest user turn.
 
 use crate::skills;
@@ -83,22 +83,22 @@ impl Agent {
             );
         }
 
-        if let Some(goal) = self.get_goal() {
-            let state_label = if goal.is_complete {
+        if let Some(pursuit) = self.get_pursuit() {
+            let state_label = if pursuit.is_complete {
                 "complete"
             } else {
                 "active"
             };
             parts.push(format!(
-                "\nActive harness goal ({state_label}):\n{}",
-                goal.objective
+                "\nActive harness pursuit ({state_label}):\n{}",
+                pursuit.objective
             ));
-            if !goal.is_complete {
+            if !pursuit.is_complete {
                 parts.push(
-                    "Work toward this goal across turns. Use get_goal to read the current goal, \
-                     create_goal when the user asks for a new goal, and update_goal to mark the \
-                     goal complete. Only when the objective is fully achieved and verified, call \
-                     update_goal with status \"complete\"."
+                    "Work toward this pursuit across turns. Use get_pursuit to read the current pursuit, \
+                     start_pursuit when the user asks for a new pursuit, and complete_pursuit to mark the \
+                     pursuit complete. Only when the objective is fully achieved and verified, call \
+                     complete_pursuit with status \"complete\"."
                         .to_string(),
                 );
             }

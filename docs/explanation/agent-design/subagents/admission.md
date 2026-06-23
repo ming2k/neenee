@@ -36,7 +36,7 @@ other two are gates:
   `Execute` ceiling admits `bash` (so `cargo test` / builds / type-checks count
   as evidence) but still drops `write_file`/`edit_file` — an independent
   auditor must not mutate the implementation it is auditing.
-- **Goal, plan, and verify tools are inert.** They are added inside the
+- **Pursuit, plan, and verify tools are inert.** They are added inside the
   sub-agent from a snapshot, tied to its own (empty) state cells — not the
   parent's. For a read-only research task they have nothing to act on.
 

@@ -1,8 +1,8 @@
 # Built-in tools
 
 The neenee agent exposes a fixed set of built-in tools to the model on every
-turn. MCP server tools and the synthetic goal tools (`get_goal`, `create_goal`,
-`update_goal`, `goal_checklist`) are appended at runtime. This is the lookup
+turn. MCP server tools and the synthetic pursuit tools (`get_pursuit`, `start_pursuit`,
+`complete_pursuit`) are appended at runtime. This is the lookup
 surface — one page per tool category. For how tools are gated (access tiers,
 capability axes, the permission broker), see [Tool access](access.md).
 
@@ -13,9 +13,9 @@ live in `neenee-agent`. The `Tool` trait is defined in
 ## Registry
 
 Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::new`
-strips any externally supplied `goal_checklist`, `get_goal`, `create_goal`,
-`update_goal`, `plan_enter`, and `plan_exit`, then appends its own goal tools
-from `crates/neenee-core/src/goals/tools.rs` and plan tools from
+strips any externally supplied `get_pursuit`, `start_pursuit`,
+`complete_pursuit`, `plan_enter`, and `plan_exit`, then appends its own pursuit tools
+from `crates/neenee-core/src/pursuits/tools.rs` and plan tools from
 `crates/neenee-core/src/plan.rs` so they share the agent's live state.
 `TaskTool` is pushed last so it can capture a snapshot of the assembled toolset.
 
@@ -32,10 +32,9 @@ from `crates/neenee-core/src/goals/tools.rs` and plan tools from
 | `todo` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |
 | `websearch` | `Read` | `*` | [web](web.md) |
-| `get_goal` | `Read` | `*` | [goals](goals.md) |
-| `create_goal` | `Write` | `*` | [goals](goals.md) |
-| `update_goal` | `Write` | `*` | [goals](goals.md) |
-| `goal_checklist` | `Read` | `*` (no permission prompt) | [goals](goals.md) |
+| `get_pursuit` | `Read` | `*` | [pursuits](pursuits.md) |
+| `start_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
+| `complete_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
 | `plan_enter` | `Read` | `*` | [plan](plan.md) |
 | `plan_exit` | `Read` | `*` | [plan](plan.md) |
 | `update_plan_progress` | `Read` | `*` | [plan](plan.md) |

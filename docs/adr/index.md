@@ -25,3 +25,4 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0012](0012-toolaccess-tier-split.md) | `ToolAccess` tier split (`Read < Execute < Write`) and the `VERIFY` profile | Accepted |
 | [0013](0013-skills-xdg-paths-and-bundled-embed.md) | Skills & commands: XDG paths + compile-time-embedded bundled skills | Accepted |
 | [0014](0014-xdg-persistence-architecture.md) | Unified XDG persistence architecture (single `Dirs` policy, four-category model, fixed override precedence) | Accepted |
+| [0015](0015-pursue-stop-gate-and-repeat-cron.md) | Pursue stop-gate + repeat cron scheduler (replace `/goal` + `/loop`) | Accepted |

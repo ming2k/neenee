@@ -5,17 +5,17 @@ use serde_json::json;
 
 use crate::{Tool, ToolAccess};
 
-use super::service::GoalService;
+use super::service::PursuitService;
 
-/// Shared context injected into goal-aware tools so they know the current
-/// thread/session id and can reach the goal service.
+/// Shared context injected into pursuit-aware tools so they know the current
+/// thread/session id and can reach the pursuit service.
 #[derive(Clone)]
-pub struct GoalToolContext {
+pub struct PursuitToolContext {
     pub thread_id: Arc<Mutex<Option<String>>>,
-    pub goal_service: GoalService,
+    pub pursuit_service: PursuitService,
 }
 
-impl GoalToolContext {
+impl PursuitToolContext {
     fn thread_id(&self) -> Result<String, String> {
         self.thread_id
             .lock()
@@ -25,24 +25,24 @@ impl GoalToolContext {
     }
 }
 
-pub struct GetGoalTool {
-    context: GoalToolContext,
+pub struct GetPursuitTool {
+    context: PursuitToolContext,
 }
 
-impl GetGoalTool {
-    pub fn new(context: GoalToolContext) -> Self {
+impl GetPursuitTool {
+    pub fn new(context: PursuitToolContext) -> Self {
         Self { context }
     }
 }
 
 #[async_trait]
-impl Tool for GetGoalTool {
+impl Tool for GetPursuitTool {
     fn name(&self) -> &str {
-        "get_goal"
+        "get_pursuit"
     }
 
     fn description(&self) -> &str {
-        "Get the current goal for this thread, including objective and completion state."
+        "Get the current pursuit for this thread, including objective and completion state."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -59,32 +59,32 @@ impl Tool for GetGoalTool {
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         let thread_id = self.context.thread_id()?;
-        let goal = self.context.goal_service.get_goal(&thread_id).await?;
-        match goal {
-            Some(goal) => Ok(serde_json::to_string(&goal).unwrap_or_default()),
-            None => Ok("{\"goal\": null}".to_string()),
+        let pursuit = self.context.pursuit_service.get_pursuit(&thread_id).await?;
+        match pursuit {
+            Some(pursuit) => Ok(serde_json::to_string(&pursuit).unwrap_or_default()),
+            None => Ok("{\"pursuit\": null}".to_string()),
         }
     }
 }
 
-pub struct CreateGoalTool {
-    context: GoalToolContext,
+pub struct StartPursuitTool {
+    context: PursuitToolContext,
 }
 
-impl CreateGoalTool {
-    pub fn new(context: GoalToolContext) -> Self {
+impl StartPursuitTool {
+    pub fn new(context: PursuitToolContext) -> Self {
         Self { context }
     }
 }
 
 #[async_trait]
-impl Tool for CreateGoalTool {
+impl Tool for StartPursuitTool {
     fn name(&self) -> &str {
-        "create_goal"
+        "start_pursuit"
     }
 
     fn description(&self) -> &str {
-        "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Replaces any existing goal on this thread."
+        "Create a pursuit only when explicitly requested by the user or system/developer instructions; do not infer pursuits from ordinary tasks. Replaces any existing pursuit on this thread."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -93,7 +93,7 @@ impl Tool for CreateGoalTool {
             "properties": {
                 "objective": {
                     "type": "string",
-                    "description": "Required. The concrete objective to start pursuing. Replaces the current goal if one exists."
+                    "description": "Required. The concrete objective to start pursuing. Replaces the current pursuit if one exists."
                 }
             },
             "required": ["objective"],
@@ -106,11 +106,11 @@ impl Tool for CreateGoalTool {
     }
 
     fn permission_label(&self) -> String {
-        "Create goal".to_string()
+        "Create pursuit".to_string()
     }
 
     fn permission_description(&self) -> String {
-        "Start a new active goal for this thread, replacing any existing goal.".to_string()
+        "Start a new active pursuit for this thread, replacing any existing pursuit.".to_string()
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -123,33 +123,33 @@ impl Tool for CreateGoalTool {
             serde_json::from_str(arguments).map_err(|err| format!("Invalid JSON: {err}"))?;
         let thread_id = self.context.thread_id()?;
 
-        let goal = self
+        let pursuit = self
             .context
-            .goal_service
-            .set_goal(&thread_id, &args.objective)
+            .pursuit_service
+            .set_pursuit(&thread_id, &args.objective)
             .await?;
-        Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
+        Ok(serde_json::to_string(&json!({ "pursuit": pursuit })).unwrap_or_default())
     }
 }
 
-pub struct UpdateGoalTool {
-    context: GoalToolContext,
+pub struct CompletePursuitTool {
+    context: PursuitToolContext,
 }
 
-impl UpdateGoalTool {
-    pub fn new(context: GoalToolContext) -> Self {
+impl CompletePursuitTool {
+    pub fn new(context: PursuitToolContext) -> Self {
         Self { context }
     }
 }
 
 #[async_trait]
-impl Tool for UpdateGoalTool {
+impl Tool for CompletePursuitTool {
     fn name(&self) -> &str {
-        "update_goal"
+        "complete_pursuit"
     }
 
     fn description(&self) -> &str {
-        "Mark the existing goal as complete. Use this tool only when the objective has actually been achieved and no required work remains. Do not mark a goal complete merely because you are stopping work or because progress is slow."
+        "Mark the existing pursuit as complete. Use this tool only when the objective has actually been achieved and no required work remains. Do not mark a pursuit complete merely because you are stopping work or because progress is slow."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -172,11 +172,11 @@ impl Tool for UpdateGoalTool {
     }
 
     fn permission_label(&self) -> String {
-        "Mark goal complete".to_string()
+        "Mark pursuit complete".to_string()
     }
 
     fn permission_description(&self) -> String {
-        "Mark the active goal as complete.".to_string()
+        "Mark the active pursuit as complete.".to_string()
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -191,30 +191,30 @@ impl Tool for UpdateGoalTool {
 
         match args.status.as_str() {
             "complete" => {
-                let goal = self.context.goal_service.mark_complete(&thread_id).await?;
-                Ok(serde_json::to_string(&json!({ "goal": goal })).unwrap_or_default())
+                let pursuit = self.context.pursuit_service.mark_complete(&thread_id).await?;
+                Ok(serde_json::to_string(&json!({ "pursuit": pursuit })).unwrap_or_default())
             }
-            other => Err(format!("invalid update_goal status: {other}")),
+            other => Err(format!("invalid complete_pursuit status: {other}")),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::GoalStore;
+    use super::super::store::PursuitStore;
     use super::*;
 
-    fn make_context() -> GoalToolContext {
-        GoalToolContext {
+    fn make_context() -> PursuitToolContext {
+        PursuitToolContext {
             thread_id: Arc::new(Mutex::new(Some("test-thread".to_string()))),
-            goal_service: GoalService::new(GoalStore::open_in_memory_blocking().unwrap()),
+            pursuit_service: PursuitService::new(PursuitStore::open_in_memory_blocking().unwrap()),
         }
     }
 
     #[test]
     fn create_goal_exposes_user_friendly_permission_text() {
-        let tool = CreateGoalTool::new(make_context());
-        assert_eq!(tool.permission_label(), "Create goal");
+        let tool = StartPursuitTool::new(make_context());
+        assert_eq!(tool.permission_label(), "Create pursuit");
         // The model-facing description is full of model instructions; the
         // user-facing override must stay short, non-prescriptive, and free
         // of "do not infer..." style guidance aimed at the model.
@@ -226,8 +226,8 @@ mod tests {
 
     #[test]
     fn update_goal_exposes_user_friendly_permission_text() {
-        let tool = UpdateGoalTool::new(make_context());
-        assert_eq!(tool.permission_label(), "Mark goal complete");
+        let tool = CompletePursuitTool::new(make_context());
+        assert_eq!(tool.permission_label(), "Mark pursuit complete");
         let desc = tool.permission_description();
         assert_ne!(desc, tool.description());
         assert!(!desc.contains("do not"));
@@ -237,10 +237,10 @@ mod tests {
 
     #[test]
     fn read_only_goal_tools_keep_trait_default_label() {
-        // `get_goal` is Read and does not override permission_label, so the
+        // `get_pursuit` is Read and does not override permission_label, so the
         // default (the raw tool name) is used. This guards against the
         // override accidentally leaking onto tools that never prompt.
-        let tool = GetGoalTool::new(make_context());
+        let tool = GetPursuitTool::new(make_context());
         assert_eq!(tool.permission_label(), tool.name());
         assert_eq!(tool.permission_description(), tool.description());
     }

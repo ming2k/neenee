@@ -174,16 +174,16 @@ impl TaskTool {
         // admission. See ADR-0011.
         let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
 
-        let goal_service = neenee_core::GoalService::new(
-            neenee_core::GoalStore::open_in_memory()
+        let pursuit_service = neenee_core::PursuitService::new(
+            neenee_core::PursuitStore::open_in_memory()
                 .await
-                .map_err(|err| format!("failed to create sub-agent goal store: {err}"))?,
+                .map_err(|err| format!("failed to create sub-agent pursuit store: {err}"))?,
         );
         let sub_agent = Agent::new(
             self.provider.clone(),
             sub_tools,
             AgentMode::Build,
-            goal_service,
+            pursuit_service,
             SkillRegistry::empty(),
         );
 
@@ -201,7 +201,7 @@ impl TaskTool {
         // On failure we surface the partial transcript anyway — both so the
         // parent's tool-result message carries the sub-agent's work-in-progress
         // `children` and so the real token cost (which can be substantial for a
-        // 32-round burnout) reaches the parent goal accounting. The
+        // 32-round burnout) reaches the parent pursuit accounting. The
         // `final_content` is prefixed `Error: …` so the existing failure
         // classifier (`starts_with("Error")`) and the TUI's red Failed badge
         // both trigger.

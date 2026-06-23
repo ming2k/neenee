@@ -1,6 +1,5 @@
 //! Presenters for orchestration / meta tools that act on session state rather
-//! than the filesystem: `todo`, `task`, `use_skill`, `create_project`,
-//! `goal_checklist`.
+//! than the filesystem: `todo`, `task`, `use_skill`, `create_project`.
 
 use super::{truncate, ToolPresenter, ToolView};
 

@@ -3,12 +3,12 @@
 //! `Agent` (in [`crate::agent`]) runs a single ReAct turn against a provider.
 //! This module wraps every turn with the cross-cutting policy a frontend
 //! cannot reasonably reimplement: context compaction (pre-turn and mid-turn
-//! pruning), retry with exponential backoff, goal accounting, permission
-//! relay, and the uncapped autonomous goal loop.
+//! pruning), retry with exponential backoff, permission relay, the `/pursue`
+//! stop-gate driver, and the `/repeat` cron scheduler.
 //!
 //! Frontends drive the harness through [`execute_turn`],
-//! [`start_interactive_turn`], and [`start_goal_loop`]. They own only the
-//! UI-specific input path (slash commands for the CLI, menus/dialogs for a
+//! [`start_interactive_turn`], [`start_pursuit`], and
+//! [`start_repeat_scheduler`]. They own only the UI-specific input path (slash commands for the CLI, menus/dialogs for a
 //! future GUI); the actual turn machinery is shared here.
 //!
 //! All items are `pub` because they are assembled by the binary, which knows
@@ -25,14 +25,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Agent;
 use neenee_core::{
-    AgentEvent, AgentResponse, Goal, GoalService, HarnessError, HarnessSnapshot, ImagePart,
-    Message, Provider, ProviderStreamEvent, Role, GOAL_COMPLETE_MARKER,
+    AgentEvent, AgentRequest, AgentResponse, CronExpr, Pursuit, PursuitService, HarnessError,
+    HarnessSnapshot, ImagePart, Message, Provider, ProviderStreamEvent, RepeatStore, Role,
+    PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
     session::{
         estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision, CompactionHooks,
-        CompactionResult, LoopCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
+        CompactionResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
     },
 };
 
@@ -190,7 +191,7 @@ impl CompactionHooks for RelayCompactionHooks {
     }
 }
 
-/// Emit the current harness snapshot (mode, goal, loop status, auto-approve)
+/// Emit the current harness snapshot (mode, pursuit, loop status, auto-approve)
 /// to the UI.
 pub fn send_harness_state(
     tx: &mpsc::UnboundedSender<AgentResponse>,
@@ -199,33 +200,33 @@ pub fn send_harness_state(
 ) {
     let _ = tx.send(AgentResponse::HarnessState(HarnessSnapshot {
         mode: agent.get_mode(),
-        goal: agent.get_goal(),
+        pursuit: agent.get_pursuit(),
         loop_status: loop_status.into(),
         auto_approve: agent.get_auto_approve(),
     }));
 }
 
-pub async fn refresh_agent_goal(
+pub async fn refresh_agent_pursuit(
     agent: &Agent,
-    goal_service: &GoalService,
+    pursuit_service: &PursuitService,
     thread_id: &str,
-) -> Option<Goal> {
-    match goal_service.get_goal(thread_id).await {
-        Ok(Some(db_goal)) => {
-            let goal = db_goal;
-            agent.set_goal(goal.clone());
-            Some(goal)
+) -> Option<Pursuit> {
+    match pursuit_service.get_pursuit(thread_id).await {
+        Ok(Some(db_pursuit)) => {
+            let pursuit = db_pursuit;
+            agent.set_pursuit(pursuit.clone());
+            Some(pursuit)
         }
         Ok(None) => {
-            agent.clear_goal();
+            agent.clear_pursuit();
             None
         }
-        Err(_) => agent.get_goal(),
+        Err(_) => agent.get_pursuit(),
     }
 }
 
-pub fn emit_goal_updated(tx: &mpsc::UnboundedSender<AgentResponse>, goal: &Goal) {
-    let _ = tx.send(AgentResponse::GoalUpdated(goal.clone()));
+pub fn emit_pursuit_updated(tx: &mpsc::UnboundedSender<AgentResponse>, pursuit: &Pursuit) {
+    let _ = tx.send(AgentResponse::PursuitUpdated(pursuit.clone()));
 }
 
 #[derive(Clone)]
@@ -235,7 +236,7 @@ pub struct TurnContext {
     pub tx: mpsc::UnboundedSender<AgentResponse>,
     pub token: CancellationToken,
     pub session: Arc<SessionStore>,
-    pub goal_service: GoalService,
+    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
@@ -258,7 +259,7 @@ pub struct InteractiveTurnContext {
     pub token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     pub generation_counter: Arc<AtomicU64>,
     pub session: Arc<SessionStore>,
-    pub goal_service: GoalService,
+    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
@@ -286,7 +287,7 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                 tx: context.tx.clone(),
                 token: token.clone(),
                 session: context.session,
-                goal_service: context.goal_service,
+                pursuit_service: context.pursuit_service,
                 compaction: context.compaction,
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,
@@ -323,7 +324,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         tx,
         token,
         session,
-        goal_service,
+        pursuit_service,
         compaction,
         retry_max_attempts,
         retry_base_ms,
@@ -470,31 +471,31 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     let outcome = result?;
 
     // Marker-based completion: if the model explicitly emitted the completion
-    // marker and an active goal exists, mark it complete in the DB.
-    let requested_completion = outcome.message.content.contains(GOAL_COMPLETE_MARKER);
+    // marker and an active pursuit exists, mark it complete in the DB.
+    let requested_completion = outcome.message.content.contains(PURSUIT_COMPLETE_MARKER);
     let mut completed = false;
-    if requested_completion && agent.goal_can_complete() {
-        match goal_service.mark_complete(&thread_id).await {
-            Ok(Some(goal)) => {
-                agent.set_goal(goal.clone());
-                emit_goal_updated(&tx, &goal);
+    if requested_completion && agent.pursuit_can_complete() {
+        match pursuit_service.mark_complete(&thread_id).await {
+            Ok(Some(pursuit)) => {
+                agent.set_pursuit(pursuit.clone());
+                emit_pursuit_updated(&tx, &pursuit);
                 completed = true;
             }
             Ok(None) => {}
             Err(error) => {
                 let _ = tx.send(AgentResponse::Error(format!(
-                    "Failed to mark goal complete: {error}"
+                    "Failed to mark pursuit complete: {error}"
                 )));
             }
         }
-    } else if agent.get_goal().is_some_and(|goal| goal.is_complete) {
+    } else if agent.get_pursuit().is_some_and(|pursuit| pursuit.is_complete) {
         completed = true;
     }
 
     let visible = outcome
         .message
         .content
-        .replace(GOAL_COMPLETE_MARKER, "")
+        .replace(PURSUIT_COMPLETE_MARKER, "")
         .trim()
         .to_string();
     if !visible.is_empty() && !streamed_text.load(Ordering::SeqCst) {
@@ -502,11 +503,11 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     }
     if requested_completion && !completed {
         let _ = tx.send(AgentResponse::Text(
-            "Goal completion marker ignored: no active goal is set.".to_string(),
+            "Pursuit completion marker ignored: no active pursuit is set.".to_string(),
         ));
     }
     if completed {
-        let _ = tx.send(AgentResponse::Text("Goal completed.".to_string()));
+        let _ = tx.send(AgentResponse::Text("Pursuit completed.".to_string()));
     }
 
     // Sync the agent's plan state to the session so resume restores both the
@@ -565,7 +566,7 @@ pub fn relay_agent_event(
             AgentResponse::StreamDelta(delta)
         }
         AgentEvent::AssistantEnd(content) => {
-            AgentResponse::StreamEnd(content.replace(GOAL_COMPLETE_MARKER, "").trim().to_string())
+            AgentResponse::StreamEnd(content.replace(PURSUIT_COMPLETE_MARKER, "").trim().to_string())
         }
         AgentEvent::AssistantDiscard => AgentResponse::StreamDiscard,
         AgentEvent::ReasoningDelta { delta, start } => {
@@ -600,7 +601,7 @@ pub fn relay_agent_event(
         },
         AgentEvent::ToolCancelled { id, name } => AgentResponse::ToolCancelled { id, name },
         AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
-        AgentEvent::GoalUpdated(goal) => AgentResponse::GoalUpdated(goal),
+        AgentEvent::PursuitUpdated(pursuit) => AgentResponse::PursuitUpdated(pursuit),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
         AgentEvent::PlanProgressUpdated(progress) => AgentResponse::PlanProgressUpdated(progress),
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
@@ -691,39 +692,36 @@ pub fn send_compaction(
 }
 
 #[derive(Clone)]
-pub struct LoopRunContext {
+pub struct PursuitContext {
     pub agent: Arc<Agent>,
     pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub tx: mpsc::UnboundedSender<AgentResponse>,
     pub token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     pub generation_counter: Arc<AtomicU64>,
     pub session: Arc<SessionStore>,
-    pub goal_service: GoalService,
+    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
     pub retry_max_ms: u64,
 }
 
-/// Run an uncapped autonomous loop driving `goal`.
+/// Run a pursuit: arm the stop-gate and execute a single agent turn.
 ///
-/// Each iteration is a complete agent turn that re-enters the transcript with
-/// a hidden control prompt. The loop terminates only when:
+/// The gate (`Agent::pursuit_continuation`) re-injects the condition and
+/// forces additional rounds *within* the turn until the model signals
+/// completion, the safety cap is hit, or the pursuit is interrupted — so a
+/// single `execute_turn` here runs to completion instead of looping whole
+/// turns (the old `/loop` model).
 ///
-/// - the model emits `GOAL_COMPLETE_MARKER` and the goal checklist allows
-///   completion (the `Ok(true)` arm — `execute_turn` reports goal completion);
-/// - the user interrupts (`Esc` or `/loop stop`);
-/// - a newer chat or loop request supersedes this one (generation bump);
-/// - a provider or tool pipeline error aborts the active turn.
-///
-/// There is no iteration budget. The cap was removed in ADR-0009 to align
-/// with the codex / claude-code model where the agentic loop runs until the
-/// model itself stops calling tools; context compaction is the backstop that
-/// keeps long loops bounded, and the user can interrupt at any time.
-///
-/// `start_iteration` is provided so `/loop resume` can pick up from a durable
-/// checkpoint; the normal `/loop` entry passes `1`.
-pub async fn start_goal_loop(context: LoopRunContext, goal: String, start_iteration: usize) {
+/// Terminates when:
+/// - the model emits `PURSUIT_COMPLETE_MARKER` (`Ok(true)`);
+/// - the stop-gate exhausts its safety cap (`Ok(false)` — disarmed without a
+///   completion signal);
+/// - the user interrupts (`Esc` or `/pursue stop`);
+/// - a newer request supersedes this one (generation bump);
+/// - a provider or tool pipeline error aborts the turn.
+pub async fn start_pursuit(context: PursuitContext, condition: String) {
     let token = CancellationToken::new();
     let generation = context.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(previous) = context.token_slot.write().await.replace(token.clone()) {
@@ -732,103 +730,111 @@ pub async fn start_goal_loop(context: LoopRunContext, goal: String, start_iterat
         previous.cancel();
     }
 
-    send_harness_state(
-        &context.tx,
-        &context.agent,
-        format!("loop {}", start_iteration.saturating_sub(1)),
-    );
+    send_harness_state(&context.tx, &context.agent, "pursue");
 
     tokio::spawn(async move {
-        let mut iteration = start_iteration;
-        loop {
-            let _ = context
-                .session
-                .set_checkpoint(Some(LoopCheckpoint {
-                    goal: goal.clone(),
-                    iteration,
-                    max_iterations: UNCAPPED_ITERATIONS,
-                    status: "running".to_string(),
-                }))
-                .await;
-            send_harness_state(&context.tx, &context.agent, format!("loop {}", iteration));
-            let prompt = format!(
-                "Autonomous goal loop iteration {}.\n\
-                 Goal: {}\n\
-                 Continue making concrete progress. Inspect the current state, use tools, \
-                 implement and verify work. Do not stop at a plan. Emit {} only if the \
-                 entire goal is achieved and verified.",
-                iteration, goal, GOAL_COMPLETE_MARKER
-            );
-            let outcome = execute_turn(
-                TurnContext {
-                    agent: context.agent.clone(),
-                    history: context.history.clone(),
-                    tx: context.tx.clone(),
-                    token: token.clone(),
-                    session: context.session.clone(),
-                    goal_service: context.goal_service.clone(),
-                    compaction: context.compaction.clone(),
-                    retry_max_attempts: context.retry_max_attempts,
-                    retry_base_ms: context.retry_base_ms,
-                    retry_max_ms: context.retry_max_ms,
-                },
-                TurnInput {
-                    prompt,
-                    hidden: true,
-                    display_prompt: None,
-                    images: Vec::new(),
-                },
-            )
+        // Arm the stop-gate so `execute_turn`'s turn loop keeps driving toward
+        // the condition instead of ending on the first stop. The gate
+        // self-disarms on cap/completion; we also disarm below as a backstop.
+        context.agent.arm_pursuit();
+        let _ = context
+            .session
+            .set_checkpoint(Some(PursuitCheckpoint {
+                pursuit: condition.clone(),
+                iteration: 1,
+                max_iterations: UNCAPPED_ITERATIONS,
+                status: "running".to_string(),
+            }))
             .await;
-            match outcome {
-                Ok(true) => {
-                    let _ = context
-                        .session
-                        .set_checkpoint(Some(LoopCheckpoint {
-                            goal: goal.clone(),
-                            iteration,
-                            max_iterations: UNCAPPED_ITERATIONS,
-                            status: "completed".to_string(),
-                        }))
-                        .await;
-                    let _ = context.tx.send(AgentResponse::Text(format!(
-                        "Goal completed in loop iteration {}.",
-                        iteration
-                    )));
-                    break;
-                }
-                Ok(false) => {
-                    iteration = iteration.saturating_add(1);
-                    continue;
-                }
-                Err(HarnessError::Interrupted) => {
-                    let _ = context
-                        .session
-                        .set_checkpoint(Some(LoopCheckpoint {
-                            goal: goal.clone(),
-                            iteration,
-                            max_iterations: UNCAPPED_ITERATIONS,
-                            status: "interrupted".to_string(),
-                        }))
-                        .await;
-                    let _ = context
-                        .tx
-                        .send(AgentResponse::Text("Loop interrupted.".to_string()));
-                    break;
-                }
-                Err(error) => {
-                    let _ = context
-                        .session
-                        .set_checkpoint(Some(LoopCheckpoint {
-                            goal: goal.clone(),
-                            iteration,
-                            max_iterations: UNCAPPED_ITERATIONS,
-                            status: "error".to_string(),
-                        }))
-                        .await;
-                    let _ = context.tx.send(AgentResponse::Error(error.to_string()));
-                    break;
-                }
+        let prompt = format!(
+            "Pursue this pursuit until it is fully achieved and verified:\n\
+             {condition}\n\
+             Work autonomously: inspect the current state, use tools, implement and verify \
+             work. Do not stop at a plan. The harness keeps this turn going until the pursuit is \
+             done, so keep making concrete progress. Emit {marker} only once the entire pursuit \
+             is achieved and verified.",
+            condition = condition,
+            marker = PURSUIT_COMPLETE_MARKER,
+        );
+        let outcome = execute_turn(
+            TurnContext {
+                agent: context.agent.clone(),
+                history: context.history.clone(),
+                tx: context.tx.clone(),
+                token: token.clone(),
+                session: context.session.clone(),
+                pursuit_service: context.pursuit_service.clone(),
+                compaction: context.compaction.clone(),
+                retry_max_attempts: context.retry_max_attempts,
+                retry_base_ms: context.retry_base_ms,
+                retry_max_ms: context.retry_max_ms,
+            },
+            TurnInput {
+                prompt,
+                hidden: true,
+                display_prompt: None,
+                images: Vec::new(),
+            },
+        )
+        .await;
+        context.agent.disarm_pursuit();
+        match outcome {
+            Ok(true) => {
+                let _ = context
+                    .session
+                    .set_checkpoint(Some(PursuitCheckpoint {
+                        pursuit: condition.clone(),
+                        iteration: 1,
+                        max_iterations: UNCAPPED_ITERATIONS,
+                        status: "completed".to_string(),
+                    }))
+                    .await;
+                let _ = context
+                    .tx
+                    .send(AgentResponse::Text("Pursuit complete.".to_string()));
+            }
+            Ok(false) => {
+                // The stop-gate disarmed without a completion signal: either
+                // the safety cap was reached or the model stopped without
+                // emitting the marker.
+                let _ = context
+                    .session
+                    .set_checkpoint(Some(PursuitCheckpoint {
+                        pursuit: condition.clone(),
+                        iteration: 1,
+                        max_iterations: UNCAPPED_ITERATIONS,
+                        status: "interrupted".to_string(),
+                    }))
+                    .await;
+                let _ = context.tx.send(AgentResponse::Text(
+                    "Pursuit stopped: safety cap reached or no completion signal.".to_string(),
+                ));
+            }
+            Err(HarnessError::Interrupted) => {
+                let _ = context
+                    .session
+                    .set_checkpoint(Some(PursuitCheckpoint {
+                        pursuit: condition.clone(),
+                        iteration: 1,
+                        max_iterations: UNCAPPED_ITERATIONS,
+                        status: "interrupted".to_string(),
+                    }))
+                    .await;
+                let _ = context
+                    .tx
+                    .send(AgentResponse::Text("Pursuit interrupted.".to_string()));
+            }
+            Err(error) => {
+                let _ = context
+                    .session
+                    .set_checkpoint(Some(PursuitCheckpoint {
+                        pursuit: condition.clone(),
+                        iteration: 1,
+                        max_iterations: UNCAPPED_ITERATIONS,
+                        status: "error".to_string(),
+                    }))
+                    .await;
+                let _ = context.tx.send(AgentResponse::Error(error.to_string()));
             }
         }
 
@@ -838,4 +844,99 @@ pub async fn start_goal_loop(context: LoopRunContext, goal: String, start_iterat
             send_harness_state(&context.tx, &context.agent, "idle");
         }
     });
+}
+
+// ── /repeat scheduler ─────────────────────────────────────────────────
+
+/// One scheduler tick: prune expired jobs, then dispatch every job whose
+/// `next_fire` is due, advancing its schedule before enqueueing so a
+/// slow turn cannot cause a double-fire.
+pub async fn run_repeat_tick(
+    store: &RepeatStore,
+    tx: &mpsc::UnboundedSender<AgentRequest>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<usize, String> {
+    let _ = store.prune_expired(now).await?;
+    let due = store.due(now).await?;
+    let mut dispatched = 0;
+    for job in due {
+        let next = match CronExpr::parse(&job.cron) {
+            Ok(cron) => cron.next_fire(now).unwrap_or(now + chrono::Duration::days(1)),
+            Err(err) => {
+                tracing::warn!(
+                    "repeat job {} has unparseable cron '{}': {err}; skipping",
+                    job.id,
+                    job.cron
+                );
+                continue;
+            }
+        };
+        store.mark_fired(&job.id, now, next).await?;
+        let _ = tx.send(AgentRequest::Chat {
+            text: job.prompt.clone(),
+            images: Vec::new(),
+        });
+        dispatched += 1;
+    }
+    Ok(dispatched)
+}
+
+/// Spawn the durable `/repeat` scheduler. Every `tick_interval` it prunes
+/// expired jobs and fires any that are due, dispatching each prompt as a
+/// normal `AgentRequest::Chat` turn through `tx`.
+pub fn start_repeat_scheduler(
+    store: RepeatStore,
+    tx: mpsc::UnboundedSender<AgentRequest>,
+    tick_interval: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(tick_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let now = chrono::Utc::now();
+            if let Err(err) = run_repeat_tick(&store, &tx, now).await {
+                tracing::warn!("repeat scheduler tick failed: {err}");
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn tick_dispatches_and_advances_due_jobs() {
+        let store = RepeatStore::open_in_memory_blocking().unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        // A job already due (next_fire == now).
+        store.add("* * * * *", "run tests", now).await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentRequest>();
+
+        let dispatched = run_repeat_tick(&store, &tx, now).await.unwrap();
+        assert_eq!(dispatched, 1);
+
+        // The prompt was enqueued as a chat turn.
+        match rx.recv().await {
+            Some(AgentRequest::Chat { text, .. }) => assert_eq!(text, "run tests"),
+            other => panic!("expected Chat, got {other:?}"),
+        }
+        // The job is no longer due at `now` (advanced to the next minute).
+        let still_due = store.due(now).await.unwrap();
+        assert!(still_due.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_skips_unparseable_cron() {
+        let store = RepeatStore::open_in_memory_blocking().unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        // `add` does not validate cron, so a bogus expr can land here; the
+        // tick must skip it rather than panic.
+        store.add("not a cron", "p", now).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentRequest>();
+        let dispatched = run_repeat_tick(&store, &tx, now).await.unwrap();
+        assert_eq!(dispatched, 0);
+    }
 }

@@ -116,7 +116,7 @@ pub trait Tool: Send + Sync {
     /// prompt for `Write` tools. Defaults to the raw [`Tool::name`], which is
     /// fine when the name itself reads as a label (e.g. `bash`, `write_file`).
     /// Override when the name is a synthetic identifier whose meaning is not
-    /// obvious to a user (e.g. `create_goal` -> `"Create goal"`). Only
+    /// obvious to a user (e.g. `start_pursuit` -> `"Create pursuit"`). Only
     /// consulted for tools that actually trigger a permission prompt.
     ///
     /// This is purely a UI string; it never reaches the model and is not
@@ -129,7 +129,7 @@ pub trait Tool: Send + Sync {
     /// (the "Details" section). Defaults to [`Tool::description`], which is
     /// appropriate when that text is written for humans. Override when
     /// [`Tool::description`] is model-facing instruction prose (instructions
-    /// like "do not infer goals from ordinary tasks") that would confuse a
+    /// like "do not infer pursuits from ordinary tasks") that would confuse a
     /// user reading the prompt. Keep overrides to one or two plain sentences
     /// describing *what the call does*, not *when the model should call it*.
     ///

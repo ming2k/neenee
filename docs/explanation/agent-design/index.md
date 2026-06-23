@@ -18,11 +18,11 @@ variation on these themes rather than a one-off mechanism.
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
 | **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: Plan mode and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
-| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; goal state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Goals](goals.md) |
-| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Goal identity is persisted in SQLite; the checklist is in-memory; sub-agent context is fresh per call. | [Goals](goals.md), [Sub-agents](subagents/index.md) |
+| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Pursuit identity is persisted in SQLite; the stop-gate is in-memory; sub-agent context is fresh per call. | [Pursuits](pursuits.md), [Sub-agents](subagents/index.md) |
 | **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents/index.md), [Harness architecture](harness.md) |
-| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; goal completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Tool rounds](tool-rounds.md), [MCP servers](mcp.md), [Goals](goals.md) |
-| **Control plane vs domain** | The harness owns steering (mode, goal, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents/index.md) |
+| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Tool rounds](tool-rounds.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents/index.md) |
 
 ## The canon, in reading order
 
@@ -40,17 +40,17 @@ model of one agent turn.
 3. [Tool rounds](tool-rounds.md) — the round trip of a tool call as a design
    concept: declaration, gating, execution, and how outcomes re-enter the
    conversation. This is the unit the rest of the canon operates on.
-4. [Goals](goals.md) — durable per-session objectives: the slim primitive
-   (objective, checklist, completion flag), the checklist that gates
-   completion, and the completion signal. How the agent remembers what it is
-   doing across turns and restarts.
+4. [Pursuits](pursuits.md) — durable per-session objectives driven by the
+   `/pursue` stop-gate (within-turn continuation until the condition is met)
+   and the `/repeat` cron scheduler. How the agent keeps working toward an
+   objective across rounds and restarts.
 5. [Plan mode](plan-mode.md) — a read-only execution surface for researching
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
    exemption for plan files.
 6. [Sub-agents](subagents/index.md) — the `task` tool's isolated child agent
    and the independent verifier. The reference for isolation: what is shared
-   (the provider), what is fresh (history, goals, plan state), how events
+   (the provider), what is fresh (history, pursuits, plan state), how events
    stream back through one pipeline, and how a profile admits tools by
    capability axis.
 7. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
@@ -71,8 +71,8 @@ to see how the canon fits together:
 
 ```text
 user message
-  └─ [Harness] execute_turn: refresh system prompt (mode, goal, skills)
-       └─ [Goals]  active goal + checklist injected into the prompt
+  └─ [Harness] execute_turn: refresh system prompt (mode, pursuit, skills)
+        └─ [Pursuits]  active pursuit injected into the prompt
        └─ [Provider] stream tokens; reconstruct native tool-call deltas
             └─ fallback? [Tool rounds] parse tool call from text
        └─ per tool call:
@@ -82,7 +82,7 @@ user message
             │              stream SubTaskEvent back through the same pipeline
             ├─ [MCP]       if call is `mcp__*`: JSON-RPC over stdio
             └─ [User questions] if call is `ask_user`: block on oneshot
-       └─ completion marker? [Goals] defer unless checklist is clear
+        └─ completion marker? [Pursuits] finalize on completion signal
        └─ next tool round, or stop on final message / safety bound
 ```
 

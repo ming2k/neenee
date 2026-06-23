@@ -2,7 +2,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, and bounded autonomous goals.
+A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, and bounded autonomous pursuits.
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
@@ -13,7 +13,7 @@ A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, an
 
 - **Semantic TUI** — Ratatui-based interface with live status, expandable tool steps, and structured diffs.
 - **Tool Use** — Full ReAct loop with native and fallback tool-calling; bash, file I/O, grep, glob, web search, and MCP servers.
-- **Autonomous Goals** — Set a goal, run `/loop`, and let the agent work iteratively with a checklist until done.
+- **Autonomous Pursuits** — Set a pursuit with `/pursue <condition>` and the harness keeps the turn going (a stop-gate) until the condition is met. Schedule recurring prompts on a clock with `/repeat`.
 - **Plan Mode** — Read-only analysis and planning without touching the codebase.
 - **Durable Sessions** — Atomic persistence with compaction, resume, and fork.
 - **Skills** — Load domain-specific instructions on demand or automatically by mention.
@@ -44,8 +44,8 @@ On first launch, press `Ctrl+M` to pick a provider and enter your API key. Then 
 
 | Command | Description |
 |---------|-------------|
-| `/goal <objective>` | Set a goal for the agent to pursue |
-| `/loop` | Start autonomous work on the active goal |
+| `/pursue <condition>` | Drive the agent until the condition is met (stop-gate) |
+| `/repeat <cron> <prompt>` | Schedule a prompt on a cron expression |
 | `/compact` | Compact context to free up space |
 | `/session list` | Browse and resume past sessions |
 | `/export` | Export conversation as Markdown |

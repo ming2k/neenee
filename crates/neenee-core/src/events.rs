@@ -2,7 +2,7 @@
 //! responses ([`AgentResponse`]), live turn events ([`AgentEvent`]), and the
 //! small data records they carry.
 
-use crate::{Goal, ImagePart, Message, ToolAccess, ToolOutput, ToolStream};
+use crate::{Pursuit, ImagePart, Message, ToolAccess, ToolOutput, ToolStream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -113,7 +113,7 @@ pub enum AgentResponse {
         after_chars: usize,
     },
     HarnessState(HarnessSnapshot),
-    GoalUpdated(Goal),
+    PursuitUpdated(Pursuit),
     /// The agent mode changed via `plan_enter` / `plan_exit`.
     ModeChanged(AgentMode),
     /// Plan progress snapshot changed (set by `plan_exit`, mutated by
@@ -186,7 +186,7 @@ pub enum AgentMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessSnapshot {
     pub mode: AgentMode,
-    pub goal: Option<Goal>,
+    pub pursuit: Option<Pursuit>,
     pub loop_status: String,
     /// Whether write-tool permission prompts are bypassed this session
     /// (`--auto-approve` / `/auto-approve on`). The TUI mirrors this into a
@@ -300,7 +300,7 @@ pub enum AgentEvent {
         id: String,
         name: String,
     },
-    GoalUpdated(Goal),
+    PursuitUpdated(Pursuit),
     /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
     /// uses this to refresh its mode indicator live, mid-turn.
     ModeChanged(AgentMode),
@@ -311,7 +311,7 @@ pub enum AgentEvent {
     /// The auto-approve toggle changed (via `/auto-approve`).
     AutoApproveChanged(bool),
     /// The agent appears stalled: N consecutive read-only tool rounds with
-    /// no write / mode / plan / goal mutation. The TUI should surface a
+    /// no write / mode / plan / pursuit mutation. The TUI should surface a
     /// visible alert so the user can decide whether to interrupt. Carries
     /// the streak length. Emitted exactly once per stall episode (a
     /// productive round resets the streak and clears the alert).
@@ -338,7 +338,7 @@ pub enum PermissionDecision {
 pub struct PermissionRequest {
     pub id: String,
     pub tool: String,
-    /// Short human-friendly title for the prompt (e.g. `"Create goal"`).
+    /// Short human-friendly title for the prompt (e.g. `"Create pursuit"`).
     /// Falls back to [`tool`](Self::tool) when a tool does not override
     /// `Tool::permission_label`. The TUI renders this as the header.
     #[serde(default)]
@@ -419,7 +419,7 @@ pub struct ModelInfo {
 }
 
 /// One tool in the session, as seen by the modal's Tools pane. `source`
-/// classifies origin: `builtin`, `mcp:<server>`, `goal`, or `plan`. `enabled`
+/// classifies origin: `builtin`, `mcp:<server>`, `pursuit`, or `plan`. `enabled`
 /// reflects the session-level enable/disable flag (toggled via
 /// [`AgentRequest::ToggleTool`]); disabled tools stay installed but are hidden
 /// from the model and rejected if invoked.

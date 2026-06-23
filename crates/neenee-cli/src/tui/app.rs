@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, Goal, ImagePart, PermissionRequest, PlanProgress,
+    mcp::McpConnectionStatus, AgentRequest, Pursuit, ImagePart, PermissionRequest, PlanProgress,
     ProviderPickerRow, ProviderPickerSnapshot, Role, SessionOverview, UserQuestionRequest,
 };
 
@@ -90,7 +90,7 @@ pub enum Modal {
     /// stored in [`App::plan_preview_content`]; `plan_preview_scroll` holds
     /// the overlay's own scroll offset.
     PlanPreview,
-    /// Activity overview: the current goal (objective + checklist), the live
+    /// Activity overview: the current pursuit (objective + checklist), the live
     /// plan-progress breakdown, and the running turn/round/model/elapsed/
     /// status. Opened by clicking the activity bar. The body scrolls via
     /// [`App::activity_scroll`].
@@ -212,7 +212,7 @@ pub struct App {
     /// accepted path completion so newly-created files become visible without
     /// a restart. `None` = not scanned yet.
     pub path_scan_cache: Option<PathScan>,
-    pub current_goal: Option<Goal>,
+    pub current_pursuit: Option<Pursuit>,
     /// Latest session-context snapshot for the session modal, or `None` before
     /// the first `QuerySessionContext` round-trip completes. Refreshed each
     /// frame from the response listener.

@@ -25,8 +25,11 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/session", "Manage durable sessions"),
     ("/sessions", "Browse past sessions"),
     ("/resume", "Resume the most recent or selected session"),
-    ("/goal", "Set, inspect, complete, or clear the active goal"),
-    ("/loop", "Run or resume bounded autonomous goal work"),
+    ("/pursue", "Pursue a condition: drive the agent until it is met, or manage the pursuit"),
+    (
+        "/repeat",
+        "Schedule a prompt on a cron: /repeat <cron> <prompt>",
+    ),
     ("/init", "Initialize a .neenee/ config tree"),
     ("/help", "Show available commands and keybindings"),
     ("/exit", "Exit the program"),
@@ -60,7 +63,7 @@ pub enum CompletionKind {
 pub struct Completion {
     /// Text to insert at the replace range.
     pub label: String,
-    /// Hint shown to the right of the label (e.g. "Set goal", "dir", "1.2k").
+    /// Hint shown to the right of the label (e.g. "Set pursuit", "dir", "1.2k").
     pub description: String,
     /// Byte offset in `App::input` where the replacement starts.
     pub replace_start: usize,
@@ -350,32 +353,16 @@ impl App {
             .collect();
         }
 
-        if let Some(after) = current.strip_prefix("/goal ") {
+        if let Some(after) = current.strip_prefix("/pursue ") {
             return [
-                ("/goal status", "Show the current goal"),
-                ("/goal done", "Mark the current goal completed"),
-                ("/goal clear", "Remove the current goal"),
+                ("/pursue status", "Show the current pursuit"),
+                ("/pursue stop", "Stop the active pursuit"),
+                ("/pursue done", "Mark the pursuit completed"),
+                ("/pursue clear", "Remove the pursuit"),
             ]
             .iter()
             .filter(|(cmd, _)| {
-                cmd.strip_prefix("/goal ")
-                    .map(|sub| sub.starts_with(after))
-                    .unwrap_or(false)
-            })
-            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
-            .collect();
-        }
-
-        if let Some(after) = current.strip_prefix("/loop ") {
-            return [
-                ("/loop 8", "Run up to 8 autonomous iterations"),
-                ("/loop resume", "Resume an unfinished durable checkpoint"),
-                ("/loop status", "Show autonomous loop status"),
-                ("/loop stop", "Stop the active loop"),
-            ]
-            .iter()
-            .filter(|(cmd, _)| {
-                cmd.strip_prefix("/loop ")
+                cmd.strip_prefix("/pursue ")
                     .map(|sub| sub.starts_with(after))
                     .unwrap_or(false)
             })

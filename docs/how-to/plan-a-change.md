@@ -87,8 +87,8 @@ The panel disappears when:
 - `/mode` shows the current mode at any time.
 - `/mode build` is the authoritative override that ends planning immediately,
   even if the agent entered Plan mode on its own.
-- Plan mode is orthogonal to [goal state](../explanation/agent-design/harness.md) and the
-  autonomous loop; a goal and `/loop` can be active in either mode.
+- Plan mode is orthogonal to [pursuit state](../explanation/agent-design/harness.md) and the
+  autonomous loop; a pursuit and `/loop` can be active in either mode.
 
 ## See also
 

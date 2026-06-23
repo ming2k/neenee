@@ -336,7 +336,7 @@ not hit disk per redraw.
 ╭────────────────────────────────────────────────────╮
 │ Plan preview                                       │
 │                                                    │
-│ # Goal                                             │
+│ # Pursuit                                             │
 │ - Ship the auth refactor                           │
 │ - Step 1: extract session store                    │
 │ - Step 2: migrate tests                            │

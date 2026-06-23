@@ -1,11 +1,15 @@
 pub use async_trait::async_trait;
 
-pub mod goals;
-pub use goals::{
-    Goal, GoalService, GoalStore, TokenUsage, TurnOutcome, TurnTimer,
+pub mod cron;
+pub use cron::CronExpr;
+pub mod pursuits;
+pub mod repeat;
+pub use repeat::{RepeatJob, RepeatStore, DEFAULT_MAX_AGE_DAYS};
+pub use pursuits::{
+    Pursuit, PursuitService, PursuitStore, TokenUsage, TurnOutcome, TurnTimer,
 };
 
-pub const GOAL_COMPLETE_MARKER: &str = "[NEENEE_GOAL_COMPLETE]";
+pub const PURSUIT_COMPLETE_MARKER: &str = "[NEENEE_PURSUIT_COMPLETE]";
 
 pub mod error;
 pub use error::{

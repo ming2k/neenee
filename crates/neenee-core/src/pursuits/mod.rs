@@ -3,22 +3,22 @@ pub mod service;
 pub mod store;
 pub mod tools;
 
-pub use service::{GoalService, TurnTimer};
-pub use store::GoalStore;
+pub use service::{PursuitService, TurnTimer};
+pub use store::PursuitStore;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// The persisted view of a thread/session goal.
+/// The persisted view of a thread/session pursuit.
 ///
 /// Slimmed in ADR-0010: the status machine, token budget, and elapsed-time
 /// accounting are gone. Only `objective`, `is_complete`, and timestamps
-/// persist. The `thread_goals` table still carries the legacy
+/// persist. The `thread_pursuits` table still carries the legacy
 /// `token_budget` / `tokens_used` / `time_used_seconds` columns for
 /// backward compatibility with pre-0010 databases, but they are no longer
 /// read or written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadGoal {
+pub struct ThreadPursuit {
     pub thread_id: String,
     pub goal_id: String,
     pub objective: String,
@@ -27,12 +27,12 @@ pub struct ThreadGoal {
     pub updated_at: DateTime<Utc>,
 }
 
-/// The runtime view of a goal exposed to the agent, tools, and TUI.
+/// The runtime view of a pursuit exposed to the agent, tools, and TUI.
 ///
 /// Carries the durable `objective` and a single `is_complete` flag that
 /// mirrors the persisted column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Goal {
+pub struct Pursuit {
     pub objective: String,
     #[serde(default)]
     pub is_complete: bool,
@@ -40,8 +40,8 @@ pub struct Goal {
 
 /// Token usage reported by a single turn.
 ///
-/// Per-turn telemetry only — not booked against any goal (ADR-0010 removed
-/// goal-level token accounting).
+/// Per-turn telemetry only — not booked against any pursuit (ADR-0010 removed
+/// pursuit-level token accounting).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub prompt_tokens: i64,

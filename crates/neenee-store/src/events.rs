@@ -10,7 +10,7 @@
 //! a monotonic sequence number, a wall-clock timestamp, and the event payload.
 
 use crate::fsutil;
-use crate::session::{CompactionCheckpoint, LoopCheckpoint};
+use crate::session::{CompactionCheckpoint, PursuitCheckpoint};
 use neenee_core::Message;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -33,7 +33,7 @@ pub enum SessionEvent {
     /// after tool-result pruning).
     MessagesReplaced { messages: Vec<Message> },
     /// The autonomous-loop checkpoint changed.
-    CheckpointSet { checkpoint: Option<LoopCheckpoint> },
+    CheckpointSet { checkpoint: Option<PursuitCheckpoint> },
     /// A compaction archived older turns and replaced the active window.
     CompactionCommitted {
         archived: Vec<Message>,

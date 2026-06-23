@@ -1,10 +1,11 @@
 use crate::tui::start_tui;
 use neenee_agent::catalog;
 use neenee_agent::orchestration::{
-    compact_turn_history, emit_goal_updated, refresh_agent_goal, send_compaction,
-    send_harness_state, start_goal_loop, start_interactive_turn, CompactionSettings,
-    InteractiveTurnContext, LoopRunContext, MidTurnCompactionGate, ProxyProvider,
-    RelayCompactionHooks, TurnInput,
+    compact_turn_history, emit_pursuit_updated, refresh_agent_pursuit, send_compaction,
+    send_harness_state, start_interactive_turn, start_pursuit, start_repeat_scheduler,
+    CompactionSettings,
+    InteractiveTurnContext, MidTurnCompactionGate, ProxyProvider,
+    PursuitContext, RelayCompactionHooks, TurnInput,
 };
 #[cfg(test)]
 use neenee_agent::orchestration::{execute_turn, retry_delay_ms, TurnContext};
@@ -17,14 +18,15 @@ use neenee_agent::TaskTool;
 #[cfg(test)]
 use neenee_core::{async_trait, Message, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, Goal, GoalService, GoalStore, Provider, Tool, EXPLORE,
+    AgentMode, AgentRequest, AgentResponse, CronExpr, Pursuit, PursuitService, PursuitStore, Provider,
+    RepeatStore, Tool, EXPLORE,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
     config::Config,
     embedding, lock, paths, provider_usage,
     search_tool::SearchHistoryTool,
-    session::{self, discard_trailing_loop_prompts, SessionStore, UNCAPPED_ITERATIONS},
+    session::{self, SessionStore},
 };
 use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
 use neenee_tools::{
@@ -36,11 +38,11 @@ use neenee_tools::{
 #[allow(dead_code)]
 mod tui;
 
-mod goals;
+mod pursuits;
 mod session_view;
 mod startup;
 
-use goals::{format_goal_status, load_legacy_goal_from_config};
+use pursuits::{format_pursuit_status, load_legacy_pursuit_from_config};
 use session_view::{
     build_session_context, build_sessions_overview, provider_key_status, resume_session,
     short_session_id,
@@ -84,8 +86,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut config = Config::load();
-    let goal_store = GoalStore::open(paths::get().goals_db()).await?;
-    let goal_service = GoalService::new(goal_store);
+    let pursuit_store = PursuitStore::open(paths::get().pursuits_db()).await?;
+    let pursuit_service = PursuitService::new(pursuit_store);
+
+    // Durable store for `/repeat` cron jobs. Opened once; cloned for the
+    // command handler and the background scheduler.
+    let repeat_store = RepeatStore::open(paths::get().repeat_db()).await?;
+    // Background scheduler: every 30s prune expired jobs and fire any that are
+    // due, dispatching each prompt as a normal chat turn.
+    start_repeat_scheduler(
+        repeat_store.clone(),
+        req_tx.clone(),
+        std::time::Duration::from_secs(30),
+    );
 
     // Initialize Agent logic. The provider is resolved through the model
     // catalog (`build_provider_for`), the single source of truth for the
@@ -205,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_provider,
         tools,
         AgentMode::Build,
-        goal_service.clone(),
+        pursuit_service.clone(),
         (*skills_registry).clone(),
     ));
     // Wire the per-project "always allow" allowlist so prior `Always`
@@ -244,15 +257,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_stall_threshold(config.agent.stall_threshold);
     agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
 
-    // Tie the agent and its goal persistence to this session/thread.
+    // Tie the agent and its pursuit persistence to this session/thread.
     let thread_id = session.id().await;
     agent.set_thread_id(&thread_id);
-    if goal_service.get_goal(&thread_id).await?.is_none() {
-        if let Some(goal) = load_legacy_goal_from_config() {
-            let _ = goal_service.set_goal(&thread_id, &goal.objective).await;
+    if pursuit_service.get_pursuit(&thread_id).await?.is_none() {
+        if let Some(pursuit) = load_legacy_pursuit_from_config() {
+            let _ = pursuit_service.set_pursuit(&thread_id, &pursuit.objective).await;
         }
     }
-    refresh_agent_goal(&agent, &goal_service, &thread_id).await;
+    refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
 
     // Restore the active plan path + plan progress from the persisted
     // session so resume re-enters Build mode with the "you are implementing
@@ -280,6 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generation_clone = task_generation.clone();
     let commands_for_task = Arc::new(custom_commands);
     let embedding_store_for_commands = embedding_store.clone();
+    let repeat_store_for_commands = repeat_store.clone();
+    let req_tx_for_commands = req_tx.clone();
 
     // Initial values for TUI
     let initial_p_name = catalog::default_provider_id(&config).to_string();
@@ -830,7 +845,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .map(|item| {
                                         format!(
                                             "{} {}/{} ({})",
-                                            item.goal,
+                                            item.pursuit,
                                             item.iteration,
                                             item.max_iterations,
                                             item.status
@@ -1013,23 +1028,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/goal" => {
+                        "/pursue" => {
                             let thread_id = session.id().await;
-                            let argument = cmd.strip_prefix("/goal").unwrap_or("").trim();
+                            let argument = cmd.strip_prefix("/pursue").unwrap_or("").trim();
                             let rest = argument;
 
-                            async fn report_goal_result(
+                            async fn report_pursuit_result(
                                 tx: &mpsc::UnboundedSender<AgentResponse>,
                                 agent: &Agent,
-                                result: Result<Option<Goal>, String>,
-                                success: impl FnOnce(&Goal) -> String,
+                                result: Result<Option<Pursuit>, String>,
+                                success: impl FnOnce(&Pursuit) -> String,
                                 empty: impl Into<String>,
                             ) {
                                 match result {
-                                    Ok(Some(goal)) => {
-                                        agent.set_goal(goal.clone());
-                                        emit_goal_updated(tx, &goal);
-                                        let _ = tx.send(AgentResponse::Text(success(&goal)));
+                                    Ok(Some(pursuit)) => {
+                                        agent.set_pursuit(pursuit.clone());
+                                        emit_pursuit_updated(tx, &pursuit);
+                                        let _ = tx.send(AgentResponse::Text(success(&pursuit)));
                                     }
                                     Ok(None) => {
                                         let _ = tx.send(AgentResponse::Error(empty.into()));
@@ -1040,24 +1055,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            if rest.is_empty() || rest == "status" {
-                                refresh_agent_goal(&agent, &goal_service, &thread_id).await;
-                                let message = match agent.get_goal() {
-                                    Some(goal) => format_goal_status(&goal),
-                                    None => "No active goal. Set one with /goal <objective>."
+                            if rest == "stop" {
+                                let mut current = ctt_clone.write().await;
+                                if let Some(token) = current.take() {
+                                    token.cancel();
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "Pursuit stop requested.".to_string(),
+                                    ));
+                                } else {
+                                    let _ = resp_tx.send(AgentResponse::Text(
+                                        "No pursuit is running.".to_string(),
+                                    ));
+                                }
+                                send_harness_state(&resp_tx, &agent, "idle");
+                                continue;
+                            }
+
+                            if rest == "status" {
+                                refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
+                                let armed = agent.is_pursuit_armed();
+                                let iterations = agent.pursuit_iterations();
+                                let message = match agent.get_pursuit() {
+                                    Some(pursuit) => {
+                                        let mut m = format_pursuit_status(&pursuit);
+                                        if armed {
+                                            m.push_str(&format!(
+                                                "\nPursuit active · gate iteration {iterations}"
+                                            ));
+                                        }
+                                        m
+                                    }
+                                    None => "No active pursuit. Start one with /pursue <condition>."
                                         .to_string(),
                                 };
                                 let _ = resp_tx.send(AgentResponse::Text(message));
                             } else if rest == "clear" {
-                                match goal_service.clear_goal(&thread_id).await {
+                                agent.disarm_pursuit();
+                                match pursuit_service.clear_pursuit(&thread_id).await {
                                     Ok(true) => {
-                                        agent.clear_goal();
+                                        agent.clear_pursuit();
                                         let _ = resp_tx
-                                            .send(AgentResponse::Text("Goal cleared.".to_string()));
+                                            .send(AgentResponse::Text("Pursuit cleared.".to_string()));
                                     }
                                     Ok(false) => {
                                         let _ = resp_tx.send(AgentResponse::Text(
-                                            "No goal to clear.".to_string(),
+                                            "No pursuit to clear.".to_string(),
                                         ));
                                     }
                                     Err(error) => {
@@ -1065,27 +1107,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else if rest == "done" {
-                                report_goal_result(
+                                agent.disarm_pursuit();
+                                report_pursuit_result(
                                     &resp_tx,
                                     &agent,
-                                    goal_service.mark_complete(&thread_id).await,
-                                    |_| "Goal marked completed.".to_string(),
-                                    "No goal to complete.",
+                                    pursuit_service.mark_complete(&thread_id).await,
+                                    |_| "Pursuit marked completed.".to_string(),
+                                    "No pursuit to complete.",
                                 )
                                 .await;
                             } else if rest.starts_with("edit ") {
                                 let new_objective = rest.strip_prefix("edit ").unwrap_or("").trim();
                                 if new_objective.is_empty() {
                                     let _ = resp_tx.send(AgentResponse::Error(
-                                        "Usage: /goal edit <new objective>".to_string(),
+                                        "Usage: /pursue edit <new condition>".to_string(),
                                     ));
                                 } else {
-                                    match goal_service
+                                    match pursuit_service
                                         .update_objective(&thread_id, new_objective)
                                         .await
                                     {
-                                        Ok(Some(goal)) => {
-                                            agent.set_goal(goal.clone());
+                                        Ok(Some(pursuit)) => {
+                                            agent.set_pursuit(pursuit.clone());
                                             {
                                                 let mut messages = history.lock().await;
                                                 agent.inject_objective_updated(&mut messages);
@@ -1093,15 +1136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 drop(messages);
                                                 let _ = session.replace_messages(updated).await;
                                             }
-                                            emit_goal_updated(&resp_tx, &goal);
+                                            emit_pursuit_updated(&resp_tx, &pursuit);
                                             let _ = resp_tx.send(AgentResponse::Text(format!(
-                                                "Goal updated: {}",
-                                                goal.objective
+                                                "Pursuit updated: {}",
+                                                pursuit.objective
                                             )));
                                         }
                                         Ok(None) => {
                                             let _ = resp_tx.send(AgentResponse::Error(
-                                                "No goal to edit. Set one first with /goal <objective>."
+                                                "No pursuit to edit. Start one with /pursue <condition>."
                                                     .to_string(),
                                             ));
                                         }
@@ -1114,234 +1157,172 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 || rest == "resume"
                                 || rest.starts_with("budget ")
                             {
-                                // Pre-ADR-0010 subcommands removed: the status
-                                // machine and token budget no longer exist.
                                 let _ = resp_tx.send(AgentResponse::Error(
-                                    "The /goal pause, /goal resume, and /goal budget subcommands were removed: \
-                                     the goal no longer carries a status machine or token budget. \
-                                     Use /goal <objective>, /goal edit, /goal done, or /goal clear."
+                                    "/pursue pause, /pursue resume, and /pursue budget are not \
+                                     supported. Use /pursue <condition>, /pursue edit, /pursue \
+                                     done, /pursue clear, /pursue status, or /pursue stop."
                                         .to_string(),
                                 ));
                             } else {
-                                // Set a new goal.
-                                match goal_service.set_goal(&thread_id, rest).await {
-                                    Ok(goal) => {
-                                        agent.set_goal(goal.clone());
-                                        emit_goal_updated(&resp_tx, &goal);
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Goal set: {}",
-                                            goal.objective
-                                        )));
+                                // `/pursue <condition>` sets a fresh condition and drives it;
+                                // `/pursue` (empty) re-arms and drives the existing pursuit.
+                                let condition = if rest.is_empty() {
+                                    match pursuit_service.active_pursuit(&thread_id).await {
+                                        Ok(Some(pursuit)) => {
+                                            let _ = resp_tx.send(AgentResponse::Text(format!(
+                                                "Resuming pursuit on existing pursuit: {}",
+                                                pursuit.objective
+                                            )));
+                                            pursuit.objective
+                                        }
+                                        Ok(None) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(
+                                                "No active pursuit. Start one with /pursue <condition>."
+                                                    .to_string(),
+                                            ));
+                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            continue;
+                                        }
                                     }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                    }
-                                }
-                            }
-                            send_harness_state(&resp_tx, &agent, "idle");
-                        }
-                        "/loop" => {
-                            let thread_id = session.id().await;
-                            // Everything after "/loop " — preserves spaces inside
-                            // the objective text so `/loop fix the bug` carries the
-                            // full sentence as the goal.
-                            let raw_args = cmd.strip_prefix("/loop").unwrap_or("").trim();
-                            if raw_args == "stop" {
-                                let mut current = ctt_clone.write().await;
-                                if let Some(token) = current.take() {
-                                    token.cancel();
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "Loop stop requested.".to_string(),
-                                    ));
                                 } else {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "No loop is running.".to_string(),
-                                    ));
-                                }
-                                send_harness_state(&resp_tx, &agent, "idle");
-                                continue;
-                            }
-                            if raw_args == "status" {
-                                let running = ctt_clone.read().await.is_some();
-                                let status = if running { "running" } else { "idle" };
-                                let checkpoint = session.checkpoint().await;
-                                let detail = checkpoint
-                                    .map(|checkpoint| {
-                                        let budget =
-                                            if checkpoint.max_iterations == UNCAPPED_ITERATIONS {
-                                                "uncapped".to_string()
-                                            } else {
-                                                // Legacy pre-ADR-0009 checkpoint: show the
-                                                // original finite budget for traceability.
-                                                format!("cap {}", checkpoint.max_iterations)
-                                            };
-                                        format!(
-                                            "{} · iteration {} ({}) for {}",
-                                            checkpoint.status,
-                                            checkpoint.iteration,
-                                            budget,
-                                            checkpoint.goal,
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "no checkpoint".to_string());
-                                let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Loop status: {}\nCheckpoint: {}",
-                                    status, detail
-                                )));
-                                send_harness_state(&resp_tx, &agent, status);
-                                continue;
-                            }
-                            if raw_args == "resume" {
-                                if ctt_clone.read().await.is_some() {
-                                    let _ = resp_tx.send(AgentResponse::Error(
-                                        "A chat or loop task is already running.".to_string(),
-                                    ));
-                                    continue;
-                                }
-                                let checkpoint = match session.checkpoint().await {
-                                    Some(checkpoint) => checkpoint,
-                                    None => {
-                                        let _ = resp_tx.send(AgentResponse::Error(
-                                            "No loop checkpoint is available to resume."
-                                                .to_string(),
-                                        ));
-                                        continue;
+                                    match pursuit_service.set_pursuit(&thread_id, rest).await {
+                                        Ok(pursuit) => {
+                                            agent.set_pursuit(pursuit.clone());
+                                            emit_pursuit_updated(&resp_tx, &pursuit);
+                                            pursuit.objective
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            continue;
+                                        }
                                     }
                                 };
-                                let start_iteration = match checkpoint.resume_iteration() {
-                                    Ok(iteration) => iteration,
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                        continue;
-                                    }
-                                };
-
-                                let mut current = history.lock().await.clone();
-                                let discarded = discard_trailing_loop_prompts(&mut current);
-                                if discarded > 0 {
-                                    *history.lock().await = current.clone();
-                                    if let Err(error) = session.replace_messages(current).await {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                        continue;
-                                    }
-                                }
-
-                                match goal_service.set_goal(&thread_id, &checkpoint.goal).await {
-                                    Ok(goal) => {
-                                        agent.set_goal(goal.clone());
-                                        emit_goal_updated(&resp_tx, &goal);
-                                    }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(format!(
-                                            "Failed to restore loop goal: {error}"
-                                        )));
-                                        continue;
-                                    }
-                                }
-                                let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Resuming goal loop at iteration {}{}.",
-                                    start_iteration,
-                                    if discarded > 0 {
-                                        " after removing an incomplete control prompt"
-                                    } else {
-                                        ""
-                                    }
-                                )));
-                                start_goal_loop(
-                                    LoopRunContext {
+                                start_pursuit(
+                                    PursuitContext {
                                         agent: agent.clone(),
                                         history: history.clone(),
                                         tx: resp_tx.clone(),
                                         token_slot: ctt_clone.clone(),
                                         generation_counter: generation_clone.clone(),
                                         session: session.clone(),
-                                        goal_service: goal_service.clone(),
+                                        pursuit_service: pursuit_service.clone(),
                                         compaction: CompactionSettings::from(&config),
                                         retry_max_attempts: config.provider_retry_max_attempts,
                                         retry_base_ms: config.provider_retry_base_ms,
                                         retry_max_ms: config.provider_retry_max_ms,
                                     },
-                                    checkpoint.goal,
-                                    start_iteration,
+                                    condition,
                                 )
                                 .await;
                                 continue;
                             }
-
-                            // Reject the legacy numeric form `/loop <N>`: the
-                            // iteration cap was removed (ADR-0009). A pure-number
-                            // argument is unambiguously the old syntax, so route
-                            // the user to the new commands instead of silently
-                            // treating the number as a goal.
-                            if raw_args.parse::<usize>().is_ok() {
-                                let _ = resp_tx.send(AgentResponse::Error(
-                                    "The `/loop <N>` form was removed: the loop now runs unbounded. \
-                                     Use `/loop` to start on the current goal, `/loop <objective>` \
-                                     to set a fresh goal and start, or `/loop stop` to interrupt."
+                            send_harness_state(&resp_tx, &agent, "idle");
+                        }
+                        "/repeat" => {
+                            let rest = cmd.strip_prefix("/repeat").unwrap_or("").trim();
+                            if rest.is_empty() || rest == "help" {
+                                let _ = resp_tx.send(AgentResponse::Text(
+                                    "Usage: /repeat <cron> <prompt>\n\
+                                     cron is five fields: minute hour day month weekday \
+                                     (e.g. `*/5 * * * *` = every 5 min, `0 9 * * 1-5` = 09:00 weekdays).\n\
+                                     Also: /repeat list, /repeat cancel <id>."
                                         .to_string(),
                                 ));
                                 continue;
                             }
-
-                            // `/loop <content>` sets a fresh goal from the content
-                            // and starts an uncapped loop on it; `/loop` (empty)
-                            // starts an uncapped loop on the existing goal. Either
-                            // way the loop runs until the model emits the completion
-                            // marker, the user interrupts, or an error aborts.
-                            let objective = if raw_args.is_empty() {
-                                match goal_service.active_goal(&thread_id).await {
-                                    Ok(Some(goal)) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Starting autonomous loop on existing goal: {}",
-                                            goal.objective
-                                        )));
-                                        goal.objective
-                                    }
-                                    Ok(None) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(
-                                            "No active goal. Set one with /goal <objective>, \
-                                             then /loop, or start a fresh loop with \
-                                             /loop <objective>."
-                                                .to_string(),
+                            if rest == "list" {
+                                let jobs = repeat_store_for_commands.list().await.unwrap_or_default();
+                                if jobs.is_empty() {
+                                    let _ = resp_tx
+                                        .send(AgentResponse::Text("No /repeat jobs scheduled.".to_string()));
+                                } else {
+                                    let mut lines = vec!["Scheduled /repeat jobs:".to_string()];
+                                    for j in &jobs {
+                                        lines.push(format!(
+                                            "  {} · `{}` · next {} · {}",
+                                            &j.id[..8.min(j.id.len())],
+                                            j.cron,
+                                            j.next_fire.format("%Y-%m-%d %H:%M"),
+                                            j.prompt,
                                         ));
-                                        continue;
+                                    }
+                                    let _ = resp_tx.send(AgentResponse::Text(lines.join("\n")));
+                                }
+                                continue;
+                            }
+                            if let Some(id) = rest.strip_prefix("cancel ") {
+                                let id = id.trim();
+                                match repeat_store_for_commands.delete(id).await {
+                                    Ok(true) => {
+                                        let _ = resp_tx.send(AgentResponse::Text(format!(
+                                            "Cancelled repeat job {id}."
+                                        )));
+                                    }
+                                    Ok(false) => {
+                                        let _ = resp_tx.send(AgentResponse::Text(format!(
+                                            "No repeat job with id {id}."
+                                        )));
                                     }
                                     Err(error) => {
                                         let _ = resp_tx.send(AgentResponse::Error(error));
-                                        continue;
                                     }
                                 }
-                            } else {
-                                match goal_service.set_goal(&thread_id, raw_args).await {
-                                    Ok(goal) => {
-                                        agent.set_goal(goal.clone());
-                                        emit_goal_updated(&resp_tx, &goal);
-                                        goal.objective
-                                    }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                        continue;
-                                    }
+                                continue;
+                            }
+                            // `/repeat <5-field cron> <prompt>`
+                            let tokens: Vec<&str> = rest.split_whitespace().collect();
+                            if tokens.len() < 6 {
+                                let _ = resp_tx.send(AgentResponse::Error(
+                                    "Usage: /repeat <5-field cron> <prompt>. \
+                                      Example: /repeat */5 * * * * check the deploy"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                            let cron = tokens[0..5].join(" ");
+                            let prompt = tokens[5..].join(" ");
+                            let parsed = match CronExpr::parse(&cron) {
+                                Ok(p) => p,
+                                Err(error) => {
+                                    let _ = resp_tx
+                                        .send(AgentResponse::Error(format!("Invalid cron: {error}")));
+                                    continue;
                                 }
                             };
-                            start_goal_loop(
-                                LoopRunContext {
-                                    agent: agent.clone(),
-                                    history: history.clone(),
-                                    tx: resp_tx.clone(),
-                                    token_slot: ctt_clone.clone(),
-                                    generation_counter: generation_clone.clone(),
-                                    session: session.clone(),
-                                    goal_service: goal_service.clone(),
-                                    compaction: CompactionSettings::from(&config),
-                                    retry_max_attempts: config.provider_retry_max_attempts,
-                                    retry_base_ms: config.provider_retry_base_ms,
-                                    retry_max_ms: config.provider_retry_max_ms,
-                                },
-                                objective,
-                                1,
-                            )
-                            .await;
+                            let now = chrono::Utc::now();
+                            let next = match parsed.next_fire(now) {
+                                Some(n) => n,
+                                None => {
+                                    let _ = resp_tx.send(AgentResponse::Error(
+                                        "That cron expression never fires within the next year.".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            };
+                            match repeat_store_for_commands.add(&cron, &prompt, next).await {
+                                Ok(job) => {
+                                    let _ = resp_tx.send(AgentResponse::Text(format!(
+                                        "Scheduled repeat job {} (`{}`), next {}. Running now.",
+                                        &job.id[..8.min(job.id.len())],
+                                        cron,
+                                        next.format("%Y-%m-%d %H:%M"),
+                                    )));
+                                    // Fire the first run immediately (cron handles the rest).
+                                    let _ = req_tx_for_commands.send(AgentRequest::Chat {
+                                        text: prompt,
+                                        images: Vec::new(),
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = resp_tx.send(AgentResponse::Error(error));
+                                }
+                            }
                         }
                         "/init" => {
                             let target = parts.get(1).copied().unwrap_or(".");
@@ -1442,7 +1423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 AgentMode::Build => "build",
                                 AgentMode::Plan => "plan",
                             };
-                            let goal = agent.get_goal();
+                            let pursuit = agent.get_pursuit();
                             let plan_path = agent.active_plan_path();
                             let markdown = crate::tui::export::format_export_markdown(
                                 crate::tui::export::ExportContext {
@@ -1450,7 +1431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     provider: &provider_id,
                                     model: &model_name,
                                     mode,
-                                    goal: goal.as_ref(),
+                                    pursuit: pursuit.as_ref(),
                                     active_plan_path: plan_path.as_deref(),
                                 },
                                 &messages,
@@ -1520,8 +1501,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
                                 /sessions — Browse past sessions\n\
                                 /resume [id] — Resume the most recent or selected session\n\
-                                /goal     — Set, inspect, complete, or clear the active goal\n\
-                                /loop [objective|resume|status|stop] — Run an uncapped autonomous goal loop\n\
+                                /pursue [condition|status|stop|done|edit|clear] — Pursue a pursuit: the harness keeps the turn going until the condition is met\n\
+                                /repeat [cron prompt|list|cancel id] — Schedule a prompt on a cron expression\n\
                                 /init [path] — Initialize a .neenee/ config tree\n\
                                 /skills [list|reload] — List or reload available skills\n\
                                 /skill <name> — Load a skill by name\n\
@@ -1550,7 +1531,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     token_slot: ctt_clone.clone(),
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
-                                    goal_service: goal_service.clone(),
+                                    pursuit_service: pursuit_service.clone(),
                                     compaction: CompactionSettings::from(&config),
                                     retry_max_attempts: config.provider_retry_max_attempts,
                                     retry_base_ms: config.provider_retry_base_ms,
@@ -1576,7 +1557,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             token_slot: ctt_clone.clone(),
                             generation_counter: generation_clone.clone(),
                             session: session.clone(),
-                            goal_service: goal_service.clone(),
+                            pursuit_service: pursuit_service.clone(),
                             compaction: CompactionSettings::from(&config),
                             retry_max_attempts: config.provider_retry_max_attempts,
                             retry_base_ms: config.provider_retry_base_ms,
@@ -1876,13 +1857,13 @@ mod tests {
             std::env::temp_dir().join(format!("neenee-retry-test-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
         let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let goal_service =
-            GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"));
+        let pursuit_service =
+            PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
         let agent = Arc::new(Agent::new(
             Arc::new(RetryOnceProvider(AtomicUsize::new(0))),
             Vec::new(),
             AgentMode::Build,
-            goal_service.clone(),
+            pursuit_service.clone(),
             SkillRegistry::empty(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1894,7 +1875,7 @@ mod tests {
                 tx,
                 token: CancellationToken::new(),
                 session,
-                goal_service,
+                pursuit_service,
                 compaction: CompactionSettings {
                     max_chars: 100_000,
                     preserve_turns: 6,
@@ -1958,13 +1939,13 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-retry-tool-{}", uuid::Uuid::new_v4()));
         let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
-        let goal_service =
-            GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"));
+        let pursuit_service =
+            PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
         let agent = Arc::new(Agent::new(
             Arc::new(ToolThenRetryProvider(AtomicUsize::new(0))),
             vec![Arc::new(RetryReadTool)],
             AgentMode::Build,
-            goal_service.clone(),
+            pursuit_service.clone(),
             SkillRegistry::empty(),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1976,7 +1957,7 @@ mod tests {
                 tx,
                 token: CancellationToken::new(),
                 session,
-                goal_service,
+                pursuit_service,
                 compaction: CompactionSettings {
                     max_chars: 100_000,
                     preserve_turns: 6,

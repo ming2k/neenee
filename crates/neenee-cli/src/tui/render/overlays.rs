@@ -1629,8 +1629,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(section("Modes")),
         row("/mode", "build · plan"),
-        row("/goal", "set or manage the goal"),
-        row("/loop N", "bounded autonomous work"),
+        row("/pursue", "pursue a pursuit until it is met"),
         Line::from(""),
         Line::from(desc("Drag to select · Ctrl+C or Ctrl+Shift+C to copy.")),
     ];
@@ -1724,13 +1723,13 @@ pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, th
 }
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
-/// goal bar, plan panel, and activity bar used to show, gathered into one
+/// pursuit bar, plan panel, and activity bar used to show, gathered into one
 /// overlay so the footer is a single line. Fields are `Option`al so the modal
 /// simply omits a section when there is nothing to report.
 pub struct ActivityModalView<'a> {
-    /// Active goal, if any. Shown as an objective line plus one row per
+    /// Active pursuit, if any. Shown as an objective line plus one row per
     /// checklist item.
-    pub goal: Option<&'a neenee_core::Goal>,
+    pub pursuit: Option<&'a neenee_core::Pursuit>,
     /// Live plan-progress snapshot, if any. Shown as a header (file name +
     /// done/total) plus one row per section.
     pub plan: Option<&'a neenee_core::PlanProgress>,
@@ -1764,9 +1763,9 @@ fn plan_section_glyph_color(
     }
 }
 
-/// The Activity modal: a scrollable overview of the current goal, the live
+/// The Activity modal: a scrollable overview of the current pursuit, the live
 /// plan-progress breakdown, and the running turn/round/model/elapsed/status.
-/// Replaces the always-pinned goal bar + plan panel (which have moved into the
+/// Replaces the always-pinned pursuit bar + plan panel (which have moved into the
 /// scrolling transcript as inline notices) so the footer stays a single line;
 /// the activity bar remains pinned as the click target that opens this modal.
 pub fn draw_activity_modal(
@@ -1776,7 +1775,7 @@ pub fn draw_activity_modal(
     theme: &Theme,
 ) {
     let ActivityModalView {
-        goal,
+        pursuit,
         plan,
         turn_count,
         current_round,
@@ -1806,16 +1805,16 @@ pub fn draw_activity_modal(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut have_section = false;
 
-    // ── Goal ──
-    if let Some(goal) = goal {
+    // ── Pursuit ──
+    if let Some(pursuit) = pursuit {
         have_section = true;
         lines.push(Line::from(vec![Span::styled(
-            "Goal",
+            "Pursuit",
             Style::default()
                 .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )]));
-        let objective_label = if goal.is_complete {
+        let objective_label = if pursuit.is_complete {
             "✓ complete · ".to_string()
         } else {
             String::new()
@@ -1823,7 +1822,7 @@ pub fn draw_activity_modal(
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("{}{}", objective_label, goal.objective),
+                format!("{}{}", objective_label, pursuit.objective),
                 Style::default().fg(theme.fg()),
             ),
         ]));

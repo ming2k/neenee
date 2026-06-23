@@ -2,7 +2,7 @@
 //! animated breathing-dot indicator shown above the input, the completion menu
 //! anchored above the input, and the persistent hint bar pinned below the
 //! input. The activity bar is also the click target that opens the Activity
-//! modal (goal + plan + live activity), replacing the old always-pinned goal
+//! modal (pursuit + plan + live activity), replacing the old always-pinned pursuit
 //! bar and plan panel.
 
 use ratatui::{

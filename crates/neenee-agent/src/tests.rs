@@ -149,8 +149,8 @@ impl Tool for StreamingReadTool {
     }
 }
 
-fn test_goal_service() -> GoalService {
-    GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"))
+fn test_pursuit_service() -> PursuitService {
+    PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"))
 }
 
 fn agent() -> Agent {
@@ -158,27 +158,27 @@ fn agent() -> Agent {
         Arc::new(TestProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     )
 }
 
-fn active_goal(objective: &str) -> Goal {
-    Goal {
+fn active_pursuit(objective: &str) -> Pursuit {
+    Pursuit {
         objective: objective.to_string(),
         is_complete: false,
     }
 }
 
 #[test]
-fn goal_is_injected_into_system_prompt() {
+fn pursuit_is_injected_into_system_prompt() {
     let agent = agent();
-    agent.set_goal(active_goal("ship the harness"));
+    agent.set_pursuit(active_pursuit("ship the harness"));
 
     let prompt = agent.build_system_prompt();
 
     assert!(prompt.contains("ship the harness"));
-    assert!(prompt.contains("update_goal"));
+    assert!(prompt.contains("complete_pursuit"));
 }
 
 #[test]
@@ -189,18 +189,18 @@ fn retry_metadata_is_not_exposed_as_public_error_text() {
 }
 
 #[test]
-fn goal_lifecycle_is_explicit() {
+fn pursuit_lifecycle_is_explicit() {
     let agent = agent();
-    agent.set_goal(active_goal("verify behavior"));
-    assert!(!agent.get_goal().unwrap().is_complete);
+    agent.set_pursuit(active_pursuit("verify behavior"));
+    assert!(!agent.get_pursuit().unwrap().is_complete);
 
-    let mut completed = active_goal("verify behavior");
+    let mut completed = active_pursuit("verify behavior");
     completed.is_complete = true;
-    agent.set_goal(completed);
-    assert!(agent.get_goal().unwrap().is_complete);
+    agent.set_pursuit(completed);
+    assert!(agent.get_pursuit().unwrap().is_complete);
 
-    agent.clear_goal();
-    assert_eq!(agent.get_goal(), None);
+    agent.clear_pursuit();
+    assert_eq!(agent.get_pursuit(), None);
 }
 
 // ── Pursuit stop-gate ──────────────────────────────────────────────────
@@ -208,7 +208,7 @@ fn goal_lifecycle_is_explicit() {
 #[test]
 fn pursuit_gate_is_inert_until_armed() {
     let agent = agent();
-    agent.set_goal(active_goal("ship"));
+    agent.set_pursuit(active_pursuit("ship"));
     let resp = Message::new(Role::Assistant, "working".to_string());
     assert!(!agent.is_pursuit_armed());
     assert!(agent.pursuit_continuation(&resp).is_none());
@@ -217,7 +217,7 @@ fn pursuit_gate_is_inert_until_armed() {
 #[test]
 fn pursuit_gate_returns_continuation_when_armed_and_active() {
     let agent = agent();
-    agent.set_goal(active_goal("ship the feature"));
+    agent.set_pursuit(active_pursuit("ship the feature"));
     agent.arm_pursuit();
     assert!(agent.is_pursuit_armed());
     assert_eq!(agent.pursuit_iterations(), 0);
@@ -225,7 +225,7 @@ fn pursuit_gate_returns_continuation_when_armed_and_active() {
     let resp = Message::new(Role::Assistant, "I will keep working".to_string());
     let prompt = agent
         .pursuit_continuation(&resp)
-        .expect("armed + active goal + no marker => continue");
+        .expect("armed + active pursuit + no marker => continue");
     assert!(prompt.contains("ship the feature"));
     // The predicate does not bump the counter; the turn loop does, on consume.
     assert_eq!(agent.pursuit_iterations(), 0);
@@ -234,11 +234,11 @@ fn pursuit_gate_returns_continuation_when_armed_and_active() {
 #[test]
 fn pursuit_gate_lets_turn_end_on_completion_marker() {
     let agent = agent();
-    agent.set_goal(active_goal("ship"));
+    agent.set_pursuit(active_pursuit("ship"));
     agent.arm_pursuit();
     let resp = Message::new(
         Role::Assistant,
-        format!("all done {}", crate::GOAL_COMPLETE_MARKER),
+        format!("all done {}", crate::PURSUIT_COMPLETE_MARKER),
     );
     assert!(agent.pursuit_continuation(&resp).is_none());
 }
@@ -254,9 +254,9 @@ fn pursuit_gate_lets_turn_end_without_active_goal() {
 #[test]
 fn pursuit_gate_lets_turn_end_when_goal_already_complete() {
     let agent = agent();
-    let mut done = active_goal("ship");
+    let mut done = active_pursuit("ship");
     done.is_complete = true;
-    agent.set_goal(done);
+    agent.set_pursuit(done);
     agent.arm_pursuit();
     let resp = Message::new(Role::Assistant, "working".to_string());
     assert!(agent.pursuit_continuation(&resp).is_none());
@@ -265,7 +265,7 @@ fn pursuit_gate_lets_turn_end_when_goal_already_complete() {
 #[test]
 fn disarm_pursuit_turns_the_gate_off() {
     let agent = agent();
-    agent.set_goal(active_goal("ship"));
+    agent.set_pursuit(active_pursuit("ship"));
     agent.arm_pursuit();
     let resp = Message::new(Role::Assistant, "working".to_string());
     assert!(agent.pursuit_continuation(&resp).is_some());
@@ -280,7 +280,7 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "run")];
@@ -347,7 +347,7 @@ async fn stalled_provider_stream_times_out_as_retryable() {
         Arc::new(StalledStreamProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -396,7 +396,7 @@ async fn stream_request_that_never_resolves_times_out() {
         Arc::new(PendingStreamProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -436,7 +436,7 @@ async fn non_streaming_chat_that_never_resolves_times_out() {
         Arc::new(PendingChatProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -485,7 +485,7 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
         Arc::new(ReasoningOnlyProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -541,7 +541,7 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
             started: started.clone(),
         })],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let token = CancellationToken::new();
@@ -611,7 +611,7 @@ async fn plan_mode_blocks_tools_unless_explicitly_read_only() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Plan,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let call = ToolCall {
@@ -642,7 +642,7 @@ async fn plan_exit_asks_user_and_implements_when_approved() {
         Arc::new(TestProvider),
         Vec::new(),
         AgentMode::Plan,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
 
@@ -703,7 +703,7 @@ async fn plan_exit_keeps_planning_when_rejected() {
         Arc::new(TestProvider),
         Vec::new(),
         AgentMode::Plan,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     let call = ToolCall {
@@ -743,7 +743,7 @@ async fn manual_mode_switch_to_plan_clears_plan_state() {
         Arc::new(TestProvider),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/was-here.md")));
@@ -771,7 +771,7 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     let call = ToolCall {
@@ -829,7 +829,7 @@ async fn rejected_permission_does_not_execute_tool() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     let call = ToolCall {
@@ -862,16 +862,16 @@ async fn rejected_permission_does_not_execute_tool() {
 
 #[tokio::test]
 async fn headless_run_rejects_write_tools_without_hanging() {
-    let goal_service = GoalService::new(
-        GoalStore::open_in_memory()
+    let pursuit_service = PursuitService::new(
+        PursuitStore::open_in_memory()
             .await
-            .expect("in-memory goal store"),
+            .expect("in-memory pursuit store"),
     );
     let agent = Agent::new(
         Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        goal_service,
+        pursuit_service,
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "write something")];
@@ -1044,7 +1044,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             AgentEvent::ToolCancelled { name, .. } => {
                 format!("tool-cancelled {name}")
             }
-            AgentEvent::GoalUpdated(_) => "goal-updated".to_string(),
+            AgentEvent::PursuitUpdated(_) => "pursuit-updated".to_string(),
             AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
             AgentEvent::PlanProgressUpdated(progress) => format!(
                 "plan-progress {:?}",
@@ -1097,7 +1097,7 @@ async fn golden_native_tool_round_then_final_text() {
             Arc::new(RecordingTool::read("beta", "B-out")),
         ],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1130,7 +1130,7 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
         ])),
         vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1170,7 +1170,7 @@ async fn golden_repeated_identical_tool_calls_abort_the_turn() {
         ])),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1199,7 +1199,7 @@ async fn golden_rejected_write_tool_terminates_turn() {
         ])),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1230,7 +1230,7 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
         ]])),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1271,7 +1271,7 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
         ])),
         vec![Arc::new(neenee_tools::AskUserTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1317,7 +1317,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     agent.set_project_root(Some(project_root.clone()));
@@ -1363,7 +1363,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     agent2.set_project_root(Some(project_root.clone()));
@@ -1386,7 +1386,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent3.set_project_root(Some(other_root));
@@ -1414,7 +1414,7 @@ async fn agent_without_project_root_never_writes_permissions_file() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     // Mutations of the allowlist must be no-ops on disk when no project root
@@ -1462,7 +1462,7 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1512,7 +1512,7 @@ async fn stall_warning_fires_once_when_threshold_reached() {
         ))),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1556,7 +1556,7 @@ async fn stall_hard_stops_after_nudge_is_ignored() {
         ))),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1619,7 +1619,7 @@ async fn stall_streak_resets_after_a_productive_round() {
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1694,7 +1694,7 @@ async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
         ])),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
@@ -1730,7 +1730,7 @@ async fn stall_detection_disabled_when_threshold_is_zero() {
         ))),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_stall_threshold(0);
@@ -1770,7 +1770,7 @@ async fn stall_threshold_can_be_lowered_at_runtime() {
         Arc::new(ScriptedProvider::new(readonly_rounds(custom, "done"))),
         vec![Arc::new(tool)],
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_stall_threshold(custom);
@@ -1808,7 +1808,7 @@ async fn verify_nudge_disabled_when_toggle_off() {
         Arc::new(ScriptedProvider::new(vec![text_round("all done")])),
         Vec::new(),
         AgentMode::Build,
-        test_goal_service(),
+        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));

@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use neenee_agent::orchestration::{execute_turn, CompactionSettings, TurnContext, TurnInput};
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
-use neenee_core::{AgentMode, GoalService, GoalStore, Role};
+use neenee_core::{AgentMode, PursuitService, PursuitStore, Role};
 use neenee_providers::MockProvider;
 use neenee_store::session::SessionStore;
 
@@ -36,13 +36,13 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     ));
     let session_path = directory.join("session.json");
     let session = Arc::new(SessionStore::for_path(session_path.clone()));
-    let goal_service =
-        GoalService::new(GoalStore::open_in_memory_blocking().expect("in-memory goal store"));
+    let pursuit_service =
+        PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
     let agent = Arc::new(Agent::new(
         Arc::new(MockProvider),
         Vec::new(),
         AgentMode::Build,
-        goal_service.clone(),
+        pursuit_service.clone(),
         SkillRegistry::empty(),
     ));
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -55,7 +55,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             tx,
             token: CancellationToken::new(),
             session: session.clone(),
-            goal_service,
+            pursuit_service,
             compaction: CompactionSettings {
                 max_chars: 100_000,
                 preserve_turns: 6,
@@ -77,10 +77,10 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     .await
     .expect("turn completes with the mock provider");
 
-    // The bool return is goal-completion (the model emitted the marker AND the
-    // goal checklist allows it), not turn-completion. With no goal set the
+    // The bool return is pursuit-completion (the model emitted the marker AND the
+    // pursuit checklist allows it), not turn-completion. With no pursuit set the
     // value is always false; the turn still ran end to end and persisted.
-    assert!(!completed, "no goal is set, so completion flag is false");
+    assert!(!completed, "no pursuit is set, so completion flag is false");
 
     // Snapshot the live state before dropping everything.
     let saved_id = session.id().await;

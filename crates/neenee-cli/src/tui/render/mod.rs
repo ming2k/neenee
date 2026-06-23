@@ -441,7 +441,7 @@ pub fn draw_transcript(
     // active), the input box, and the persistent hint bar. The activity bar
     // sits directly above the input so the live transcript progress reads as
     // "what is happening right now" right next to where the user types, and it
-    // doubles as the click target that opens the Activity modal (the goal and
+    // doubles as the click target that opens the Activity modal (the pursuit and
     // plan summaries that used to live here now scroll inside that modal and
     // as inline notices in the transcript).
     let footer_x = chunks[1].x + FOOTER_H_INSET;
@@ -637,8 +637,8 @@ mod tests {
                     &mut layout_map,
                     &[
                         crate::tui::Completion {
-                            label: "/goal".to_string(),
-                            description: "Set goal".to_string(),
+                            label: "/pursue".to_string(),
+                            description: "Pursue a pursuit".to_string(),
                             replace_start: 0,
                             replace_end: 0,
                         },

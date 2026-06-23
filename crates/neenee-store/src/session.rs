@@ -17,55 +17,23 @@ pub use neenee_core::{estimate_chars, estimate_tokens};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-/// Sentinel value for `LoopCheckpoint::max_iterations` indicating an uncapped
-/// loop. `/loop` no longer accepts a numeric iteration budget; it runs until
-/// the model emits the completion marker, the user runs `/loop stop`, an
-/// error aborts the loop, or a newer request supersedes it. Stored on the
-/// checkpoint so legacy snapshots that carry a finite `max_iterations` from
-/// pre-ADR-0009 versions still resume cleanly: the resume path treats any
-/// valid checkpoint — capped or not — as uncapped going forward.
+/// Sentinel value for `PursuitCheckpoint::max_iterations` indicating an uncapped
+/// run. `/pursue` runs until the model emits the completion marker, the user
+/// runs `/pursue stop`, an error aborts the pursuit, or a newer request
+/// supersedes it. Stored on the checkpoint so legacy snapshots that carry a
+/// finite `max_iterations` from pre-ADR-0009 versions still load cleanly.
 pub const UNCAPPED_ITERATIONS: usize = usize::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LoopCheckpoint {
-    pub goal: String,
+pub struct PursuitCheckpoint {
+    // Serde key kept as `goal` so pre-rename session snapshots still load.
+    #[serde(rename = "goal")]
+    pub pursuit: String,
     pub iteration: usize,
     pub max_iterations: usize,
     pub status: String,
 }
 
-impl LoopCheckpoint {
-    pub fn resume_iteration(&self) -> Result<usize, String> {
-        if self.max_iterations == 0 {
-            return Err(format!(
-                "Checkpoint has invalid iteration budget {}.",
-                self.max_iterations
-            ));
-        }
-        if matches!(self.status.as_str(), "completed" | "exhausted") {
-            return Err(format!(
-                "Checkpoint is {} and has no unfinished iteration to resume.",
-                self.status
-            ));
-        }
-        if !matches!(self.status.as_str(), "running" | "interrupted" | "error") {
-            return Err(format!("Checkpoint has unknown status '{}'.", self.status));
-        }
-        let iteration = self.iteration.max(1);
-        // Capped checkpoints (legacy pre-ADR-0009 snapshots with
-        // `max_iterations <= 50`) are no longer treated as bounded on resume:
-        // the loop continues past the original budget. We still reject
-        // `iteration > max_iterations` for capped checkpoints because that
-        // signals a corrupted checkpoint, not a crossed cap.
-        if self.max_iterations != UNCAPPED_ITERATIONS && iteration > self.max_iterations {
-            return Err(format!(
-                "Checkpoint iteration {} exceeds its budget {}.",
-                iteration, self.max_iterations
-            ));
-        }
-        Ok(iteration)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompactionCheckpoint {
@@ -84,7 +52,7 @@ struct SessionData {
     updated_at: u64,
     messages: Vec<Message>,
     archived_messages: Vec<Message>,
-    loop_checkpoint: Option<LoopCheckpoint>,
+    loop_checkpoint: Option<PursuitCheckpoint>,
     compaction: Option<CompactionCheckpoint>,
     /// Working directory this session belongs to. Phase 2 (project isolation)
     /// uses this to route archived sessions to the right per-project bucket
@@ -403,7 +371,7 @@ pub struct SessionSummary {
     pub updated_at: u64,
     pub created_at: u64,
     /// Short description of what the session is about (first user message or
-    /// the active goal), already truncated for display.
+    /// the active pursuit), already truncated for display.
     pub overview: String,
     pub active: bool,
 }
@@ -555,7 +523,7 @@ impl SessionStore {
         messages
     }
 
-    pub async fn checkpoint(&self) -> Option<LoopCheckpoint> {
+    pub async fn checkpoint(&self) -> Option<PursuitCheckpoint> {
         self.data.lock().await.loop_checkpoint.clone()
     }
 
@@ -623,7 +591,7 @@ impl SessionStore {
         self.persist(&data)
     }
 
-    pub async fn set_checkpoint(&self, checkpoint: Option<LoopCheckpoint>) -> Result<(), String> {
+    pub async fn set_checkpoint(&self, checkpoint: Option<PursuitCheckpoint>) -> Result<(), String> {
         let mut data = self.data.lock().await;
         data.loop_checkpoint = checkpoint;
         data.updated_at = unix_timestamp();
@@ -885,7 +853,7 @@ fn summary(data: &SessionData, active: bool) -> SessionSummary {
 }
 
 /// Derive a short, human-readable description of a session: the first user
-/// message, falling back to the active goal, then to a placeholder.
+/// message, falling back to the active pursuit, then to a placeholder.
 fn session_overview(data: &SessionData) -> String {
     const MAX: usize = 64;
     if let Some(message) = data
@@ -897,7 +865,7 @@ fn session_overview(data: &SessionData) -> String {
         return truncate_preview(&message.content, MAX);
     }
     if let Some(checkpoint) = &data.loop_checkpoint {
-        return truncate_preview(&checkpoint.goal, MAX);
+        return truncate_preview(&checkpoint.pursuit, MAX);
     }
     "(empty session)".to_string()
 }
@@ -923,20 +891,6 @@ pub struct CompactionResult {
     pub active: Vec<Message>,
     pub archived: Vec<Message>,
     pub checkpoint: CompactionCheckpoint,
-}
-
-pub fn discard_trailing_loop_prompts(messages: &mut Vec<Message>) -> usize {
-    let original_len = messages.len();
-    while messages.last().is_some_and(|message| {
-        message.hidden
-            && message.role == neenee_core::Role::User
-            && message
-                .content
-                .starts_with("Autonomous goal loop iteration ")
-    }) {
-        messages.pop();
-    }
-    original_len - messages.len()
 }
 
 /// Header prepended to every compaction checkpoint message. Doubles as the
@@ -1157,7 +1111,7 @@ const SUMMARY_TEMPLATE: &str = "\
 Output exactly the Markdown structure shown inside <template> and keep the \
 section order unchanged. Do not include the <template> tags in your response.\n\
 <template>\n\
-## Goal\n\
+## Pursuit\n\
 - [single-sentence task summary]\n\
 \n\
 ## Constraints & Preferences\n\
@@ -1753,8 +1707,8 @@ mod tests {
         let messages = vec![Message::new(neenee_core::Role::User, "hello")];
         store.replace_messages(messages.clone()).await.unwrap();
         store
-            .set_checkpoint(Some(LoopCheckpoint {
-                goal: "test".to_string(),
+            .set_checkpoint(Some(PursuitCheckpoint {
+                pursuit: "test".to_string(),
                 iteration: 2,
                 max_iterations: 8,
                 status: "running".to_string(),
@@ -2348,94 +2302,6 @@ mod tests {
             Message::new(neenee_core::Role::Assistant, "answer"),
         ];
         assert!(compact_messages(&messages, 10_000, 1).is_none());
-    }
-
-    #[test]
-    fn resume_discards_only_trailing_loop_control_prompts() {
-        let mut messages = vec![
-            Message::new(neenee_core::Role::User, "real request"),
-            Message::hidden(
-                neenee_core::Role::User,
-                "Autonomous goal loop iteration 2/8.\nGoal: ship",
-            ),
-        ];
-
-        assert_eq!(discard_trailing_loop_prompts(&mut messages), 1);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, "real request");
-    }
-
-    #[test]
-    fn resume_iteration_accepts_only_unfinished_valid_checkpoints() {
-        let unfinished = LoopCheckpoint {
-            goal: "ship".to_string(),
-            iteration: 3,
-            max_iterations: 8,
-            status: "interrupted".to_string(),
-        };
-        assert_eq!(unfinished.resume_iteration().unwrap(), 3);
-
-        let initial = LoopCheckpoint {
-            iteration: 0,
-            status: "running".to_string(),
-            ..unfinished.clone()
-        };
-        assert_eq!(initial.resume_iteration().unwrap(), 1);
-
-        for status in ["completed", "exhausted", "unknown"] {
-            let checkpoint = LoopCheckpoint {
-                status: status.to_string(),
-                ..unfinished.clone()
-            };
-            assert!(checkpoint.resume_iteration().is_err());
-        }
-
-        // A zero budget is still rejected — it signals a corrupt checkpoint,
-        // not the uncapped sentinel.
-        let zero_budget = LoopCheckpoint {
-            max_iterations: 0,
-            ..unfinished.clone()
-        };
-        assert!(zero_budget.resume_iteration().is_err());
-
-        // Iteration exceeding the budget is rejected for capped (legacy)
-        // checkpoints so a corrupted snapshot cannot resume past its cap.
-        let over_budget = LoopCheckpoint {
-            iteration: 12,
-            max_iterations: 8,
-            ..unfinished.clone()
-        };
-        assert!(over_budget.resume_iteration().is_err());
-    }
-
-    #[test]
-    fn resume_iteration_accepts_uncapped_checkpoint() {
-        // Post-ADR-0009 checkpoints store `UNCAPPED_ITERATIONS` and resume
-        // cleanly from any unfinished iteration — there is no upper bound to
-        // cross. Both fresh (`iteration == 1`) and deep (`iteration == 1000`)
-        // checkpoints resume from their stored iteration.
-        let uncapped = LoopCheckpoint {
-            goal: "ship".to_string(),
-            iteration: 7,
-            max_iterations: UNCAPPED_ITERATIONS,
-            status: "interrupted".to_string(),
-        };
-        assert_eq!(uncapped.resume_iteration().unwrap(), 7);
-
-        let deep = LoopCheckpoint {
-            iteration: 1000,
-            ..uncapped.clone()
-        };
-        assert_eq!(deep.resume_iteration().unwrap(), 1000);
-
-        // Terminal statuses are still rejected on the uncapped path.
-        for status in ["completed", "exhausted"] {
-            let checkpoint = LoopCheckpoint {
-                status: status.to_string(),
-                ..uncapped.clone()
-            };
-            assert!(checkpoint.resume_iteration().is_err());
-        }
     }
 
     #[test]

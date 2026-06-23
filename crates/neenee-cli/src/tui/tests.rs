@@ -243,10 +243,6 @@ fn tool_activity_is_semantic_and_loop_progress_is_preserved() {
         "making edits"
     );
     assert_eq!(
-        event_loop::tool_activity_status("goal_checklist"),
-        "updating tasks"
-    );
-    assert_eq!(
         event_loop::tool_activity_status("mcp__github__search"),
         "using MCP"
     );
@@ -510,7 +506,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         current_model: "mock".to_string(),
         cwd: cwd.clone(),
         path_scan_cache: None,
-        current_goal: None,
+        current_pursuit: None,
         session_context: None,
         loop_status: "idle".to_string(),
         activity_status: String::new(),
@@ -588,11 +584,11 @@ fn completions_returns_empty_when_input_does_not_trigger() {
 #[test]
 fn completions_classifies_slash_input_as_slash_kind() {
     let (mut app, _tmp) = app_in_tempdir(&["Cargo.toml"], &[]);
-    app.input = "/go".to_string();
+    app.input = "/pu".to_string();
     app.cursor_position = app.input.chars().count();
     let completions = app.completions();
     assert_eq!(app.completion_kind(), CompletionKind::Slash);
-    assert!(completions.iter().any(|c| c.label == "/goal"));
+    assert!(completions.iter().any(|c| c.label == "/pursue"));
     // Slash candidates replace the whole input.
     for c in &completions {
         assert_eq!(c.replace_start, 0);

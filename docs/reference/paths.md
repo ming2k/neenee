@@ -37,7 +37,8 @@ Persistent, program-generated, must survive restart. Back it up.
 | Path | Purpose | Lossy? |
 |------|---------|--------|
 | `blobs/<2-char-prefix>/<hash>` | Content-addressed blob store for large payloads | Yes |
-| `goals.db` | SQLite goal database, keyed by session id | Yes |
+| `pursuits.db` | SQLite pursuit database, keyed by session id | Yes |
+| `repeat.db` | SQLite `/repeat` cron-job database (durable recurring prompts) | Yes |
 | `projects/<16-hex-bucket>/` | Per-project bucket: sessions, current pointer, metadata | Yes |
 | `projects/<bucket>/embeddings.json` | Per-project lightweight embedding index | Rebuildable (re-indexed) |
 | `projects/<bucket>/neenee.lock` | Per-project advisory lock | Rebuildable |
@@ -125,7 +126,7 @@ The override stack is identical; only the fallback locations differ.
 
 ## Cleanup quick reference
 
-| Goal | Command |
+| Pursuit | Command |
 |------|---------|
 | Reset caches | `rm -rf $XDG_CACHE_HOME/neenee` |
 | Reset rebuildable state | `rm -rf $XDG_STATE_HOME/neenee` |

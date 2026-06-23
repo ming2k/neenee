@@ -20,7 +20,7 @@ orchestration relay    ──► response the TUI appends to the matching step
 The forwarded events carry the same shapes the parent stream does — streaming
 deltas, tool calls, tool results, activity — so the zoomed view renders through
 the same transcript pipeline as the top-level conversation. Parent-only events
-that have no read-only-researcher meaning (goal updates, mode changes,
+that have no read-only-researcher meaning (pursuit updates, mode changes,
 permission requests) are dropped on the way through. A question request
 that somehow reaches the forwarder is dropped with a defensive error log
 rather than silently deadlocking (see
@@ -34,7 +34,7 @@ stack and the transcript switches to showing that step's children.
 
 When zoomed in:
 
-- The entire footer — plan panel, goal bar, status bar, input box, hint bar —
+- The entire footer — plan panel, pursuit bar, status bar, input box, hint bar —
   is hidden. The sub-agent view is read-only chrome.
 - A one-row navigation band at the bottom shows the task position (`N of M`)
   on the left and `Esc back   [ prev   ] next` on the right.
@@ -65,7 +65,7 @@ nested tool steps. No token needs to link the two — the parent dropping the
 future is enough.
 
 Real token usage from the sub-agent is accumulated into the parent turn's cost,
-so it flows up to the active [goal](../goals.md) if one is set.
+so it flows up to the active [pursuit](../pursuits.md) if one is set.
 
 ## Plan mode
 

@@ -2,7 +2,7 @@
 
 neenee's agent is not an arbitrary program that happens to call a language
 model. Its shape — the role split, the tool loop, the compaction backstop, the
-durable goal — is a direct consequence of the chat completion API contract.
+durable pursuit — is a direct consequence of the chat completion API contract.
 This page names the three protocol primitives that drive that shape, so the
 rest of the agent design reads as their consequence rather than a series of
 independent choices.
@@ -34,14 +34,14 @@ neenee exploits this gradient to layer intent by durability:
 
 | Placed in `system` | Placed in `user` |
 |--------------------|------------------|
-| Persona, tool catalog, the active **goal** as a persistent anchor | The real prompt, plus dynamic control prompts that should drive action |
+| Persona, tool catalog, the active **pursuit** as a persistent anchor | The real prompt, plus dynamic control prompts that should drive action |
 
-The goal lives in the system prompt so the model treats it as a durable rule
+The pursuit lives in the system prompt so the model treats it as a durable rule
 rather than a one-off request it can consider finished. Loop control prompts
 live in `user` so the model treats them as the current turn's work. Reversing
-the two would fail: a goal in `user` reads as a request that is done after one
+the two would fail: a pursuit in `user` reads as a request that is done after one
 turn; a control prompt in `system` dilutes the authority a system message
-carries. See [Goals](agent-design/goals.md).
+carries. See [Pursuits](agent-design/pursuits.md).
 
 There is one attribute orthogonal to role: **visibility**. A message can be
 marked hidden, which means the model still receives it (it enters the request)
@@ -70,7 +70,7 @@ most of the harness machinery:
   [context compaction](agent-design/harness.md) to stay within the model's
   window — summarizing or pruning old messages so the array stays finite.
 - **Cross-session intent cannot live in the array**, so a durable objective
-  needs a [goal](agent-design/goals.md) persisted outside the request, then
+  needs a [pursuit](agent-design/pursuits.md) persisted outside the request, then
   re-injected into the system prompt each round.
 - **A tool's effect is invisible to the model unless it re-enters the array**,
   so every tool result is appended as a `tool` message before the next
@@ -78,7 +78,7 @@ most of the harness machinery:
   result message neenee sends back.
 
 The agent is therefore a stateless API plus client-managed external state —
-the messages array, the persisted goal and session, the in-memory checklist.
+the messages array, the persisted pursuit and session, the in-memory checklist.
 Nothing else carries across a round.
 
 ## Function calling is the ReAct loop, not an implementation detail
@@ -123,7 +123,7 @@ Two protocol constraints shape the harness:
 Read together, the three primitives explain design choices that otherwise look
 arbitrary:
 
-- The **goal sits in the system prompt** because of the role authority
+- The **pursuit sits in the system prompt** because of the role authority
   gradient — it needs to read as durable framing, not a request.
 - **Compaction exists** because the API is stateless and the messages array
   is the only memory, and it is bounded.
@@ -132,7 +132,7 @@ arbitrary:
 - **The hidden control channel exists** because the `user` role drives action,
   and visibility is separable from role.
 
-The rest of this section — harness, turns and rounds, goals, tool rounds — is
+The rest of this section — harness, turns and rounds, pursuits, tool rounds — is
 each a specialization of one or more of these primitives.
 
 ## See also
@@ -141,7 +141,7 @@ each a specialization of one or more of these primitives.
 - [Tool rounds](agent-design/tool-rounds.md) — the round trip of one tool call
 - [Provider capabilities](provider-capabilities.md) — which providers implement
   which primitives
-- [Goals](agent-design/goals.md) — the goal as a system-prompt anchor
+- [Pursuits](agent-design/pursuits.md) — the pursuit as a system-prompt anchor
 - [Harness architecture](agent-design/harness.md) — compaction and the
   stateless-memory consequence
 - [ADR-0009](../adr/0009-uncapped-agentic-loop.md) — the uncapped loop as a

@@ -27,7 +27,7 @@ round has started yet:
 | Indent | 1 space |
 
 The breathing sweep is the TUI's single liveness anchor — every other
-running indicator (tool step, thinking marker, goal bar) holds a steady
+running indicator (tool step, thinking marker, pursuit bar) holds a steady
 accent so this dot is the only thing in the user's peripheral vision that
 moves. See [ADR-0008](../../adr/0008-single-breathing-anchor.md).
 
@@ -66,7 +66,6 @@ session.
 | `grep` | `searching codebase` |
 | `write_file` / `edit_file` | `making edits` |
 | `bash` | `running command` |
-| `goal_checklist` | `updating tasks` |
 | MCP tools (`mcp__*`) | `using MCP` |
 | Finalizing stream | `finalizing response` |
 | Autonomous loop | `loop 2/8` prefix ahead of the activity |

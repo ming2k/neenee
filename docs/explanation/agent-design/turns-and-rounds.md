@@ -39,7 +39,7 @@ edits, and verifies may run several.
 
 The round counter resets at the start of every turn. A separate,
 monotonic **turn counter** persists across turns for the concerns that
-need to measure passage between turns — plan staleness, goal accounting.
+need to measure passage between turns — plan staleness, pursuit accounting.
 
 ## What ends a turn
 
@@ -87,7 +87,7 @@ be incoherent.
 | Repeated-call guard | Round | A stuck loop is unbounded by default; the guardrail watches each iteration for the one signature of "stuck" (same name + args) |
 | Mid-turn context relief | Round | Pruning old tool results between rounds reclaims space before the next request, inside one turn |
 | Pre-tool retry safety | Round | A round is retryable until its first side effect; after that, retry is terminal |
-| Goal token and time accounting | Turn | Cost is booked once the turn's outcome is final, not partway through |
+| Pursuit token and time accounting | Turn | Cost is booked once the turn's outcome is final, not partway through |
 | Plan staleness | Turn | "Turns since the plan was last updated" is the signal that the model has drifted |
 | Session durability | Turn | The transcript commits at the turn boundary, never mid-loop |
 | Autonomous loop budget | Turn | `/loop` counts completed turns (iterations) for status display and durable resume — uncapped, see ADR-0009 |
@@ -104,7 +104,7 @@ the turn the loop has gone. Each tool call renders as a step. When the turn
 ends, the round detail collapses into the single user-visible exchange.
 
 The turn layer is the durable shape of the conversation. The transcript is
-a sequence of turns; goal accounting, plan progress, and the persisted
+a sequence of turns; pursuit accounting, plan progress, and the persisted
 session all advance at turn boundaries. A resumed session restores whole
 turns, never partial rounds.
 
@@ -131,7 +131,7 @@ conversational memory is the transcript the agent resends, not anything
 the model remembers. If the transcript grows past the context budget
 mid-turn, relief prunes old tool results between rounds — the turn does
 not have to end to reclaim space. When round 4 produces plain text with no
-tool call, the turn closes, goal accounting books the combined token cost
+tool call, the turn closes, pursuit accounting books the combined token cost
 of all four rounds, and the plan's staleness counter advances by one turn.
 
 ## See also
@@ -140,7 +140,7 @@ of all four rounds, and the plan's staleness counter advances by one turn.
   full table of safety bounds
 - [Tool rounds](tool-rounds.md) — the lifecycle of one round: declaration,
   gating, execution, and re-entry into the transcript
-- [Goals](goals.md) — turn-scoped token and time accounting
+- [Pursuits](pursuits.md) — turn-scoped token and time accounting
 - [Plan mode](plan-mode.md) — plan staleness measured in turns
 - [Sub-agents](subagents/index.md) — independent turns and round budgets for
   child agents

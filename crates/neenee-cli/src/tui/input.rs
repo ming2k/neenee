@@ -1334,10 +1334,10 @@ mod tests {
 
     #[test]
     fn enter_executes_an_exact_slash_command() {
-        let mut input = "/goal".to_string();
+        let mut input = "/pursue".to_string();
         assert_eq!(
             enter(&mut input, true),
-            InputAction::SendSlash("/goal".to_string())
+            InputAction::SendSlash("/pursue".to_string())
         );
     }
 

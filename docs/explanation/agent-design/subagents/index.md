@@ -52,7 +52,7 @@ and nothing else:
 | Provider | Yes | The same provider connection |
 | Conversation history | No | A fresh system + task prompt |
 | Tools | Snapshot, profile-filtered | The tools the bound [profile](profiles.md) admits |
-| Goal state | No | An empty in-memory goal store |
+| Pursuit state | No | An empty in-memory pursuit store |
 | Plan state, mode | No | Build mode, no active plan |
 | Skills | No | No loaded skills |
 | Cancellation token | No | A fresh, independent token |
@@ -78,6 +78,6 @@ mutate files.
 - [`task`](../../reference/tools/task.md) — parameter reference.
 - [Plan mode](../plan-mode.md) — `task` in Plan mode, and plan verification.
 - [Tool rounds](../tool-rounds.md) — the round trip the sub-agent runs internally.
-- [Goals](../goals.md) — how sub-agent token cost flows up to a parent goal.
+- [Pursuits](../pursuits.md) — how sub-agent token cost flows up to a parent pursuit.
 - [Harness architecture](../harness.md) — the safety bounds that bound a
   sub-agent turn.
