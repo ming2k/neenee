@@ -2,7 +2,6 @@ use crate::blobs::BlobStore;
 use crate::events::{EventLog, SessionEvent};
 use crate::fsutil;
 use crate::paths;
-use neenee_core::async_trait;
 use neenee_core::{Message, Provider, Role};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -1528,71 +1527,22 @@ pub async fn summarize_with_provider(
 }
 
 // ---------------------------------------------------------------------------
-// Hooks + orchestrator
+// Compaction orchestrator
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-pub struct CompactionDecision {
-    /// Set to `false` to veto the compaction. Defaults to `true`.
-    pub proceed: bool,
-    /// Extra context strings folded into the summarization prompt.
-    pub extra_context: Vec<String>,
-}
-
-impl CompactionDecision {
-    pub fn proceed() -> Self {
-        Self {
-            proceed: true,
-            extra_context: Vec::new(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn veto() -> Self {
-        Self {
-            proceed: false,
-            extra_context: Vec::new(),
-        }
-    }
-}
-
-/// Pre/post-compaction hooks. `pre_compact` can veto a compaction or inject
-/// extra summarization context; `post_compact` is informational.
-#[async_trait]
-pub trait CompactionHooks: Send + Sync {
-    async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
-        CompactionDecision::proceed()
-    }
-
-    async fn post_compact(&self, _checkpoint: &ContextReliefCheckpoint) {}
-}
-
-/// No-op hooks used as the default.
-#[allow(dead_code)]
-pub struct NoopCompactionHooks;
-
-#[async_trait]
-impl CompactionHooks for NoopCompactionHooks {}
 
 /// Run a compaction over `history` in place.
 ///
 /// When `provider` is `Some`, an LLM produces an anchored structured summary
 /// (with the previous summary carried forward for incremental updates); on any
 /// failure it falls back to the deterministic excerpt summary. When `provider`
-/// is `None`, the excerpt summary is used directly. `hooks.pre_compact` may
-/// veto the run or supply extra context.
+/// is `None`, the excerpt summary is used directly.
 pub async fn run_compaction(
     history: &mut Vec<Message>,
     target_tokens: usize,
     preserve_turns: usize,
     provider: Option<Arc<dyn Provider>>,
-    hooks: &dyn CompactionHooks,
+    extra_context: Vec<String>,
 ) -> Result<Option<ContextReliefResult>, String> {
-    let decision = hooks.pre_compact(history).await;
-    if !decision.proceed {
-        return Ok(None);
-    }
-
     let before_chars = estimate_chars(history);
     let before_tokens = estimate_tokens(history);
     let Some(selection) = select_compaction(history, preserve_turns) else {
@@ -1606,7 +1556,7 @@ pub async fn run_compaction(
                 provider,
                 &selection.archived,
                 selection.previous_summary.as_deref(),
-                &decision.extra_context,
+                &extra_context,
                 budget_chars,
             )
             .await
@@ -1639,7 +1589,6 @@ pub async fn run_compaction(
         before_tokens,
         "compaction complete"
     );
-    hooks.post_compact(&result.checkpoint).await;
     let active = result.active.clone();
     *history = active;
     Ok(Some(result))
@@ -1960,6 +1909,7 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neenee_core::async_trait;
 
     /// Tests that touch process-global state (`paths::set_test_default` or
     /// process env vars) cannot run in parallel. We serialise them through
@@ -2710,55 +2660,15 @@ mod tests {
         ];
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
 
-        let result = run_compaction(
-            &mut history,
-            10_000,
-            1,
-            Some(provider),
-            &NoopCompactionHooks,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let result = run_compaction(&mut history, 10_000, 1, Some(provider), Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
 
         // The mock provider's canned reply becomes the checkpoint summary.
         assert!(result.active[0].content.contains("mock AI"));
         assert_eq!(result.active[1].content, "recent question");
         assert!(result.active[0].hidden);
-    }
-
-    #[tokio::test]
-    async fn run_compaction_vetoed_by_hook_leaves_history_untouched() {
-        struct VetoHooks;
-        #[async_trait]
-        impl CompactionHooks for VetoHooks {
-            async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
-                CompactionDecision::veto()
-            }
-        }
-
-        let original = vec![
-            Message::new(Role::System, "system"),
-            Message::new(Role::User, "old question"),
-            Message::new(Role::Assistant, "old answer"),
-            Message::new(Role::User, "recent question"),
-            Message::new(Role::Assistant, "recent answer"),
-        ];
-        let mut history = original.clone();
-
-        let outcome = run_compaction(&mut history, 10_000, 1, None, &VetoHooks)
-            .await
-            .unwrap();
-
-        assert!(outcome.is_none());
-        assert_eq!(history.len(), original.len());
-        assert_eq!(
-            history.last().unwrap().content,
-            original.last().unwrap().content
-        );
-        assert!(history.iter().all(|message| !message.hidden
-            || message.role != Role::User
-            || !message.content.starts_with("[Conversation checkpoint]")));
     }
 
     #[tokio::test]
@@ -2791,16 +2701,10 @@ mod tests {
         ];
         let provider: Arc<dyn Provider> = Arc::new(FailingProvider);
 
-        let result = run_compaction(
-            &mut history,
-            10_000,
-            1,
-            Some(provider),
-            &NoopCompactionHooks,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let result = run_compaction(&mut history, 10_000, 1, Some(provider), Vec::new())
+            .await
+            .unwrap()
+            .unwrap();
 
         // Fallback excerpt summary references the old question.
         assert!(result.active[0].content.contains("old question"));

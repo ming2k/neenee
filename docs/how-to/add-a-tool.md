@@ -3,7 +3,7 @@
 This guide walks through implementing a new tool that the agent can call. It
 assumes familiarity with the `Tool` trait. For the existing tool catalog,
 see [Built-in tools](../reference/tools/index.md). For the protocol the model uses
-to call tools, see [Tool rounds](../explanation/agent-design/tool-rounds.md).
+to call tools, see [Tool rounds](../explanation/agent-design/turns-and-rounds.md).
 
 Most built-in tools live in the `neenee-tools` crate. Pick the module that
 matches the tool's domain: filesystem and web tools go in
@@ -77,7 +77,13 @@ async fn call(&self, arguments: &str) -> Result<String, String> {
 
 async fn call_structured(&self, arguments: &str) -> Result<crate::ToolOutput, String> {
     // …do the work…
-    Ok(crate::ToolOutput::Code { lang: Some("rs".into()), text })
+    Ok(crate::ToolOutput::Code {
+        lang: Some("rs".into()),
+        text,
+        start_line: 0,
+        prefix: None,
+        suffix: None,
+    })
 }
 ```
 
@@ -193,7 +199,7 @@ added after that line (the dispatch tool itself, the history tool) are not in
 the snapshot at all. Place new read-only, non-interactive tools before the MCP
 extension to make them sub-agent-callable; write tools and `requires_user()`
 tools are excluded by the profile regardless of where they sit. See
-[Sub-agents → Tool admission](../explanation/agent-design/subagents/admission.md)
+[Sub-agents → Tool admission](../explanation/agent-design/subagents.md#tool-admission)
 and [ADR-0011](../adr/0011-subagent-profiles.md).
 
 ## Verify
@@ -233,7 +239,7 @@ Update these surfaces in the same change:
 ## See also
 
 - [Built-in tools](../reference/tools/index.md) — existing tool catalog
-- [Tool rounds](../explanation/agent-design/tool-rounds.md) — schema injection and
+- [Tool rounds](../explanation/agent-design/turns-and-rounds.md) — schema injection and
   fallback mechanics
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   tool support varies across providers

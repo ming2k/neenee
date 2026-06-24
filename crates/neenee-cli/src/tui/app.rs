@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
     mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, ProviderPickerRow,
@@ -22,7 +21,6 @@ use neenee_core::{
 
 use crate::tui::completion::PathScan;
 use crate::tui::composer_attachments;
-use crate::tui::config;
 use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
@@ -380,10 +378,6 @@ pub struct App {
     /// Global tool-step density (false = Compact default, true = Comfortable:
     /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
-    /// TUI display config (`[tui]` table of `config.toml`): per-step-kind
-    /// default expand state. Shared with the response listener so live and
-    /// restored steps both honor it.
-    pub tui_config: Arc<config::TuiConfig>,
     /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
     /// overlay. `None` when the overlay is closed.
     pub tool_detail_message_idx: Option<usize>,
@@ -471,10 +465,6 @@ impl App {
     /// matching staged full paste, leaving image chips in place as
     /// positional labels for the model. Used at submit time so the agent
     /// receives the real paste contents instead of the chip label.
-    pub fn expand_paste_chips(&self, text: &str) -> String {
-        composer_attachments::expand_paste_chips(text, &self.pending_text_pastes)
-    }
-
     /// Recall the most-recently-queued message: pop it off the back of the
     /// send queue (LIFO undo), remove its visual marker from the shared
     /// transcript, and load its text + any pasted images back into the
@@ -553,10 +543,6 @@ impl App {
         // Drop the cached project scan so newly-created files become
         // visible on the next `@` mention without a restart.
         self.path_scan_cache = None;
-    }
-
-    pub fn cursor_display_x(&self) -> u16 {
-        self.input[..self.byte_cursor()].width() as u16
     }
 
     /// Toggle the expansion of the tool step / reasoning trace at `mi`,

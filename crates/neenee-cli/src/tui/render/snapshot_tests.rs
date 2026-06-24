@@ -226,6 +226,27 @@ fn read_file_expanded_renders_code_block() {
 }
 
 #[test]
+fn read_file_with_offset_numbers_from_start_line() {
+    // A structured `Code` carrying `start_line: 100` (as `read_file` emits
+    // when called with `offset: 100`) must number the gutter 100, 101, … —
+    // not restart at 1. Also locks that the gutter column widens to fit
+    // three-digit line numbers instead of overflowing.
+    let m = tool_step_structured(
+        "read_file",
+        r#"{"path":"src/lib.rs","offset":100}"#,
+        neenee_core::ToolOutput::Code {
+            lang: Some("rs".into()),
+            text: "fn a() {}\nfn b() {}\nfn c() {}\n".into(),
+            start_line: 100,
+            prefix: None,
+            suffix: None,
+        },
+        true,
+    );
+    insta::assert_snapshot!(render_grid(&m, 80, 40));
+}
+
+#[test]
 fn bash_expanded_renders_markers_and_output() {
     let m = tool_step(
         "bash",

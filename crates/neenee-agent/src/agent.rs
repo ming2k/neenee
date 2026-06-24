@@ -111,6 +111,13 @@ pub struct Agent {
     /// harness never injects the "you forgot to call verify_plan_execution"
     /// reminder, even with an active plan in Build mode.
     verify_nudge_enabled: Arc<std::sync::Mutex<bool>>,
+    /// Lifecycle event hooks (ADR-0025). Installed once at startup from the
+    /// `[hooks]` config by the CLI; empty by default (sub-agents, tests). Read
+    /// at the PreToolUse / PostToolUse / Stop insertion points. Held as a
+    /// swappable `Arc` behind a `Mutex` so [`Agent::set_hooks`] can replace the
+    /// whole registry without the insertion points holding the lock across the
+    /// async `fire` — they clone the `Arc` and drop the guard first.
+    hooks: std::sync::Mutex<Arc<crate::hooks::HookRegistry>>,
 }
 
 /// Mutable bookkeeping threaded through a single turn's tool-dispatch rounds.
@@ -222,6 +229,7 @@ impl Agent {
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
             verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
+            hooks: std::sync::Mutex::new(Arc::new(crate::hooks::HookRegistry::empty())),
         }
     }
 
@@ -293,6 +301,85 @@ impl Agent {
             .context_relief_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = gate;
+    }
+
+    /// Install the lifecycle hook registry (ADR-0025). Replaces any prior
+    /// registry; intended to be called once at startup after the `[hooks]`
+    /// config is parsed. Sub-agents and tests leave the default empty registry.
+    pub fn set_hooks(&self, registry: crate::hooks::HookRegistry) {
+        *self.hooks.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(registry);
+    }
+
+    /// Snapshot the hook registry as a cheap `Arc` clone, so insertion points
+    /// fire hooks without holding the swap lock across the async `fire`.
+    fn hooks(&self) -> Arc<crate::hooks::HookRegistry> {
+        self.hooks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The session id hooks see (the live thread id, if any).
+    fn hook_session_id(&self) -> String {
+        self.thread_id().unwrap_or_default()
+    }
+
+    /// The cwd hooks run under (the persisted project root, if any).
+    fn hook_cwd(&self) -> Option<std::path::PathBuf> {
+        self.project_root
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    // --- Public hook entry points (ADR-0025) ---------------------------------
+    // The PreToolUse / PostToolUse / Stop insertion points are inline in the
+    // loop above (they need local control flow); the lifecycle entry points
+    // below are called by the driver / orchestration at the session, turn, and
+    // compaction boundaries.
+
+    /// `UserPromptSubmit` gate. Called by `execute_turn` before the prompt
+    /// enters the transcript: a `Deny` drops it, a `Prepend` prefixes context.
+    pub async fn fire_user_prompt_submit(
+        &self,
+        prompt: &str,
+    ) -> crate::hooks::UserPromptVerdict {
+        self.hooks()
+            .check_user_prompt_submit(prompt, &self.hook_session_id(), self.hook_cwd().as_deref())
+            .await
+    }
+
+    /// `PreCompact` observers. Returns any injected context to fold into the
+    /// upcoming summarization (ADR-0025).
+    pub async fn fire_pre_compact(&self) -> Vec<String> {
+        self.hooks()
+            .pre_compact(&self.hook_session_id(), self.hook_cwd().as_deref())
+            .await
+    }
+
+    /// `PostCompact` observers. Informational only.
+    pub async fn fire_post_compact(&self) {
+        self.hooks()
+            .post_compact(&self.hook_session_id(), self.hook_cwd().as_deref())
+            .await
+    }
+
+    /// `SessionStart` observers; injected context becomes hidden setup messages.
+    pub async fn fire_session_start(
+        &self,
+        source: neenee_core::SessionSource,
+        messages: &mut Vec<Message>,
+    ) {
+        self.hooks()
+            .session_start(source, &self.hook_session_id(), self.hook_cwd().as_deref(), messages)
+            .await
+    }
+
+    /// `SessionEnd` observers. Informational only.
+    pub async fn fire_session_end(&self) {
+        self.hooks()
+            .session_end(&self.hook_session_id(), self.hook_cwd().as_deref())
+            .await
     }
 
     /// Between tool rounds, if context pressure exceeds the configured budget,
@@ -528,6 +615,25 @@ impl Agent {
             return None;
         }
         Some(pursuits::prompts::continuation_prompt(&pursuit))
+    }
+
+    /// The turn-end gate (ADR-0025). Combines the `/pursue` stop-gate with any
+    /// `Stop` hooks: a pursuit forcing continuation wins; otherwise a `Stop`
+    /// hook may force another round with feedback. Returns `None` to let the
+    /// turn end — i.e. both the pursuit gate and every Stop hook must agree to
+    /// stop. The pursuit gate is queried first so its safety-cap disarm side
+    /// effect is preserved.
+    async fn stop_gate(&self, response: &Message) -> Option<String> {
+        if let Some(prompt) = self.pursuit_continuation(response) {
+            return Some(prompt);
+        }
+        self.hooks()
+            .check_stop(
+                response.content.as_str(),
+                &self.hook_session_id(),
+                self.hook_cwd().as_deref(),
+            )
+            .await
     }
 
     pub fn thread_id(&self) -> Option<String> {
@@ -984,7 +1090,7 @@ impl Agent {
             // Pursuit stop-gate: if a pursuit is armed and the model has not
             // signalled completion, re-inject the condition and force another
             // round instead of ending the turn.
-            if let Some(prompt) = self.pursuit_continuation(&response) {
+            if let Some(prompt) = self.stop_gate(&response).await {
                 *self
                     .pursuit_iterations
                     .lock()
@@ -1224,7 +1330,7 @@ impl Agent {
             // Pursuit stop-gate (mirror of the non-streaming path): if a
             // pursuit is armed and the model has not signalled completion,
             // re-inject the condition and force another round.
-            if let Some(prompt) = self.pursuit_continuation(&response) {
+            if let Some(prompt) = self.stop_gate(&response).await {
                 *self
                     .pursuit_iterations
                     .lock()
@@ -1328,6 +1434,8 @@ impl Agent {
                     false,
                     on_event,
                 );
+                self.run_post_tool_hooks(call, &result, duration_ms, messages)
+                    .await;
             }
             // If the user denied permission for any call, stop the turn here
             // instead of feeding the (possibly partial) results back to the
@@ -1370,6 +1478,8 @@ impl Agent {
                 true,
                 on_event,
             );
+            self.run_post_tool_hooks(&call, &result, duration_ms, messages)
+                .await;
             return Ok(!denied);
         }
 
@@ -1445,6 +1555,38 @@ impl Agent {
             None => Message::tool_result(call, format!("[{} result]:\n{}", call.name, text)),
         };
         messages.push(tool_message);
+    }
+
+    /// Fire PostToolUse (success) or PostToolUseFailure (error) hooks and append
+    /// any injected context as hidden user messages (ADR-0025). No-op when the
+    /// registry is empty, which is the common case (sub-agents, tests, no
+    /// `[hooks]` config).
+    async fn run_post_tool_hooks(
+        &self,
+        call: &ToolCall,
+        result: &ToolOutput,
+        duration_ms: u64,
+        messages: &mut Vec<Message>,
+    ) {
+        let registry = self.hooks();
+        if registry.is_empty() {
+            return;
+        }
+        let summary = result.to_text();
+        let session_id = self.hook_session_id();
+        let cwd = self.hook_cwd();
+        let injected = if result.is_error() {
+            registry
+                .run_post_tool_use_failure(call.name.as_str(), &summary, &session_id, cwd.as_deref())
+                .await
+        } else {
+            registry
+                .run_post_tool_use(call.name.as_str(), &summary, duration_ms, &session_id, cwd.as_deref())
+                .await
+        };
+        for context in injected {
+            messages.push(Message::hidden(Role::User, context));
+        }
     }
 
     pub(crate) fn guard_repeated_call(
@@ -1801,6 +1943,28 @@ impl Agent {
                 }
             }
         };
+
+        // PreToolUse hooks (ADR-0025): a hook may deny the call before it runs.
+        // Arguments are parsed best-effort; an unparseable string still fires
+        // the hook with a null input so a guard is never bypassed by bad JSON.
+        let tool_input = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            .unwrap_or(serde_json::Value::Null);
+        if let Some(reason) = self
+            .hooks()
+            .check_pre_tool_use(
+                call.name.as_str(),
+                &tool_input,
+                &self.hook_session_id(),
+                self.hook_cwd().as_deref(),
+            )
+            .await
+        {
+            tracing::info!(tool = %call.name, "tool blocked by PreToolUse hook");
+            return ToolOutput::Error {
+                message: format!("Blocked by hook: {}", reason),
+                detail: None,
+            };
+        }
 
         // Defense in depth: even though disabled tools are dropped from the
         // schema build, a model that still names one (e.g. from an older

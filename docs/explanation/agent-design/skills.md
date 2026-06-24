@@ -152,5 +152,5 @@ Skills are an **extension surface** of the harness, alongside MCP servers (which
 add tools, not instructions). The harness refreshes the skills catalog when it
 rebuilds the system prompt each turn; see [Harness
 architecture](harness.md). Skill invocation is a special case of a tool round,
-so [Tool rounds](tool-rounds.md) describes the execution path an explicit
+so [Tool rounds](turns-and-rounds.md) describes the execution path an explicit
 `use_skill` call takes.

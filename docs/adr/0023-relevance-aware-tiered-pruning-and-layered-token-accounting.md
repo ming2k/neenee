@@ -42,6 +42,17 @@ changes is *what* it chooses to prune, *how hard*, and *how pressure is counted`
 
 ### 1. Layered token accounting (`effective_pressure_tokens`)
 
+> **Update (2026-06-24): reverted as dead code.** `effective_pressure_tokens`
+> and `USAGE_TRUST_FLOOR` were removed. The `Provider` trait still does not
+> surface usage, so the function never had a production caller — `reported` was
+> hard-`None` at every site — and an exported, tested function that only
+> *advertised* usage-aware accounting was a net liability (it implied a
+> capability that does not exist). Pressure is measured purely by
+> `estimate_tokens`. The policy below is retained as the design of record:
+> when a provider actually reports `prompt_tokens`, reintroduce this prefer-when-
+> plausible function at the (then-real) call sites. Until then there is nothing
+> to centralize.
+
 `estimate_tokens` (chars/4) is no longer the sole pressure signal. A new
 `effective_pressure_tokens(estimate, reported_prompt_tokens)`
 (`neenee-core/src/pressure.rs`) prefers a provider-reported `prompt_tokens` when
@@ -154,7 +165,7 @@ settle. Nested sub-agent transcripts descend the same policy.
 - ADR-0021 — pruning implicit (silent, ~65%-gated) and renamed distinct from
   compaction (`ContextRelief*`).
 - `neenee-core/src/pressure.rs` — `prune_tool_results`, `plan_prune`,
-  `effective_pressure_tokens`, `mentioned_after`.
+  `mentioned_after`.
 - [Context pruning](../explanation/agent-design/context-pruning.md) — the
   design reference, updated for this policy.
 - [Context compaction](../explanation/agent-design/context-compaction.md#how-pressure-is-measured)

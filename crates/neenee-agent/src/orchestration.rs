@@ -32,9 +32,8 @@ use neenee_core::{
 use neenee_store::{
     config::Config,
     session::{
-        estimate_chars, estimate_tokens, run_compaction, CompactionDecision, CompactionHooks,
-        ContextReliefCheckpoint, ContextReliefResult, PursuitCheckpoint, SessionStore,
-        UNCAPPED_ITERATIONS,
+        estimate_chars, estimate_tokens, run_compaction, ContextReliefCheckpoint,
+        ContextReliefResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
     },
 };
 
@@ -182,29 +181,6 @@ impl neenee_core::ContextReliefGate for MidTurnPruneGate {
     }
 }
 
-pub struct RelayCompactionHooks {
-    pub tx: mpsc::UnboundedSender<AgentResponse>,
-    pub session_id: String,
-}
-
-#[async_trait]
-impl CompactionHooks for RelayCompactionHooks {
-    async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
-        let _ = self.tx.send(turn(
-            &self.session_id,
-            TurnEvent::Activity("compacting context".to_string()),
-        ));
-        CompactionDecision::proceed()
-    }
-
-    async fn post_compact(&self, _checkpoint: &ContextReliefCheckpoint) {
-        let _ = self.tx.send(turn(
-            &self.session_id,
-            TurnEvent::Activity("preparing context".to_string()),
-        ));
-    }
-}
-
 /// Emit the current harness snapshot (mode, pursuit, loop status, auto-approve)
 /// to the UI.
 pub fn send_harness_state(
@@ -348,7 +324,7 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     });
 }
 
-pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool, HarnessError> {
+pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<bool, HarnessError> {
     let TurnContext {
         agent,
         history,
@@ -368,6 +344,26 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     // compares this against `TodoList::updated_at_turn`.
     agent.bump_turn();
     let _ = tx.send(turn(&session_id, TurnEvent::Activity("saving request".to_string())));
+
+    // UserPromptSubmit hooks (ADR-0025): a hook may deny the prompt or prepend
+    // context. Hidden control prompts (pursuit continuation, verify nudge) are
+    // harness-internal and bypass the gate.
+    if !input.hidden {
+        match agent.fire_user_prompt_submit(&input.prompt).await {
+            crate::hooks::UserPromptVerdict::Deny(reason) => {
+                let _ = tx.send(turn(
+                    &session_id,
+                    TurnEvent::Text(format!("Prompt blocked by hook: {reason}")),
+                ));
+                return Ok(true);
+            }
+            crate::hooks::UserPromptVerdict::Prepend(context) => {
+                input.prompt = format!("{context}\n\n{}", input.prompt);
+            }
+            crate::hooks::UserPromptVerdict::Allow => {}
+        }
+    }
+
     let admitted_session_id = session.id().await;
     let thread_id = admitted_session_id.clone();
     let mut turn_history = {
@@ -400,21 +396,23 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         prune_and_commit(&mut turn_history, &session, &compaction).await?;
     }
     if estimate_tokens(&turn_history) > compaction.budget.compaction_threshold_tokens {
-        let hooks = RelayCompactionHooks {
-            tx: tx.clone(),
-            session_id: session_id.clone(),
-        };
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::Activity("compacting context".to_string()),
+        ));
+        let extra = agent.fire_pre_compact().await;
         if let Some(checkpoint) = compact_turn_history(
             &mut turn_history,
             &session,
             &compaction,
             Some(agent.provider.clone()),
-            &hooks,
+            extra,
         )
         .await?
         {
             send_compaction(&tx, &session_id, &checkpoint);
         }
+        agent.fire_post_compact().await;
         let _ = tx.send(turn(&session_id, TurnEvent::Activity("preparing context".to_string())));
     }
 
@@ -443,10 +441,6 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
             && !compacted_after_overflow
             && !tool_activity.load(Ordering::SeqCst)
         {
-            let hooks = RelayCompactionHooks {
-                tx: tx.clone(),
-                session_id: session_id.clone(),
-            };
             let overflow_settings = CompactionSettings {
                 preserve_turns: compaction.preserve_turns.max(1),
                 ..compaction.clone()
@@ -456,7 +450,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
                 &session,
                 &overflow_settings,
                 Some(agent.provider.clone()),
-                &hooks,
+                Vec::new(),
             )
             .await?
             .is_some()
@@ -725,7 +719,7 @@ pub async fn compact_turn_history(
     session: &SessionStore,
     settings: &CompactionSettings,
     provider: Option<Arc<dyn Provider>>,
-    hooks: &dyn CompactionHooks,
+    extra_context: Vec<String>,
 ) -> Result<Option<ContextReliefCheckpoint>, String> {
     // Skip the model call entirely when summarization is disabled; the excerpt
     // fallback inside `run_compaction` still produces a checkpoint.
@@ -735,7 +729,7 @@ pub async fn compact_turn_history(
         settings.budget.target_tokens,
         settings.preserve_turns,
         provider,
-        hooks,
+        extra_context,
     )
     .await?
     else {

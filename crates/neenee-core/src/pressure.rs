@@ -133,32 +133,13 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     (estimate_chars(messages) / CHARS_PER_TOKEN).max(1)
 }
 
-/// Fraction of our independent estimate below which a provider-reported
-/// `prompt_tokens` count is distrusted (treated as missing). Relays and local
-/// servers sometimes report `0` or absurdly small usage; trusting that would
-/// under-count pressure and risk overflow.
-const USAGE_TRUST_FLOOR: f64 = 0.5;
-
-/// Effective context pressure, in tokens, to compare against relief thresholds.
-///
-/// Layered accounting: a provider-reported `prompt_tokens` is ground truth for
-/// what the model actually saw, so it is preferred when present *and* plausible.
-/// "Plausible" means at least [`USAGE_TRUST_FLOOR`] × our independent estimate —
-/// a `0` or absurdly small report (common from relays / local servers) is
-/// treated as missing and the cheap [`estimate_tokens`] proxy is used instead.
-/// The bias is deliberately conservative: under-counting risks overflow, while
-/// over-counting only prunes slightly early.
-///
-/// Today every call site passes `reported = None` — the `Provider` trait does
-/// not yet surface usage, and threading it through the streaming adapters is a
-/// separate epic (ADR-0019). Centralising the policy here means wiring real
-/// usage later is a one-line change at each call site, not a logic rewrite.
-pub fn effective_pressure_tokens(estimate_tokens: usize, reported_prompt_tokens: Option<usize>) -> usize {
-    match reported_prompt_tokens {
-        Some(reported) if reported as f64 >= estimate_tokens as f64 * USAGE_TRUST_FLOOR => reported,
-        _ => estimate_tokens,
-    }
-}
+// NOTE: the provider-reported-usage path (ADR-0019/0023 "layered token
+// accounting", `effective_pressure_tokens` / `USAGE_TRUST_FLOOR`) was removed
+// as dead code: the `Provider` trait never surfaces usage, so the function had
+// no production caller and only advertised a capability that does not exist.
+// Pressure is computed purely from `estimate_tokens`. Revive a usage-preferring
+// policy here once a provider actually reports `prompt_tokens`. See the deferral
+// note in docs/adr/0023-relevance-aware-tiered-pruning-and-layered-token-accounting.md.
 
 pub(crate) fn message_chars(message: &Message) -> usize {
     let own = message.content.len()
@@ -642,19 +623,6 @@ mod tests {
         assert!(prune_tool_results(&mut messages, 0, 1_000_000).is_none());
         assert!(!is_cleared(&messages[0].content));
         assert!(!is_truncated(&messages[0].content));
-    }
-
-    #[test]
-    fn effective_pressure_prefers_plausible_usage_else_estimate() {
-        // No report -> estimate.
-        assert_eq!(effective_pressure_tokens(1000, None), 1000);
-        // Plausible report (>= 50% of estimate) -> trust ground truth.
-        assert_eq!(effective_pressure_tokens(1000, Some(1500)), 1500);
-        assert_eq!(effective_pressure_tokens(1000, Some(600)), 600);
-        // Implausibly low report (relay/local zero or near-zero) -> distrust,
-        // fall back to the (larger) estimate to avoid under-counting.
-        assert_eq!(effective_pressure_tokens(1000, Some(0)), 1000);
-        assert_eq!(effective_pressure_tokens(1000, Some(100)), 1000);
     }
 
     #[test]

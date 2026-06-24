@@ -190,46 +190,6 @@ pub(super) fn manual_walk(root: &std::path::Path) -> Vec<String> {
     out
 }
 
-/// Split a raw `@`-mention body (everything after the `@`) into the directory
-/// to scan and the file-name prefix to match inside it. Kept for tests that
-/// exercise the legacy single-directory resolution; the live completion path
-/// uses the cached recursive scan + [`path_query_match`] instead.
-#[cfg(test)]
-fn split_prefix(after_at: &str, cwd: &std::path::Path) -> (std::path::PathBuf, String) {
-    let last_slash = after_at.bytes().rposition(|b| b == b'/');
-    let (dir_part, file_prefix) = match last_slash {
-        Some(idx) => (&after_at[..=idx], after_at[idx + 1..].to_string()),
-        None => ("", after_at.to_string()),
-    };
-
-    let base_dir = if let Some(rest) = dir_part.strip_prefix("~/") {
-        match dirs::home_dir() {
-            Some(home) => home.join(rest),
-            None => cwd.join(dir_part),
-        }
-    } else if dir_part.starts_with('/') {
-        std::path::PathBuf::from(dir_part)
-    } else {
-        cwd.join(dir_part)
-    };
-    (base_dir, file_prefix)
-}
-
-/// Format a byte count with a single-letter SI suffix, matching the
-/// context-usage formatter's style: `512B`, `1.2k`, `3.4M`.
-#[cfg(test)]
-fn format_byte_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{}B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}k", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
 /// Decide whether a cached path entry should be shown for a given `@query`.
 ///
 /// - Empty query: only top-level entries (immediate children of cwd), so the

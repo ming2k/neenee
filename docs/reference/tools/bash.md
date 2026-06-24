@@ -13,4 +13,4 @@ See [Tool access](access.md) and [ADR-0012](../../adr/0012-toolaccess-tier-split
 
 The `VERIFY` sub-agent profile admits `bash` so an independent plan verifier
 can run tests, builds, and type-checks as evidence; the `EXPLORE` profile does
-not. See [Sub-agent profiles](../../explanation/agent-design/subagents/profiles.md).
+not. See [Sub-agent profiles](../../explanation/agent-design/subagents.md#profiles).

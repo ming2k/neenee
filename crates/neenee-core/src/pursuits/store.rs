@@ -35,6 +35,54 @@ pub struct PursuitStore {
     conn: Arc<std::sync::Mutex<Connection>>,
 }
 
+/// Versioned schema migrations for the `thread_pursuits` table.
+///
+/// Driven by `PRAGMA user_version`: each step only runs when the database is
+/// below its target version, runs inside its own transaction, and advances
+/// the version only on success. See ADR-0024.
+fn migrations() -> &'static [crate::db::Migration] {
+    &[
+        crate::db::Migration {
+            version: 1,
+            description: "create thread_pursuits (compat legacy thread_goals table)",
+            apply: |conn| {
+                if !crate::db::table_exists(conn, "thread_pursuits") {
+                    // A database carried over from the pre-rename `goals.db`
+                    // still has the `thread_goals` table; rename it so its
+                    // rows survive under the new name.
+                    if crate::db::table_exists(conn, "thread_goals") {
+                        conn.execute(
+                            "ALTER TABLE thread_goals RENAME TO thread_pursuits",
+                            [],
+                        )?;
+                    } else {
+                        conn.execute(THREAD_PURSUITS_SCHEMA, [])?;
+                    }
+                }
+                Ok(())
+            },
+        },
+        crate::db::Migration {
+            version: 2,
+            description: "rename legacy goal_id column -> pursuit_id",
+            apply: |conn| {
+                // Only runs on databases that still carry the pre-rename
+                // column. Fresh databases already have `pursuit_id`, so both
+                // checks are skipped.
+                if !crate::db::column_exists(conn, "thread_pursuits", "pursuit_id")
+                    && crate::db::column_exists(conn, "thread_pursuits", "goal_id")
+                {
+                    conn.execute(
+                        "ALTER TABLE thread_pursuits RENAME COLUMN goal_id TO pursuit_id",
+                        [],
+                    )?;
+                }
+                Ok(())
+            },
+        },
+    ]
+}
+
 impl Clone for PursuitStore {
     fn clone(&self) -> Self {
         Self {
@@ -91,10 +139,10 @@ impl PursuitStore {
     /// Synchronous in-memory constructor for tests that run outside an async
     /// context (the schema setup is cheap and never blocks meaningfully).
     pub fn open_in_memory_blocking() -> Result<Self, String> {
-        let conn = Connection::open_in_memory()
+        let mut conn = Connection::open_in_memory()
             .map_err(|err| format!("failed to open in-memory db: {err}"))?;
-        conn.execute(THREAD_PURSUITS_SCHEMA, [])
-            .map_err(|err| format!("failed to create thread_pursuits table: {err}"))?;
+        crate::db::migrate(&mut conn, migrations())
+            .map_err(|err| format!("pursuits migrate failed: {err}"))?;
         Ok(Self {
             conn: Arc::new(std::sync::Mutex::new(conn)),
         })
@@ -103,20 +151,9 @@ impl PursuitStore {
     async fn migrate(&self) -> Result<(), String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|err| err.to_string())?;
-            // Rename a legacy `thread_goals` table (carried over from
-            // goals.db by `open`) so its rows survive under the new name.
-            // "no such table" on fresh databases is expected and ignored.
-            let _ = conn.execute("ALTER TABLE thread_goals RENAME TO thread_pursuits", []);
-            // Rename the legacy `goal_id` column (carried over from goals.db
-            // or from a pre-rename thread_pursuits schema) to `pursuit_id`.
-            // "no such column" on fresh databases is expected and ignored.
-            let _ = conn.execute(
-                "ALTER TABLE thread_pursuits RENAME COLUMN goal_id TO pursuit_id",
-                [],
-            );
-            conn.execute(THREAD_PURSUITS_SCHEMA, [])
-                .map_err(|err| format!("failed to create thread_pursuits table: {err}"))?;
+            let mut conn = conn.lock().map_err(|err| err.to_string())?;
+            crate::db::migrate(&mut conn, migrations())
+                .map_err(|err| format!("pursuits migrate failed: {err}"))?;
             Ok::<_, String>(())
         })
         .await
@@ -297,4 +334,76 @@ fn thread_pursuit_from_row(row: &rusqlite::Row) -> Result<ThreadPursuit, rusqlit
         created_at: DateTime::from_timestamp_millis(created_at_ms).unwrap_or_else(Utc::now),
         updated_at: DateTime::from_timestamp_millis(updated_at_ms).unwrap_or_else(Utc::now),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_db_has_latest_user_version() {
+        let store = PursuitStore::open_in_memory_blocking().unwrap();
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(user_version(&conn), 2);
+        assert!(crate::db::table_exists(&conn, "thread_pursuits"));
+    }
+
+    #[test]
+    fn legacy_thread_goals_table_migrates() {
+        // Simulate a pre-rename database: a thread_goals table carrying the
+        // old goal_id column plus a row of data.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE thread_goals (
+                thread_id TEXT PRIMARY KEY,
+                goal_id   TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status    TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO thread_goals (thread_id, goal_id, objective, status, created_at_ms, updated_at_ms) \
+             VALUES ('t1', 'g1', 'do the thing', 'active', 100, 200)",
+            [],
+        )
+        .unwrap();
+
+        crate::db::migrate(&mut conn, migrations()).unwrap();
+
+        assert_eq!(user_version(&conn), 2);
+        assert!(crate::db::table_exists(&conn, "thread_pursuits"));
+        assert!(!crate::db::table_exists(&conn, "thread_goals"));
+        assert!(crate::db::column_exists(&conn, "thread_pursuits", "pursuit_id"));
+        // The legacy row survives the table + column rename.
+        let (objective, pursuit_id): (String, String) = conn
+            .query_row(
+                "SELECT objective, pursuit_id FROM thread_pursuits WHERE thread_id = 't1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(objective, "do the thing");
+        assert_eq!(pursuit_id, "g1");
+    }
+
+    #[test]
+    fn idempotent_migrate() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&mut conn, migrations()).unwrap();
+        let v1 = user_version(&conn);
+        // Running again against an already-current database is a no-op.
+        crate::db::migrate(&mut conn, migrations()).unwrap();
+        let v2 = user_version(&conn);
+        assert_eq!(v1, v2);
+        assert_eq!(v1, 2);
+    }
 }

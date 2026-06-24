@@ -264,10 +264,6 @@ mod tests {
         Message::new(Role::User, content)
     }
 
-    fn assistant(content: &str) -> Message {
-        Message::new(Role::Assistant, content)
-    }
-
     fn assistant_with_call(content: &str, call: ToolCall) -> Message {
         let mut m = Message::new(Role::Assistant, content);
         m.tool_calls = Some(vec![call]);

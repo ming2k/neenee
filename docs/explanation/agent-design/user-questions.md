@@ -114,11 +114,11 @@ question-request events are dropped by the dispatch tool's forwarder — so
 admitting `ask_user` there would deadlock until the parent turn is cancelled.
 Keeping the question with the parent (which *can* ask) is the contract; a
 sub-agent that hits ambiguity returns it in its written answer instead. See
-[Sub-agents → Tool admission](subagents/admission.md) and
+[Sub-agents → Tool admission](subagents.md#tool-admission) and
 [ADR-0011](../../adr/0011-subagent-profiles.md).
 
 ## See also
 
 - [How to ask the user a question](../../how-to/ask-the-user.md)
 - [Built-in tools](../../reference/tools/index.md)
-- [Tool rounds](tool-rounds.md)
+- [Tool rounds](turns-and-rounds.md)

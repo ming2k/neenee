@@ -12,7 +12,7 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-tool-rendering-redesign.md) | Tool-step rendering redesign: log entries over expandable cards | Accepted |
-| [0002](0002-model-channel-abstraction.md) | Model/channel abstraction and picker redesign | Proposed |
+| [0002](0002-model-channel-abstraction.md) | Model/channel abstraction and picker redesign | Accepted |
 | [0003](0003-extract-neenee-app-crate.md) | Extract `neenee-app` from the binary crate | Superseded by ADR-0004 |
 | [0004](0004-six-crate-topology.md) | Six-crate topology: core / app / providers / tools / harness / cli | Superseded by ADR-0005 |
 | [0005](0005-strict-layering-and-renames.md) | Strictly-layered topology + scenario-bound store | Accepted |
@@ -34,3 +34,5 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0021](0021-pruning-is-implicit-and-distinct-from-compaction.md) | Tool-result pruning is implicit (silent, gated at ~65%) and renamed distinct from compaction (`ContextRelief*`) | Accepted |
 | [0022](0022-session-level-ai-title.md) | Session-level AI title (first-turn auto + on-demand `/title` + manual lock; `TITLE` sub-agent profile) | Accepted |
 | [0023](0023-relevance-aware-tiered-pruning-and-layered-token-accounting.md) | Relevance-aware, tiered pruning (staleness/keep-alive, truncate→clear, informative placeholders) and layered token accounting (`effective_pressure_tokens`) | Accepted |
+| [0024](0024-pragmatic-sqlite-migrations.md) | Pragmatic SQLite migrations via `PRAGMA user_version` | Accepted |
+| [0025](0025-lifecycle-event-hooks.md) | Lifecycle event hooks (single event axis: SessionStart/End, UserPromptSubmit, PreToolUse/PostToolUse/Stop/PreCompact; command-handler config; delete one-shot `CompactionHooks`) | Proposed |

@@ -1,7 +1,15 @@
 # 0002. Model/channel abstraction and picker redesign
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
+
+> **Update (2026-06-24):** Implemented. The `Transport` / `Channel` /
+> `ProviderEntry` types and the catalog construction path shipped in
+> `neenee-core::catalog`. Built-in presets materialize a single `"default"`
+> channel; the multi-channel-per-model capability is live for **user-defined**
+> entries (a config entry may declare several channels with `default_channel`
+> selecting one — see `neenee-agent::catalog` tests). Status promoted from
+> Proposed accordingly.
 
 ## Context
 

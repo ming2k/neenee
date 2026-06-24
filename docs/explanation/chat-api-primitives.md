@@ -8,7 +8,7 @@ rest of the agent design reads as their consequence rather than a series of
 independent choices.
 
 For the byte-level wire shape, see [Request flow](request-flow.md). For the
-round trip of a single tool call, see [Tool rounds](agent-design/tool-rounds.md).
+round trip of a single tool call, see [Tool rounds](agent-design/turns-and-rounds.md).
 For why providers differ on which primitives they implement, see
 [Provider capabilities](provider-capabilities.md).
 
@@ -139,7 +139,7 @@ each a specialization of one or more of these primitives.
 ## See also
 
 - [Request flow](request-flow.md) — the wire-level shape of each transaction
-- [Tool rounds](agent-design/tool-rounds.md) — the round trip of one tool call
+- [Tool rounds](agent-design/turns-and-rounds.md) — the round trip of one tool call
 - [Provider capabilities](provider-capabilities.md) — which providers implement
   which primitives
 - [Pursuits](agent-design/pursuits.md) — the pursuit as a system-prompt anchor

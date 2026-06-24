@@ -58,7 +58,7 @@ pub use theme::Theme;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block as RtBlock, Paragraph},
     Frame,
@@ -165,7 +165,10 @@ pub struct TranscriptView<'a> {
     /// affordance. `None` whenever the pointer is elsewhere or an overlay
     /// modal is open.
     pub hovered_step: Option<usize>,
-    /// Keyboard-focused activatable target.
+    /// Keyboard-focused activatable target. Part of the in-progress focus-
+    /// navigation feature (see `UiState::has_focused_target`); the render side
+    /// is ready but no caller sets it yet, hence the targeted allow.
+    #[allow(dead_code)]
     pub focused_target: Option<InteractiveTarget>,
     pub theme: &'a Theme,
 }
@@ -204,9 +207,6 @@ pub struct TranscriptRender {
 /// A sticky pinned step summary (returned to the app for click handling).
 pub struct StickyInfo {
     pub message_idx: usize,
-    pub summary: String,
-    pub color: Color,
-    pub block_idx: usize,
     pub rect: Rect,
     /// The content-line index of the real summary inside the stream. The app
     /// uses this to re-anchor the scroll offset when the user collapses the
@@ -672,6 +672,7 @@ mod tests {
                     &mut LayoutMap::new(),
                     true,
                     &mut 0,
+                    &SelectionState::None,
                 );
                 draw_completion_menu(
                     f,
@@ -1145,6 +1146,7 @@ mod tests {
                     &mut layout_map,
                     true,
                     &mut 0,
+                    &SelectionState::None,
                 );
             })
             .unwrap();
@@ -1186,6 +1188,7 @@ mod tests {
                     &mut LayoutMap::new(),
                     true,
                     &mut 0,
+                    &SelectionState::None,
                 );
             })
             .unwrap();
@@ -1257,6 +1260,7 @@ mod tests {
                     &mut layout_map,
                     false,
                     &mut input_scroll,
+                    &SelectionState::None,
                 );
             })
             .unwrap();

@@ -96,6 +96,11 @@ const MAX_REPEATED_TOOL_CALLS: usize = 3;
 /// from looping forever; the user can also interrupt with `Esc`. Generous by
 /// design — a well-behaved pursuit completes by signalling the marker well
 /// before this.
+///
+/// This is **not** the per-turn round cap ADR-0009 removed: an ordinary turn
+/// (no pursuit armed) stays uncapped and ends when the model stops calling
+/// tools. This cap only bounds the *forced re-injection* of an opt-in stop-gate
+/// the user explicitly armed — see ADR-0015.
 const MAX_PURSUIT_ITERATIONS: u32 = 50;
 
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
@@ -125,6 +130,8 @@ pub mod agent;
 pub use agent::Agent;
 
 pub mod catalog;
+pub mod hooks;
+pub use hooks::{matcher_matches, HookRegistry, UserPromptVerdict};
 pub mod orchestration;
 mod plan_verify;
 mod prompt;

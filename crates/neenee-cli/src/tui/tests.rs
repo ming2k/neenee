@@ -540,7 +540,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         layout_map: LayoutMap::new(),
         hovered_step: None,
         tool_density: Arc::new(AtomicBool::new(false)),
-        tui_config: Arc::new(config::TuiConfig::default()),
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,

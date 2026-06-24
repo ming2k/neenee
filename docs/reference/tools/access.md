@@ -3,7 +3,7 @@
 How the harness decides whether a tool may run, and whether it needs the user's
 permission. This is the factual reference; the *rationale* for the tier split
 and the sub-agent admission policy lives in
-[Sub-agent profiles](../../explanation/agent-design/subagents/profiles.md) and
+[Sub-agent profiles](../../explanation/agent-design/subagents.md#profiles) and
 [ADR-0012](../../adr/0012-toolaccess-tier-split.md).
 
 ## `ToolAccess` tiers
@@ -40,7 +40,7 @@ A `requires_user()` tool is excluded from sub-agents because a sub-agent has no
 user reachable to answer it; a `spawns_subagent()` tool is excluded in *every*
 profile to prevent recursion. `Tool::allowed_in_plan_mode` is the pre-existing
 fourth axis, consulted by the Plan-mode gate. See
-[Sub-agent admission](../../explanation/agent-design/subagents/admission.md).
+[Sub-agent admission](../../explanation/agent-design/subagents.md#tool-admission).
 
 ## Permission prompt text
 
@@ -64,6 +64,6 @@ Only `start_pursuit` and `complete_pursuit` currently override them.
 ## See also
 
 - [ADR-0012](../../adr/0012-toolaccess-tier-split.md) — the tier split decision.
-- [Sub-agent profiles](../../explanation/agent-design/subagents/profiles.md) —
+- [Sub-agent profiles](../../explanation/agent-design/subagents.md#profiles) —
   how the axes drive sub-agent tool admission.
 - [Plan mode](../../explanation/agent-design/plan-mode.md) — the Plan-mode gate.

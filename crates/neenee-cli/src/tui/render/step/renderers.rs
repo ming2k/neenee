@@ -151,8 +151,6 @@ pub struct StickyStep {
     summary: String,
     color: Color,
     background: Option<Color>,
-    /// usize::MAX for tool steps, usize::MAX - 1 for reasoning traces.
-    block_idx: usize,
     summary_line: usize,
     body_end_line: usize,
 }
@@ -242,11 +240,19 @@ fn draw_blank_rows(ctx: &mut RenderCtx<'_, '_>, style: Style, rows: usize) {
 /// `code_bg`. Used for `read_file` / `edit_file` results and as the
 /// fallback for unrecognized tools. The gutter starts at column `indent`
 /// so the code aligns with the rest of the step body.
+///
+/// `start_line` is the 1-based file line of the first row of `content`
+/// (carried by `ToolOutput::Code::start_line`). `0` means "unknown" — the
+/// renderer then numbers the slice 1, 2, 3… The gutter width is derived from
+/// the *highest* displayed line number (not the line *count*) so an offset
+/// snippet like 100..104 still gets a 3-wide column instead of overflowing.
+#[allow(clippy::too_many_arguments)]
 fn draw_code_content(
     ctx: &mut RenderCtx<'_, '_>,
     mi: usize,
     block_idx: usize,
     content: &str,
+    start_line: usize,
     selection: &SelectionState,
     indent: usize,
     inner_w: usize,
@@ -258,7 +264,12 @@ fn draw_code_content(
         logical_lines.push((offset, line));
         offset += line.len() + 1;
     }
-    let gutter_width = logical_lines.len().to_string().len().max(2);
+    // `0` (unknown) is indistinguishable from `1` for gutter purposes: both
+    // render the first row as line 1. Normalize once so the math below is
+    // uniform.
+    let first_line = start_line.max(1);
+    let last_line = first_line.saturating_add(logical_lines.len().saturating_sub(1));
+    let gutter_width = last_line.to_string().len().max(2);
     let left_indent = indent;
     let gutter_gap = 1usize;
     let gutter_indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
@@ -269,7 +280,7 @@ fn draw_code_content(
         let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_width));
         for (wrap_idx, wl) in wrapped.iter().enumerate() {
             let gutter = if wrap_idx == 0 {
-                format!("{:>width$}", line_idx + 1, width = gutter_width)
+                format!("{:>width$}", first_line + line_idx, width = gutter_width)
             } else {
                 " ".repeat(gutter_width)
             };
@@ -818,7 +829,21 @@ fn draw_tool_result(
             );
         }
         ResultKind::Code => {
-            draw_code_content(ctx, mi, block_idx, output, selection, indent, inner_w)
+            // Prefer the structured payload: its `text` is pure file content
+            // (the model-facing `prefix`/`suffix` framing is ignored here) and
+            // `start_line` carries the read `offset` so an offset snippet
+            // numbers from its true file line. Legacy/restored steps without a
+            // payload fall back to the flattened `output` string with
+            // `start_line = 0` (slice-relative 1-based numbering).
+            let (content, start_line) = match structured {
+                Some(neenee_core::ToolOutput::Code {
+                    text, start_line, ..
+                }) => (text.as_str(), *start_line),
+                _ => (output, 0),
+            };
+            draw_code_content(
+                ctx, mi, block_idx, content, start_line, selection, indent, inner_w,
+            )
         }
         ResultKind::Diff => {
             // Prefer the structured Patch payload (old/new from the result);
@@ -1405,7 +1430,6 @@ pub fn draw_tool_step(
             summary,
             color: status_color,
             background: Some(theme.surface()),
-            block_idx: usize::MAX,
             summary_line: summary_line_idx,
             body_end_line: *content_lines,
         });
@@ -1687,7 +1711,6 @@ pub fn draw_reasoning_trace(
             summary,
             color: theme.muted(),
             background: None,
-            block_idx: usize::MAX - 1,
             summary_line: summary_line_idx,
             body_end_line: *content_lines,
         });
@@ -1753,9 +1776,6 @@ pub fn draw_sticky_summary_if_needed(
     };
     Some(StickyInfo {
         message_idx: step.message_idx,
-        summary: step.summary.clone(),
-        color: step.color,
-        block_idx: step.block_idx,
         rect: line_rect,
         summary_line: step.summary_line,
     })

@@ -1,6 +1,8 @@
 use crate::fsutil;
 use crate::paths;
-use neenee_core::{CompactionPolicy, McpServerConfig, SkillsConfig, WebSearchConfig};
+use neenee_core::{
+    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, WebSearchConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -198,6 +200,35 @@ pub struct Config {
     /// semantics and TOML examples.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Lifecycle event hooks (`[[hooks]]` array, ADR-0025). Each entry fires a
+    /// shell command at one lifecycle point; see [`HookSpec`].
+    #[serde(default)]
+    pub hooks: Vec<HookSpec>,
+}
+
+/// One lifecycle event hook entry (ADR-0025). Deserialized from a `[[hooks]]`
+/// table in `config.toml`:
+///
+/// ```toml
+/// [[hooks]]
+/// event   = "PostToolUse"          # a [`HookEventKind`] variant
+/// matcher = "Write|Edit"           # optional; tool-name `|`-list or regex
+/// command = ".neenee/hooks/lint.sh"
+/// ```
+///
+/// The command receives the [`neenee_core::HookContext`] as JSON on stdin and
+/// communicates a decision via exit code / stdout JSON (see the CLI runner).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookSpec {
+    /// When this hook fires.
+    pub event: HookEventKind,
+    /// Tool-name filter. `None` (or unset) matches every event; only tool
+    /// events (`PreToolUse` / `PostToolUse` / `PostToolUseFailure`) honour it.
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Shell command run when the event matches. Executed with the project
+    /// root as cwd and the hook context as JSON on stdin.
+    pub command: String,
 }
 
 impl Default for Config {
@@ -232,6 +263,7 @@ impl Default for Config {
             websearch: WebSearchConfig::default(),
             tui: TuiConfig::default(),
             agent: AgentConfig::default(),
+            hooks: Vec::new(),
         }
     }
 }

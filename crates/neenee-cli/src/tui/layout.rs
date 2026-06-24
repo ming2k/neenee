@@ -136,14 +136,6 @@ impl LayoutMap {
         self.transcript_content_rect
     }
 
-    /// Clear all regions (call at the start of each frame).
-    pub fn clear(&mut self) {
-        self.regions.clear();
-        self.table_grids.clear();
-        self.table_cell_hits.clear();
-        self.transcript_content_rect = None;
-    }
-
     /// Record the displayed grid text for a table block.
     pub fn record_table_grid(&mut self, message_idx: usize, block_idx: usize, text: String) {
         self.table_grids.insert((message_idx, block_idx), text);
@@ -252,22 +244,6 @@ impl LayoutMap {
         })
     }
 
-    /// Returns all regions for a given message.
-    pub fn message_regions(&self, message_idx: usize) -> Vec<&BlockRegion> {
-        self.regions
-            .iter()
-            .filter(|r| r.message_idx == message_idx)
-            .collect()
-    }
-
-    /// Returns all regions for a specific block.
-    pub fn block_regions(&self, message_idx: usize, block_idx: usize) -> Vec<&BlockRegion> {
-        self.regions
-            .iter()
-            .filter(|r| r.message_idx == message_idx && r.block_idx == block_idx)
-            .collect()
-    }
-
     /// Return visible activatable targets in screen order.
     pub fn interactive_targets(&self) -> Vec<InteractiveTarget> {
         let mut regions: Vec<&BlockRegion> = self
@@ -290,12 +266,6 @@ impl LayoutMap {
         }
         targets
     }
-}
-
-/// Helper to measure how many display columns a string occupies.
-pub fn display_width(s: &str) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    s.width()
 }
 
 #[cfg(test)]
@@ -329,18 +299,6 @@ mod tests {
     fn test_hit_test_miss() {
         let map = LayoutMap::new();
         assert!(map.hit_test(0, 0).is_none());
-    }
-
-    #[test]
-    fn transcript_content_rect_round_trip_and_clears() {
-        let mut map = LayoutMap::new();
-        assert!(map.transcript_content_rect().is_none());
-        map.set_transcript_content_rect(Rect::new(2, 0, 10, 5));
-        assert_eq!(map.transcript_content_rect(), Some(Rect::new(2, 0, 10, 5)));
-        // A frame reset must drop the rect, otherwise the previous frame's
-        // bounds would keep switching focus to Browse after a resize.
-        map.clear();
-        assert!(map.transcript_content_rect().is_none());
     }
 
     #[test]

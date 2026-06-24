@@ -131,6 +131,39 @@ bash = true
 thinking = false
 ```
 
+## Hooks
+
+Lifecycle event hooks (ADR-0025): each entry runs a shell command at one
+point in the agent's lifecycle. See the [hooks explanation](../explanation/agent-design/hooks.md)
+for the event set, the command contract, and how hooks compose with the
+permission broker and the `/pursue` stop-gate.
+
+The `[[hooks]]` array contains one table per hook. The capability a hook has
+(block / inject / observe) is implied by its `event` — see the explanation for
+which event honours which.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `hooks[].event` | — | The lifecycle event: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreCompact`, `PostCompact` |
+| `hooks[].matcher` | `*` | Tool-name filter. A `|`-separated list of exact names (`Write|Edit`) when only letters/digits/`_`/`|`; otherwise a regular expression. Only the tool events honour it |
+| `hooks[].command` | — | Shell command run when the event matches. Receives the event JSON on stdin; replies via exit code / stdout JSON |
+
+```toml
+[[hooks]]
+event   = "PostToolUse"
+matcher = "Write|Edit"
+command = ".neenee/hooks/lint.sh"
+
+[[hooks]]
+event   = "PreToolUse"
+matcher = "Bash"
+command = ".neenee/hooks/guard-rm.sh"
+
+[[hooks]]
+event   = "Stop"
+command = ".neenee/hooks/ci-gate.sh"
+```
+
 ## Feature tables
 
 These sub-tables have their own reference pages; only the table name is

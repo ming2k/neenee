@@ -49,6 +49,14 @@ one Claude-Code subsystem:
    *signals* (matching Claude Code: no separate LLM judge). `/pursue` subsumes
    the old `/loop`; there is no outer multi-turn loop.
 
+   This cap does **not** reintroduce the per-turn round cap ADR-0009 removed.
+   ADR-0009 keeps an *ordinary* turn (no pursuit armed) uncapped: it ends when
+   the model stops calling tools. `MAX_PURSUIT_ITERATIONS` only bites when a
+   user has explicitly armed a stop-gate that overrides that natural stop by
+   re-injecting a hidden prompt — i.e. it bounds the *forced re-injection*, not
+   the model's own tool-calling. Without it an armed pursuit whose condition the
+   model never signals would loop indefinitely with no human in the gate.
+
 2. **`/repeat <cron> <prompt>` — a cron scheduler (clock-driven, recurring).**
    A real five-field cron expression engine (`neenee_core::cron::CronExpr`)
    computes fire times. Jobs are durable in SQLite (`repeat.db`,

@@ -680,7 +680,6 @@ pub async fn run_tui(
         layout_map: LayoutMap::new(),
         hovered_step: None,
         tool_density: tool_density.clone(),
-        tui_config: tui_config.clone(),
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,

@@ -57,6 +57,14 @@ pub struct InputContext {
     /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
     pub in_subagent_view: bool,
     /// Whether a keyboard-focusable step or action target is active.
+    ///
+    /// Part of the in-progress keyboard focus-navigation feature (alongside
+    /// `RenderCtx::focused_target`, `InputAction::ActivateFocusedTarget`,
+    /// `Interaction::Focused`, and `LayoutMap::interactive_targets`). The
+    /// activation plumbing is wired but nothing populates this state yet, so it
+    /// reads as dead until the focus-walk keybinding lands. Targeted allow
+    /// rather than a blanket module suppression.
+    #[allow(dead_code)]
     pub has_focused_target: bool,
     /// Which surface (input box vs conversation stream) owns keyboard focus.
     pub focus_zone: FocusZone,
@@ -164,10 +172,6 @@ pub enum InputAction {
     InsertChar(char),
     /// Delete character before cursor.
     Backspace,
-    /// Move cursor left.
-    CursorLeft,
-    /// Move cursor right.
-    CursorRight,
     /// Cycle suggestion forward.
     SuggestNext,
     /// Cycle suggestion backward.

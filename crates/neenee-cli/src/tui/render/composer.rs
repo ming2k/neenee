@@ -12,12 +12,13 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::layout::{BlockRegion, LayoutMap};
+use crate::tui::selection::SelectionState;
 
 use super::design::{
     COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS, COMPOSER_TEXT_ROW_OFFSET,
     COMPOSER_VERTICAL_CHROME_ROWS,
 };
-use super::text_layout::{padded_tail, wrap_text, WrappedLine};
+use super::text_layout::{block_selection_range, line_selection, padded_tail, wrap_text, WrappedLine};
 use super::Theme;
 
 /// Special message_idx for the live input box in the layout map, so semantic
@@ -82,6 +83,7 @@ pub fn draw_composer(
     layout_map: &mut LayoutMap,
     record: bool,
     input_scroll: &mut usize,
+    selection: &SelectionState,
 ) {
     // The input box is a flat panel: each text row carries panel_bg and is
     // prefixed with `› ` on the first wrapped line / a two-space indent on
@@ -188,6 +190,14 @@ pub fn draw_composer(
     } else {
         let start = scroll;
         let end = (scroll + visible_rows).min(wrapped.len());
+        // Resolve the selection byte range for the whole input box once; each
+        // wrapped line intersects it to find its own highlighted slice. The
+        // composer records itself as a single block at `INPUT_MSG_IDX` /
+        // block 0, so a drag or triple-click inside the box resolves here.
+        let sel_range = block_selection_range(selection, INPUT_MSG_IDX, 0);
+        let selected_bg = theme.selected();
+        let text_fg = theme.fg();
+        let base_text = Style::default().bg(panel_bg).fg(text_fg);
         for (i, wl) in wrapped[start..end].iter().enumerate() {
             let used = COMPOSER_PROMPT_PREFIX_COLS + wl.text.width();
             let mut spans = if start + i == 0 {
@@ -195,10 +205,22 @@ pub fn draw_composer(
             } else {
                 vec![indent.clone()]
             };
-            spans.push(Span::styled(
-                wl.text.clone(),
-                Style::default().bg(panel_bg).fg(theme.fg()),
-            ));
+            let selected = line_selection(sel_range, wl);
+            match selected {
+                None => spans.push(Span::styled(wl.text.clone(), base_text)),
+                Some((lo, hi)) => {
+                    if lo > 0 {
+                        spans.push(Span::styled(wl.text[..lo].to_string(), base_text));
+                    }
+                    spans.push(Span::styled(
+                        wl.text[lo..hi].to_string(),
+                        base_text.bg(selected_bg),
+                    ));
+                    if hi < wl.text.len() {
+                        spans.push(Span::styled(wl.text[hi..].to_string(), base_text));
+                    }
+                }
+            }
             spans.push(Span::styled(
                 padded_tail(full_w, used),
                 Style::default().bg(panel_bg),

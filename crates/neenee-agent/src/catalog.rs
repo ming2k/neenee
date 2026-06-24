@@ -6,9 +6,10 @@
 //! provider construction (`build_provider_for_channel` in `neenee-providers`)
 //! never touches the environment or config again.
 //!
-//! Phase 1 of ADR-0002: produces one channel per entry from the legacy
-//! per-provider fields. The on-disk schema is unchanged; later phases add
-//! multi-channel entries, favorites, and recency.
+//! ADR-0002: built-in presets produce one `"default"` channel per entry from
+//! the per-provider fields, while user-defined entries may declare several
+//! channels (with `default_channel` selecting one). Favorites and recency are
+//! layered on top via the provider-usage telemetry.
 
 use neenee_core::catalog::{builtin_provider_metadata, Channel, ProviderEntry, Transport};
 use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot};

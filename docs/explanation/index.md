@@ -23,14 +23,15 @@ before the individual docs.
 |------|--------|
 | [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
 | [Harness architecture](agent-design/harness.md) | Control plane around provider calls, pursuit state, autonomous loop, safety bounds |
-| [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model: a turn as the user-perceived unit, a round as the ReAct loop iteration inside it, and which concerns attach to each layer |
+| [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model (turn vs round) and the lifecycle inside one round: declaration, gating, execution, and how outcomes re-enter the conversation |
 | [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-turn condition-driven pursuit) and the `/repeat` cron scheduler |
-| [Sub-agents](agent-design/subagents/index.md) | The `task` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
+| [Sub-agents](agent-design/subagents.md) | The `task` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and Plan-mode gating |
 | [Plan mode](agent-design/plan-mode.md) | Read-only planning surface, autonomous `plan_enter`/`plan_exit`, and the plan-file write exemption |
 | [User questions](agent-design/user-questions.md) | How the `ask_user` tool blocks the agent, renders a modal, and returns answers |
 | [Skills](agent-design/skills.md) | On-demand domain expertise: the catalog/body two-channel model, the source/priority cascade, and explicit versus implicit invocation |
-| [Tool rounds](agent-design/tool-rounds.md) | The round trip of a tool call as a design concept: declaration, gating, execution, and how outcomes re-enter the conversation |
+| [Lifecycle hooks](agent-design/hooks.md) | User-configured actions on the agent's lifecycle events (PreToolUse, Stop, SessionStart, PreCompact…): one event axis with capability implied by the event |
+
 
 ## Provider protocol and UI
 

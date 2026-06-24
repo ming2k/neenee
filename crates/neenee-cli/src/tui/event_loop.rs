@@ -488,6 +488,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                         &mut layout_map,
                         true,
                         &mut app.input_scroll,
+                        &app.selection,
                     );
                 }
             }
@@ -1534,8 +1535,6 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // `pending_text_pastes` and relabels survivors.
                     app.reconcile_attachments();
                 }
-                input::InputAction::CursorLeft => {}
-                input::InputAction::CursorRight => {}
                 input::InputAction::SuggestNext => {
                     let count = app.completions().len();
                     if count > 0 {

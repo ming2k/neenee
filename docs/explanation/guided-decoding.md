@@ -8,7 +8,7 @@ itself.
 For the higher-level capability model, see
 [Provider capabilities](provider-capabilities.md). For where neenee's
 adapters assume this layer is present, see
-[Tool rounds](agent-design/tool-rounds.md).
+[Tool rounds](agent-design/turns-and-rounds.md).
 
 ## The problem
 
@@ -150,7 +150,7 @@ asserting two things about the upstream runtime:
 If either assumption fails, the model may still produce tool calls (its
 weights are tool-tuned) but with no syntactic guarantee. The client then
 faces occasional parse failures. neenee's universal fallback
-([Tool rounds](agent-design/tool-rounds.md)) is the graceful degradation for
+([Tool rounds](agent-design/turns-and-rounds.md)) is the graceful degradation for
 exactly this case: when guided decoding is absent or unreliable, the agent
 parses JSON out of assistant text and accepts that some calls will be
 malformed.
@@ -178,7 +178,7 @@ same API regardless of vendor.
 
 - [Provider capabilities](provider-capabilities.md) — how neenee maps this
   layer into its adapter taxonomy
-- [Tool rounds](agent-design/tool-rounds.md) — what neenee does with the tool calls
+- [Tool rounds](agent-design/turns-and-rounds.md) — what neenee does with the tool calls
   this layer produces
 - [Request flow](request-flow.md) — how the resulting `tool_calls` field
   drives the ReAct loop

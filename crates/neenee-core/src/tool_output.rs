@@ -53,8 +53,26 @@ pub enum ToolOutput {
     /// Source code / file contents, with an optional language hint (file
     /// extension) so a future renderer can syntax-highlight. `text` is the
     /// (possibly truncation-prefixed) content, identical to what the legacy
-    /// string output carried.
-    Code { lang: Option<String>, text: String },
+    /// string output carried. `start_line` is the 1-based line number of the
+    /// first row of `text` within its source file, so a snippet read with an
+    /// `offset` numbers from that line instead of restarting at 1. `0` means
+    /// "unknown" and the renderer falls back to 1-based numbering within the
+    /// slice — the same sentinel/semantics as [`ToolOutput::Patch::start_line`].
+    ///
+    /// `prefix` / `suffix` carry **model-facing framing only** (line-range
+    /// header, pagination/EOF continuation hints). The renderer ignores them
+    /// and draws `text` with the line-number gutter; [`ToolOutput::to_text`]
+    /// composes `prefix\n{text}\nsuffix` for the model. Splitting the two
+    /// audiences is what lets a paginated read both render cleanly (pure
+    /// content, correct line base) and tell the model exactly where it is and
+    /// how to continue — preventing re-read loops.
+    Code {
+        lang: Option<String>,
+        text: String,
+        start_line: usize,
+        prefix: Option<String>,
+        suffix: Option<String>,
+    },
     /// A directory / glob listing, as raw entry strings.
     Listing { entries: Vec<String> },
     /// Ripgrep-style search matches, as raw `path:line:content` lines plus the
@@ -132,7 +150,17 @@ impl ToolOutput {
                 exit,
                 truncated,
             } => shell_to_text(stdout, stderr, *exit, *truncated),
-            ToolOutput::Code { text, .. } => text.clone(),
+            ToolOutput::Code {
+                text,
+                prefix,
+                suffix,
+                ..
+            } => match (prefix, suffix) {
+                (Some(pre), Some(suf)) => format!("{}\n{}\n{}", pre, text, suf),
+                (Some(pre), None) => format!("{}\n{}", pre, text),
+                (None, Some(suf)) => format!("{}\n{}", text, suf),
+                (None, None) => text.clone(),
+            },
             ToolOutput::Listing { entries } => entries.join("\n"),
             ToolOutput::Matches { lines, .. } => lines.join("\n"),
             ToolOutput::Patch { path, op, new, .. } => match op {
@@ -360,9 +388,59 @@ mod tests {
         let o = ToolOutput::Code {
             lang: Some("rs".into()),
             text: "fn main() {}".into(),
+            start_line: 1,
+            prefix: None,
+            suffix: None,
         };
         assert_eq!(o.to_text(), "fn main() {}");
         assert!(!o.is_error());
+    }
+
+    #[test]
+    fn code_start_line_round_trips_and_defaults_to_zero() {
+        // `start_line` is structural metadata for the renderer; it must not
+        // leak into `to_text()` (the model still sees bare content) and must
+        // survive cloning so an offset snippet keeps its line base.
+        let o = ToolOutput::Code {
+            lang: None,
+            text: "x".into(),
+            start_line: 42,
+            prefix: None,
+            suffix: None,
+        };
+        assert_eq!(o.to_text(), "x");
+        let cloned = o.clone();
+        match cloned {
+            ToolOutput::Code { start_line, .. } => assert_eq!(start_line, 42),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn code_prefix_suffix_frame_the_content_for_the_model() {
+        // The renderer draws `text`; the model sees framing composed around it.
+        // This split is what makes pagination loop-safe: the model gets a
+        // concrete continuation without polluting the rendered code block.
+        let with_both = ToolOutput::Code {
+            lang: None,
+            text: "body".into(),
+            start_line: 100,
+            prefix: Some("[f: lines 100-100 of 5000]".into()),
+            suffix: Some("[4900 more lines — read with offset=101]".into()),
+        };
+        assert_eq!(
+            with_both.to_text(),
+            "[f: lines 100-100 of 5000]\nbody\n[4900 more lines — read with offset=101]"
+        );
+
+        let prefix_only = ToolOutput::Code {
+            lang: None,
+            text: "body".into(),
+            start_line: 100,
+            prefix: Some("[f: lines 100-105 of 105]".into()),
+            suffix: None,
+        };
+        assert_eq!(prefix_only.to_text(), "[f: lines 100-105 of 105]\nbody");
     }
 
     #[test]

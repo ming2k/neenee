@@ -15,7 +15,7 @@ lets a project add capabilities without forking neenee: a database query tool,
 a private API client, a custom linter. The integration is deliberately narrow:
 
 1. **Same execution path.** An MCP tool shares the `Tool` trait, the
-   permission broker, the [tool-round](tool-rounds.md) loop, and the TUI step
+   permission broker, the [tool-round](turns-and-rounds.md) loop, and the TUI step
    renderer with every built-in. The agent does not treat MCP tools specially.
 2. **Local stdio only.** neenee speaks JSON-RPC over a spawned child's
    stdin/stdout. No HTTP, no remote servers — the server runs under the user's
@@ -72,7 +72,7 @@ blocks that one tool call indefinitely.
 The load result is a list of tools plus a status per server, not a single
 `Result`: neenee always starts, with whatever tools loaded. MCP tools are
 spliced into the agent's toolset after the built-ins and before the sub-agent
-tool, so they are visible to [sub-agents](subagents/index.md) when the server
+tool, so they are visible to [sub-agents](subagents.md) when the server
 is `read_only`.
 
 ## The tool wrapper
@@ -175,7 +175,7 @@ sent `SIGKILL`.
   parameter surface and the MCP tools subsection
 - [Plan mode](plan-mode.md) — the access-tier gate and the `.neenee/plans/`
   write exemption
-- [Sub-agents](subagents/index.md) — why `read_only` MCP servers are visible
+- [Sub-agents](subagents.md) — why `read_only` MCP servers are visible
   to sub-agents and write servers are not
 - [Harness architecture](harness.md) — the 8-second MCP init bound and the
   tool permission broker

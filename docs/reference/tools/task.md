@@ -18,5 +18,5 @@ the calling agent, which stays in control of all writes and any user questions.
 
 This page is the parameter reference. The sub-agent mechanism — isolation
 model, event streaming, the TUI zoom view, and why the profile excludes
-`ask_user` — is explained in [Sub-agents](../../explanation/agent-design/subagents/index.md).
+`ask_user` — is explained in [Sub-agents](../../explanation/agent-design/subagents.md).
 See also [ADR-0011](../../adr/0011-subagent-profiles.md).

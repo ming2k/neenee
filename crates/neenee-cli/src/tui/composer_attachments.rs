@@ -53,17 +53,6 @@ pub struct ChipMatch {
     pub end_byte: usize,
 }
 
-impl ChipMatch {
-    /// Re-render this chip with a (possibly) new 1-based number, preserving
-    /// its kind and (for paste chips) line count.
-    fn with_number(&self, number: usize) -> String {
-        match self.kind {
-            ChipKind::Image => image_chip(number),
-            ChipKind::Paste => paste_chip(number, self.line_count.unwrap_or(0)),
-        }
-    }
-}
-
 /// Build the `[Image #N]` label staged behind a pasted image attachment.
 pub fn image_chip(number_one_based: usize) -> String {
     format!("[Image #{number_one_based}]")

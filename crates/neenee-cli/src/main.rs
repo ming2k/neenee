@@ -4,7 +4,7 @@ use neenee_agent::orchestration::{
     compact_turn_history, emit_pursuit_updated, refresh_agent_pursuit, send_compaction,
     send_harness_state, start_interactive_turn, start_pursuit, start_repeat_scheduler, turn,
     CompactionSettings, InteractiveTurnContext, MidTurnPruneGate, ProxyProvider, PursuitContext,
-    RelayCompactionHooks, TurnInput,
+    TurnInput,
 };
 #[cfg(test)]
 use neenee_agent::orchestration::{execute_turn, retry_delay_ms, TurnContext};
@@ -30,7 +30,7 @@ use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
 use neenee_tools::mcp::load_mcp_tools;
 use neenee_tools::project::init_neenee_config;
 use neenee_tools::BashTool;
-#[allow(dead_code)]
+mod hooks;
 mod tui;
 
 mod pursuits;
@@ -269,6 +269,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_hard_stop_rounds(config.agent.hard_stop_rounds);
     agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
 
+    // Lifecycle event hooks (ADR-0025): each `[[hooks]]` entry runs a shell
+    // command at one lifecycle point (PreToolUse / PostToolUse / Stop / …).
+    agent.set_hooks(hooks::build_hook_registry(&config.hooks));
+
     // Tie the agent and its pursuit persistence to this session/thread.
     let thread_id = session.id().await;
     agent.set_thread_id(&thread_id);
@@ -324,6 +328,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The agent background task takes ownership of `config`; pull the TUI
     // presentation config out first so it can be handed to the TUI later.
     let tui_config = config.tui.clone();
+    // Keep an Arc handle on the main thread so SessionEnd hooks (ADR-0025) can
+    // fire after the TUI returns — the background task below moves `agent`.
+    let agent_for_session_end = Arc::clone(&agent);
     tokio::spawn(async move {
         send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
@@ -1109,16 +1116,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &config,
                                 active_context_window(&agent),
                             );
-                            let hooks = RelayCompactionHooks {
-                                tx: resp_tx.clone(),
-                                session_id: session.id().await,
-                            };
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Activity("compacting context".to_string()),
+                            ));
+                            let extra = agent.fire_pre_compact().await;
                             match compact_turn_history(
                                 &mut current,
                                 &session,
                                 &settings,
                                 Some(agent.provider.clone()),
-                                &hooks,
+                                extra,
                             )
                             .await
                             {
@@ -1138,6 +1146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = resp_tx.send(AgentResponse::Error(error));
                                 }
                             }
+                            agent.fire_post_compact().await;
                         }
                         Some(BuiltinCmd::Pursue) => {
                             let thread_id = session.id().await;
@@ -1189,7 +1198,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             if rest == "status" {
-                                refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
+    refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
+
+    // SessionStart hooks (ADR-0025): inject setup context before the first
+    // turn. Resume vs fresh start is surfaced so a hook can branch.
+    {
+        let source = match &startup {
+            StartupMode::Resume(_) => neenee_core::SessionSource::Resume,
+            _ => neenee_core::SessionSource::Startup,
+        };
+        let mut history = history.lock().await;
+        agent.fire_session_start(source, &mut history).await;
+    }
                                 let armed = agent.is_pursuit_armed();
                                 let iterations = agent.pursuit_iterations();
                                 let message = match agent.get_pursuit() {
@@ -1786,6 +1806,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     {
         Ok(history) => {
+            // SessionEnd hooks (ADR-0025): observers fire on clean exit.
+            agent_for_session_end.fire_session_end().await;
             let _ = Config::save_history(&history);
         }
         Err(e) => return Err(e),

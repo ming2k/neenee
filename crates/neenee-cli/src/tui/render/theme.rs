@@ -43,8 +43,6 @@ pub struct Theme {
     pub element_bg: Color,
     /// Background for menus / suggestion popups.
     pub menu_bg: Color,
-    /// Tinted band behind the user's own messages (no role label is shown).
-    pub user_bg: Color,
     /// Dim overlay drawn behind modals to fake alpha.
     pub backdrop: Color,
     /// Brightness multiplier (0.0–1.0) applied to every cell of the live
@@ -86,7 +84,6 @@ impl Default for Theme {
             user_panel_bg_queued: Color::Rgb(9, 12, 11),
             element_bg: Color::Rgb(21, 23, 22),
             menu_bg: Color::Rgb(17, 19, 18),
-            user_bg: Color::Rgb(18, 24, 21),
             backdrop: Color::Rgb(3, 4, 4),
             // Halves surface luminance behind a dim-recess modal — clearly
             // recessed for focus, still readable for context.
@@ -133,10 +130,6 @@ impl Theme {
     /// [`Theme::user_surface`] so pending reads differently from delivered.
     pub fn user_surface_queued(&self) -> Color {
         self.user_panel_bg_queued
-    }
-    /// Tint behind the user's own messages.
-    pub fn user_tint(&self) -> Color {
-        self.user_bg
     }
     /// Dim overlay behind modals.
     pub fn backdrop(&self) -> Color {

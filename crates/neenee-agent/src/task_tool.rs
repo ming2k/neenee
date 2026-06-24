@@ -186,6 +186,15 @@ impl TaskTool {
             pursuit_service,
             SkillRegistry::empty(),
         );
+        // Sub-agents are autonomous and non-interactive: no user is reachable
+        // to answer permission prompts. The bound profile already enforces the
+        // safety boundary (EXPLORE admits only Read tools, VERIFY admits
+        // Read + Execute but not Write), so auto-approving within that boundary
+        // is safe — profile admission IS the permission gate. Without this,
+        // an Execute-tier tool (bash) in the VERIFY profile would emit a
+        // `PermissionRequest` that `forward_event` silently drops, deadlocking
+        // the sub-agent on the unanswered oneshot receiver.
+        sub_agent.set_auto_approve(true);
         // Sub-agents are short-lived and read-only by profile, and session
         // review is on-demand (`/review`) with no automatic firing — so a
         // research sub-agent never pays for a diagnostic and review can never

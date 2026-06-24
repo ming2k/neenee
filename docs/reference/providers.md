@@ -135,7 +135,7 @@ terminal so tool side effects are never replayed.
 
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   providers differ on tool and reasoning support
-- [Tool rounds](../explanation/agent-design/tool-rounds.md) — how the universal
+- [Tool rounds](../explanation/agent-design/turns-and-rounds.md) — how the universal
   fallback covers providers without native tools
 - [How to add a provider](../how-to/add-a-provider.md) — implementing a new
   adapter

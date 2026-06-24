@@ -10,52 +10,37 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use neenee_core::{Provider, Tool, ToolAccess, VERIFY};
+use neenee_core::{Message, Provider, Role, Tool, ToolAccess};
 
 use crate::plan::PlanToolContext;
-use crate::task_tool::TaskTool;
 
-/// Spawn an independent verifier sub-agent that re-reads the active plan
-/// and the current state of the workspace, then reports PASS / PARTIAL /
-/// FAIL for each section with concrete evidence.
-///
-/// Internally constructs a `TaskTool` with the same provider + read-only
-/// toolset as the parent agent, so the verifier inherits the parent's
-/// capabilities without write access. The call still streams as a nested
-/// tool step in the TUI (since the underlying `TaskTool` emits SubTask
-/// events through `call_structured_with_events`).
+/// A lightweight pipeline verifier that replaces the old heavy sub-agent.
+/// 
+/// Phase 1: Deterministic Checks — extracts commands from the plan's `Test Plan`
+/// section and runs them directly via bash.
+/// Phase 2: Lightweight LLM Review — feeds the plan and test outputs to a single
+/// `provider.chat()` call for a fast, token-efficient verdict.
 pub struct VerifyPlanExecutionTool {
-    task: Arc<TaskTool>,
+    provider: Arc<dyn Provider>,
     context: PlanToolContext,
 }
 
 impl VerifyPlanExecutionTool {
-    /// `provider` and `tools` should be the same values the parent
-    /// `TaskTool` was constructed with, so the verifier inherits the same
-    /// capabilities. `context` is the shared plan context so we can pull
-    /// the active plan path. The internal `TaskTool` binds the `VERIFY`
-    /// profile so the verifier gets read tools *plus* command execution
-    /// (tests/builds/type-checks) but no file-write, no user interaction,
-    /// and no recursion. See ADR-0012.
     pub fn new(
         provider: Arc<dyn Provider>,
-        tools: Vec<Arc<dyn Tool>>,
+        _tools: Vec<Arc<dyn Tool>>,
         context: PlanToolContext,
     ) -> Self {
-        Self {
-            task: Arc::new(TaskTool::new(provider, tools, &VERIFY)),
-            context,
-        }
+        Self { provider, context }
     }
 }
 
 const VERIFY_DESCRIPTION: &str =
-    "Spawn an independent verifier sub-agent that re-reads the active plan and the current state \
-     of the workspace, then reports PASS / PARTIAL / FAIL for each section with concrete evidence \
-     (file paths, command output). Call this before declaring the plan complete. The verifier \
-     runs with a clean context and read-only tools, so it is not biased by what you wrote during \
-     implementation. Address every PARTIAL and FAIL before reporting completion to the user. \
-     Optional `plan_path` overrides the active plan path; if omitted, the active plan is used.";
+    "Run the plan verification pipeline. This automatically extracts and executes \
+     commands from the plan's `Test Plan` section, then performs a lightweight LLM \
+     review to produce a PASS / PARTIAL / FAIL verdict per section. Call this before \
+     declaring the plan complete. Address every PARTIAL and FAIL before reporting \
+     completion to the user.";
 
 #[async_trait]
 impl Tool for VerifyPlanExecutionTool {
@@ -73,8 +58,7 @@ impl Tool for VerifyPlanExecutionTool {
             "properties": {
                 "focus": {
                     "type": "string",
-                    "description": "Optional section name or concern to focus the verifier on. \
-                                    When omitted the verifier walks every section of the plan."
+                    "description": "Optional section name or concern to focus the verifier on."
                 }
             },
             "additionalProperties": false
@@ -82,76 +66,142 @@ impl Tool for VerifyPlanExecutionTool {
     }
 
     fn access(&self) -> ToolAccess {
-        ToolAccess::Read
+        // Technically executes bash commands internally, but it does so via its own
+        // deterministic extraction from the approved plan, not from model arguments.
+        ToolAccess::Execute
     }
 
-    /// `verify_plan_execution` delegates to an internal `TaskTool`, i.e. it
-    /// spawns a sub-agent; profiles exclude it alongside `task`.
     fn spawns_subagent(&self) -> bool {
-        true
+        // No longer spawns a heavy TaskTool sub-agent
+        false
     }
 
     fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
-        // Verification is a Build-mode concern (it audits implementation
-        // work). In Plan mode there is nothing to verify, so block it via
-        // the default gate by returning false. The agent's gate check
-        // uses `access() == Read` as the default, which would allow this
-        // tool — so we explicitly opt back into the gate here.
         false
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
-        // Parse optional `focus`.
         let focus = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
             .and_then(|v| v.get("focus")?.as_str().map(str::to_string))
             .filter(|s| !s.trim().is_empty());
 
-        // Resolve plan path: explicit override → active plan → error.
         let plan_path = self
             .context
             .active_plan_path()
             .ok_or_else(|| "No active plan to verify. Call plan_exit first.".to_string())?;
 
         let plan_display = plan_path.display().to_string();
+        let plan_content = std::fs::read_to_string(&plan_path)
+            .map_err(|e| format!("Could not read plan {}: {}", plan_display, e))?;
 
-        // Build the verifier task prompt. The *role* framing (independent,
-        // unbiased, may run commands, must not edit, non-interactive) lives
-        // in the `VERIFY` profile's system prompt; this user prompt carries
-        // only the task-specific contract: the plan path, the per-section
-        // PASS/PARTIAL/FAIL procedure, and the final verdict line.
+        // Phase 1: Deterministic Checks
+        // Simple extraction: look for code blocks or list items in the Test Plan section
+        let mut test_commands = Vec::new();
+        let mut in_test_plan = false;
+        let mut in_code_block = false;
+
+        for line in plan_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("## ") {
+                in_test_plan = trimmed.to_lowercase().contains("test plan");
+                continue;
+            }
+            if !in_test_plan {
+                continue;
+            }
+
+            if trimmed.starts_with("```") {
+                in_code_block = !in_code_block;
+                continue;
+            }
+
+            if in_code_block && !trimmed.is_empty() {
+                test_commands.push(trimmed.to_string());
+            } else if trimmed.starts_with("- `") && trimmed.ends_with("`") {
+                test_commands.push(trimmed[3..trimmed.len() - 1].to_string());
+            }
+        }
+
+        // Phase 1.5 removed: user-configured verification commands now live on
+        // the lifecycle hook bus (ADR-0025) rather than a bespoke
+        // `[hooks] pre_complete` table.
+
+        let mut check_results = String::new();
+        if test_commands.is_empty() {
+            check_results.push_str("No deterministic test commands found in the Test Plan section.\n");
+        } else {
+            for cmd in test_commands {
+                check_results.push_str(&format!("> {}\n", cmd));
+                match tokio::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await
+                {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if output.status.success() {
+                            check_results.push_str("[PASS]\n");
+                            if !stdout.trim().is_empty() {
+                                check_results.push_str(&format!("{}\n", stdout.trim()));
+                            }
+                        } else {
+                            check_results.push_str(&format!("[FAIL] Exit code: {}\n", output.status));
+                            if !stdout.trim().is_empty() {
+                                check_results.push_str(&format!("STDOUT:\n{}\n", stdout.trim()));
+                            }
+                            if !stderr.trim().is_empty() {
+                                check_results.push_str(&format!("STDERR:\n{}\n", stderr.trim()));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        check_results.push_str(&format!("[ERROR] Failed to execute: {}\n", e));
+                    }
+                }
+                check_results.push('\n');
+            }
+        }
+
+        // Phase 2: Lightweight LLM Review
         let focus_clause = match &focus {
             Some(f) => format!("Focus especially on: {f}.\n\n", f = f),
             None => String::new(),
         };
+
         let prompt = format!(
             "Verify the implementation against the approved plan.\n\n\
-             Step 1. Read the plan at {path}.\n\n\
-             Step 2. For each `##` section in the plan, examine the current state of the \
-             workspace (read_file, grep, glob, list_dir, bash for tests / builds / \
-             type-checks). Look for concrete evidence that the section's work was done.\n\n\
-             Step 3. Report each section as PASS, PARTIAL, or FAIL with the evidence:\n\
-             - PASS: name a file or command output that confirms the section is done.\n\
-             - PARTIAL: name what is done and what is missing.\n\
-             - FAIL: name what is wrong or absent.\n\n\
-             {focus}Step 4. End with a one-line VERDICT: PASS / PARTIAL / FAIL summarizing \
-             the whole plan. Do not echo the implementer's claims — only what you \
-             directly observed.",
+             Plan at {path}:\n\
+             {plan_content}\n\n\
+             Phase 1 Deterministic Check Results:\n\
+             {check_results}\n\n\
+             Phase 2 Review Task: \n\
+             Based on the plan requirements and the deterministic check results above, \
+             report the status of each `##` section as PASS, PARTIAL, or FAIL. \n\
+             - PASS: The check results prove it is done, or it requires no code changes.\n\
+             - PARTIAL: Some parts are done, but evidence is missing for others.\n\
+             - FAIL: The check results show failure, or crucial steps are clearly missing.\n\n\
+             {focus}End with a one-line VERDICT: PASS / PARTIAL / FAIL summarizing the whole plan.",
             path = plan_display,
+            plan_content = plan_content,
+            check_results = check_results,
             focus = focus_clause,
         );
 
-        let task_args = serde_json::json!({
-            "description": format!("Verify plan at {}", plan_display),
-            "prompt": prompt,
-        });
-        // Delegate to the underlying TaskTool. We use `call` (the simple
-        // variant) so the result comes back as a string the parent agent
-        // can read; the trade-off is that the nested tool step in the TUI
-        // will not stream sub-agent tokens live. A future iteration can
-        // implement call_structured_with_events here too.
-        let arguments_string = serde_json::to_string(&task_args)
-            .map_err(|e| format!("could not serialize verifier task: {e}"))?;
-        self.task.call(&arguments_string).await
+        let message = Message::new(Role::User, prompt);
+        let result = self.provider.chat(vec![message]).await
+            .map_err(|e| format!("LLM review failed: {}", e))?;
+
+        let mut final_output = format!("## Deterministic Checks\n\n{}\n\n## LLM Review\n\n{}", check_results, result.content);
+        
+        // Ensure the output is not overwhelmingly large if tests spam output
+        if final_output.len() > 8000 {
+            final_output.truncate(8000);
+            final_output.push_str("\n...[output truncated due to length]");
+        }
+
+        Ok(final_output)
     }
 }

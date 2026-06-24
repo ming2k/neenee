@@ -23,6 +23,8 @@ pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 pub mod capability;
 pub mod catalog;
+pub mod hooks;
+pub mod db;
 pub mod events;
 pub mod mcp;
 pub mod model;
@@ -41,6 +43,9 @@ pub mod tool_call;
 pub mod tool_registry;
 pub mod webconfig;
 pub use capability::{ContextReliefGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
+pub use hooks::{
+    Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource,
+};
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
@@ -52,9 +57,8 @@ pub use events::{
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
-    effective_pressure_tokens, estimate_chars, estimate_tokens, prune_tool_results,
-    CompactionPolicy, ContextBudget, PruneOutcome, CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX,
-    PRUNED_TOOL_PLACEHOLDER,
+    estimate_chars, estimate_tokens, prune_tool_results, CompactionPolicy, ContextBudget,
+    PruneOutcome, CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, PRUNED_TOOL_PLACEHOLDER,
 };
 pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
 pub use session_title::{clean_title, TITLE_MAX_LEN};

@@ -49,8 +49,9 @@ impl BlobStore {
         fs::read(&path).ok()
     }
 
-    /// True if the blob exists locally.
-    #[allow(dead_code)]
+    /// True if the blob exists locally. Test-only today; production code reads
+    /// blobs directly and treats a miss as absence.
+    #[cfg(test)]
     pub fn exists(&self, hash: &str) -> bool {
         self.path(hash).exists()
     }

@@ -25,6 +25,7 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 include_dir = "0.7"
 inventory = "0.3"
+regex = "1"
 
 [dev-dependencies]
 neenee-tools = { path = "../neenee-tools" }

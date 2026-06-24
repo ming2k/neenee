@@ -41,6 +41,20 @@ pub struct RepeatStore {
     conn: Arc<std::sync::Mutex<Connection>>,
 }
 
+/// Versioned schema migrations for the `repeat_jobs` table.
+///
+/// Driven by `PRAGMA user_version`. See ADR-0024.
+fn migrations() -> &'static [crate::db::Migration] {
+    &[crate::db::Migration {
+        version: 1,
+        description: "create repeat_jobs",
+        apply: |conn| {
+            conn.execute(SCHEMA, [])?;
+            Ok(())
+        },
+    }]
+}
+
 impl Clone for RepeatStore {
     fn clone(&self) -> Self {
         Self {
@@ -66,10 +80,10 @@ impl RepeatStore {
 
     /// Synchronous in-memory constructor for tests run outside an async context.
     pub fn open_in_memory_blocking() -> Result<Self, String> {
-        let conn = Connection::open_in_memory()
+        let mut conn = Connection::open_in_memory()
             .map_err(|err| format!("failed to open in-memory db: {err}"))?;
-        conn.execute(SCHEMA, [])
-            .map_err(|err| format!("failed to create repeat_jobs table: {err}"))?;
+        crate::db::migrate(&mut conn, migrations())
+            .map_err(|err| format!("repeat migrate failed: {err}"))?;
         Ok(Self {
             conn: Arc::new(std::sync::Mutex::new(conn)),
         })
@@ -78,9 +92,9 @@ impl RepeatStore {
     async fn migrate(&self) -> Result<(), String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|err| err.to_string())?;
-            conn.execute(SCHEMA, [])
-                .map_err(|err| format!("failed to create repeat_jobs table: {err}"))?;
+            let mut conn = conn.lock().map_err(|err| err.to_string())?;
+            crate::db::migrate(&mut conn, migrations())
+                .map_err(|err| format!("repeat migrate failed: {err}"))?;
             Ok::<_, String>(())
         })
         .await

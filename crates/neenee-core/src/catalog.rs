@@ -51,13 +51,14 @@ impl Transport {
 /// One delivery path for a [`ProviderEntry`].
 ///
 /// A channel pairs a [`Transport`] with resolved credentials (`api_key`) and
-/// the wire `model` id. Phase 1 of ADR-0002 materializes exactly one channel
-/// per entry from the legacy per-provider config fields; later phases introduce
-/// multiple channels per model (e.g. Gemini via Studio, Vertex, or a relay).
+/// the wire `model` id. Built-in presets materialize exactly one channel per
+/// entry (id `"default"`); user-defined entries may declare several channels
+/// per model (e.g. Gemini via Studio, Vertex, or a relay), with the entry's
+/// `default_channel` selecting one. See ADR-0002.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// Stable identifier within the model (e.g. `"studio"`, `"vertex"`).
-    /// Phase 1 entries use `"default"`.
+    /// Built-in presets use `"default"`.
     pub id: String,
     /// Display label shown in the picker (e.g. `"Google Studio"`).
     pub label: String,

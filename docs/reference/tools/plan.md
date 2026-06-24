@@ -52,5 +52,5 @@ evidence. Call this before declaring the plan complete. Blocked in Plan mode
 (no plan to verify). The verifier binds the `VERIFY` profile (ceiling
 `Execute`), so it can run `bash` for tests/builds/type-checks as evidence but
 cannot edit files, ask the user, or recurse. See
-[Plan verification](../../explanation/agent-design/subagents/plan-verification.md)
+[Plan verification](../../explanation/agent-design/subagents.md#plan-verification)
 and [ADR-0012](../../adr/0012-toolaccess-tier-split.md).

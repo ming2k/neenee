@@ -100,6 +100,12 @@ pub enum SelectionState {
     /// (`row * ncols + col`, with the header as row 0) so it maps back to the
     /// block's headers/rows. Selecting a cell grabs its full (possibly
     /// line-wrapped) text without bleeding into adjacent cells or borders.
+    ///
+    /// Scaffolded but not yet constructed: the selection state, the
+    /// `get_selected_text` cell branch, and the `LayoutMap` table-grid bookkeeping
+    /// are in place, but no input path produces a cell selection yet. Targeted
+    /// allow until the table-cell drag handler lands.
+    #[allow(dead_code)]
     TableCell {
         message_idx: usize,
         block_idx: usize,
@@ -113,14 +119,6 @@ pub enum SelectionState {
 }
 
 impl SelectionState {
-    pub fn is_none(&self) -> bool {
-        matches!(self, SelectionState::None)
-    }
-
-    pub fn is_active(&self) -> bool {
-        !self.is_none()
-    }
-
     /// Start a new range selection at the given cursor.
     pub fn start_range(anchor: SemanticCursor) -> Self {
         SelectionState::Range {
@@ -163,53 +161,6 @@ impl SelectionState {
         }
     }
 
-    /// Check if a given block is part of the current selection.
-    pub fn contains_block(&self, message_idx: usize, block_idx: usize) -> bool {
-        match self {
-            SelectionState::Block {
-                message_idx: mi,
-                block_idx: bi,
-            } => *mi == message_idx && *bi == block_idx,
-            SelectionState::TableCell {
-                message_idx: mi,
-                block_idx: bi,
-                ..
-            } => *mi == message_idx && *bi == block_idx,
-            SelectionState::Range { anchor, head } => {
-                let (start, end) = if anchor <= head {
-                    (*anchor, *head)
-                } else {
-                    (*head, *anchor)
-                };
-                let target = SemanticCursor::new(message_idx, block_idx, 0);
-                // Target block is selected if its cursor falls within the range.
-                // For simplicity we treat block granularity: any overlap means selected.
-                target >= start && target <= end
-            }
-            SelectionState::None => false,
-        }
-    }
-
-    /// Check if a specific byte offset within a block is selected.
-    pub fn contains_byte(&self, message_idx: usize, block_idx: usize, byte_offset: usize) -> bool {
-        match self {
-            SelectionState::Block {
-                message_idx: mi,
-                block_idx: bi,
-            } => *mi == message_idx && *bi == block_idx,
-            SelectionState::TableCell { .. } => false,
-            SelectionState::Range { anchor, head } => {
-                let (start, end) = if anchor <= head {
-                    (*anchor, *head)
-                } else {
-                    (*head, *anchor)
-                };
-                let cursor = SemanticCursor::new(message_idx, block_idx, byte_offset);
-                cursor >= start && cursor <= end
-            }
-            SelectionState::None => false,
-        }
-    }
 }
 
 /// Extract the selected text from the document model.
@@ -383,16 +334,6 @@ impl SelectionDrag {
         self.active = true;
         self.anchor = Some(cursor);
         self.cell_constraint = Some(cell);
-    }
-
-    pub fn update(&mut self, cursor: SemanticCursor) -> SelectionState {
-        match self.anchor {
-            Some(anchor) => SelectionState::Range {
-                anchor,
-                head: cursor,
-            },
-            None => SelectionState::None,
-        }
     }
 
     pub fn end(&mut self) {

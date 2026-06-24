@@ -116,15 +116,22 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read the full contents of a file. Use this when you need to see code or text content."
+        "Read the full contents of a file as text. Use when you need to see \
+         code or text. Supports `offset` (1-based start line) and `limit` \
+         (max lines). Output is paginated by whole lines with a byte budget, \
+         so a large read returns the first chunk plus a concrete \
+         `offset=<next>` to continue — always advance to that exact offset \
+         and never re-read the same range. The result declares its line range \
+         (`lines A-B of N`); an empty range means you are past EOF. Prefer \
+         `offset`/`limit` over re-issuing the same full read."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Absolute or relative path to the file" },
-                "offset": { "type": "integer", "description": "Optional line offset (1-based) to start reading from" },
-                "limit": { "type": "integer", "description": "Optional max number of lines to read" }
+                "offset": { "type": "integer", "description": "1-based line to start reading from (default 1)" },
+                "limit": { "type": "integer", "description": "Maximum number of lines to read (default: to EOF / until the byte budget is hit)" }
             },
             "required": ["path"]
         })
@@ -148,37 +155,110 @@ impl Tool for ReadFileTool {
         let limit = args["limit"].as_u64().unwrap_or(0) as usize;
 
         let lines: Vec<&str> = content.lines().collect();
-        let start = offset - 1;
-        let end = if limit > 0 {
-            (start + limit).min(lines.len())
-        } else {
-            lines.len()
-        };
-
+        let total_lines = lines.len();
         let lang = std::path::Path::new(path)
             .extension()
             .map(|e| e.to_string_lossy().to_string());
-        if start >= lines.len() {
+
+        // Empty file / offset past EOF: nothing to show. Surface an explicit,
+        // machine-actionable note so the model does NOT re-read in a loop
+        // wondering whether the call failed. `text` stays empty (the renderer
+        // draws nothing) and the note explains why via `to_text()`.
+        let start = offset - 1;
+        if total_lines == 0 {
             return Ok(neenee_core::ToolOutput::Code {
                 lang,
                 text: String::new(),
+                start_line: offset,
+                prefix: Some(format!("[{}: empty file]", path)),
+                suffix: None,
             });
         }
-        let slice = &lines[start..end];
-        let result = slice.join("\n");
+        if start >= total_lines {
+            return Ok(neenee_core::ToolOutput::Code {
+                lang,
+                text: String::new(),
+                start_line: offset,
+                prefix: Some(format!(
+                    "[{}: offset {} is past end of file ({} line{})]",
+                    path,
+                    offset,
+                    total_lines,
+                    if total_lines == 1 { "" } else { "s" }
+                )),
+                suffix: None,
+            });
+        }
 
-        // Offload very large outputs
-        let text = if result.len() > 8000 {
-            format!(
-                "[Output truncated: {} lines, {} chars total]\n{}\n\n[Use offset/limit or read_file to see more]",
-                lines.len(),
-                content.len(),
-                truncate_utf8(&result, 4000)
-            )
+        // Requested window [start, requested_end): offset..offset+limit
+        // (limit 0 = to EOF). We then snap this to a byte budget AT LINE
+        // BOUNDARIES, which is what makes pagination deterministic and
+        // loop-safe: every read returns whole lines plus a concrete
+        // continuation offset, so the model can always compute the next
+        // `offset` and can never get stuck re-truncating the same window
+        // (the old char-mid-cut + "use offset/limit" with no number could).
+        // The first line is always included even if it alone exceeds the
+        // budget, so a read always makes forward progress.
+        const READ_BUDGET_BYTES: usize = 8000;
+        let requested_end = if limit > 0 {
+            (start + limit).min(total_lines)
         } else {
-            result
+            total_lines
         };
-        Ok(neenee_core::ToolOutput::Code { lang, text })
+        let mut used = 0usize;
+        let mut shown_end = start; // exclusive index into `lines`
+        for i in start..requested_end {
+            let cost = lines[i].len() + 1; // +1 for the '\n' we rejoin with
+            if i > start && used + cost > READ_BUDGET_BYTES {
+                break;
+            }
+            used += cost;
+            shown_end = i + 1;
+        }
+
+        let text = lines[start..shown_end].join("\n");
+        // 1-based range of what we actually returned.
+        let first_line = offset; // == start + 1
+        let last_line = shown_end; // exclusive 0-based index → 1-based last
+        let more_remain = shown_end < total_lines;
+
+        // Model-facing framing. Omitted entirely for the plain "read whole
+        // small file from line 1" case (zero overhead, byte-identical to the
+        // legacy model output); added whenever position or pagination matters
+        // so the model always knows where it is and how to continue. The
+        // renderer ignores prefix/suffix and gutter-numbers `text`.
+        let (prefix, suffix) = if offset == 1 && !more_remain {
+            (None, None)
+        } else {
+            let header = format!(
+                "[{}: lines {}-{} of {}{}]",
+                path,
+                first_line,
+                last_line,
+                total_lines,
+                if more_remain { "" } else { " (end of file)" }
+            );
+            let suffix = if more_remain {
+                let remaining = total_lines - shown_end;
+                Some(format!(
+                    "[{} more line{} below — read with offset={}]",
+                    remaining,
+                    if remaining == 1 { "" } else { "s" },
+                    shown_end + 1
+                ))
+            } else {
+                None
+            };
+            (Some(header), suffix)
+        };
+
+        Ok(neenee_core::ToolOutput::Code {
+            lang,
+            text,
+            start_line: offset,
+            prefix,
+            suffix,
+        })
     }
 }
 
@@ -1130,5 +1210,235 @@ mod tests {
         // Non-plan paths are not exempted, even though the tools are write-capable.
         assert!(!write.allowed_in_plan_mode(src_args));
         assert!(!edit.allowed_in_plan_mode(src_args));
+    }
+
+    #[tokio::test]
+    async fn read_file_carries_offset_as_start_line() {
+        // The structured `Code::start_line` is the contract the renderer relies
+        // on to number an offset snippet from its true file line. A read with
+        // `offset: 3` must surface `start_line: 3` (and only the post-offset
+        // content), while a plain read reports `start_line: 1`.
+        let dir =
+            std::env::temp_dir().join(format!("neenee-read-start-line-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lines.txt");
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+        let tool = ReadFileTool;
+
+        let full = tool
+            .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &path.to_string_lossy()))
+            .await
+            .unwrap();
+        match full {
+            neenee_core::ToolOutput::Code {
+                start_line, text, ..
+            } => {
+                assert_eq!(start_line, 1);
+                assert!(text.starts_with("one"));
+            }
+            _ => panic!("expected Code"),
+        }
+
+        let offset = tool
+            .call_structured(
+                &r#"{"path":"PATH","offset":3}"#.replace("PATH", &path.to_string_lossy()),
+            )
+            .await
+            .unwrap();
+        match offset {
+            neenee_core::ToolOutput::Code {
+                start_line, text, ..
+            } => {
+                assert_eq!(start_line, 3);
+                assert_eq!(text, "three\nfour\nfive");
+            }
+            _ => panic!("expected Code"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Pull `(text, prefix, suffix)` out of a `Code` output for assertions.
+    fn code_parts(
+        out: neenee_core::ToolOutput,
+    ) -> (String, Option<String>, Option<String>) {
+        match out {
+            neenee_core::ToolOutput::Code {
+                text,
+                prefix,
+                suffix,
+                ..
+            } => (text, prefix, suffix),
+            _ => panic!("expected Code output"),
+        }
+    }
+
+    /// A file whose every line is exactly `line_width` chars so the byte-budget
+    /// math is predictable in the pagination tests below.
+    fn make_fixed_width_file(line_count: usize) -> (std::path::PathBuf, Vec<String>) {
+        let dir = std::env::temp_dir()
+            .join(format!("neenee-read-paginate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.txt");
+        let lines: Vec<String> = (1..=line_count).map(|n| format!("line{n:05}")).collect();
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        (path, lines)
+    }
+
+    #[tokio::test]
+    async fn plain_small_read_has_no_framing() {
+        // The common case stays byte-identical to the legacy model output:
+        // no prefix/suffix, so we don't tax every small read.
+        let dir =
+            std::env::temp_dir().join(format!("neenee-read-plain-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+
+        let out = ReadFileTool
+            .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &path.to_string_lossy()))
+            .await
+            .unwrap();
+        let (text, prefix, suffix) = code_parts(out);
+        assert_eq!(text, "a\nb\nc");
+        assert!(prefix.is_none());
+        assert!(suffix.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_read_paginates_with_concrete_non_overlapping_continuation() {
+        // 3000 lines × 10 bytes ("lineNNNNN\n") = 30KB. The 8000-byte budget
+        // holds ~800 lines per page. The tool MUST return whole lines, declare
+        // the range, and give an exact next offset — and following that offset
+        // must continue without overlap or gap (the loop-safety contract).
+        const LINES: usize = 3000;
+        const PAGE: usize = 800; // 8000 / (9 + 1)
+        let (path, lines) = make_fixed_width_file(LINES);
+        let tool = ReadFileTool;
+        let arg = |offset: usize| {
+            format!(
+                r#"{{"path":"{}","offset":{}}}"#,
+                path.to_string_lossy(),
+                offset
+            )
+        };
+
+        // Page 1: lines 1..=800, continuation offset = 801.
+        let (text1, pre1, suf1) = code_parts(tool.call_structured(&arg(1)).await.unwrap());
+        assert_eq!(
+            pre1,
+            Some(format!(
+                "[{}: lines 1-{} of {}]",
+                path.to_string_lossy(),
+                PAGE,
+                LINES
+            ))
+        );
+        let suf1 = suf1.expect("page 1 has a continuation suffix");
+        assert!(
+            suf1.contains("offset=801"),
+            "suffix must name the exact next offset, got: {suf1}"
+        );
+        assert_eq!(text1.lines().count(), PAGE);
+        assert_eq!(text1.lines().next().unwrap(), "line00001");
+        assert_eq!(text1.lines().last().unwrap(), &format!("line{:05}", PAGE));
+
+        // Page 2 from the advertised offset: must start exactly at 801 (no gap)
+        // and not repeat line 800 (no overlap) — this is what breaks the loop.
+        let (text2, _pre2, suf2) = code_parts(tool.call_structured(&arg(801)).await.unwrap());
+        assert_eq!(text2.lines().next().unwrap(), "line00801", "no gap");
+        assert!(
+            !text2.lines().any(|l| l == "line00800"),
+            "no overlap with previous page"
+        );
+        assert_eq!(text2.lines().count(), PAGE);
+        assert!(
+            suf2.expect("page 2 suffix").contains("offset=1601"),
+            "continuation advances"
+        );
+
+        // Final page reaches EOF and carries no continuation suffix.
+        let (text_last, _pre, suf_last) =
+            code_parts(tool.call_structured(&arg(LINES - PAGE + 1)).await.unwrap());
+        assert_eq!(
+            text_last.lines().last().unwrap(),
+            &format!("line{:05}", LINES),
+            "lands exactly on the last line"
+        );
+        assert!(suf_last.is_none(), "no suffix at EOF");
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_limit_is_line_bounded_not_re_truncated() {
+        // Regression for the real infinite-loop trap: requesting a huge `limit`
+        // on a big file used to keep the slice over budget, re-truncate the
+        // same window, and emit a generic "use offset/limit" with no number.
+        // Now the window is line-bounded and the continuation is concrete, so
+        // the model advances instead of looping.
+        const LINES: usize = 3000;
+        let (path, _lines) = make_fixed_width_file(LINES);
+        let arg = format!(
+            r#"{{"path":"{}","limit":{}}}"#,
+            path.to_string_lossy(),
+            LINES
+        );
+        let (text, _pre, suf) = code_parts(ReadFileTool.call_structured(&arg).await.unwrap());
+        // Far fewer than the requested 3000 lines — bounded by the budget.
+        assert!(text.lines().count() < LINES);
+        assert!(
+            suf.expect("oversized limit still paginates").contains("offset="),
+            "gives a concrete next offset rather than a generic hint"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_and_past_eof_reads_explain_themselves() {
+        // Both cases used to return a bare empty string, which a model can
+        // mistake for a failure and re-read in a loop. They now carry an
+        // explicit note via the model-facing prefix.
+        let dir = std::env::temp_dir()
+            .join(format!("neenee-read-edge-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let empty = dir.join("empty.txt");
+        std::fs::write(&empty, "").unwrap();
+        let (text, pre, suf) = code_parts(
+            ReadFileTool
+                .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &empty.to_string_lossy()))
+                .await
+                .unwrap(),
+        );
+        assert!(text.is_empty());
+        assert!(
+            pre.as_ref().is_some_and(|p| p.contains("empty file")),
+            "pre={pre:?}"
+        );
+        assert!(suf.is_none());
+
+        let small = dir.join("small.txt");
+        std::fs::write(&small, "a\nb\n").unwrap();
+        let (text, pre, suf) = code_parts(
+            ReadFileTool
+                .call_structured(
+                    &r#"{"path":"PATH","offset":99}"#.replace("PATH", &small.to_string_lossy()),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(text.is_empty());
+        assert!(
+            pre.as_ref().is_some_and(|p| p.contains("past end of file")),
+            "pre={pre:?}"
+        );
+        assert!(suf.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

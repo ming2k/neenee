@@ -18,11 +18,11 @@ variation on these themes rather than a one-off mechanism.
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
 | **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: Plan mode and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Plan mode](plan-mode.md), [MCP servers](mcp.md) |
-| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Sub-agents](subagents/index.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
-| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Pursuit identity is persisted in SQLite; the stop-gate is in-memory; sub-agent context is fresh per call. | [Pursuits](pursuits.md), [Sub-agents](subagents/index.md) |
-| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents/index.md), [Harness architecture](harness.md) |
-| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Tool rounds](tool-rounds.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
-| **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents/index.md) |
+| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Sub-agents](subagents.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. Pursuit identity is persisted in SQLite; the stop-gate is in-memory; sub-agent context is fresh per call. | [Pursuits](pursuits.md), [Sub-agents](subagents.md) |
+| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents.md), [Harness architecture](harness.md) |
+| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Turns and rounds](turns-and-rounds.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `TaskTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents.md) |
 
 ## The canon, in reading order
 
@@ -35,34 +35,38 @@ model of one agent turn.
    here.
 2. [Turns and rounds](turns-and-rounds.md) — the two-layer execution model:
    a turn as the user-perceived unit, a round as the ReAct loop iteration
-   inside it, and which concerns attach to each layer. The structural map
-   the rest of the canon is built on.
-3. [Tool rounds](tool-rounds.md) — the round trip of a tool call as a design
-   concept: declaration, gating, execution, and how outcomes re-enter the
-   conversation. This is the unit the rest of the canon operates on.
-4. [Pursuits](pursuits.md) — durable per-session objectives driven by the
+   inside it, and which concerns attach to each layer. Then the lifecycle
+   inside one round: declaration, gating, execution, and how outcomes
+   re-enter the conversation. This is the structural map the rest of the
+   canon is built on.
+3. [Pursuits](pursuits.md) — durable per-session objectives driven by the
    `/pursue` stop-gate (within-turn continuation until the condition is met)
    and the `/repeat` cron scheduler. How the agent keeps working toward an
    objective across rounds and restarts.
-5. [Plan mode](plan-mode.md) — a read-only execution surface for researching
+4. [Plan mode](plan-mode.md) — a read-only execution surface for researching
    before editing. The cleanest example of capability gating: one `Read`/`Write`
    flag drives both the Plan-mode gate and the broker, with one deliberate
    exemption for plan files.
-6. [Sub-agents](subagents/index.md) — the `task` tool's isolated child agent
+5. [Sub-agents](subagents.md) — the `task` tool's isolated child agent
    and the independent verifier. The reference for isolation: what is shared
    (the provider), what is fresh (history, pursuits, plan state), how events
    stream back through one pipeline, and how a profile admits tools by
    capability axis.
-7. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
+6. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
    tools. The reference for failure isolation and for how an extension surface
    reuses the same `Tool` trait and execution path as built-ins.
-8. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
+7. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
    to resolve ambiguity. The reference for the oneshot-channel blocking
    pattern the permission broker also uses.
-9. [Skills](skills.md) — on-demand domain expertise: the two-channel model
+8. [Skills](skills.md) — on-demand domain expertise: the two-channel model
    (catalog in the system prompt, body on demand), the source/priority
    cascade, and explicit versus implicit invocation. The reference for the
    extension surface that adds instructions rather than tools.
+9. [Lifecycle hooks](hooks.md) — user-configured actions that fire on the
+    agent's lifecycle events (tool call, turn end, session start, compaction).
+    One event axis with capability implied by the event; the reference for
+    the extension surface that adds practice (format, CI gates, context
+    injection) without touching the core loop.
 
 The harness's [context-relief](harness.md#context-relief) section has two
 deep-dive references, read as a pair:
@@ -84,17 +88,21 @@ to see how the canon fits together:
 user message
   └─ [Harness] execute_turn: refresh system prompt (mode, pursuit, skills)
         └─ [Pursuits]  active pursuit injected into the prompt
+       └─ [Hooks]     UserPromptSubmit: deny? / prepend context
        └─ [Provider] stream tokens; reconstruct native tool-call deltas
             └─ fallback? [Tool rounds] parse tool call from text
        └─ per tool call:
+            ├─ [Hooks] PreToolUse gate (matcher?) ── deny? → blocked
             ├─ [Plan mode] gate: allowed_in_plan_mode(arguments)?
             ├─ [Harness] permission broker (Write tools only)
             ├─ [Sub-agents] if call is `task`: spawn isolated child,
             │              stream SubTaskEvent back through the same pipeline
             ├─ [MCP]       if call is `mcp__*`: JSON-RPC over stdio
             └─ [User questions] if call is `ask_user`: block on oneshot
-        └─ completion marker? [Pursuits] finalize on completion signal
+       └─ [Hooks] PostToolUse | PostToolUseFailure: inject context?
+       └─ completion marker? [Pursuits] finalize on completion signal
        └─ next tool round, or stop on final message / safety bound
+            └─ [Hooks] Stop gate composes with /pursue: deny? → another round
 ```
 
 Every arrow is documented in one of the canon pages above.

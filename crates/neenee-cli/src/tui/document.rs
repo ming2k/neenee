@@ -43,9 +43,12 @@ pub enum MessageKind {
         output: Option<String>,
         /// Typed result (ADR-0001). `None` until the result lands, then a
         /// [`neenee_core::ToolOutput`] carrying structured data (e.g. a shell
-        /// exit code) alongside the legacy `output` text. Currently stored but
-        /// not yet consumed by the renderer — the classification/rendering
-        /// switch is a follow-up slice.
+        /// exit code) alongside the legacy `output` text. Consumed by the
+        /// renderer for data-level classification — `finish_tool_step` derives
+        /// [`ToolStepStatus`] from `ToolOutput::is_error()` instead of
+        /// string-sniffing the output, and `bash_command_for` reads the typed
+        /// `Shell` command. The legacy `output`/`arguments` strings remain the
+        /// fallback for restored sessions that predate the typed payload.
         ///
         /// Boxed to keep this enum variant small: `ToolOutput` (and especially
         /// its `Subagent`/`Patch` variants) is large enough that an unboxed
@@ -488,17 +491,6 @@ impl TranscriptMessage {
         }
     }
 
-    /// Wall-clock duration of a finished tool step, if recorded.
-    pub fn tool_step_duration_ms(&self) -> Option<u64> {
-        match &self.kind {
-            MessageKind::ToolStep {
-                duration_ms: Some(d),
-                ..
-            } => Some(*d),
-            _ => None,
-        }
-    }
-
     /// Append a sub-agent event as a nested child of this tool step.
     ///
     /// Returns `true` if this message is a tool step and the event was stored.
@@ -663,22 +655,6 @@ impl TranscriptMessage {
         }
     }
 
-    /// Replace a sub-agent task step's children with the supplied transcript.
-    /// Used by the resume path to rebuild the nested view from persisted
-    /// `Message::children`. Live updates still go through `push_subtask_event`
-    /// — this is purely for restoring from disk. No-op for non-tool-step
-    /// messages or steps that already have children (the live event stream
-    /// always wins over the snapshot to avoid clobbering in-progress runs).
-    pub fn attach_subagent_children(&mut self, children: Vec<TranscriptMessage>) {
-        if let MessageKind::ToolStep {
-            children: existing, ..
-        } = &mut self.kind
-        {
-            if existing.is_empty() {
-                *existing = children;
-            }
-        }
-    }
 
     /// Short label for the sub-agent (its task description), shown in the
     /// sub-agent view's navigation bar.
@@ -978,13 +954,6 @@ impl TranscriptMessage {
         self.reparse();
     }
 
-    /// Extract text from a byte range within this message's raw content.
-    pub fn raw_slice(&self, start: usize, end: usize) -> &str {
-        let len = self.raw.len();
-        let start = start.min(len);
-        let end = end.min(len);
-        &self.raw[start..end]
-    }
 }
 
 /// Parse a JSON arguments string into ordered `(key, display_value)` pairs

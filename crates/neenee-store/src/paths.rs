@@ -81,13 +81,6 @@ impl Dirs {
         self.config_dir.join("config.toml")
     }
 
-    /// Marker written once the legacy `~/.config/neenee` data files have been
-    /// migrated to the XDG-split layout. Prevents re-running the migration.
-    #[allow(dead_code)]
-    pub fn migration_marker(&self) -> PathBuf {
-        self.config_dir.join(".migrated-v2")
-    }
-
     /// Content-addressed blob store root. Large payloads are stored under
     /// `<root>/<2-char-prefix>/<hash>`.
     pub fn blobs_dir(&self) -> PathBuf {
@@ -145,16 +138,6 @@ impl Dirs {
         self.data_dir.join("commands")
     }
 
-    /// Pointer to the currently active session id per project. Rebuildable, so
-    /// lives under state, not data.
-    ///
-    /// Reserved for Phase 2 (project isolation) where the active session id
-    /// becomes a small pointer file rather than the full session content.
-    #[allow(dead_code)]
-    pub fn current_pointer(&self) -> PathBuf {
-        self.state_dir.join("current.json")
-    }
-
     /// Slash-command input history. Rebuildable.
     pub fn history_file(&self) -> PathBuf {
         self.state_dir.join("history.json")
@@ -167,19 +150,6 @@ impl Dirs {
     /// signal.
     pub fn provider_usage_file(&self) -> PathBuf {
         self.state_dir.join("provider_usage.json")
-    }
-
-    /// Cross-process advisory lock file. Lives under runtime when available,
-    /// otherwise state (still on a local filesystem).
-    ///
-    /// Phase 5 locks this file on startup with a non-blocking `flock(2)` so
-    /// two `neenee` instances cannot clobber the same project's session store.
-    #[allow(dead_code)]
-    pub fn lock_file(&self) -> PathBuf {
-        self.runtime_dir
-            .clone()
-            .unwrap_or_else(|| self.state_dir.clone())
-            .join("neenee.lock")
     }
 
     /// Per-project embedding index. A lightweight brute-force index by default;
@@ -229,8 +199,9 @@ impl Dirs {
         self.project_dir(project_root).join("permissions.json")
     }
 
-    /// Structured log directory with rolling appender output.
-    #[allow(dead_code)]
+    /// Structured log directory with rolling appender output. Test-only today
+    /// (only [`Self::ensure`] references it); production logs to stderr.
+    #[cfg(test)]
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("log")
     }
@@ -240,7 +211,7 @@ impl Dirs {
     /// Best-effort initial creation of every directory neenee may write to.
     /// Idempotent. Errors are surfaced as a single aggregate `String`. Used by
     /// tests; production creates directories lazily via `fsutil` on first write.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn ensure(&self) -> Result<(), String> {
         for path in [
             &self.config_dir,
@@ -429,19 +400,6 @@ fn app_dir_from_root(root: PathBuf) -> PathBuf {
     }
 }
 
-/// True when `path` is `~/.config/neenee` (the legacy single-bucket location).
-/// Used by the migration logic to detect the old layout.
-#[allow(dead_code)]
-pub fn is_legacy_config_dir(path: &Path) -> bool {
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    parent
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n == "config")
-        .unwrap_or(false)
-}
 
 /// Map a project root (cwd) to a stable, ASCII-safe bucket name. Uses the first
 /// 16 hex chars of SHA-256 so the layout is reproducible across processes,
@@ -554,19 +512,6 @@ mod tests {
             assert_eq!(
                 dirs.runtime_dir.as_deref(),
                 Some(std::path::Path::new("/run/user/12345/neenee"))
-            );
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        });
-    }
-
-    #[test]
-    fn lock_file_prefers_runtime_dir() {
-        env_locked!({
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/12345");
-            let dirs = Dirs::resolve(&PathsOverride::default());
-            assert_eq!(
-                dirs.lock_file(),
-                PathBuf::from("/run/user/12345/neenee/neenee.lock")
             );
             std::env::remove_var("XDG_RUNTIME_DIR");
         });

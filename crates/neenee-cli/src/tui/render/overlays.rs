@@ -296,26 +296,6 @@ pub fn draw_model_editor(
     frame.set_cursor(cursor_x, cursor_y);
 }
 
-/// Render a unix timestamp as a short relative time (e.g. "2h ago", "3d ago").
-pub fn relative_time(ts: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let diff = now.saturating_sub(ts);
-    if diff < 60 {
-        "just now".to_string()
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86_400 {
-        format!("{}h ago", diff / 3600)
-    } else if diff < 7 * 86_400 {
-        format!("{}d ago", diff / 86_400)
-    } else {
-        format!("{}w ago", diff / (7 * 86_400))
-    }
-}
-
 /// Compact relative time for space-constrained surfaces (e.g. the sessions
 /// picker's meta column): `now` / `3m` / `2h` / `5d` / `3w` — no "ago" suffix.
 pub fn relative_time_compact(ts: u64) -> String {

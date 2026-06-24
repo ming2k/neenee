@@ -5,7 +5,7 @@ conversation for that task's child messages, hides the footer, and pins a
 one-row navigation bar at the bottom of the transcript area. This page
 documents that view's layout and key bindings. The isolation model and
 event streaming that produce the children live on the
-[Sub-agents](../../explanation/agent-design/subagents/index.md) explanation page;
+[Sub-agents](../../explanation/agent-design/subagents.md) explanation page;
 the inline (non-zoomed) rendering of the task step lives on the
 [Tool step](tool-step.md#sub-agent-children) page.
 
