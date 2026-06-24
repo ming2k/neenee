@@ -136,7 +136,8 @@ impl RepeatStore {
             let rows = stmt
                 .query_map([], job_from_row)
                 .map_err(|err| format!("query list failed: {err}"))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|err| format!("list task failed: {err}"))?
@@ -157,7 +158,8 @@ impl RepeatStore {
             let rows = stmt
                 .query_map(params![now_ms], job_from_row)
                 .map_err(|err| format!("query due failed: {err}"))?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|err| format!("due task failed: {err}"))?
@@ -308,7 +310,13 @@ mod tests {
         }
         let removed = store.prune_expired(now).await.unwrap();
         assert_eq!(removed, 1);
-        let remaining: Vec<String> = store.list().await.unwrap().into_iter().map(|j| j.id).collect();
+        let remaining: Vec<String> = store
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
         assert!(remaining.contains(&fresh.id));
         assert!(!remaining.contains(&"old".to_string()));
     }

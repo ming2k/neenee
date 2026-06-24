@@ -97,7 +97,45 @@ pub enum Modal {
     Activity,
 }
 
+/// How the live surface recedes while a modal owns the foreground.
+///
+/// A terminal cannot alpha-blend, so a modal expresses "the background has
+/// receded" in one of three ways instead of painting a translucent veil. This
+/// is the single source of truth that both the footer-collapse decision
+/// ([`App`]/event loop) and the per-frame recess pass (`render::recess_backdrop`)
+/// consult, so layout and paint can never disagree about what a modal does to
+/// the surface beneath it.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Recess {
+    /// The modal floats on the fully-live surface. No dimming, no occlusion —
+    /// used by lightweight overlays that never take over (Question, Permission).
+    None,
+    /// The surface stays mounted and is darkened in place so the centered modal
+    /// reads as the focal layer while context (transcript, input, hint bar,
+    /// activity bar) remains visible. The brightness factor comes from
+    /// [`Theme::modal_dim_factor`](crate::tui::render::Theme::modal_dim_factor).
+    Dim,
+    /// Full takeover: the footer collapses to zero height and the surface is
+    /// occluded with a solid fill. Reserved for context-switching flows
+    /// (session selection) where a clean slate is the intent.
+    Takeover,
+}
+
 impl Modal {
+    /// The recess policy for this modal — the single source of truth that the
+    /// footer-collapse flag and the per-frame recess pass both key off.
+    pub fn recess(self) -> Recess {
+        match self {
+            // Float: lightweight overlays that never touch the surface.
+            Modal::None | Modal::Question | Modal::Permission => Recess::None,
+            // Context switch: the one modal that fully owns the screen.
+            Modal::Sessions => Recess::Takeover,
+            // Everything else recedes the surface for focus while keeping it
+            // visible (transcript, chrome, and all).
+            _ => Recess::Dim,
+        }
+    }
+
     /// Whether this modal closes when the user clicks outside its rect
     /// (click-outside-to-dismiss). True only for read-only / info overlays
     /// (Help, ToolStepDetail, Session, Sessions, PlanPreview, Activity).

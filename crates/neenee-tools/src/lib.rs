@@ -467,6 +467,36 @@ fn json_string(arguments: &str, key: &str) -> String {
         .unwrap_or_else(|| "*".to_string())
 }
 
+// --- Self-registration -----------------------------------------------------
+//
+// Each tool registers itself here instead of being enumerated at the agent's
+// assembly point. `inventory` collects these submissions at runtime; adding a
+// tool is a single line in its own module (see project.rs for the scaffolding
+// tools). The two web tools pull their config out of the build context.
+
+neenee_core::register_tool!(BashFactory => BashTool);
+neenee_core::register_tool!(ReadFileFactory => ReadFileTool);
+neenee_core::register_tool!(WriteFileFactory => WriteFileTool);
+neenee_core::register_tool!(AskUserFactory => AskUserTool);
+neenee_core::register_tool!(EditFileFactory => EditFileTool);
+neenee_core::register_tool!(GrepFactory => GrepTool);
+neenee_core::register_tool!(GlobFactory => GlobTool);
+neenee_core::register_tool!(ListDirFactory => ListDirTool);
+neenee_core::register_tool!(WebFetchFactory => |ctx| {
+    let cfg = ctx
+        .get::<neenee_core::WebSearchConfig>()
+        .cloned()
+        .unwrap_or_default();
+    WebFetchTool::with_config(cfg)
+});
+neenee_core::register_tool!(WebSearchFactory => |ctx| {
+    let cfg = ctx
+        .get::<neenee_core::WebSearchConfig>()
+        .cloned()
+        .unwrap_or_default();
+    WebSearchTool::with_config(cfg)
+});
+
 /// Search file contents with ripgrep.
 pub struct GrepTool;
 

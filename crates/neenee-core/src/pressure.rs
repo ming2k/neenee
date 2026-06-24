@@ -8,16 +8,39 @@
 
 use crate::{Message, Role};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Approximate characters per token for the cheap estimator used when a
 /// provider does not report real token usage. Centralised here so every
 /// budget↔content conversion stays consistent with [`estimate_tokens`].
 pub const CHARS_PER_TOKEN: usize = 4;
 
-/// Placeholder written into a tool-result message whose content has been pruned
-/// to relieve context pressure. Kept on a `Tool`-role message so the OpenAI
-/// `tool_call_id` chain stays intact for providers that require it.
+/// Legacy placeholder for a fully-cleared tool result. Still recognised on read
+/// so older sessions (and the early uninformative form) are treated as
+/// already-cleared, but new clears use the informative [`CLEARED_TOOL_PREFIX`]
+/// form below. Kept on a `Tool`-role message so the OpenAI `tool_call_id` chain
+/// stays intact for providers that require it.
 pub const PRUNED_TOOL_PLACEHOLDER: &str = "[Old tool result content cleared]";
+
+/// Prefix of the placeholder a *fully cleared* tool result is replaced with.
+/// The full form carries a breadcrumb — `[cleared tool result: read foo.rs (42
+/// lines, 1500 chars)]` — so the model can decide whether to re-fetch instead of
+/// guessing, and so later passes recognise an already-cleared result.
+pub const CLEARED_TOOL_PREFIX: &str = "[cleared tool result:";
+
+/// Marker embedded in a *truncated* tool result (head + tail kept, middle
+/// elided). Distinguishes the intermediate "truncated" tier from a full clear so
+/// a later, higher-pressure pass can escalate truncation to a clear.
+const ELIDED_MARKER: &str = " chars elided to relieve context ...]";
+
+/// Own-content length (chars) above which a prune candidate is first *truncated*
+/// (a gentler tier that keeps the shape of the output) rather than cleared
+/// outright. Below it, truncation would not save enough to be worth the lost
+/// signal, so the candidate is cleared directly.
+const TRUNCATE_MIN_CHARS: usize = 2_000;
+
+/// Characters of head and of tail preserved when truncating a candidate.
+const TRUNCATE_KEEP_EACH_SIDE: usize = 400;
 
 /// Declarative context-compaction policy expressed as fractions of the active
 /// model's context window, plus a fallback window for models whose size the
@@ -110,6 +133,33 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     (estimate_chars(messages) / CHARS_PER_TOKEN).max(1)
 }
 
+/// Fraction of our independent estimate below which a provider-reported
+/// `prompt_tokens` count is distrusted (treated as missing). Relays and local
+/// servers sometimes report `0` or absurdly small usage; trusting that would
+/// under-count pressure and risk overflow.
+const USAGE_TRUST_FLOOR: f64 = 0.5;
+
+/// Effective context pressure, in tokens, to compare against relief thresholds.
+///
+/// Layered accounting: a provider-reported `prompt_tokens` is ground truth for
+/// what the model actually saw, so it is preferred when present *and* plausible.
+/// "Plausible" means at least [`USAGE_TRUST_FLOOR`] × our independent estimate —
+/// a `0` or absurdly small report (common from relays / local servers) is
+/// treated as missing and the cheap [`estimate_tokens`] proxy is used instead.
+/// The bias is deliberately conservative: under-counting risks overflow, while
+/// over-counting only prunes slightly early.
+///
+/// Today every call site passes `reported = None` — the `Provider` trait does
+/// not yet surface usage, and threading it through the streaming adapters is a
+/// separate epic (ADR-0019). Centralising the policy here means wiring real
+/// usage later is a one-line change at each call site, not a logic rewrite.
+pub fn effective_pressure_tokens(estimate_tokens: usize, reported_prompt_tokens: Option<usize>) -> usize {
+    match reported_prompt_tokens {
+        Some(reported) if reported as f64 >= estimate_tokens as f64 * USAGE_TRUST_FLOOR => reported,
+        _ => estimate_tokens,
+    }
+}
+
 pub(crate) fn message_chars(message: &Message) -> usize {
     let own = message.content.len()
         + message
@@ -146,113 +196,305 @@ pub struct PruneOutcome {
     pub originals: Vec<Message>,
 }
 
-/// Clear the content of older `Tool`-role messages to relieve context pressure,
-/// protecting the most recent `protect_recent_chars` of tool results. Mutates
-/// `messages` in place. Returns `Some(PruneOutcome)` only when at least
-/// `min_reclaim_chars` would be reclaimed; otherwise returns `None` and leaves
-/// the messages untouched. Idempotent: already-pruned tool results are skipped.
+/// Relieve context pressure by degrading older `Tool`-role results in place,
+/// keeping the OpenAI `tool_call_id` chain intact. Mutates `messages`; returns
+/// `Some(PruneOutcome)` only when at least `min_reclaim_chars` would be
+/// reclaimed, else `None` with `messages` untouched (atomic: nothing is mutated
+/// unless the gate passes).
+///
+/// This is more than FIFO-by-age. For each candidate the policy chooses *what*
+/// to prune and *how hard*:
+///
+/// - **Recency protection** keeps the most recent `protect_recent_chars` of
+///   tool output verbatim — that is what is usually still relevant.
+/// - **Keep-alive** spares a fresh result whose file target is mentioned in the
+///   last few non-tool messages (likely still in play).
+/// - **Staleness / dedup** clears a result outright when a *later* tool touched
+///   the same file (an earlier `read` superseded by a re-`read` or `edit` is
+///   stale — and keeping stale content is worse than clearing it).
+/// - **Tiered degradation** truncates a large, fresh result to head + tail first
+///   (a gentler tier that keeps its shape) and only fully clears it on a later,
+///   higher-pressure pass — or immediately when it is already small.
+/// - **Informative clears** replace content with `[cleared tool result: <label>
+///   (<n> lines, <m> chars)]` so the model can decide whether to re-fetch.
+///
+/// Idempotent: already-cleared results are skipped; a truncated result escalates
+/// to a clear on a subsequent pass, so repeated calls converge.
 pub fn prune_tool_results(
     messages: &mut [Message],
     protect_recent_chars: usize,
     min_reclaim_chars: usize,
 ) -> Option<PruneOutcome> {
-    let tools: Vec<(usize, usize)> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, message)| {
-            message.role == Role::Tool && message.content != PRUNED_TOOL_PLACEHOLDER
-        })
-        .map(|(index, message)| (index, message_chars(message)))
-        .collect();
-    if tools.is_empty() {
+    let plan = plan_prune(messages, protect_recent_chars);
+    let reclaimable: usize = plan.iter().map(|c| c.reclaim).sum();
+    if plan.is_empty() || reclaimable < min_reclaim_chars {
         return None;
     }
-
-    // Walk the most recent tool results backward, protecting them until the
-    // protected budget is met. Older tool results become pruning candidates.
-    let mut protected_chars = 0usize;
-    let mut protected_count = 0usize;
-    for &(_, chars) in tools.iter().rev() {
-        if protected_chars >= protect_recent_chars {
-            break;
-        }
-        protected_chars += chars;
-        protected_count += 1;
-    }
-    let prunable_count = tools.len().saturating_sub(protected_count);
-    if prunable_count == 0 {
-        return None;
-    }
-
-    let reclaimable: usize = tools
-        .iter()
-        .take(prunable_count)
-        .map(|(_, chars)| chars.saturating_sub(PRUNED_TOOL_PLACEHOLDER.len()))
-        .sum();
-    if reclaimable < min_reclaim_chars {
-        return None;
-    }
-
-    let mut outcome = PruneOutcome::default();
-    for &(index, _) in tools.iter().take(prunable_count) {
-        let original = messages[index].clone();
-        outcome.reclaimed_chars +=
-            message_chars(&messages[index]).saturating_sub(PRUNED_TOOL_PLACEHOLDER.len());
-        outcome.cleared_count += 1;
-        outcome.originals.push(original);
-        messages[index].content = PRUNED_TOOL_PLACEHOLDER.to_string();
-        messages[index].reasoning_content = None;
-        // Recursively clear old tool results inside any nested sub-agent
-        // transcript. The sub-agent's `Tool`-role children hold the same kind
-        // of bulky old outputs the top-level pruner is trying to reclaim;
-        // leaving them intact would defeat pruning for any session that made
-        // heavy use of `task`. The parent `Tool` message itself stays (the
-        // OpenAI tool_call_id chain must remain intact) — only its nested
-        // grandchildren are pruned, mirroring the top-level policy.
-        if let Some(children) = messages[index].children.as_mut() {
-            prune_tool_results_inner(children, protect_recent_chars);
-        }
-    }
-    Some(outcome)
+    Some(apply_prune(messages, plan, protect_recent_chars))
 }
 
-/// Inner recursive worker for [`prune_tool_results`]. Used to descend into a
-/// sub-agent's nested transcript and prune its old `Tool`-role messages using
-/// the same `protect_recent_chars` budget. Unlike the public entry point this
-/// always prunes every eligible old result (no `min_reclaim_chars` gate) and
-/// returns nothing — the durable archival already happened when the sub-agent
-/// finished; here we are only relieving in-memory context pressures on resume.
-fn prune_tool_results_inner(messages: &mut [Message], protect_recent_chars: usize) {
+/// One planned degradation: replace `messages[index].content` with
+/// `new_content`, reclaiming `reclaim` chars of own content.
+struct PrunePlan {
+    index: usize,
+    new_content: String,
+    reclaim: usize,
+}
+
+/// Owned (mutation-safe) summary of the tool call that produced a result: a
+/// short human label and the file path it targeted, correlated via
+/// `tool_call_id`.
+#[derive(Clone, Default)]
+struct ToolMeta {
+    label: String,
+    file_key: Option<String>,
+}
+
+/// Plan (without mutating) which tool results to degrade and how. Returns an
+/// empty vec when there is nothing to do.
+fn plan_prune(messages: &[Message], protect_recent_chars: usize) -> Vec<PrunePlan> {
+    let meta = collect_tool_meta(messages);
     let tools: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| {
-            message.role == Role::Tool && message.content != PRUNED_TOOL_PLACEHOLDER
-        })
-        .map(|(index, _)| index)
+        .filter(|(_, m)| m.role == Role::Tool && !is_cleared(&m.content))
+        .map(|(i, _)| i)
         .collect();
     if tools.is_empty() {
-        return;
+        return Vec::new();
     }
+
+    // Recency protection: protect newest results until the char budget is met.
+    let mut protected: HashSet<usize> = HashSet::new();
     let mut protected_chars = 0usize;
-    let mut protected_count = 0usize;
-    for &index in tools.iter().rev() {
+    for &i in tools.iter().rev() {
         if protected_chars >= protect_recent_chars {
             break;
         }
-        protected_chars += message_chars(&messages[index]);
-        protected_count += 1;
+        protected_chars += message_chars(&messages[i]);
+        protected.insert(i);
     }
-    let prunable_count = tools.len().saturating_sub(protected_count);
-    for &index in tools.iter().take(prunable_count) {
-        messages[index].content = PRUNED_TOOL_PLACEHOLDER.to_string();
-        messages[index].reasoning_content = None;
-        // Recurse one more level for sub-sub-agents (bounded by the schema's
-        // tool-filter rule that prevents `task` from spawning `task`).
-        if let Some(children) = messages[index].children.as_mut() {
-            prune_tool_results_inner(children, protect_recent_chars);
+
+    // Staleness: the last tool result for a given file is live; earlier ones
+    // touching the same file are stale once it is re-touched.
+    let mut last_for_file: HashMap<&str, usize> = HashMap::new();
+    for &i in &tools {
+        if let Some(fk) = meta.get(&i).and_then(|m| m.file_key.as_deref()) {
+            last_for_file.insert(fk, i);
         }
     }
+    let mut plan = Vec::new();
+    for &i in &tools {
+        if protected.contains(&i) {
+            continue;
+        }
+        let meta_i = meta.get(&i).cloned().unwrap_or_default();
+        let stale = meta_i
+            .file_key
+            .as_deref()
+            .and_then(|fk| last_for_file.get(fk))
+            .is_some_and(|&last| last > i);
+        // Keep-alive spares a *fresh* result whose file target is still in play.
+        // A stale result is cleared even if mentioned, because its content is
+        // outdated. "In play" means referenced *after* this result was produced
+        // — by later natural language or a later tool call on the same file.
+        // Looking forward from `i` (not at a global recent window) is what stops
+        // a result's own originating call from self-referencing and sparing it.
+        if !stale && mentioned_after(messages, i, meta_i.file_key.as_deref()) {
+            continue;
+        }
+        let content = &messages[i].content;
+        let new_content = degrade(content, &meta_i, stale);
+        if new_content.len() >= content.len() {
+            continue; // no real gain
+        }
+        let reclaim = content.len() - new_content.len();
+        plan.push(PrunePlan {
+            index: i,
+            new_content,
+            reclaim,
+        });
+    }
+    plan
+}
+
+/// Apply a plan, recording originals for archival and recursing into any nested
+/// sub-agent transcript on the messages it touches.
+fn apply_prune(
+    messages: &mut [Message],
+    plan: Vec<PrunePlan>,
+    protect_recent_chars: usize,
+) -> PruneOutcome {
+    let mut outcome = PruneOutcome::default();
+    for item in plan {
+        outcome.originals.push(messages[item.index].clone());
+        outcome.reclaimed_chars += item.reclaim;
+        outcome.cleared_count += 1;
+        messages[item.index].content = item.new_content;
+        messages[item.index].reasoning_content = None;
+        // A `task` result carries the sub-agent's whole transcript as
+        // `children`; its old `Tool` results are the same kind of bulky weight,
+        // so prune them too (ungated — durability already happened when the
+        // sub-agent finished; here we relieve in-memory pressure).
+        if let Some(children) = messages[item.index].children.as_mut() {
+            let child_plan = plan_prune(children, protect_recent_chars);
+            if !child_plan.is_empty() {
+                let nested = apply_prune(children, child_plan, protect_recent_chars);
+                outcome.reclaimed_chars += nested.reclaimed_chars;
+            }
+        }
+    }
+    outcome
+}
+
+/// Choose the degraded form of a tool result's content.
+fn degrade(content: &str, meta: &ToolMeta, stale: bool) -> String {
+    // Stale (superseded on the same file) or already truncated -> clear fully.
+    if stale || is_truncated(content) {
+        return cleared_placeholder(meta, content);
+    }
+    // Large and fresh -> truncate (gentler). Small -> clear directly.
+    if content.len() >= TRUNCATE_MIN_CHARS {
+        truncate_middle(content)
+    } else {
+        cleared_placeholder(meta, content)
+    }
+}
+
+/// Correlate each `Tool` result with the assistant `tool_call` that produced it,
+/// returning owned per-message-index metadata so later mutation is borrow-safe.
+fn collect_tool_meta(messages: &[Message]) -> HashMap<usize, ToolMeta> {
+    let mut by_id: HashMap<&str, (&str, &str)> = HashMap::new();
+    for m in messages {
+        if let Some(calls) = &m.tool_calls {
+            for c in calls {
+                by_id.insert(c.id.as_str(), (c.name.as_str(), c.arguments.as_str()));
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for (i, m) in messages.iter().enumerate() {
+        if m.role != Role::Tool {
+            continue;
+        }
+        let meta = m
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| by_id.get(id))
+            .map(|(name, args)| ToolMeta {
+                label: tool_label(name, args),
+                file_key: file_key(name, args),
+            })
+            .unwrap_or_default();
+        out.insert(i, meta);
+    }
+    out
+}
+
+/// Whether a tool result's file target is referenced in any message *after*
+/// `index` — by full path or by its bare file name, in natural-language content
+/// or in the arguments of a later tool call. This is the keep-alive signal: a
+/// result whose target is still being talked about or re-touched is left intact.
+/// Looking forward from `index` (rather than at a global recent window) is what
+/// prevents a result's own originating call from self-referencing and sparing it.
+fn mentioned_after(messages: &[Message], index: usize, file_key: Option<&str>) -> bool {
+    let Some(fk) = file_key else {
+        return false;
+    };
+    if fk.is_empty() {
+        return false;
+    }
+    let base = fk.rsplit(['/', '\\']).next().unwrap_or(fk);
+    let base_match = base != fk && !base.is_empty();
+    for m in messages.iter().skip(index + 1) {
+        if m.content.contains(fk) || (base_match && m.content.contains(base)) {
+            return true;
+        }
+        if let Some(calls) = &m.tool_calls {
+            for c in calls {
+                if c.arguments.contains(fk) || (base_match && c.arguments.contains(base)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_cleared(content: &str) -> bool {
+    content == PRUNED_TOOL_PLACEHOLDER || content.starts_with(CLEARED_TOOL_PREFIX)
+}
+
+fn is_truncated(content: &str) -> bool {
+    content.contains(ELIDED_MARKER)
+}
+
+fn parsed_args(arguments: &str) -> serde_json::Value {
+    serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null)
+}
+
+fn arg_str<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+}
+
+/// Short label for a tool call, e.g. `read src/main.rs`, `grep "TODO"`, or just
+/// `bash` when no salient argument is found.
+fn tool_label(name: &str, arguments: &str) -> String {
+    let args = parsed_args(arguments);
+    match arg_str(
+        &args,
+        &[
+            "path", "file_path", "file", "filename", "pattern", "query", "command", "cmd", "url",
+        ],
+    ) {
+        Some(detail) => {
+            let detail = detail.trim();
+            let short: String = detail.chars().take(60).collect();
+            if detail.chars().count() > 60 {
+                format!("{name} {short}…")
+            } else {
+                format!("{name} {short}")
+            }
+        }
+        None => name.to_string(),
+    }
+}
+
+/// The file path a tool touched, used for staleness/dedup. `None` for tools that
+/// are not file-addressed (e.g. `bash`, `grep` without a file).
+fn file_key(_name: &str, arguments: &str) -> Option<String> {
+    let args = parsed_args(arguments);
+    arg_str(&args, &["path", "file_path", "file", "filename"]).map(|s| s.to_string())
+}
+
+/// Informative cleared-placeholder carrying the tool label and the size that was
+/// dropped, so the model can decide whether to re-fetch.
+fn cleared_placeholder(meta: &ToolMeta, content: &str) -> String {
+    let label = if meta.label.is_empty() {
+        "tool"
+    } else {
+        meta.label.as_str()
+    };
+    let lines = content.lines().count().max(1);
+    format!(
+        "{CLEARED_TOOL_PREFIX} {label} ({lines} lines, {} chars)]",
+        content.len()
+    )
+}
+
+/// Keep head + tail, eliding the middle with a recognisable marker. Returns the
+/// content unchanged when it is too short for truncation to help.
+fn truncate_middle(content: &str) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    let keep = TRUNCATE_KEEP_EACH_SIDE;
+    if chars.len() <= keep * 2 + 64 {
+        return content.to_string();
+    }
+    let head: String = chars[..keep].iter().collect();
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    let dropped = chars.len() - keep * 2;
+    format!("{head}\n[... {dropped}{ELIDED_MARKER}\n{tail}")
 }
 
 pub fn estimate_message_tokens(message: &Message) -> i64 {
@@ -280,60 +522,139 @@ mod tests {
     use super::*;
     use crate::ToolCall;
 
+    fn call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }
+    }
+
+    /// Realistic Assistant message carrying a tool call — the way every Tool
+    /// result is produced in an OpenAI-protocol transcript. The pruner correlates
+    /// a result back to its call (name + arguments) via `tool_call_id`, so tests
+    /// that exercise labels / staleness / keep-alive need this originating call
+    /// to exist, not just the bare Tool result.
+    fn assistant_with_call(id: &str, name: &str, args: &str) -> Message {
+        let mut message = Message::new(Role::Assistant, "");
+        message.tool_calls = Some(vec![call(id, name, args)]);
+        message
+    }
+
     #[test]
-    fn prune_protects_recent_tool_results_and_skips_already_pruned() {
-        let big = "Y".repeat(2_000);
+    fn large_fresh_result_is_truncated_then_cleared_on_next_pass() {
+        let big = "Y".repeat(5_000);
         let mut messages = vec![
             Message::new(Role::User, "q1"),
-            Message::tool_result(
-                &ToolCall {
-                    id: "c1".to_string(),
-                    name: "bash".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                big.clone(),
-            ),
-            Message::tool_result(
-                &ToolCall {
-                    id: "c2".to_string(),
-                    name: "bash".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                big.clone(),
-            ),
+            Message::tool_result(&call("c1", "bash", "{}"), big),
             Message::new(Role::User, "q2"),
         ];
 
-        // Protect nothing (0), require at least 1 char reclaimed: the two old
-        // tool results are both prunable.
-        let outcome = prune_tool_results(&mut messages, 0, 1).unwrap();
-        assert_eq!(outcome.cleared_count, 2);
-        assert_eq!(outcome.originals.len(), 2);
-        assert_eq!(messages[1].content, PRUNED_TOOL_PLACEHOLDER);
-        assert_eq!(messages[2].content, PRUNED_TOOL_PLACEHOLDER);
+        // Pass 1: large + fresh -> truncated (head/tail kept), not cleared.
+        let out1 = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert_eq!(out1.cleared_count, 1);
+        assert!(is_truncated(&messages[1].content));
+        assert!(!is_cleared(&messages[1].content));
+        assert!(messages[1].content.len() < 5_000);
 
-        // Idempotent: a second pass finds nothing to prune (placeholders skipped).
+        // Pass 2: already truncated -> escalated to a full clear.
+        let out2 = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert_eq!(out2.cleared_count, 1);
+        assert!(is_cleared(&messages[1].content));
+
+        // Pass 3: nothing left to do -> None (converged / idempotent).
         assert!(prune_tool_results(&mut messages, 0, 1).is_none());
     }
 
     #[test]
-    fn prune_respects_protect_budget_and_min_reclaim() {
-        let big = "Z".repeat(2_000);
-        let mut messages = vec![Message::tool_result(
-            &ToolCall {
-                id: "c".to_string(),
-                name: "bash".to_string(),
-                arguments: "{}".to_string(),
-            },
-            big,
-        )];
+    fn short_result_is_cleared_directly_with_informative_placeholder() {
+        // Below TRUNCATE_MIN_CHARS, so it skips the truncate tier and is cleared
+        // outright — but still larger than the placeholder, so clearing reclaims
+        // real space (a result shorter than its placeholder is correctly left
+        // alone: clearing it would *grow* the window).
+        let body = format!("{}\n{}\n{}", "a".repeat(100), "b".repeat(100), "c".repeat(100));
+        let mut messages = vec![
+            assistant_with_call("c1", "read", r#"{"path":"src/config.rs"}"#),
+            Message::tool_result(&call("c1", "read", r#"{"path":"src/config.rs"}"#), body),
+        ];
 
-        // The single tool result is fully protected by a large budget.
+        let out = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert_eq!(out.cleared_count, 1);
+        // Informative: carries tool label, line count, and char count.
+        assert!(messages[1].content.starts_with(CLEARED_TOOL_PREFIX));
+        assert!(messages[1].content.contains("read src/config.rs"));
+        assert!(messages[1].content.contains("3 lines"));
+    }
+
+    #[test]
+    fn stale_read_superseded_by_later_edit_is_cleared_first() {
+        let body = "X".repeat(3_000);
+        let mut messages = vec![
+            // Round 1: read config.rs ...
+            assistant_with_call("c1", "read", r#"{"path":"config.rs"}"#),
+            Message::tool_result(&call("c1", "read", r#"{"path":"config.rs"}"#), body.clone()),
+            // ... superseded by a later edit of the same file (round 2).
+            assistant_with_call("c2", "edit", r#"{"path":"config.rs"}"#),
+            Message::tool_result(&call("c2", "edit", r#"{"path":"config.rs"}"#), "ok".to_string()),
+        ];
+
+        let out = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert_eq!(out.cleared_count, 1);
+        // The stale read (index 1) is cleared outright (not merely truncated),
+        // because a later op touched the same file.
+        assert!(is_cleared(&messages[1].content));
+        assert!(messages[1].content.contains("read config.rs"));
+    }
+
+    #[test]
+    fn keep_alive_spares_a_result_mentioned_in_recent_messages() {
+        let body = "Z".repeat(3_000);
+        let mut messages = vec![
+            assistant_with_call("c1", "read", r#"{"path":"important.rs"}"#),
+            Message::tool_result(&call("c1", "read", r#"{"path":"important.rs"}"#), body),
+            // A later user message references the file by name -> keep alive.
+            Message::new(Role::User, "now fix the bug in important.rs please"),
+        ];
+
+        // Even with zero recency protection, the mentioned result is spared.
+        assert!(prune_tool_results(&mut messages, 0, 1).is_none());
+    }
+
+    #[test]
+    fn result_shorter_than_its_placeholder_is_left_alone() {
+        // A result tinier than the informative placeholder that would replace it
+        // yields negative reclaim — clearing it would *grow* the window. Such a
+        // candidate is skipped entirely (no real gain), so it is left verbatim.
+        let tiny = "ok".to_string();
+        let mut messages = vec![Message::tool_result(&call("c1", "bash", "{}"), tiny)];
+        assert!(prune_tool_results(&mut messages, 0, 1).is_none());
+        assert_eq!(messages[0].content, "ok");
+    }
+
+    #[test]
+    fn recency_protection_and_min_reclaim_gate() {
+        let big = "Z".repeat(3_000);
+        let mut messages = vec![Message::tool_result(&call("c", "bash", "{}"), big)];
+
+        // Fully protected by a large recency budget -> None, untouched.
         assert!(prune_tool_results(&mut messages, 10_000, 1).is_none());
-        // With no protection but a reclaim minimum larger than what's available,
-        // it still returns None and leaves content intact.
-        assert!(prune_tool_results(&mut messages, 0, 10_000).is_none());
-        assert_ne!(messages[0].content, PRUNED_TOOL_PLACEHOLDER);
+        // Reclaim floor larger than anything available -> None, untouched.
+        assert!(prune_tool_results(&mut messages, 0, 1_000_000).is_none());
+        assert!(!is_cleared(&messages[0].content));
+        assert!(!is_truncated(&messages[0].content));
+    }
+
+    #[test]
+    fn effective_pressure_prefers_plausible_usage_else_estimate() {
+        // No report -> estimate.
+        assert_eq!(effective_pressure_tokens(1000, None), 1000);
+        // Plausible report (>= 50% of estimate) -> trust ground truth.
+        assert_eq!(effective_pressure_tokens(1000, Some(1500)), 1500);
+        assert_eq!(effective_pressure_tokens(1000, Some(600)), 600);
+        // Implausibly low report (relay/local zero or near-zero) -> distrust,
+        // fall back to the (larger) estimate to avoid under-counting.
+        assert_eq!(effective_pressure_tokens(1000, Some(0)), 1000);
+        assert_eq!(effective_pressure_tokens(1000, Some(100)), 1000);
     }
 
     #[test]
@@ -344,8 +665,8 @@ mod tests {
         assert_eq!(budget.prune_threshold_tokens, 130_000); // 65%
         assert_eq!(budget.compaction_threshold_tokens, 170_000); // 85%
         assert_eq!(budget.target_tokens, 50_000); // 25%
-        // Pruning trips before full compaction, and compaction leaves a target
-        // well below its trigger — the escalation ladder the harness relies on.
+                                                  // Pruning trips before full compaction, and compaction leaves a target
+                                                  // well below its trigger — the escalation ladder the harness relies on.
         assert!(budget.prune_threshold_tokens < budget.compaction_threshold_tokens);
         assert!(budget.target_tokens < budget.prune_threshold_tokens);
     }

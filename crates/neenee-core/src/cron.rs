@@ -204,7 +204,10 @@ mod tests {
         // 00:07 -> next is 00:15
         assert_eq!(e.next_fire(m(2026, 1, 1, 0, 7)), Some(m(2026, 1, 1, 0, 15)));
         // 00:15 -> next is 00:30
-        assert_eq!(e.next_fire(m(2026, 1, 1, 0, 15)), Some(m(2026, 1, 1, 0, 30)));
+        assert_eq!(
+            e.next_fire(m(2026, 1, 1, 0, 15)),
+            Some(m(2026, 1, 1, 0, 30))
+        );
     }
 
     #[test]
@@ -250,7 +253,10 @@ mod tests {
         assert_eq!(e.next_fire(m(2026, 1, 2, 0, 0)), Some(m(2026, 1, 5, 0, 0)));
         // If the 1st were a Monday it fires once; here it fires on the 1st
         // (Thursday 2026-01-01) before any Monday.
-        assert_eq!(e.next_fire(m(2025, 12, 31, 23, 59)), Some(m(2026, 1, 1, 0, 0)));
+        assert_eq!(
+            e.next_fire(m(2025, 12, 31, 23, 59)),
+            Some(m(2026, 1, 1, 0, 0))
+        );
     }
 
     #[test]

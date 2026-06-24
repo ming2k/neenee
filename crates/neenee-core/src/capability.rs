@@ -1,7 +1,7 @@
 //! Foundational capability traits: how the harness talks to a model
 //! ([`Provider`]) and to tools ([`Tool`]), the stream events a provider emits
 //! ([`ProviderStreamEvent`]), and the mid-turn context-relief hook
-//! ([`CompactionGate`]).
+//! ([`ContextReliefGate`]).
 
 use crate::{Message, SubTaskEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
@@ -72,7 +72,7 @@ pub trait Provider: Send + Sync {
 /// returning `None` leaves it untouched. The gate owns durability policy
 /// (archiving originals before the replacement takes effect).
 #[async_trait]
-pub trait CompactionGate: Send + Sync {
+pub trait ContextReliefGate: Send + Sync {
     async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>>;
 }
 

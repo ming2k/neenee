@@ -23,6 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 tracing = "0.1"
+inventory = "0.3"
 
 [dev-dependencies]
 toml = "0.8"

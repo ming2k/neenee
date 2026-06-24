@@ -13,7 +13,7 @@
 //! so the export stays scannable.
 
 use chrono::Utc;
-use neenee_core::{Pursuit, Message, Role, ToolCall};
+use neenee_core::{Message, Pursuit, Role, ToolCall};
 
 /// Metadata carried from the harness into the exporter so the header reflects
 /// the live session state at the moment of export.

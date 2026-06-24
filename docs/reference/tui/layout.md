@@ -139,17 +139,22 @@ mode and the bar's contents.
 
 ## Modal overlay view
 
-When an overlay modal is open, `chrome_hidden = true` collapses the entire
-footer (plan panel, pursuit bar, status bar, input box, hint bar) to 0 height. The
-modal takes over the viewport with a dim backdrop painted over whatever
-the transcript was showing. The one exception is the
-[permission sheet](modals.md#permission-sheet), which is inline (no
-backdrop, no `chrome_hidden`) and replaces only the input-box area.
+When an overlay modal is open, its recess policy (`Modal::recess`) decides
+what happens to the surface beneath it. A **Dim** modal keeps the footer at
+its normal height and darkens the whole live surface in place
+(`recess_backdrop` scales every cell by `theme.modal_dim_factor`), so the
+transcript and chrome stay visible for context while the centered panel reads
+as the focal layer. The **Takeover** policy (the sessions picker only) instead
+collapses the entire footer (plan panel, pursuit bar, status bar, input box,
+hint bar) to 0 height and fully occludes the surface. The one
+**None**-recess surface is the [permission sheet](modals.md#permission-sheet),
+which is inline (no dimming, no footer collapse) and replaces only the
+input-box area.
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
-│             dim backdrop over the frozen transcript          │
+│             dimmed (visible) transcript surface           │
 │                                                              │
 │            ╭────────────────────────────────────╮            │
 │            │                                    │            │
@@ -239,7 +244,7 @@ the transcript content above.
 |------|----------------|
 | `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, sub-agent split, sticky summary overlay |
 | `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `GOAL_BAR_ROWS`, `STATUS_BAR_ROWS`, `PLAN_PANEL_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
-| `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop` |
+| `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop` |
 | `render/chrome.rs` | `draw_status_bar`, `draw_pursuit_bar` / `PursuitBarView`, `draw_hint_bar` / `HintBarView` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
 | `render/message_body.rs` | `draw_plan_panel` |

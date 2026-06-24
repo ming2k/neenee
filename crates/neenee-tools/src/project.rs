@@ -167,6 +167,11 @@ impl Tool for InitConfigTool {
     }
 }
 
+// --- Self-registration -----------------------------------------------------
+
+neenee_core::register_tool!(CreateProjectFactory => CreateProjectTool);
+neenee_core::register_tool!(InitConfigFactory => InitConfigTool);
+
 fn validate_project_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Project name must not be empty.".to_string());

@@ -67,7 +67,7 @@ when one is open); it is not a zone toggle.
 | `render/mod.rs` | Draw orchestration: `draw_transcript`, `TranscriptView`, `TranscriptRender`, `transcript_band_rect`, `TRANSCRIPT_H_INSET` |
 | `render/design.rs` | Non-color design tokens: spacing, gutters, fixed row counts, text measurement limits |
 | `render/theme.rs` | `Theme` (all color tokens) |
-| `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `draw_dim_backdrop`, color helpers |
+| `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop`, color helpers |
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |
 | `render/message_body.rs` | `draw_message_body` (markdown text, user panels, code blocks) |
 | `render/step/mod.rs` | Step module: draw orchestration, shared header rendering, sticky-pin tracking |

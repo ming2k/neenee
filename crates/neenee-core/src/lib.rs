@@ -34,26 +34,32 @@ pub use todos::{
 };
 pub mod pressure;
 pub mod session_review;
+pub mod session_title;
 pub mod skillsconfig;
 pub mod subagent;
 pub mod tool_call;
+pub mod tool_registry;
 pub mod webconfig;
-pub use capability::{CompactionGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
+pub use capability::{ContextReliefGate, Provider, ProviderStreamEvent, Tool, ToolAccess};
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
-    PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
+    ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
     ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, SubTaskEvent,
-    ToolInfo, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply,
+    UserQuestionRequest,
 };
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
-    estimate_chars, estimate_tokens, prune_tool_results, CHARS_PER_TOKEN, CompactionPolicy,
-    ContextBudget, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
+    effective_pressure_tokens, estimate_chars, estimate_tokens, prune_tool_results,
+    CompactionPolicy, ContextBudget, PruneOutcome, CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX,
+    PRUNED_TOOL_PLACEHOLDER,
 };
 pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
+pub use session_title::{clean_title, TITLE_MAX_LEN};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, REVIEW, VERIFY};
+pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, REVIEW, TITLE, VERIFY};
 pub use tool_output::truncate_utf8;
+pub use tool_registry::{collect_tools, ToolContext, ToolContextBuilder, ToolFactory};
 pub use webconfig::WebSearchConfig;

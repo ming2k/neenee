@@ -27,15 +27,28 @@ use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
     Message, Provider, ProviderStreamEvent, Pursuit, PursuitService, RepeatStore, Role,
-    PURSUIT_COMPLETE_MARKER,
+    TurnEvent, PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
     session::{
-        estimate_chars, estimate_tokens, run_compaction, CompactionCheckpoint, CompactionDecision,
-        CompactionHooks, CompactionResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
+        estimate_chars, estimate_tokens, run_compaction, CompactionDecision, CompactionHooks,
+        ContextReliefCheckpoint, ContextReliefResult, PursuitCheckpoint, SessionStore,
+        UNCAPPED_ITERATIONS,
     },
 };
+
+/// Wrap a session-scoped [`TurnEvent`] in the [`AgentResponse::Turn`]
+/// envelope (ADR-0017). Every per-turn emitter routes through this so the
+/// session id is attached uniformly, letting the TUI key transcript buffers
+/// by `session_id` and dispatch primary vs `/btw` side events correctly.
+pub fn turn(session_id: &str, event: TurnEvent) -> AgentResponse {
+    AgentResponse::Turn {
+        session_id: session_id.to_string(),
+        event,
+    }
+}
+
 pub struct ProxyProvider {
     pub holder: Arc<RwLock<Arc<dyn Provider>>>,
 }
@@ -136,13 +149,13 @@ impl CompactionSettings {
 
 /// Mid-turn context-relief gate: prunes old tool results durably when the
 /// active turn is approaching the model's context budget.
-pub struct MidTurnCompactionGate {
+pub struct MidTurnPruneGate {
     pub session: Arc<SessionStore>,
     pub prune_protect_chars: usize,
 }
 
 #[async_trait]
-impl neenee_core::CompactionGate for MidTurnCompactionGate {
+impl neenee_core::ContextReliefGate for MidTurnPruneGate {
     async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
         let mut messages = messages;
         let outcome = neenee_core::prune_tool_results(
@@ -151,18 +164,18 @@ impl neenee_core::CompactionGate for MidTurnCompactionGate {
             CompactionSettings::PRUNE_MIN_RECLAIM_CHARS,
         )?;
         let after_chars = estimate_chars(&messages);
-        let checkpoint = CompactionCheckpoint {
+        let checkpoint = ContextReliefCheckpoint {
             archived_messages: outcome.originals.len(),
             active_messages: messages.len(),
             before_chars: after_chars + outcome.reclaimed_chars,
             after_chars,
         };
-        let result = CompactionResult {
+        let result = ContextReliefResult {
             active: messages.clone(),
             archived: outcome.originals,
             checkpoint,
         };
-        if let Err(error) = self.session.commit_compaction(result).await {
+        if let Err(error) = self.session.commit_context_relief(result).await {
             tracing::warn!(?error, "mid-turn prune commit failed");
         }
         Some(messages)
@@ -171,21 +184,24 @@ impl neenee_core::CompactionGate for MidTurnCompactionGate {
 
 pub struct RelayCompactionHooks {
     pub tx: mpsc::UnboundedSender<AgentResponse>,
+    pub session_id: String,
 }
 
 #[async_trait]
 impl CompactionHooks for RelayCompactionHooks {
     async fn pre_compact(&self, _messages: &[Message]) -> CompactionDecision {
-        let _ = self
-            .tx
-            .send(AgentResponse::Activity("compacting context".to_string()));
+        let _ = self.tx.send(turn(
+            &self.session_id,
+            TurnEvent::Activity("compacting context".to_string()),
+        ));
         CompactionDecision::proceed()
     }
 
-    async fn post_compact(&self, _checkpoint: &CompactionCheckpoint) {
-        let _ = self
-            .tx
-            .send(AgentResponse::Activity("preparing context".to_string()));
+    async fn post_compact(&self, _checkpoint: &ContextReliefCheckpoint) {
+        let _ = self.tx.send(turn(
+            &self.session_id,
+            TurnEvent::Activity("preparing context".to_string()),
+        ));
     }
 }
 
@@ -193,15 +209,19 @@ impl CompactionHooks for RelayCompactionHooks {
 /// to the UI.
 pub fn send_harness_state(
     tx: &mpsc::UnboundedSender<AgentResponse>,
+    session_id: &str,
     agent: &Agent,
     loop_status: impl Into<String>,
 ) {
-    let _ = tx.send(AgentResponse::HarnessState(HarnessSnapshot {
-        mode: agent.get_mode(),
-        pursuit: agent.get_pursuit(),
-        loop_status: loop_status.into(),
-        auto_approve: agent.get_auto_approve(),
-    }));
+    let _ = tx.send(turn(
+        session_id,
+        TurnEvent::HarnessState(HarnessSnapshot {
+            mode: agent.get_mode(),
+            pursuit: agent.get_pursuit(),
+            loop_status: loop_status.into(),
+            auto_approve: agent.get_auto_approve(),
+        }),
+    ));
 }
 
 pub async fn refresh_agent_pursuit(
@@ -223,8 +243,12 @@ pub async fn refresh_agent_pursuit(
     }
 }
 
-pub fn emit_pursuit_updated(tx: &mpsc::UnboundedSender<AgentResponse>, pursuit: &Pursuit) {
-    let _ = tx.send(AgentResponse::PursuitUpdated(pursuit.clone()));
+pub fn emit_pursuit_updated(
+    tx: &mpsc::UnboundedSender<AgentResponse>,
+    session_id: &str,
+    pursuit: &Pursuit,
+) {
+    let _ = tx.send(turn(session_id, TurnEvent::PursuitUpdated(pursuit.clone())));
 }
 
 #[derive(Clone)]
@@ -234,6 +258,9 @@ pub struct TurnContext {
     pub tx: mpsc::UnboundedSender<AgentResponse>,
     pub token: CancellationToken,
     pub session: Arc<SessionStore>,
+    /// Session id this turn belongs to (ADR-0017). Tags every emitted
+    /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
+    pub session_id: String,
     pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
@@ -257,6 +284,9 @@ pub struct InteractiveTurnContext {
     pub token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     pub generation_counter: Arc<AtomicU64>,
     pub session: Arc<SessionStore>,
+    /// Session id this turn belongs to (ADR-0017). Tags every emitted
+    /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
+    pub session_id: String,
     pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
@@ -274,10 +304,10 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     }
     let _ = context
         .tx
-        .send(AgentResponse::Activity("starting request".to_string()));
+        .send(turn(&context.session_id, TurnEvent::Activity("starting request".to_string())));
 
     tokio::spawn(async move {
-        send_harness_state(&context.tx, &context.agent, "running");
+        send_harness_state(&context.tx, &context.session_id, &context.agent, "running");
         let result = execute_turn(
             TurnContext {
                 agent: context.agent.clone(),
@@ -285,6 +315,7 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                 tx: context.tx.clone(),
                 token: token.clone(),
                 session: context.session,
+                session_id: context.session_id.clone(),
                 pursuit_service: context.pursuit_service,
                 compaction: context.compaction,
                 retry_max_attempts: context.retry_max_attempts,
@@ -300,17 +331,19 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
             Err(HarnessError::Interrupted) if is_current => {
                 let _ = context
                     .tx
-                    .send(AgentResponse::Text("... [Interrupted]".to_string()));
+                    .send(turn(&context.session_id, TurnEvent::Text("... [Interrupted]".to_string())));
             }
             Err(error) if is_current => {
-                let _ = context.tx.send(AgentResponse::Error(error.to_string()));
+                let _ = context
+                    .tx
+                    .send(turn(&context.session_id, TurnEvent::Error(error.to_string())));
             }
             Err(_) => {}
         }
         let mut slot = context.token_slot.write().await;
         if context.generation_counter.load(Ordering::SeqCst) == generation {
             slot.take();
-            send_harness_state(&context.tx, &context.agent, "idle");
+            send_harness_state(&context.tx, &context.session_id, &context.agent, "idle");
         }
     });
 }
@@ -322,6 +355,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         tx,
         token,
         session,
+        session_id,
         pursuit_service,
         compaction,
         retry_max_attempts,
@@ -333,7 +367,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     // `updated_at_turn`) sees the new value. The TUI's stale detector
     // compares this against `TodoList::updated_at_turn`.
     agent.bump_turn();
-    let _ = tx.send(AgentResponse::Activity("saving request".to_string()));
+    let _ = tx.send(turn(&session_id, TurnEvent::Activity("saving request".to_string())));
     let admitted_session_id = session.id().await;
     let thread_id = admitted_session_id.clone();
     let mut turn_history = {
@@ -355,14 +389,21 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         history.clone()
     };
     session.replace_messages(turn_history.clone()).await?;
-    let _ = tx.send(AgentResponse::Activity("preparing context".to_string()));
+    let _ = tx.send(turn(&session_id, TurnEvent::Activity("preparing context".to_string())));
     // Cheap tool-result pruning to relieve pressure before considering a full
-    // compaction. Only prunes when it can reclaim meaningful space.
-    if compaction.prune {
-        prune_and_commit(&mut turn_history, &session, &tx, &compaction).await?;
+    // compaction. Gated by the model-relative `prune_utilization` threshold
+    // (ADR-0019) so it engages only once pressure crosses that fraction of the
+    // window — not every turn — mirroring the mid-turn gate. Pruning also
+    // self-limits to runs that reclaim meaningful space.
+    if compaction.prune && estimate_tokens(&turn_history) > compaction.budget.prune_threshold_tokens
+    {
+        prune_and_commit(&mut turn_history, &session, &compaction).await?;
     }
     if estimate_tokens(&turn_history) > compaction.budget.compaction_threshold_tokens {
-        let hooks = RelayCompactionHooks { tx: tx.clone() };
+        let hooks = RelayCompactionHooks {
+            tx: tx.clone(),
+            session_id: session_id.clone(),
+        };
         if let Some(checkpoint) = compact_turn_history(
             &mut turn_history,
             &session,
@@ -372,9 +413,9 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         )
         .await?
         {
-            send_compaction(&tx, &checkpoint);
+            send_compaction(&tx, &session_id, &checkpoint);
         }
-        let _ = tx.send(AgentResponse::Activity("preparing context".to_string()));
+        let _ = tx.send(turn(&session_id, TurnEvent::Activity("preparing context".to_string())));
     }
 
     let tool_activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -391,7 +432,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
                 if matches!(event, AgentEvent::ToolCall { .. }) {
                     activity_for_run.store(true, Ordering::SeqCst);
                 }
-                relay_agent_event(&tx, event, &streamed_for_run);
+                relay_agent_event(&tx, &session_id, event, &streamed_for_run);
             })
             .await;
 
@@ -402,7 +443,10 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
             && !compacted_after_overflow
             && !tool_activity.load(Ordering::SeqCst)
         {
-            let hooks = RelayCompactionHooks { tx: tx.clone() };
+            let hooks = RelayCompactionHooks {
+                tx: tx.clone(),
+                session_id: session_id.clone(),
+            };
             let overflow_settings = CompactionSettings {
                 preserve_turns: compaction.preserve_turns.max(1),
                 ..compaction.clone()
@@ -419,10 +463,10 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
             {
                 compacted_after_overflow = true;
                 if streamed_text.swap(false, Ordering::SeqCst) {
-                    let _ = tx.send(AgentResponse::StreamDiscard);
+                    let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
                 }
-                if let Some(checkpoint) = session.compaction().await {
-                    send_compaction(&tx, &checkpoint);
+                if let Some(checkpoint) = session.last_relief().await {
+                    send_compaction(&tx, &session_id, &checkpoint);
                 }
                 attempt = attempt.saturating_sub(1);
                 continue;
@@ -436,11 +480,27 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         else {
             break Err(error);
         };
-        if tool_activity.load(Ordering::SeqCst) || attempt >= retry_limit {
-            break Err(HarnessError::Other(message));
+        // Distinguish the two give-up reasons so the surfaced error explains
+        // what happened instead of looking identical to a fresh failure that
+        // was never retried. The tool-activity guard is intentional: once a
+        // tool has run this turn the history may carry side effects we cannot
+        // safely replay, so we stop rather than risk repeating them.
+        if tool_activity.load(Ordering::SeqCst) {
+            break Err(HarnessError::Other(format!(
+                "{message}\n\nNot retried automatically because a tool already ran \
+                 this turn and re-running could repeat its side effects. Resend \
+                 the message to try again."
+            )));
+        }
+        if attempt >= retry_limit {
+            break Err(HarnessError::Other(format!(
+                "{message}\n\nGave up after {retry_limit} attempt(s); the upstream \
+                 service appears overloaded. Resend the message to try again, or \
+                 raise `provider_retry_max_attempts` for more attempts."
+            )));
         }
         if streamed_text.swap(false, Ordering::SeqCst) {
-            let _ = tx.send(AgentResponse::StreamDiscard);
+            let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
         }
         let delay_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
         tracing::warn!(
@@ -449,12 +509,15 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
             delay_ms,
             "retrying after transient provider error"
         );
-        let _ = tx.send(AgentResponse::RetryScheduled {
-            attempt: attempt + 1,
-            max_attempts: retry_limit,
-            delay_ms,
-            message,
-        });
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::RetryScheduled {
+                attempt: attempt + 1,
+                max_attempts: retry_limit,
+                delay_ms,
+                message,
+            },
+        ));
         tokio::select! {
             _ = token.cancelled() => return Err(HarnessError::Interrupted),
             _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
@@ -463,7 +526,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     if session.id().await != admitted_session_id {
         return Err(HarnessError::Interrupted);
     }
-    let _ = tx.send(AgentResponse::Activity("saving response".to_string()));
+    let _ = tx.send(turn(&session_id, TurnEvent::Activity("saving response".to_string())));
     *history.lock().await = turn_history.clone();
     session.replace_messages(turn_history).await?;
     let outcome = result?;
@@ -476,14 +539,15 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         match pursuit_service.mark_complete(&thread_id).await {
             Ok(Some(pursuit)) => {
                 agent.set_pursuit(pursuit.clone());
-                emit_pursuit_updated(&tx, &pursuit);
+                emit_pursuit_updated(&tx, &session_id, &pursuit);
                 completed = true;
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = tx.send(AgentResponse::Error(format!(
-                    "Failed to mark pursuit complete: {error}"
-                )));
+                let _ = tx.send(turn(
+                    &session_id,
+                    TurnEvent::Error(format!("Failed to mark pursuit complete: {error}")),
+                ));
             }
         }
     } else if agent
@@ -500,15 +564,16 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         .trim()
         .to_string();
     if !visible.is_empty() && !streamed_text.load(Ordering::SeqCst) {
-        let _ = tx.send(AgentResponse::Text(visible));
+        let _ = tx.send(turn(&session_id, TurnEvent::Text(visible)));
     }
     if requested_completion && !completed {
-        let _ = tx.send(AgentResponse::Text(
-            "Pursuit completion marker ignored: no active pursuit is set.".to_string(),
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::Text("Pursuit completion marker ignored: no active pursuit is set.".to_string()),
         ));
     }
     if completed {
-        let _ = tx.send(AgentResponse::Text("Pursuit completed.".to_string()));
+        let _ = tx.send(turn(&session_id, TurnEvent::Text("Pursuit completed.".to_string())));
     }
 
     // Sync the agent's active plan path to the session so resume restores
@@ -552,6 +617,7 @@ pub fn retry_delay_ms(
 
 pub fn relay_agent_event(
     tx: &mpsc::UnboundedSender<AgentResponse>,
+    session_id: &str,
     event: AgentEvent,
     streamed_text: &std::sync::atomic::AtomicBool,
 ) {
@@ -561,69 +627,95 @@ pub fn relay_agent_event(
             // `turn N · round M · waiting for model` with the round as a
             // first-class field rather than text-mining it out of the status
             // string. The bare status follows as the `Activity` below.
-            let _ = tx.send(AgentResponse::RoundStarted { round: tool_round });
-            AgentResponse::Activity("waiting for model".to_string())
+            let _ = tx.send(turn(session_id, TurnEvent::RoundStarted { round: tool_round }));
+            turn(session_id, TurnEvent::Activity("waiting for model".to_string()))
         }
         AgentEvent::AssistantDelta { delta, start } => {
             if start {
-                let _ = tx.send(AgentResponse::StreamStart);
+                let _ = tx.send(turn(session_id, TurnEvent::StreamStart));
             }
             streamed_text.store(true, Ordering::SeqCst);
-            AgentResponse::StreamDelta(delta)
+            turn(session_id, TurnEvent::StreamDelta(delta))
         }
-        AgentEvent::AssistantEnd(content) => AgentResponse::StreamEnd(
-            content
-                .replace(PURSUIT_COMPLETE_MARKER, "")
-                .trim()
-                .to_string(),
+        AgentEvent::AssistantEnd(content) => turn(
+            session_id,
+            TurnEvent::StreamEnd(
+                content
+                    .replace(PURSUIT_COMPLETE_MARKER, "")
+                    .trim()
+                    .to_string(),
+            ),
         ),
-        AgentEvent::AssistantDiscard => AgentResponse::StreamDiscard,
+        AgentEvent::AssistantDiscard => turn(session_id, TurnEvent::StreamDiscard),
         AgentEvent::ReasoningDelta { delta, start } => {
             if start {
-                let _ = tx.send(AgentResponse::StreamStart);
+                let _ = tx.send(turn(session_id, TurnEvent::StreamStart));
             }
             streamed_text.store(true, Ordering::SeqCst);
-            AgentResponse::StreamReasoningDelta(delta)
+            turn(session_id, TurnEvent::StreamReasoningDelta(delta))
         }
-        AgentEvent::ReasoningEnd(content) => AgentResponse::StreamReasoningEnd(content),
+        AgentEvent::ReasoningEnd(content) => {
+            turn(session_id, TurnEvent::StreamReasoningEnd(content))
+        }
         AgentEvent::ToolCall {
             id,
             name,
             arguments,
-        } => AgentResponse::ToolCall {
-            id,
-            name,
-            arguments,
-        },
+        } => turn(
+            session_id,
+            TurnEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            },
+        ),
         AgentEvent::ToolResult {
             id,
             name,
             output,
             structured,
             duration_ms,
-        } => AgentResponse::ToolResult {
-            id,
-            name,
-            output,
-            structured,
-            duration_ms,
-        },
-        AgentEvent::ToolCancelled { id, name } => AgentResponse::ToolCancelled { id, name },
-        AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
-        AgentEvent::PursuitUpdated(pursuit) => AgentResponse::PursuitUpdated(pursuit),
-        AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
-        AgentEvent::TodosUpdated(todos) => AgentResponse::TodosUpdated(todos),
-        AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
-        AgentEvent::SessionReview { alert } => AgentResponse::SessionReview { alert },
-        AgentEvent::PermissionRequest(request) => AgentResponse::PermissionRequest(request),
-        AgentEvent::UserQuestionRequest(request) => AgentResponse::UserQuestionRequest(request),
+        } => turn(
+            session_id,
+            TurnEvent::ToolResult {
+                id,
+                name,
+                output,
+                structured,
+                duration_ms,
+            },
+        ),
+        AgentEvent::ToolCancelled { id, name } => {
+            turn(session_id, TurnEvent::ToolCancelled { id, name })
+        }
+        AgentEvent::ToolStream { id, stream } => {
+            turn(session_id, TurnEvent::ToolStream { id, stream })
+        }
+        AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
+        AgentEvent::ModeChanged(mode) => turn(session_id, TurnEvent::ModeChanged(mode)),
+        AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
+        AgentEvent::AutoApproveChanged(enabled) => {
+            turn(session_id, TurnEvent::AutoApproveChanged(enabled))
+        }
+        AgentEvent::SessionReview { alert } => {
+            turn(session_id, TurnEvent::SessionReview { alert })
+        }
+        AgentEvent::PermissionRequest(request) => {
+            turn(session_id, TurnEvent::PermissionRequest(request))
+        }
+        AgentEvent::UserQuestionRequest(request) => {
+            turn(session_id, TurnEvent::UserQuestionRequest(request))
+        }
         AgentEvent::SubTask {
             parent_call_id,
             event,
-        } => AgentResponse::SubTask {
-            parent_call_id,
-            event,
-        },
+        } => turn(
+            session_id,
+            TurnEvent::SubTask {
+                parent_call_id,
+                event,
+            },
+        ),
     };
     let _ = tx.send(response);
 }
@@ -634,7 +726,7 @@ pub async fn compact_turn_history(
     settings: &CompactionSettings,
     provider: Option<Arc<dyn Provider>>,
     hooks: &dyn CompactionHooks,
-) -> Result<Option<CompactionCheckpoint>, String> {
+) -> Result<Option<ContextReliefCheckpoint>, String> {
     // Skip the model call entirely when summarization is disabled; the excerpt
     // fallback inside `run_compaction` still produces a checkpoint.
     let provider = if settings.summarize { provider } else { None };
@@ -650,16 +742,18 @@ pub async fn compact_turn_history(
         return Ok(None);
     };
     let checkpoint = result.checkpoint.clone();
-    session.commit_compaction(result).await?;
+    session.commit_context_relief(result).await?;
     Ok(Some(checkpoint))
 }
 
-/// Prune old tool results in place and durably commit the change. Emits a
-/// `Compacted` event only when pruning actually reclaims space.
+/// Prune old tool results in place and durably commit the change. Pruning is an
+/// implicit context-relief step: it keeps the conversation and the
+/// `tool_call_id` chain intact (only stale tool *bodies* are cleared), so unlike
+/// a summarizing compaction it does **not** surface a transcript notice — it
+/// only records a durable checkpoint and a `debug` trace for observability.
 pub async fn prune_and_commit(
     history: &mut [Message],
     session: &SessionStore,
-    tx: &mpsc::UnboundedSender<AgentResponse>,
     settings: &CompactionSettings,
 ) -> Result<(), String> {
     let before_chars = estimate_chars(history);
@@ -671,31 +765,40 @@ pub async fn prune_and_commit(
         return Ok(());
     };
     let after_chars = estimate_chars(history);
-    let checkpoint = CompactionCheckpoint {
+    let checkpoint = ContextReliefCheckpoint {
         archived_messages: outcome.originals.len(),
         active_messages: history.len(),
         before_chars,
         after_chars,
     };
-    let result = CompactionResult {
-        active: history.to_owned(),
-        archived: outcome.originals,
-        checkpoint: checkpoint.clone(),
-    };
-    session.commit_compaction(result).await?;
-    send_compaction(tx, &checkpoint);
-    Ok(())
+    tracing::debug!(
+        pruned_tool_results = checkpoint.archived_messages,
+        before_chars,
+        after_chars,
+        "pruned stale tool results"
+    );
+    session
+        .commit_context_relief(ContextReliefResult {
+            active: history.to_owned(),
+            archived: outcome.originals,
+            checkpoint,
+        })
+        .await
 }
 
 pub fn send_compaction(
     tx: &mpsc::UnboundedSender<AgentResponse>,
-    checkpoint: &CompactionCheckpoint,
+    session_id: &str,
+    checkpoint: &ContextReliefCheckpoint,
 ) {
-    let _ = tx.send(AgentResponse::Compacted {
-        archived_messages: checkpoint.archived_messages,
-        before_chars: checkpoint.before_chars,
-        after_chars: checkpoint.after_chars,
-    });
+    let _ = tx.send(turn(
+        session_id,
+        TurnEvent::Compacted {
+            archived_messages: checkpoint.archived_messages,
+            before_chars: checkpoint.before_chars,
+            after_chars: checkpoint.after_chars,
+        },
+    ));
 }
 
 #[derive(Clone)]
@@ -706,6 +809,8 @@ pub struct PursuitContext {
     pub token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     pub generation_counter: Arc<AtomicU64>,
     pub session: Arc<SessionStore>,
+    /// Session id this pursuit belongs to (ADR-0017).
+    pub session_id: String,
     pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
@@ -737,7 +842,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
         previous.cancel();
     }
 
-    send_harness_state(&context.tx, &context.agent, "pursue");
+    send_harness_state(&context.tx, &context.session_id, &context.agent, "pursue");
 
     tokio::spawn(async move {
         // Arm the stop-gate so `execute_turn`'s turn loop keeps driving toward
@@ -770,6 +875,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                 tx: context.tx.clone(),
                 token: token.clone(),
                 session: context.session.clone(),
+                session_id: context.session_id.clone(),
                 pursuit_service: context.pursuit_service.clone(),
                 compaction: context.compaction.clone(),
                 retry_max_attempts: context.retry_max_attempts,
@@ -796,9 +902,10 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                         status: "completed".to_string(),
                     }))
                     .await;
-                let _ = context
-                    .tx
-                    .send(AgentResponse::Text("Pursuit complete.".to_string()));
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Text("Pursuit complete.".to_string()),
+                ));
             }
             Ok(false) => {
                 // The stop-gate disarmed without a completion signal: either
@@ -813,8 +920,11 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                         status: "interrupted".to_string(),
                     }))
                     .await;
-                let _ = context.tx.send(AgentResponse::Text(
-                    "Pursuit stopped: safety cap reached or no completion signal.".to_string(),
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Text(
+                        "Pursuit stopped: safety cap reached or no completion signal.".to_string(),
+                    ),
                 ));
             }
             Err(HarnessError::Interrupted) => {
@@ -827,9 +937,10 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                         status: "interrupted".to_string(),
                     }))
                     .await;
-                let _ = context
-                    .tx
-                    .send(AgentResponse::Text("Pursuit interrupted.".to_string()));
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Text("Pursuit interrupted.".to_string()),
+                ));
             }
             Err(error) => {
                 let _ = context
@@ -841,14 +952,16 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                         status: "error".to_string(),
                     }))
                     .await;
-                let _ = context.tx.send(AgentResponse::Error(error.to_string()));
+                let _ = context
+                    .tx
+                    .send(turn(&context.session_id, TurnEvent::Error(error.to_string())));
             }
         }
 
         let mut slot = context.token_slot.write().await;
         if context.generation_counter.load(Ordering::SeqCst) == generation {
             slot.take();
-            send_harness_state(&context.tx, &context.agent, "idle");
+            send_harness_state(&context.tx, &context.session_id, &context.agent, "idle");
         }
     });
 }

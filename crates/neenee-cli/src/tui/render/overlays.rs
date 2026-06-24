@@ -18,8 +18,7 @@ use crate::tui::layout::LayoutMap;
 use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest};
 
 use super::primitives::{
-    centered_rect, contrast_fg, draw_dim_backdrop, modal_frame, panel_block, render_body,
-    viewport_rect,
+    centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
 };
 use super::Theme;
 
@@ -57,7 +56,6 @@ pub(crate) fn draw_models_modal(
     cursor_position: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(72, 60, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -208,7 +206,6 @@ pub fn draw_model_editor(
     cursor_position: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(60, 36, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -376,7 +373,6 @@ pub fn draw_sessions_modal(
     selected: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(80, 64, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -491,7 +487,6 @@ pub fn draw_session_modal(
     scroll: &mut usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let modal = centered_rect(76, 70, viewport_rect(frame));
     let f = modal_frame(frame, modal, theme.panel(), true, true);
     let header_rect = f.header;
@@ -916,7 +911,6 @@ pub fn draw_history_modal(
     modal_index: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(70, 55, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -1142,10 +1136,7 @@ pub fn draw_question_modal(
             ]));
         }
     }
-    frame.render_widget(
-        Paragraph::new(body).wrap(Wrap { trim: false }),
-        f.body,
-    );
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), f.body);
 
     if let Some(fo) = f.footer {
         frame.render_widget(
@@ -1462,7 +1453,6 @@ pub fn draw_tool_step_detail_overlay(
     theme: &Theme,
 ) {
     use crate::tui::document::MessageKind;
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(92, 84, viewport_rect(frame));
     frame.render_widget(Clear, area);
 
@@ -1557,7 +1547,6 @@ pub fn draw_tool_step_detail_overlay(
 }
 
 pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(58, 70, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -1685,7 +1674,6 @@ fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Color, width: u
 /// time so the modal does not hit disk on every redraw; `scroll` is the
 /// overlay's own scroll offset, reset on each open.
 pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, theme: &Theme) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     // Wider than the help modal — plans are usually long. Cap at 80% x 70%
     // so the modal stays readable on small terminals.
     let area = centered_rect(80, 70, viewport_rect(frame));
@@ -1784,7 +1772,6 @@ pub fn draw_activity_modal(
         activity,
     } = view;
 
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(72, 70, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 

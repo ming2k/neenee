@@ -31,3 +31,6 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0018](0018-per-project-multi-instance-concurrency.md) | Per-project multi-instance concurrency (drop the per-project flock; one session file per live instance; file-scoped locks on shared global state) | Accepted |
 | [0019](0019-model-relative-context-compaction.md) | Model-relative context compaction (token thresholds derived from the active model's context window) | Accepted |
 | [0020](0020-unified-task-list.md) | Unified task list (supersede the per-plan progress panel with one shared `TodoList`) | Accepted |
+| [0021](0021-pruning-is-implicit-and-distinct-from-compaction.md) | Tool-result pruning is implicit (silent, gated at ~65%) and renamed distinct from compaction (`ContextRelief*`) | Accepted |
+| [0022](0022-session-level-ai-title.md) | Session-level AI title (first-turn auto + on-demand `/title` + manual lock; `TITLE` sub-agent profile) | Accepted |
+| [0023](0023-relevance-aware-tiered-pruning-and-layered-token-accounting.md) | Relevance-aware, tiered pruning (staleness/keep-alive, truncate→clear, informative placeholders) and layered token accounting (`effective_pressure_tokens`) | Accepted |

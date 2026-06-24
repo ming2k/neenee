@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Modals no longer erase the background.** Opening a centered modal used to
+  fully occlude the transcript, input, hint bar, and activity bar. Every modal
+  except the sessions picker now **dims** the live surface in place instead —
+  the background stays visible for context while the modal reads as the focal
+  layer. The dim brightness is tunable via the new `modal_dim_factor` theme
+  field (default 0.5). The sessions picker keeps its full-takeover behavior
+  (footer collapse + solid occlusion) since switching sessions is a context
+  switch. This is driven by a single new `Modal::recess` policy
+  (`None` / `Dim` / `Takeover`) that the footer-collapse flag and the
+  per-frame paint both consult, replacing the old opaque `draw_dim_backdrop`
+  fill.
+
 ## [0.2.0] - 2026-06-24
 
 ### Removed

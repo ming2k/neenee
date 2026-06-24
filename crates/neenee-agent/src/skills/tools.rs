@@ -156,6 +156,25 @@ fn list_skill_files(root: &std::path::Path) -> String {
     }
 }
 
+// --- Self-registration -----------------------------------------------------
+//
+// The skill tools share one live registry, cloned out of the build context as
+// `Arc<SkillRegistry>`. They decline (return `None`) when no registry was
+// provided, so a context that isn't skill-aware simply gets no skill tools.
+
+neenee_core::register_tool!(UseSkillFactory => |ctx| {
+    let registry = ctx.shared::<SkillRegistry>()?;
+    UseSkillTool { registry }
+});
+neenee_core::register_tool!(ListSkillsFactory => |ctx| {
+    let registry = ctx.shared::<SkillRegistry>()?;
+    ListSkillsTool { registry }
+});
+neenee_core::register_tool!(ReloadSkillsFactory => |ctx| {
+    let registry = ctx.shared::<SkillRegistry>()?;
+    ReloadSkillsTool { registry }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

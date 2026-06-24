@@ -36,8 +36,9 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     ));
     let session_path = directory.join("session.json");
     let session = Arc::new(SessionStore::for_path(session_path.clone()));
-    let pursuit_service =
-        PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"));
+    let pursuit_service = PursuitService::new(
+        PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
+    );
     let agent = Arc::new(Agent::new(
         Arc::new(MockProvider),
         Vec::new(),
@@ -55,6 +56,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             tx,
             token: CancellationToken::new(),
             session: session.clone(),
+            session_id: session.id().await,
             pursuit_service,
             compaction: CompactionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),

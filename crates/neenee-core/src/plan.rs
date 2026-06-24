@@ -375,11 +375,9 @@ mod tests {
         let context = PlanToolContext::new(mode);
         // Seed both the path and the task list (as plan_exit would).
         context.set_active_plan_path(Some(PathBuf::from(".neenee/plans/x.md")));
-        context.todo_context().set_todos(TodoList::from_plan_markdown(
-            "## X\n",
-            100,
-            1,
-        ));
+        context
+            .todo_context()
+            .set_todos(TodoList::from_plan_markdown("## X\n", 100, 1));
         assert!(context.active_plan_path().is_some());
         assert_eq!(context.todo_context().todos().len(), 1);
 

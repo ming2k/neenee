@@ -165,6 +165,27 @@ the requested structured verdict only, no preamble.",
     },
 };
 
+/// The session-titling role (ADR-0022). Read-only and non-interactive like
+/// [`REVIEW`], but its task is pure text-in/text-out — it admits no tool loop at
+/// all. The runner (`Agent::generate_title`) makes a single `provider.chat()`
+/// framed by this prompt and normalizes the reply via `clean_title`. Declared as
+/// a profile (not an ad-hoc call) so the capability-axis vocabulary stays the
+/// single source of truth for what a bounded sub-agent may do, per ADR-0011.
+pub const TITLE: SubagentProfile = SubagentProfile {
+    name: "title",
+    system_prompt: "\
+You are a session-titling sub-agent. You are shown an excerpt of a conversation \
+and asked for a short title that captures what the session is about. Reply with \
+only the title — 3 to 7 words, plain text, no quotes, no markdown, no trailing \
+punctuation, no preamble. Name the concrete subject of the work (a feature, \
+file, bug, or task) rather than a generic word like \"chat\" or \"help\". Write \
+the title in the same language as the conversation.",
+    tool_policy: ToolPolicy {
+        access: ToolAccess::Read,
+        allow_user_interaction: false,
+    },
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

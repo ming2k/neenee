@@ -47,6 +47,13 @@ pub struct Theme {
     pub user_bg: Color,
     /// Dim overlay drawn behind modals to fake alpha.
     pub backdrop: Color,
+    /// Brightness multiplier (0.0–1.0) applied to every cell of the live
+    /// surface while a [`Recess::Dim`](crate::tui::app::Recess) modal is open.
+    /// The terminal cannot alpha-blend, so a dim-recess modal darkens the
+    /// transcript/chrome in place by scaling each color by this factor — lower
+    /// is darker. This is the single knob for how strongly an open modal
+    /// recedes the background for focus.
+    pub modal_dim_factor: f32,
     /// Brand / selection color.
     pub primary: Color,
     pub warning: Color,
@@ -81,6 +88,9 @@ impl Default for Theme {
             menu_bg: Color::Rgb(17, 19, 18),
             user_bg: Color::Rgb(18, 24, 21),
             backdrop: Color::Rgb(3, 4, 4),
+            // Halves surface luminance behind a dim-recess modal — clearly
+            // recessed for focus, still readable for context.
+            modal_dim_factor: 0.5,
             primary: Color::Rgb(142, 161, 145),
             warning: Color::Rgb(181, 149, 93),
             success: Color::Rgb(117, 148, 117),
@@ -131,6 +141,11 @@ impl Theme {
     /// Dim overlay behind modals.
     pub fn backdrop(&self) -> Color {
         self.backdrop
+    }
+    /// Brightness factor (0.0–1.0) the dim-recess pass scales the live surface
+    /// by. Lower is darker. See [`Theme::modal_dim_factor`](struct.Theme.html#structfield.modal_dim_factor).
+    pub fn modal_dim_factor(&self) -> f32 {
+        self.modal_dim_factor
     }
     /// Selection highlight background.
     pub fn selected(&self) -> Color {

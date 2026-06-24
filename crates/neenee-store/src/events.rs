@@ -10,7 +10,7 @@
 //! a monotonic sequence number, a wall-clock timestamp, and the event payload.
 
 use crate::fsutil;
-use crate::session::{CompactionCheckpoint, PursuitCheckpoint};
+use crate::session::{ContextReliefCheckpoint, PursuitCheckpoint};
 use neenee_core::Message;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -33,12 +33,18 @@ pub enum SessionEvent {
     /// after tool-result pruning).
     MessagesReplaced { messages: Vec<Message> },
     /// The autonomous-loop checkpoint changed.
-    CheckpointSet { checkpoint: Option<PursuitCheckpoint> },
-    /// A compaction archived older turns and replaced the active window.
-    CompactionCommitted {
+    CheckpointSet {
+        checkpoint: Option<PursuitCheckpoint>,
+    },
+    /// A context-relief op (tool-result pruning or a summarizing compaction)
+    /// archived originals and replaced the active window. `alias` keeps event
+    /// logs written before the rename replayable. The enum tag is `rename_all =
+    /// "snake_case"`, so the pre-rename on-disk tag was `compaction_committed`.
+    #[serde(alias = "compaction_committed")]
+    ContextReliefCommitted {
         archived: Vec<Message>,
         active: Vec<Message>,
-        checkpoint: CompactionCheckpoint,
+        checkpoint: ContextReliefCheckpoint,
     },
     /// Messages were moved into the archived list without a compaction.
     Archived { messages: Vec<Message> },
@@ -58,6 +64,13 @@ pub enum SessionEvent {
     /// change (snapshot semantics); history of individual items is
     /// reconstructable from the log itself.
     TodosSet { todos: neenee_core::TodoList },
+    /// The session title changed (ADR-0022). `title = None` clears it. `manual`
+    /// marks a user-set title (`/title <text>`) that AI generation must not
+    /// overwrite; automatic and on-demand generation always set `manual = false`.
+    TitleSet {
+        title: Option<String>,
+        manual: bool,
+    },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and
@@ -175,6 +188,36 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].seq, 0);
         assert_eq!(loaded[1].seq, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_compaction_committed_tag_still_replays() {
+        // Event logs written before the prune/compact rename used the tag
+        // `compaction_committed`. The serde alias on `ContextReliefCommitted`
+        // must keep those lines replayable, or resuming an old session would
+        // drop its archived turns. Regression guard for the rename.
+        let dir =
+            std::env::temp_dir().join(format!("neenee-events-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        std::fs::write(
+            &path,
+            "{\"seq\":0,\"timestamp\":1,\"type\":\"compaction_committed\",\
+             \"archived\":[],\"active\":[],\
+             \"checkpoint\":{\"archived_messages\":2,\"active_messages\":3,\
+             \"before_chars\":100,\"after_chars\":40}}\n",
+        )
+        .unwrap();
+        let loaded = EventLog::new(path).load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].event {
+            SessionEvent::ContextReliefCommitted { checkpoint, .. } => {
+                assert_eq!(checkpoint.before_chars, 100);
+                assert_eq!(checkpoint.after_chars, 40);
+            }
+            other => panic!("legacy tag did not map to ContextReliefCommitted: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

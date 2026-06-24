@@ -61,7 +61,6 @@ impl BlobStore {
         self.root.join(prefix).join(hash)
     }
 
-    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }

@@ -33,7 +33,7 @@ use crate::tui::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionState,
 };
 use crate::tui::step_interaction;
-use crate::tui::{App, Modal, SessionTab, PROVIDERS};
+use crate::tui::{App, Modal, Recess, SessionTab, PROVIDERS};
 
 use tokio::sync::Mutex;
 
@@ -326,29 +326,24 @@ pub(super) async fn run_app_loop<B: Backend>(
                 app.input.clone()
             };
 
-            // Modal chrome policy:
-            // - "Hide" group: the footer collapses to zero height so the
-            //   modal owns the whole surface. Used for full-screen entry
-            //   flows that carry their own input UI or want a clean slate
-            //   (Sessions / Provider / ModelEditor).
-            // - "Blur" group: the footer keeps its height so the backdrop
-            //   layout is stable across modal open/close (Help / ToolStepDetail
-            //   / Session / PlanPreview / Activity). The composer stays in its
-            //   normal Compose-zone palette — the modal's full-screen backdrop
-            //   is the single signal that the surface has receded, so an extra
-            //   per-row dim would only make the input box inconsistent with the
-            //   activity bar and hint bar sitting beside it. The caret is still
-            //   suppressed (see `show_caret` below) since the modal owns the
-            //   keyboard.
-            // Question floats on top without hiding or dimming the chrome — it
-            // is a lightweight overlay, not a full takeover.
-            // HistorySearch borrows the input line and Permission replaces
-            // only the composer with its own sheet, so neither hides the
-            // rest of the chrome.
-            let chrome_hidden = matches!(
-                app.active_modal,
-                Modal::Provider | Modal::ModelEditor | Modal::Sessions
-            );
+            // Modal recess policy (single source of truth: `Modal::recess`).
+            // A terminal cannot alpha-blend, so a modal either floats, darkens
+            // the live surface in place, or fully occludes it:
+            // - Takeover (Sessions): the footer collapses to zero height and
+            //   the surface is occluded — opening a different session is a full
+            //   context switch, so a clean slate is the intent.
+            // - Dim (every other centered modal): the footer keeps its height
+            //   so layout is stable, and the whole surface is darkened in place
+            //   by the recess pass just before the modal is drawn. Context
+            //   (transcript, input, hint bar, activity bar) stays visible for
+            //   focus while the centered panel reads as the focal layer.
+            // - None (Question / Permission): floats on the fully-live surface.
+            // Provider / ModelEditor / HistorySearch borrow the input line as
+            // their own field, so the composer is suppressed for them (its rect
+            // stays as recessed surface) — no duplicate field, and no
+            // masked-cursor panic in the editor.
+            let recess = app.active_modal.recess();
+            let chrome_hidden = recess == Recess::Takeover;
 
             // When zoomed into a sub-agent, render its child messages and show
             // a navigation bar; otherwise render the root conversation.
@@ -460,20 +455,25 @@ pub(super) async fn run_app_loop<B: Backend>(
                         app.permission_scroll =
                             app.permission_scroll.min(app.permission_max_scroll);
                     }
-                } else if matches!(app.active_modal, Modal::ModelEditor | Modal::HistorySearch) {
-                    // These modals render their own live input field over a
-                    // dimmed backdrop, so the composer underneath would only
-                    // (a) bleed its panel background out around the centered
-                    // modal and (b) duplicate the same `app.input` the modal
-                    // already shows, making it look like focus is split. For
-                    // the editor's key field it would also panic: the masked
-                    // key's byte cursor is computed against the unmasked string.
+                } else if matches!(
+                    app.active_modal,
+                    Modal::Provider | Modal::ModelEditor | Modal::HistorySearch
+                ) {
+                    // These modals borrow the input line as their own field
+                    // (filter / key+model / search), so the composer underneath
+                    // would only duplicate the same `app.input` the modal
+                    // already shows. Its rect stays mounted (so the footer
+                    // layout is stable) but is left as recessed surface — the
+                    // dim pass darkens it like the rest of the background. For
+                    // the editor's key field the composer would also panic:
+                    // the masked key's byte cursor is computed against the
+                    // unmasked string.
                 } else if !app.in_subagent_view() {
-                    // The composer stays mounted for the "blur" modal group
-                    // (Help / ToolStepDetail / Session / PlanPreview / Activity)
-                    // so the footer layout doesn't shift when the overlay opens
-                    // or closes. It keeps its normal Compose-zone palette (the
-                    // modal backdrop is the recede signal); the caret is hidden
+                    // The composer stays mounted for the dim-recess modals
+                    // (Help / ToolStepDetail / Session / PlanPreview /
+                    // Activity) so the footer layout doesn't shift when the
+                    // overlay opens or closes; the recess pass darkens it in
+                    // place with the rest of the surface. The caret is hidden
                     // whenever any modal owns the keyboard.
                     let compose_focused = app.focus_zone.is_compose();
                     let show_caret = compose_focused && app.active_modal == Modal::None;
@@ -530,6 +530,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                     );
                 }
             }
+
+            // Recess the live surface for the open modal: darken it in place
+            // (Dim), occlude it fully (Takeover), or leave it untouched (None).
+            // Done after the transcript + chrome are drawn and before the modal
+            // panel so the panel overpaints its own crisp area on top of the
+            // recessed background.
+            render::recess_backdrop(f, recess, &app.theme);
 
             // Modals
             match app.active_modal {

@@ -2,9 +2,9 @@ use crate::tui::start_tui;
 use neenee_agent::catalog;
 use neenee_agent::orchestration::{
     compact_turn_history, emit_pursuit_updated, refresh_agent_pursuit, send_compaction,
-    send_harness_state, start_interactive_turn, start_pursuit, start_repeat_scheduler,
-    CompactionSettings, InteractiveTurnContext, MidTurnCompactionGate, ProxyProvider,
-    PursuitContext, RelayCompactionHooks, TurnInput,
+    send_harness_state, start_interactive_turn, start_pursuit, start_repeat_scheduler, turn,
+    CompactionSettings, InteractiveTurnContext, MidTurnPruneGate, ProxyProvider, PursuitContext,
+    RelayCompactionHooks, TurnInput,
 };
 #[cfg(test)]
 use neenee_agent::orchestration::{execute_turn, retry_delay_ms, TurnContext};
@@ -17,23 +17,19 @@ use neenee_agent::TaskTool;
 #[cfg(test)]
 use neenee_core::{async_trait, Message, ProviderStreamEvent};
 use neenee_core::{
-    AgentMode, AgentRequest, AgentResponse, CronExpr, Provider, Pursuit, PursuitService,
-    PursuitStore, RepeatStore, Tool, CHARS_PER_TOKEN, EXPLORE, resolve_model,
+    resolve_model, AgentMode, AgentRequest, AgentResponse, CronExpr, Provider, Pursuit,
+    PursuitService, PursuitStore, RepeatStore, Tool, TurnEvent, CHARS_PER_TOKEN, EXPLORE,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
     config::Config,
     embedding, lock, paths, provider_usage,
-    search_tool::SearchHistoryTool,
     session::{self, SessionStore},
 };
 use neenee_tools::commands::{discover_commands, expand_command, CustomCommand};
-use neenee_tools::{
-    mcp::load_mcp_tools,
-    project::{init_neenee_config, CreateProjectTool, InitConfigTool},
-    AskUserTool, BashTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
-    WebFetchTool, WebSearchTool, WriteFileTool,
-};
+use neenee_tools::mcp::load_mcp_tools;
+use neenee_tools::project::init_neenee_config;
+use neenee_tools::BashTool;
 #[allow(dead_code)]
 mod tui;
 
@@ -198,29 +194,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     ));
 
-    let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
-        Arc::new(BashTool),
-        Arc::new(ReadFileTool),
-        Arc::new(WriteFileTool),
-        Arc::new(AskUserTool),
-        Arc::new(EditFileTool),
-        Arc::new(GrepTool),
-        Arc::new(GlobTool),
-        Arc::new(ListDirTool),
-        Arc::new(WebFetchTool::with_config(config.websearch.clone())),
-        Arc::new(WebSearchTool::with_config(config.websearch.clone())),
-        Arc::new(CreateProjectTool),
-        Arc::new(InitConfigTool),
-        Arc::new(UseSkillTool {
-            registry: skills_registry.clone(),
-        }),
-        Arc::new(ListSkillsTool {
-            registry: skills_registry.clone(),
-        }),
-        Arc::new(ReloadSkillsTool {
-            registry: skills_registry.clone(),
-        }),
-    ];
+    // Built-in tools self-register via `inventory` (each tool carries a
+    // `register_tool!` submission at its definition site) and are collected
+    // here from a single opaque context. Tools that need runtime state (the web
+    // tools' search config, the shared skill registry, the embedding index +
+    // session store) pull it out of the context by type — see
+    // `neenee_core::tool_registry`. Meta-tools that genuinely depend on the
+    // *rest* of the toolset (the sub-agent dispatch `task`) cannot
+    // self-register and are assembled explicitly below. MCP tools are
+    // discovered at runtime from configured servers and layered on last.
+    let tool_ctx = {
+        let mut builder = neenee_core::ToolContextBuilder::new();
+        builder.provide(config.websearch.clone());
+        builder.provide(skills_registry.clone());
+        builder.provide(embedding_store.clone());
+        builder.provide(session.clone());
+        builder.build()
+    };
+    let mut tools: Vec<Arc<dyn neenee_core::Tool>> = neenee_core::collect_tools(&tool_ctx);
     tools.extend(mcp.tools);
     // TaskTool gets a snapshot of the toolset (excluding itself) so spawned
     // sub-agents cannot recurse and inherit the live provider. It binds the
@@ -231,10 +222,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &EXPLORE,
     ));
     tools.push(task_tool);
-    tools.push(Arc::new(SearchHistoryTool::new(
-        embedding_store.clone(),
-        session.clone(),
-    )));
     let agent = Arc::new(Agent::new(
         agent_provider,
         tools,
@@ -248,8 +235,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.set_project_root(Some(project_root.clone()));
     if auto_approve_at_start {
         agent.set_auto_approve(true);
-        let _ = resp_tx.send(AgentResponse::Text(
-            "Auto-approve ON: write tools will execute without permission prompts.".to_string(),
+        let _ = resp_tx.send(turn(
+            &session.id().await,
+            TurnEvent::Text(
+                "Auto-approve ON: write tools will execute without permission prompts."
+                    .to_string(),
+            ),
         ));
     }
 
@@ -264,7 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `reseed_prune_threshold`), so it tracks the live model rather than a
     // fixed character budget.
     if config.compaction_prune {
-        agent.set_compaction_gate(Some(Arc::new(MidTurnCompactionGate {
+        agent.set_context_relief_gate(Some(Arc::new(MidTurnPruneGate {
             session: session.clone(),
             prune_protect_chars: config.compaction_prune_protect_tokens * CHARS_PER_TOKEN,
         })));
@@ -334,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // presentation config out first so it can be handed to the TUI later.
     let tui_config = config.tui.clone();
     tokio::spawn(async move {
-        send_harness_state(&resp_tx, &agent, "idle");
+        send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
         let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
         // Record that the default model was activated on startup, so the
         // picker's recency ordering reflects "last used = now". Best-effort:
@@ -391,7 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // supersedes, while the stale task's generation-guarded idle
                     // send is skipped (`orchestration.rs` start_pursuit /
                     // start_interactive_turn / run_shell_command).
-                    send_harness_state(&resp_tx, &agent, "idle");
+                    send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
 
                     let mut token = ctt_clone.write().await;
                     if let Some(t) = token.take() {
@@ -638,16 +629,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                     }
                                 }
-                                let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Mode changed to: {:?}",
-                                    new_mode
-                                )));
-                                send_harness_state(&resp_tx, &agent, "idle");
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(format!("Mode changed to: {:?}", new_mode)),
+                                ));
+                                send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                             } else {
-                                let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Current mode: {:?}",
-                                    agent.get_mode()
-                                )));
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(format!("Current mode: {:?}", agent.get_mode())),
+                                ));
                             }
                         }
                         Some(BuiltinCmd::Mcp) => {
@@ -663,7 +654,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .join("\n")
                                 )
                             };
-                            let _ = resp_tx.send(AgentResponse::Text(message));
+                            let _ = resp_tx
+                                .send(turn(&session.id().await, TurnEvent::Text(message)));
                         }
                         Some(BuiltinCmd::Plan) => {
                             // Open the plan preview modal. The TUI loads
@@ -676,8 +668,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = resp_tx.send(AgentResponse::OpenPlanPreview(path));
                                 }
                                 None => {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "No active plan to preview.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text("No active plan to preview.".to_string()),
                                     ));
                                 }
                             }
@@ -694,8 +687,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = resp_tx.send(AgentResponse::TriggerVerification);
                                 }
                                 None => {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "No active plan to verify.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text("No active plan to verify.".to_string()),
                                     ));
                                 }
                             }
@@ -703,8 +697,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(BuiltinCmd::Permissions) => {
                             if parts.get(1) == Some(&"clear") {
                                 agent.clear_allowed_tools();
-                                let _ = resp_tx.send(AgentResponse::Text(
-                                    "Always-allowed tool rules cleared.".to_string(),
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(
+                                        "Always-allowed tool rules cleared.".to_string(),
+                                    ),
                                 ));
                             } else {
                                 let allowed = agent.allowed_tools();
@@ -713,7 +710,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     format!("Always-allowed tools:\n- {}", allowed.join("\n- "))
                                 };
-                                let _ = resp_tx.send(AgentResponse::Text(message));
+                                let _ = resp_tx
+                                    .send(turn(&session.id().await, TurnEvent::Text(message)));
                             }
                         }
                         Some(BuiltinCmd::AutoApprove) => {
@@ -731,13 +729,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let enabled = next.unwrap_or_else(|| !agent.get_auto_approve());
                             agent.set_auto_approve(enabled);
-                            let _ = resp_tx.send(AgentResponse::Text(format!(
-                                "Auto-approve {}: write tools {} run without permission prompts.",
-                                if enabled { "ON" } else { "OFF" },
-                                if enabled { "will" } else { "won't" },
-                            )));
-                            let _ = resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
-                            send_harness_state(&resp_tx, &agent, "idle");
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Text(format!(
+                                    "Auto-approve {}: write tools {} run without permission prompts.",
+                                    if enabled { "ON" } else { "OFF" },
+                                    if enabled { "will" } else { "won't" },
+                                )),
+                            ));
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::AutoApproveChanged(enabled),
+                            ));
+                            send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                         }
                         Some(BuiltinCmd::Review) => {
                             // /review — on-demand session review (ADR-0018,
@@ -758,23 +762,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let transcript = session.transcript().await;
                             let rounds = Agent::estimate_tool_rounds(&transcript);
                             if rounds == 0 {
-                                let _ = resp_tx.send(AgentResponse::Text(
-                                    "Nothing to review yet — no tool rounds in the current \
-                                     transcript."
-                                        .to_string(),
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(
+                                        "Nothing to review yet — no tool rounds in the current \
+                                         transcript."
+                                            .to_string(),
+                                    ),
                                 ));
                                 continue;
                             }
-                            let _ = resp_tx.send(AgentResponse::Activity(
-                                "running session review…".to_string(),
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Activity("running session review…".to_string()),
                             ));
                             let verdicts = agent.review_now(&transcript).await;
                             // Mirror the worst verdict into the activity-bar
                             // banner (empty alert clears it when healthy).
                             let alert = Agent::render_review_alert(&verdicts, rounds);
-                            let _ = resp_tx.send(AgentResponse::SessionReview { alert });
-                            let _ = resp_tx
-                                .send(AgentResponse::Text(format_review_report(&verdicts, rounds)));
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::SessionReview { alert },
+                            ));
+                            let _ =
+                                resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(format_review_report(&verdicts, rounds)),
+                                ));
                         }
                         Some(BuiltinCmd::VerifyNudge) => {
                             // /verify-nudge        → show current state
@@ -792,19 +806,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let enabled = next.unwrap_or_else(|| !agent.get_verify_nudge_enabled());
                             agent.set_verify_nudge_enabled(enabled);
-                            let _ = resp_tx.send(AgentResponse::Text(format!(
-                                "Verify hard nudge {}: the harness {} inject a reminder when \
-                                 the model ends a turn with an approved plan but no \
-                                 verify_plan_execution call.",
-                                if enabled { "ON" } else { "OFF" },
-                                if enabled { "will" } else { "won't" },
-                            )));
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Text(format!(
+                                    "Verify hard nudge {}: the harness {} inject a reminder when \
+                                     the model ends a turn with an approved plan but no \
+                                     verify_plan_execution call.",
+                                    if enabled { "ON" } else { "OFF" },
+                                    if enabled { "will" } else { "won't" },
+                                )),
+                            ));
                         }
                         Some(BuiltinCmd::Search) => {
                             let query = cmd.strip_prefix("/search").unwrap_or("").trim();
                             if query.is_empty() {
-                                let _ = resp_tx.send(AgentResponse::Text(
-                                    "Usage: /search <query>".to_string(),
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text("Usage: /search <query>".to_string()),
                                 ));
                             } else {
                                 let messages = session.transcript().await;
@@ -824,8 +842,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     Ok(results) => {
                                         if results.is_empty() {
-                                            let _ = resp_tx.send(AgentResponse::Text(
-                                                "No relevant history found.".to_string(),
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(
+                                                    "No relevant history found.".to_string(),
+                                                ),
                                             ));
                                         } else {
                                             let mut lines =
@@ -839,8 +860,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     text
                                                 ));
                                             }
-                                            let _ = resp_tx
-                                                .send(AgentResponse::Text(lines.join("\n\n")));
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(lines.join("\n\n")),
+                                            ));
                                         }
                                     }
                                     Err(error) => {
@@ -860,181 +883,221 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok((id, transcript)) => {
                                     let _ = resp_tx
                                         .send(AgentResponse::ConversationReplaced(transcript));
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Resumed session {}.",
-                                        short_session_id(&id)
-                                    )));
-                                    send_harness_state(&resp_tx, &agent, "idle");
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "Resumed session {}.",
+                                            short_session_id(&id)
+                                        )),
+                                    ));
+                                    send_harness_state(
+                                        &resp_tx,
+                                        &session.id().await,
+                                        &agent,
+                                        "idle",
+                                    );
                                 }
                                 Err(error) => {
                                     let _ = resp_tx.send(AgentResponse::Error(error));
                                 }
                             }
                         }
-                        Some(BuiltinCmd::Session) => match parts.get(1).copied().unwrap_or("status") {
-                            "status" => {
-                                let id = session.id().await;
-                                let parent_id = session
-                                    .parent_id()
-                                    .await
-                                    .unwrap_or_else(|| "none".to_string());
-                                let message_count = history.lock().await.len();
-                                let archived_count = session.archived_count().await;
-                                let checkpoint = session.checkpoint().await;
-                                let compaction = session.compaction().await;
-                                let checkpoint_text = checkpoint
-                                    .map(|item| {
-                                        format!(
-                                            "{} {}/{} ({})",
-                                            item.pursuit,
-                                            item.iteration,
-                                            item.max_iterations,
-                                            item.status
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "none".to_string());
-                                let _ = resp_tx.send(AgentResponse::Text(format!(
-                                    "Session: {}\nForked from: {}\nActive messages: {}\nArchived messages: {}\nLoop checkpoint: {}\nLast compaction: {}",
+                        Some(BuiltinCmd::Session) => {
+                            match parts.get(1).copied().unwrap_or("status") {
+                                "status" => {
+                                    let id = session.id().await;
+                                    let parent_id = session
+                                        .parent_id()
+                                        .await
+                                        .unwrap_or_else(|| "none".to_string());
+                                    let message_count = history.lock().await.len();
+                                    let archived_count = session.archived_count().await;
+                                    let checkpoint = session.checkpoint().await;
+                                    let last_relief = session.last_relief().await;
+                                    let checkpoint_text = checkpoint
+                                        .map(|item| {
+                                            format!(
+                                                "{} {}/{} ({})",
+                                                item.pursuit,
+                                                item.iteration,
+                                                item.max_iterations,
+                                                item.status
+                                            )
+                                        })
+                                        .unwrap_or_else(|| "none".to_string());
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                    "Session: {}\nForked from: {}\nActive messages: {}\nArchived messages: {}\nLoop checkpoint: {}\nLast context relief: {}",
                                     id,
                                     parent_id,
                                     message_count,
                                     archived_count,
                                     checkpoint_text,
-                                    compaction
+                                    last_relief
                                         .map(|item| format!(
                                             "{} -> {} chars",
                                             item.before_chars, item.after_chars
                                         ))
                                         .unwrap_or_else(|| "none".to_string())
-                                )));
-                            }
-                            "list" => match session.list().await {
-                                Ok(sessions) => {
-                                    let lines = sessions
-                                        .into_iter()
-                                        .map(|item| {
-                                            format!(
-                                                "- {}{}  messages={}  parent={}",
-                                                short_session_id(&item.id),
-                                                if item.active { " [active]" } else { "" },
-                                                item.message_count,
-                                                item.parent_id
-                                                    .map(|id| short_session_id(&id).to_string())
-                                                    .unwrap_or_else(|| "none".to_string())
-                                            )
-                                        })
-                                        .collect::<Vec<_>>();
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Sessions:\n{}",
-                                        lines.join("\n")
-                                    )));
-                                }
-                                Err(error) => {
-                                    let _ = resp_tx.send(AgentResponse::Error(error));
-                                }
-                            },
-                            "fork" => {
-                                generation_clone.fetch_add(1, Ordering::SeqCst);
-                                agent.reject_pending_permissions();
-                                let _ = resp_tx.send(AgentResponse::PermissionsCleared);
-                                if let Some(token) = ctt_clone.write().await.take() {
-                                    token.cancel();
-                                }
-                                match session.fork().await {
-                                    Ok((id, parent_id)) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Forked session {} from {}.",
-                                            id, parent_id
-                                        )));
-                                        send_harness_state(&resp_tx, &agent, "idle");
-                                    }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                    }
-                                }
-                            }
-                            "open" => {
-                                let Some(id) = parts.get(2) else {
-                                    let _ = resp_tx.send(AgentResponse::Error(
-                                        "Usage: /session open <session-id>".to_string(),
+                                )),
                                     ));
-                                    continue;
-                                };
-                                generation_clone.fetch_add(1, Ordering::SeqCst);
-                                agent.reject_pending_permissions();
-                                let _ = resp_tx.send(AgentResponse::PermissionsCleared);
-                                if let Some(token) = ctt_clone.write().await.take() {
-                                    token.cancel();
                                 }
-                                match session.open(id).await {
-                                    Ok(()) => {
-                                        *history.lock().await = session.messages().await;
-                                        let transcript = session.transcript().await;
-                                        let _ = resp_tx
-                                            .send(AgentResponse::ConversationReplaced(transcript));
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Opened session {}.",
-                                            id
-                                        )));
-                                        send_harness_state(&resp_tx, &agent, "idle");
+                                "list" => match session.list().await {
+                                    Ok(sessions) => {
+                                        let lines = sessions
+                                            .into_iter()
+                                            .map(|item| {
+                                                format!(
+                                                    "- {}{}  messages={}  parent={}",
+                                                    short_session_id(&item.id),
+                                                    if item.active { " [active]" } else { "" },
+                                                    item.message_count,
+                                                    item.parent_id
+                                                        .map(|id| short_session_id(&id).to_string())
+                                                        .unwrap_or_else(|| "none".to_string())
+                                                )
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let _ = resp_tx.send(turn(
+                                            &session.id().await,
+                                            TurnEvent::Text(format!("Sessions:\n{}", lines.join("\n"))),
+                                        ));
                                     }
                                     Err(error) => {
                                         let _ = resp_tx.send(AgentResponse::Error(error));
                                     }
-                                }
-                            }
-                            "resume" => {
-                                generation_clone.fetch_add(1, Ordering::SeqCst);
-                                agent.reject_pending_permissions();
-                                let _ = resp_tx.send(AgentResponse::PermissionsCleared);
-                                if let Some(token) = ctt_clone.write().await.take() {
-                                    token.cancel();
-                                }
-                                match resume_session(&session, &history, parts.get(2).copied())
-                                    .await
-                                {
-                                    Ok((id, transcript)) => {
-                                        let _ = resp_tx
-                                            .send(AgentResponse::ConversationReplaced(transcript));
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Resumed session {}.",
-                                            short_session_id(&id)
-                                        )));
-                                        send_harness_state(&resp_tx, &agent, "idle");
+                                },
+                                "fork" => {
+                                    generation_clone.fetch_add(1, Ordering::SeqCst);
+                                    agent.reject_pending_permissions();
+                                    let _ = resp_tx.send(AgentResponse::PermissionsCleared);
+                                    if let Some(token) = ctt_clone.write().await.take() {
+                                        token.cancel();
                                     }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
-                                    }
-                                }
-                            }
-                            "new" => {
-                                generation_clone.fetch_add(1, Ordering::SeqCst);
-                                agent.reject_pending_permissions();
-                                let _ = resp_tx.send(AgentResponse::PermissionsCleared);
-                                if let Some(token) = ctt_clone.write().await.take() {
-                                    token.cancel();
-                                }
-                                history.lock().await.clear();
-                                match session.reset().await {
-                                    Ok(id) => {
-                                        let _ = resp_tx.send(AgentResponse::ConversationCleared);
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Started new session: {}",
-                                            id
-                                        )));
-                                    }
-                                    Err(error) => {
-                                        let _ = resp_tx.send(AgentResponse::Error(error));
+                                    match session.fork().await {
+                                        Ok((id, parent_id)) => {
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(format!(
+                                                    "Forked session {} from {}.",
+                                                    id, parent_id
+                                                )),
+                                            ));
+                                            send_harness_state(
+                                                &resp_tx,
+                                                &session.id().await,
+                                                &agent,
+                                                "idle",
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
                                     }
                                 }
-                            }
-                            other => {
-                                let _ = resp_tx.send(AgentResponse::Error(format!(
+                                "open" => {
+                                    let Some(id) = parts.get(2) else {
+                                        let _ = resp_tx.send(AgentResponse::Error(
+                                            "Usage: /session open <session-id>".to_string(),
+                                        ));
+                                        continue;
+                                    };
+                                    generation_clone.fetch_add(1, Ordering::SeqCst);
+                                    agent.reject_pending_permissions();
+                                    let _ = resp_tx.send(AgentResponse::PermissionsCleared);
+                                    if let Some(token) = ctt_clone.write().await.take() {
+                                        token.cancel();
+                                    }
+                                    match session.open(id).await {
+                                        Ok(()) => {
+                                            *history.lock().await = session.messages().await;
+                                            let transcript = session.transcript().await;
+                                            let _ = resp_tx.send(
+                                                AgentResponse::ConversationReplaced(transcript),
+                                            );
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(format!("Opened session {}.", id)),
+                                            ));
+                                            send_harness_state(
+                                                &resp_tx,
+                                                &session.id().await,
+                                                &agent,
+                                                "idle",
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                                "resume" => {
+                                    generation_clone.fetch_add(1, Ordering::SeqCst);
+                                    agent.reject_pending_permissions();
+                                    let _ = resp_tx.send(AgentResponse::PermissionsCleared);
+                                    if let Some(token) = ctt_clone.write().await.take() {
+                                        token.cancel();
+                                    }
+                                    match resume_session(&session, &history, parts.get(2).copied())
+                                        .await
+                                    {
+                                        Ok((id, transcript)) => {
+                                            let _ = resp_tx.send(
+                                                AgentResponse::ConversationReplaced(transcript),
+                                            );
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(format!(
+                                                    "Resumed session {}.",
+                                                    short_session_id(&id)
+                                                )),
+                                            ));
+                                            send_harness_state(
+                                                &resp_tx,
+                                                &session.id().await,
+                                                &agent,
+                                                "idle",
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                                "new" => {
+                                    generation_clone.fetch_add(1, Ordering::SeqCst);
+                                    agent.reject_pending_permissions();
+                                    let _ = resp_tx.send(AgentResponse::PermissionsCleared);
+                                    if let Some(token) = ctt_clone.write().await.take() {
+                                        token.cancel();
+                                    }
+                                    history.lock().await.clear();
+                                    match session.reset().await {
+                                        Ok(id) => {
+                                            let _ =
+                                                resp_tx.send(AgentResponse::ConversationCleared);
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(format!(
+                                                    "Started new session: {}",
+                                                    id
+                                                )),
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            let _ = resp_tx.send(AgentResponse::Error(error));
+                                        }
+                                    }
+                                }
+                                other => {
+                                    let _ = resp_tx.send(AgentResponse::Error(format!(
                                     "Unknown session command '{}'. Use status, list, resume, fork, open, or new.",
                                     other
                                 )));
+                                }
                             }
-                        },
+                        }
                         Some(BuiltinCmd::Sessions) => {
                             let _ = resp_tx.send(AgentResponse::SessionsOverview(
                                 build_sessions_overview(&session).await,
@@ -1042,9 +1105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Some(BuiltinCmd::Compact) => {
                             let mut current = history.lock().await.clone();
-                            let settings = CompactionSettings::from_config(&config, active_context_window(&agent));
+                            let settings = CompactionSettings::from_config(
+                                &config,
+                                active_context_window(&agent),
+                            );
                             let hooks = RelayCompactionHooks {
                                 tx: resp_tx.clone(),
+                                session_id: session.id().await,
                             };
                             match compact_turn_history(
                                 &mut current,
@@ -1057,11 +1124,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 Ok(Some(checkpoint)) => {
                                     *history.lock().await = current;
-                                    send_compaction(&resp_tx, &checkpoint);
+                                    send_compaction(&resp_tx, &session.id().await, &checkpoint);
                                 }
                                 Ok(None) => {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "Not enough complete turns to compact.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(
+                                            "Not enough complete turns to compact.".to_string(),
+                                        ),
                                     ));
                                 }
                                 Err(error) => {
@@ -1076,6 +1146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             async fn report_pursuit_result(
                                 tx: &mpsc::UnboundedSender<AgentResponse>,
+                                session_id: &str,
                                 agent: &Agent,
                                 result: Result<Option<Pursuit>, String>,
                                 success: impl FnOnce(&Pursuit) -> String,
@@ -1084,8 +1155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match result {
                                     Ok(Some(pursuit)) => {
                                         agent.set_pursuit(pursuit.clone());
-                                        emit_pursuit_updated(tx, &pursuit);
-                                        let _ = tx.send(AgentResponse::Text(success(&pursuit)));
+                                        emit_pursuit_updated(tx, session_id, &pursuit);
+                                        let _ = tx.send(turn(
+                                            session_id,
+                                            TurnEvent::Text(success(&pursuit)),
+                                        ));
                                     }
                                     Ok(None) => {
                                         let _ = tx.send(AgentResponse::Error(empty.into()));
@@ -1100,15 +1174,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut current = ctt_clone.write().await;
                                 if let Some(token) = current.take() {
                                     token.cancel();
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "Pursuit stop requested.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &thread_id,
+                                        TurnEvent::Text("Pursuit stop requested.".to_string()),
                                     ));
                                 } else {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "No pursuit is running.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &thread_id,
+                                        TurnEvent::Text("No pursuit is running.".to_string()),
                                     ));
                                 }
-                                send_harness_state(&resp_tx, &agent, "idle");
+                                send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                                 continue;
                             }
 
@@ -1131,19 +1207,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .to_string()
                                     }
                                 };
-                                let _ = resp_tx.send(AgentResponse::Text(message));
+                                let _ = resp_tx.send(turn(
+                                    &thread_id,
+                                    TurnEvent::Text(message),
+                                ));
                             } else if rest == "clear" {
                                 agent.disarm_pursuit();
                                 match pursuit_service.clear_pursuit(&thread_id).await {
                                     Ok(true) => {
                                         agent.clear_pursuit();
-                                        let _ = resp_tx.send(AgentResponse::Text(
-                                            "Pursuit cleared.".to_string(),
+                                        let _ = resp_tx.send(turn(
+                                            &thread_id,
+                                            TurnEvent::Text("Pursuit cleared.".to_string()),
                                         ));
                                     }
                                     Ok(false) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(
-                                            "No pursuit to clear.".to_string(),
+                                        let _ = resp_tx.send(turn(
+                                            &thread_id,
+                                            TurnEvent::Text("No pursuit to clear.".to_string()),
                                         ));
                                     }
                                     Err(error) => {
@@ -1154,6 +1235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent.disarm_pursuit();
                                 report_pursuit_result(
                                     &resp_tx,
+                                    &thread_id,
                                     &agent,
                                     pursuit_service.mark_complete(&thread_id).await,
                                     |_| "Pursuit marked completed.".to_string(),
@@ -1180,11 +1262,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 drop(messages);
                                                 let _ = session.replace_messages(updated).await;
                                             }
-                                            emit_pursuit_updated(&resp_tx, &pursuit);
-                                            let _ = resp_tx.send(AgentResponse::Text(format!(
-                                                "Pursuit updated: {}",
-                                                pursuit.objective
-                                            )));
+                                            emit_pursuit_updated(&resp_tx, &thread_id, &pursuit);
+                                            let _ = resp_tx.send(turn(
+                                                &thread_id,
+                                                TurnEvent::Text(format!(
+                                                    "Pursuit updated: {}",
+                                                    pursuit.objective
+                                                )),
+                                            ));
                                         }
                                         Ok(None) => {
                                             let _ = resp_tx.send(AgentResponse::Error(
@@ -1213,10 +1298,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let condition = if rest.is_empty() {
                                     match pursuit_service.active_pursuit(&thread_id).await {
                                         Ok(Some(pursuit)) => {
-                                            let _ = resp_tx.send(AgentResponse::Text(format!(
-                                                "Resuming pursuit on existing pursuit: {}",
-                                                pursuit.objective
-                                            )));
+                                            let _ = resp_tx.send(turn(
+                                                &thread_id,
+                                                TurnEvent::Text(format!(
+                                                    "Resuming pursuit on existing pursuit: {}",
+                                                    pursuit.objective
+                                                )),
+                                            ));
                                             pursuit.objective
                                         }
                                         Ok(None) => {
@@ -1224,12 +1312,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "No active pursuit. Start one with /pursue <condition>."
                                                     .to_string(),
                                             ));
-                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                                             continue;
                                         }
                                         Err(error) => {
                                             let _ = resp_tx.send(AgentResponse::Error(error));
-                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                                             continue;
                                         }
                                     }
@@ -1237,12 +1325,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match pursuit_service.set_pursuit(&thread_id, rest).await {
                                         Ok(pursuit) => {
                                             agent.set_pursuit(pursuit.clone());
-                                            emit_pursuit_updated(&resp_tx, &pursuit);
+                                            emit_pursuit_updated(&resp_tx, &thread_id, &pursuit);
                                             pursuit.objective
                                         }
                                         Err(error) => {
                                             let _ = resp_tx.send(AgentResponse::Error(error));
-                                            send_harness_state(&resp_tx, &agent, "idle");
+                                            send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                                             continue;
                                         }
                                     }
@@ -1255,8 +1343,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         token_slot: ctt_clone.clone(),
                                         generation_counter: generation_clone.clone(),
                                         session: session.clone(),
+                                        session_id: session.id().await,
                                         pursuit_service: pursuit_service.clone(),
-                                        compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
+                                        compaction: CompactionSettings::from_config(
+                                            &config,
+                                            active_context_window(&agent),
+                                        ),
                                         retry_max_attempts: config.provider_retry_max_attempts,
                                         retry_base_ms: config.provider_retry_base_ms,
                                         retry_max_ms: config.provider_retry_max_ms,
@@ -1266,17 +1358,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .await;
                                 continue;
                             }
-                            send_harness_state(&resp_tx, &agent, "idle");
+                            send_harness_state(&resp_tx, &session.id().await, &agent, "idle");
                         }
                         Some(BuiltinCmd::Repeat) => {
                             let rest = cmd.strip_prefix("/repeat").unwrap_or("").trim();
                             if rest.is_empty() || rest == "help" {
-                                let _ = resp_tx.send(AgentResponse::Text(
-                                    "Usage: /repeat <cron> <prompt>\n\
-                                     cron is five fields: minute hour day month weekday \
-                                     (e.g. `*/5 * * * *` = every 5 min, `0 9 * * 1-5` = 09:00 weekdays).\n\
-                                     Also: /repeat list, /repeat cancel <id>."
-                                        .to_string(),
+                                let _ = resp_tx.send(turn(
+                                    &session.id().await,
+                                    TurnEvent::Text(
+                                        "Usage: /repeat <cron> <prompt>\n\
+                                         cron is five fields: minute hour day month weekday \
+                                         (e.g. `*/5 * * * *` = every 5 min, `0 9 * * 1-5` = 09:00 weekdays).\n\
+                                         Also: /repeat list, /repeat cancel <id>."
+                                            .to_string(),
+                                    ),
                                 ));
                                 continue;
                             }
@@ -1284,8 +1379,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let jobs =
                                     repeat_store_for_commands.list().await.unwrap_or_default();
                                 if jobs.is_empty() {
-                                    let _ = resp_tx.send(AgentResponse::Text(
-                                        "No /repeat jobs scheduled.".to_string(),
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text("No /repeat jobs scheduled.".to_string()),
                                     ));
                                 } else {
                                     let mut lines = vec!["Scheduled /repeat jobs:".to_string()];
@@ -1298,7 +1394,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             j.prompt,
                                         ));
                                     }
-                                    let _ = resp_tx.send(AgentResponse::Text(lines.join("\n")));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(lines.join("\n")),
+                                    ));
                                 }
                                 continue;
                             }
@@ -1306,14 +1405,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let id = id.trim();
                                 match repeat_store_for_commands.delete(id).await {
                                     Ok(true) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "Cancelled repeat job {id}."
-                                        )));
+                                        let _ = resp_tx.send(turn(
+                                            &session.id().await,
+                                            TurnEvent::Text(format!("Cancelled repeat job {id}.")),
+                                        ));
                                     }
                                     Ok(false) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(format!(
-                                            "No repeat job with id {id}."
-                                        )));
+                                        let _ = resp_tx.send(turn(
+                                            &session.id().await,
+                                            TurnEvent::Text(format!("No repeat job with id {id}.")),
+                                        ));
                                     }
                                     Err(error) => {
                                         let _ = resp_tx.send(AgentResponse::Error(error));
@@ -1355,12 +1456,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             match repeat_store_for_commands.add(&cron, &prompt, next).await {
                                 Ok(job) => {
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Scheduled repeat job {} (`{}`), next {}. Running now.",
-                                        &job.id[..8.min(job.id.len())],
-                                        cron,
-                                        next.format("%Y-%m-%d %H:%M"),
-                                    )));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "Scheduled repeat job {} (`{}`), next {}. Running now.",
+                                            &job.id[..8.min(job.id.len())],
+                                            cron,
+                                            next.format("%Y-%m-%d %H:%M"),
+                                        )),
+                                    ));
                                     // Fire the first run immediately (cron handles the rest).
                                     let _ = req_tx_for_commands.send(AgentRequest::Chat {
                                         text: prompt,
@@ -1376,21 +1480,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let target = parts.get(1).copied().unwrap_or(".");
                             match init_neenee_config(std::path::Path::new(target)) {
                                 Ok(created) if created.is_empty() => {
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "neenee is already configured in '{}'. Nothing to do.",
-                                        target
-                                    )));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "neenee is already configured in '{}'. Nothing to do.",
+                                            target
+                                        )),
+                                    ));
                                 }
                                 Ok(created) => {
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Initialized neenee configuration in '{}'.\nCreated:\n{}",
-                                        target,
-                                        created
-                                            .iter()
-                                            .map(|path| format!("- {}", path))
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    )));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "Initialized neenee configuration in '{}'.\nCreated:\n{}",
+                                            target,
+                                            created
+                                                .iter()
+                                                .map(|path| format!("- {}", path))
+                                                .collect::<Vec<_>>()
+                                                .join("\n")
+                                        )),
+                                    ));
                                 }
                                 Err(error) => {
                                     let _ = resp_tx.send(AgentResponse::Error(error));
@@ -1406,7 +1516,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     match tool.call("{}").await {
                                         Ok(output) => {
-                                            let _ = resp_tx.send(AgentResponse::Text(output));
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(output),
+                                            ));
                                         }
                                         Err(error) => {
                                             let _ = resp_tx.send(AgentResponse::Error(error));
@@ -1419,7 +1532,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     match tool.call("{}").await {
                                         Ok(output) => {
-                                            let _ = resp_tx.send(AgentResponse::Text(output));
+                                            let _ = resp_tx.send(turn(
+                                                &session.id().await,
+                                                TurnEvent::Text(output),
+                                            ));
                                         }
                                         Err(error) => {
                                             let _ = resp_tx.send(AgentResponse::Error(error));
@@ -1446,7 +1562,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 match tool.call(&args).await {
                                     Ok(output) => {
-                                        let _ = resp_tx.send(AgentResponse::Text(output));
+                                        let _ = resp_tx.send(turn(
+                                            &session.id().await,
+                                            TurnEvent::Text(output),
+                                        ));
                                     }
                                     Err(error) => {
                                         let _ = resp_tx.send(AgentResponse::Error(error));
@@ -1458,8 +1577,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             history.lock().await.clear();
                             let _ = session.replace_messages(Vec::new()).await;
                             let _ = resp_tx.send(AgentResponse::ConversationCleared);
-                            let _ = resp_tx.send(AgentResponse::Text(
-                                "Conversation history cleared.".to_string(),
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Text("Conversation history cleared.".to_string()),
                             ));
                         }
                         Some(BuiltinCmd::Export) => {
@@ -1487,21 +1607,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let char_count = markdown.chars().count();
                             match crate::tui::clipboard::copy(&markdown).await {
                                 Ok(crate::tui::clipboard::CopyOutcome::Native) => {
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Session exported to clipboard ({} messages, {} chars). \
-                                         Paste it into another agent to continue this work.",
-                                        messages.len(),
-                                        char_count
-                                    )));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "Session exported to clipboard ({} messages, {} chars). \
+                                             Paste it into another agent to continue this work.",
+                                            messages.len(),
+                                            char_count
+                                        )),
+                                    ));
                                 }
                                 Ok(crate::tui::clipboard::CopyOutcome::Osc52) => {
-                                    let _ = resp_tx.send(AgentResponse::Text(format!(
-                                        "Session exported via OSC52 ({} messages, {} chars). \
-                                         If your terminal did not capture it, run neenee in a \
-                                         clipboard-capable environment.",
-                                        messages.len(),
-                                        char_count
-                                    )));
+                                    let _ = resp_tx.send(turn(
+                                        &session.id().await,
+                                        TurnEvent::Text(format!(
+                                            "Session exported via OSC52 ({} messages, {} chars). \
+                                             If your terminal did not capture it, run neenee in a \
+                                             clipboard-capable environment.",
+                                            messages.len(),
+                                            char_count
+                                        )),
+                                    ));
                                 }
                                 Err(error) => {
                                     let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -1537,10 +1663,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for (name, desc) in BuiltinCmd::ALL {
                                 lines.push(format!("{name:<13} — {desc}"));
                             }
-                            let _ = resp_tx
-                                .send(AgentResponse::Text(format!("{}
-{custom_help}", lines.join("
-"))));
+                            let _ = resp_tx.send(turn(
+                                &session.id().await,
+                                TurnEvent::Text(format!(
+                                    "{}
+{custom_help}",
+                                    lines.join(
+                                        "
+"
+                                    )
+                                )),
+                            ));
                         }
                         Some(BuiltinCmd::Exit) => {
                             let _ = resp_tx.send(AgentResponse::Exit);
@@ -1562,8 +1695,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     token_slot: ctt_clone.clone(),
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
+                                    session_id: session.id().await,
                                     pursuit_service: pursuit_service.clone(),
-                                    compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
+                                    compaction: CompactionSettings::from_config(
+                                        &config,
+                                        active_context_window(&agent),
+                                    ),
                                     retry_max_attempts: config.provider_retry_max_attempts,
                                     retry_base_ms: config.provider_retry_base_ms,
                                     retry_max_ms: config.provider_retry_max_ms,
@@ -1588,8 +1725,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             token_slot: ctt_clone.clone(),
                             generation_counter: generation_clone.clone(),
                             session: session.clone(),
+                            session_id: session.id().await,
                             pursuit_service: pursuit_service.clone(),
-                            compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
+                            compaction: CompactionSettings::from_config(
+                                &config,
+                                active_context_window(&agent),
+                            ),
                             retry_max_attempts: config.provider_retry_max_attempts,
                             retry_base_ms: config.provider_retry_base_ms,
                             retry_max_ms: config.provider_retry_max_ms,
@@ -1613,10 +1754,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let shell_token_slot = ctt_clone.clone();
                     let shell_generation = generation_clone.clone();
                     let shell_agent = agent.clone();
+                    let shell_session_id = session.id().await;
                     tokio::spawn(async move {
                         run_shell_command(
                             command,
                             shell_tx,
+                            shell_session_id,
                             shell_token_slot,
                             shell_generation,
                             shell_agent,
@@ -1708,6 +1851,7 @@ fn format_review_report(verdicts: &[neenee_core::ReviewVerdict], rounds: usize) 
 async fn run_shell_command(
     command: String,
     tx: mpsc::UnboundedSender<AgentResponse>,
+    session_id: String,
     token_slot: Arc<AsyncRwLock<Option<CancellationToken>>>,
     generation_counter: Arc<AtomicU64>,
     agent: Arc<Agent>,
@@ -1731,23 +1875,30 @@ async fn run_shell_command(
 
     // Surface the synthetic tool step starting. The response listener maps
     // `name: "bash"` to the "running command" activity status.
-    let _ = tx.send(AgentResponse::ToolCall {
-        id: call_id.clone(),
-        name: "bash".to_string(),
-        arguments: arguments.clone(),
-    });
+    let _ = tx.send(turn(
+        &session_id,
+        TurnEvent::ToolCall {
+            id: call_id.clone(),
+            name: "bash".to_string(),
+            arguments: arguments.clone(),
+        },
+    ));
 
     let bash = BashTool;
     let tx_for_stream = tx.clone();
+    let session_id_for_stream = session_id.clone();
     let call_id_for_stream = call_id.clone();
     let mut on_stream = move |stream: ToolStream| {
         if !is_current() {
             return;
         }
-        let _ = tx_for_stream.send(AgentResponse::ToolStream {
-            id: call_id_for_stream.clone(),
-            stream,
-        });
+        let _ = tx_for_stream.send(turn(
+            &session_id_for_stream,
+            TurnEvent::ToolStream {
+                id: call_id_for_stream.clone(),
+                stream,
+            },
+        ));
     };
 
     let run = bash.call_structured_with_events("", &arguments, Box::new(|_| {}), &mut on_stream);
@@ -1760,33 +1911,42 @@ async fn run_shell_command(
             // event if we are still the active turn — a newer turn's
             // ToolCall events must not be flattened by our exit.
             if is_current() {
-                let _ = tx.send(AgentResponse::ToolCancelled {
-                    id: call_id,
-                    name: "bash".to_string(),
-                });
+                let _ = tx.send(turn(
+                    &session_id,
+                    TurnEvent::ToolCancelled {
+                        id: call_id,
+                        name: "bash".to_string(),
+                    },
+                ));
             }
         }
         result = run => if is_current() {
             match result {
                 Ok(structured) => {
                     let output = structured.to_text();
-                    let _ = tx.send(AgentResponse::ToolResult {
-                        id: call_id,
-                        name: "bash".to_string(),
-                        output,
-                        structured,
-                        duration_ms: 0,
-                    });
+                    let _ = tx.send(turn(
+                        &session_id,
+                        TurnEvent::ToolResult {
+                            id: call_id,
+                            name: "bash".to_string(),
+                            output,
+                            structured,
+                            duration_ms: 0,
+                        },
+                    ));
                 }
                 Err(error) => {
                     let structured = neenee_core::ToolOutput::Text(error.clone());
-                    let _ = tx.send(AgentResponse::ToolResult {
-                        id: call_id,
-                        name: "bash".to_string(),
-                        output: error,
-                        structured,
-                        duration_ms: 0,
-                    });
+                    let _ = tx.send(turn(
+                        &session_id,
+                        TurnEvent::ToolResult {
+                            id: call_id,
+                            name: "bash".to_string(),
+                            output: error,
+                            structured,
+                            duration_ms: 0,
+                        },
+                    ));
                 }
             }
         },
@@ -1799,8 +1959,8 @@ async fn run_shell_command(
     if is_current() {
         slot.take();
         drop(slot);
-        send_harness_state(&tx, &agent, "idle");
-        let _ = tx.send(AgentResponse::Activity(String::new()));
+        send_harness_state(&tx, &session_id, &agent, "idle");
+        let _ = tx.send(turn(&session_id, TurnEvent::Activity(String::new())));
     }
 }
 
@@ -1812,7 +1972,47 @@ mod tests {
 
     struct RetryOnceProvider(AtomicUsize);
     struct ToolThenRetryProvider(AtomicUsize);
+    struct AlwaysRetryableProvider;
     struct RetryReadTool;
+
+    /// Built-in tools self-register via `inventory` across the neenee-tools,
+    /// neenee-agent, and neenee-store crates. This test guards the one real
+    /// risk of that approach — that a crate's `inventory::submit!` nodes get
+    /// dropped by the linker — by asserting the assembled set contains every
+    /// expected built-in tool name.
+    #[test]
+    fn registry_collects_all_self_registered_tools() {
+        let mut builder = neenee_core::ToolContextBuilder::new();
+        builder.provide(std::sync::Arc::new(
+            neenee_agent::skills::SkillRegistry::empty(),
+        ));
+        let ctx = builder.build();
+        let collected = neenee_core::collect_tools(&ctx);
+        let names: std::collections::HashSet<&str> = collected.iter().map(|t| t.name()).collect();
+        for expected in [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep",
+            "glob",
+            "list_dir",
+            "ask_user",
+            "webfetch",
+            "websearch",
+            "create_project",
+            "init_config",
+            "use_skill",
+            "list_skills",
+            "reload_skills",
+        ] {
+            assert!(
+                names.contains(expected),
+                "self-registered tool '{expected}' missing from collected set; \
+                 a crate's inventory submission was likely stripped by the linker"
+            );
+        }
+    }
 
     #[async_trait]
     impl Provider for RetryOnceProvider {
@@ -1877,6 +2077,32 @@ mod tests {
                     neenee_core::retryable_error("upstream unavailable", None),
                 )])))
             }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysRetryableProvider {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+            Err("non-streaming path should not be used".to_string())
+        }
+
+        async fn stream_chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<futures::stream::BoxStream<'static, Result<String, String>>, String> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn stream_chat_events(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<futures::stream::BoxStream<'static, Result<ProviderStreamEvent, String>>, String>
+        {
+            // Every request fails with a retryable error so the turn exhausts
+            // its retry budget without ever touching a tool.
+            Ok(Box::pin(stream::iter(vec![Err(
+                neenee_core::retryable_error("OpenAI HTTP 429 Too Many Requests", None),
+            )])))
         }
     }
 
@@ -1951,6 +2177,7 @@ mod tests {
                 history: history.clone(),
                 tx,
                 token: CancellationToken::new(),
+                session_id: session.id().await,
                 session,
                 pursuit_service,
                 compaction: CompactionSettings {
@@ -1984,7 +2211,10 @@ mod tests {
         let activities = responses
             .iter()
             .filter_map(|response| match response {
-                AgentResponse::Activity(status) => Some(status.as_str()),
+                AgentResponse::Turn {
+                    event: TurnEvent::Activity(status),
+                    ..
+                } => Some(status.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1999,15 +2229,22 @@ mod tests {
         assert_eq!(activities.last(), Some(&"saving response"));
         assert!(responses.iter().any(|response| matches!(
             response,
-            AgentResponse::RetryScheduled {
-                attempt: 2,
-                max_attempts: 3,
+            AgentResponse::Turn {
+                event: TurnEvent::RetryScheduled {
+                    attempt: 2,
+                    max_attempts: 3,
+                    ..
+                },
                 ..
             }
         )));
-        assert!(responses
-            .iter()
-            .any(|response| matches!(response, AgentResponse::StreamDiscard)));
+        assert!(responses.iter().any(|response| matches!(
+            response,
+            AgentResponse::Turn {
+                event: TurnEvent::StreamDiscard,
+                ..
+            }
+        )));
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -2034,6 +2271,7 @@ mod tests {
                 history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 tx,
                 token: CancellationToken::new(),
+                session_id: session.id().await,
                 session,
                 pursuit_service,
                 compaction: CompactionSettings {
@@ -2057,9 +2295,97 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "upstream unavailable");
+        let error_string = error.to_string();
+        assert!(
+            error_string.starts_with("upstream unavailable"),
+            "should surface the provider message: {error_string}"
+        );
+        assert!(
+            error_string.contains("Not retried automatically"),
+            "should explain why retry was skipped: {error_string}"
+        );
         assert!(!std::iter::from_fn(|| rx.try_recv().ok())
-            .any(|response| matches!(response, AgentResponse::RetryScheduled { .. })));
+            .any(|response| matches!(
+                response,
+                AgentResponse::Turn {
+                    event: TurnEvent::RetryScheduled { .. },
+                    ..
+                }
+            )));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn turn_exhaustion_message_explains_retry_budget() {
+        let directory =
+            std::env::temp_dir().join(format!("neenee-retry-exhaust-{}", uuid::Uuid::new_v4()));
+        let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
+        let pursuit_service = PursuitService::new(
+            PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
+        );
+        let agent = Arc::new(Agent::new(
+            Arc::new(AlwaysRetryableProvider),
+            Vec::new(),
+            AgentMode::Build,
+            pursuit_service.clone(),
+            SkillRegistry::empty(),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let error = execute_turn(
+            TurnContext {
+                agent,
+                history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                tx,
+                token: CancellationToken::new(),
+                session_id: session.id().await,
+                session,
+                pursuit_service,
+                compaction: CompactionSettings {
+                    budget: neenee_core::CompactionPolicy::default().resolve(100_000),
+                    preserve_turns: 6,
+                    summarize: false,
+                    prune: false,
+                    prune_protect_chars: 0,
+                },
+                retry_max_attempts: 3,
+                retry_base_ms: 1,
+                retry_max_ms: 10,
+            },
+            TurnInput {
+                prompt: "work".to_string(),
+                hidden: false,
+                display_prompt: None,
+                images: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let error_string = error.to_string();
+        assert!(
+            error_string.starts_with("OpenAI HTTP 429 Too Many Requests"),
+            "should surface the provider message: {error_string}"
+        );
+        assert!(
+            error_string.contains("Gave up after 3 attempt(s)"),
+            "should explain the retry budget was exhausted: {error_string}"
+        );
+        // All attempts but the last must announce a retry; the final failure
+        // surfaces as the error above instead.
+        let scheduled = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|response| matches!(
+                response,
+                AgentResponse::Turn {
+                    event: TurnEvent::RetryScheduled { .. },
+                    ..
+                }
+            ))
+            .count();
+        assert_eq!(
+            scheduled, 2,
+            "should schedule retries for every attempt before giving up"
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 

@@ -91,11 +91,11 @@ pub struct Agent {
     pursuit_service: PursuitService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Context-pressure threshold (in tokens) above which the harness asks the
-    /// [`CompactionGate`] to relieve pressure between tool rounds. `0` disables
+    /// [`ContextReliefGate`] to relieve pressure between tool rounds. `0` disables
     /// mid-turn relief. Derived from the active model's context window.
     context_prune_threshold_tokens: Arc<std::sync::Mutex<usize>>,
-    /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
-    compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
+    /// Optional mid-turn context-relief gate (see [`ContextReliefGate`]).
+    context_relief_gate: Arc<std::sync::Mutex<Option<Arc<dyn ContextReliefGate>>>>,
     /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
     /// tool rounds. Seeded from `Config::agent.hard_stop_rounds` (default `0`
     /// = uncapped, matching ADR-0009) and mutated at runtime via
@@ -180,10 +180,8 @@ impl Agent {
         let active_plan_path = Arc::new(std::sync::Mutex::new(None));
         let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
-        let todo_context = neenee_core::TodoToolContext::shared(
-            Arc::clone(&todos),
-            Arc::clone(&turn_counter),
-        );
+        let todo_context =
+            neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
         let plan_context = plan::PlanToolContext::shared(
             Arc::clone(&mode),
             Arc::clone(&active_plan_path),
@@ -196,7 +194,9 @@ impl Agent {
             verify_tools,
             plan_context,
         )));
-        tools.push(Arc::new(neenee_core::TodoWriteTool::new(todo_context.clone())));
+        tools.push(Arc::new(neenee_core::TodoWriteTool::new(
+            todo_context.clone(),
+        )));
         tools.push(Arc::new(neenee_core::TodoUpdateTool::new(todo_context)));
 
         Self {
@@ -218,7 +218,7 @@ impl Agent {
             pursuit_service,
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
-            compaction_gate: Arc::new(std::sync::Mutex::new(None)),
+            context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
             verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
@@ -226,7 +226,7 @@ impl Agent {
     }
 
     /// Context-pressure threshold (in tokens) for mid-turn relief. `0` (the
-    /// default) disables the mid-turn [`CompactionGate`]. Re-seed on provider
+    /// default) disables the mid-turn [`ContextReliefGate`]. Re-seed on provider
     /// switch so the threshold tracks the new model's context window.
     pub fn set_context_prune_threshold(&self, budget_tokens: usize) {
         *self
@@ -288,15 +288,15 @@ impl Agent {
     }
 
     /// Install (or clear with `None`) the mid-turn context-relief gate.
-    pub fn set_compaction_gate(&self, gate: Option<Arc<dyn CompactionGate>>) {
+    pub fn set_context_relief_gate(&self, gate: Option<Arc<dyn ContextReliefGate>>) {
         *self
-            .compaction_gate
+            .context_relief_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = gate;
     }
 
     /// Between tool rounds, if context pressure exceeds the configured budget,
-    /// hand the live message list to the [`CompactionGate`] for relief (e.g.
+    /// hand the live message list to the [`ContextReliefGate`] for relief (e.g.
     /// pruning old tool results). The gate owns durability of any originals.
     async fn relieve_pressure_if_needed(
         &self,
@@ -311,7 +311,7 @@ impl Agent {
             return Ok(());
         }
         let gate = self
-            .compaction_gate
+            .context_relief_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -392,10 +392,7 @@ impl Agent {
     /// Current task list snapshot. Read by the harness to mirror into the
     /// session and by the TUI to render the sticky panel.
     pub fn todos(&self) -> neenee_core::TodoList {
-        self.todos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.todos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Replace the task list. Used by `plan_exit` (to seed from the approved

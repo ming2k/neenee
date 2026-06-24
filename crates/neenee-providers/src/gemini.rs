@@ -244,7 +244,10 @@ mod tests {
 
     #[test]
     fn extract_text_returns_empty_for_non_text_payload() {
-        assert_eq!(extract_text(r#"{"candidates":[{"finishReason":"STOP"}]}"#), "");
+        assert_eq!(
+            extract_text(r#"{"candidates":[{"finishReason":"STOP"}]}"#),
+            ""
+        );
         assert_eq!(extract_text("not json"), "");
     }
 

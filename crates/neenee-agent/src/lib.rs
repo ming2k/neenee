@@ -62,14 +62,15 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, CompactionGate, HarnessError, HarnessSnapshot,
-    ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
-    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
-    ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService, PursuitStore, RetryableError, Role,
-    SessionOverview, SkillsConfig, SubTaskEvent, SubagentProfile, TokenUsage, Tool, ToolAccess,
-    ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
-    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
-    EXPLORE, PRUNED_TOOL_PLACEHOLDER, VERIFY,
+    AgentMode, AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError,
+    HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp,
+    PermissionDecision, PermissionRequest, Provider, ProviderEntry, ProviderPickerRow,
+    ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService,
+    PursuitStore, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
+    SubagentProfile, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult,
+    ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
+    UserQuestionReply, UserQuestionRequest, WebSearchConfig, EXPLORE, PRUNED_TOOL_PLACEHOLDER,
+    TITLE, VERIFY,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -128,6 +129,7 @@ pub mod orchestration;
 mod plan_verify;
 mod prompt;
 pub mod session_review;
+pub mod session_title;
 pub mod skills;
 pub mod task_tool;
 

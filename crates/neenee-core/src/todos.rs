@@ -324,7 +324,8 @@ impl TodoList {
             return 0;
         }
         let before = self.items.len();
-        self.items.retain(|it| !it.content.to_lowercase().contains(&needle));
+        self.items
+            .retain(|it| !it.content.to_lowercase().contains(&needle));
         let removed = before - self.items.len();
         if removed > 0 {
             self.updated_at_turn = turn;
@@ -423,19 +424,22 @@ pub struct TodoToolContext {
 
 impl TodoToolContext {
     pub fn new(todos: Arc<Mutex<TodoList>>, turn_counter: Arc<Mutex<u64>>) -> Self {
-        Self { todos, turn_counter }
+        Self {
+            todos,
+            turn_counter,
+        }
     }
 
     /// Build a context that shares state with cells owned by the `Agent`.
     pub fn shared(todos: Arc<Mutex<TodoList>>, turn_counter: Arc<Mutex<u64>>) -> Self {
-        Self { todos, turn_counter }
+        Self {
+            todos,
+            turn_counter,
+        }
     }
 
     pub fn todos(&self) -> TodoList {
-        self.todos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.todos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_todos(&self, list: TodoList) {
@@ -616,8 +620,8 @@ impl Tool for TodoUpdateTool {
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
-        let value =
-            serde_json::from_str::<serde_json::Value>(arguments).map_err(|e| format!("Invalid JSON: {e}"))?;
+        let value = serde_json::from_str::<serde_json::Value>(arguments)
+            .map_err(|e| format!("Invalid JSON: {e}"))?;
         let key = value
             .get("key")
             .and_then(|v| v.as_str())
@@ -636,7 +640,9 @@ impl Tool for TodoUpdateTool {
         let turn = self.context.current_turn();
         let mut list = self.context.todos();
         if list.is_empty() {
-            return Ok("No todos to update. Use the `todo` tool to create the list first.".to_string());
+            return Ok(
+                "No todos to update. Use the `todo` tool to create the list first.".to_string(),
+            );
         }
         let changed = list.update(key, status, now, turn);
         if changed == 0 {
@@ -729,7 +735,10 @@ mod tests {
     fn update_by_content_substring_matches_case_insensitive() {
         let mut list = TodoList::new();
         list.reconcile(
-            &desired(&[("Design UI", TodoStatus::Pending), ("design db", TodoStatus::Pending)]),
+            &desired(&[
+                ("Design UI", TodoStatus::Pending),
+                ("design db", TodoStatus::Pending),
+            ]),
             100,
             1,
         );
@@ -741,7 +750,10 @@ mod tests {
     fn update_position_takes_priority_over_content() {
         let mut list = TodoList::new();
         list.reconcile(
-            &desired(&[("1 thing", TodoStatus::Pending), ("other", TodoStatus::Pending)]),
+            &desired(&[
+                ("1 thing", TodoStatus::Pending),
+                ("other", TodoStatus::Pending),
+            ]),
             100,
             1,
         );
@@ -785,7 +797,10 @@ mod tests {
     fn status_parse_accepts_legacy_plan_spellings() {
         assert_eq!(TodoStatus::parse("done"), Some(TodoStatus::Completed));
         assert_eq!(TodoStatus::parse("skipped"), Some(TodoStatus::Cancelled));
-        assert_eq!(TodoStatus::parse("in_progress"), Some(TodoStatus::InProgress));
+        assert_eq!(
+            TodoStatus::parse("in_progress"),
+            Some(TodoStatus::InProgress)
+        );
         assert_eq!(TodoStatus::parse("nope"), None);
     }
 
@@ -857,14 +872,15 @@ mod tests {
     async fn todo_update_tool_matches_by_position() {
         let (context, list) = ctx();
         let write = TodoWriteTool::new(context.clone());
-        write.call(
-            r#"{"items":[
+        write
+            .call(
+                r#"{"items":[
                 {"content":"a","status":"pending"},
                 {"content":"b","status":"pending"}
             ]}"#,
-        )
-        .await
-        .unwrap();
+            )
+            .await
+            .unwrap();
         let update = TodoUpdateTool::new(context);
         update
             .call(r#"{"key":"2","status":"completed"}"#)
@@ -879,7 +895,8 @@ mod tests {
     async fn todo_update_tool_matches_by_content() {
         let (context, list) = ctx();
         let write = TodoWriteTool::new(context.clone());
-        write.call(r#"{"items":[{"content":"Write tests","status":"pending"}]}"#)
+        write
+            .call(r#"{"items":[{"content":"Write tests","status":"pending"}]}"#)
             .await
             .unwrap();
         let update = TodoUpdateTool::new(context);
@@ -888,10 +905,7 @@ mod tests {
             .await
             .unwrap();
         assert!(body.contains("Updated 1"));
-        assert_eq!(
-            list.lock().unwrap().items[0].status,
-            TodoStatus::Completed
-        );
+        assert_eq!(list.lock().unwrap().items[0].status, TodoStatus::Completed);
     }
 
     #[tokio::test]

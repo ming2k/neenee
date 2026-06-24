@@ -13,8 +13,10 @@ never breaks parsing.
 Context compaction keeps the uncapped agentic loop bounded. Thresholds are
 derived from the **active model's context window** (token-denominated) and
 re-seeded on every provider switch, so they track the live model rather than a
-fixed budget. See the [harness explanation](../explanation/agent-design/harness.md#context-compaction)
-and ADR-0019 for the design.
+fixed budget. See the [harness explanation](../explanation/agent-design/harness.md#context-relief),
+the [pruning](../explanation/agent-design/context-pruning.md) and
+[compaction](../explanation/agent-design/context-compaction.md) deep-dives, and
+ADR-0019 / ADR-0021 for the design.
 
 Pressure is estimated in tokens (`estimate_tokens`, ~4 chars/token) and compared
 against the resolved thresholds. Each fraction is multiplied by the active

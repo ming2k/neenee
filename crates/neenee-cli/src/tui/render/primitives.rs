@@ -1,7 +1,8 @@
-//! Tiny shared render helpers: viewport math, modal centering/backdrop, panel
+//! Tiny shared render helpers: viewport math, modal centering/recess, panel
 //! chrome, and color arithmetic. Kept in one place so the per-component
 //! modules do not need to depend on each other for these primitives.
 
+use crate::tui::app::Recess;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Style},
@@ -9,6 +10,8 @@ use ratatui::{
     widgets::{Block as RtBlock, Clear, Paragraph},
     Frame,
 };
+
+use super::Theme;
 
 /// Global viewport margin. Only vertical breathing room (1 cell top and
 /// bottom) is reserved; horizontally every component spans the full terminal
@@ -46,18 +49,66 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// Fake an alpha backdrop by filling an area with a dim solid color.
+/// Recess the live surface behind a modal, per its [`Recess`] policy.
 ///
-/// `Clear` is rendered first so the fill *replaces* whatever was drawn
-/// underneath (glyph + style) rather than merging via `set_style`. Without
-/// it, half-block glyphs that carry their color in the foreground — e.g. the
-/// composer's `▄`/`▀` edges — survive the backdrop as colored slivers next to
-/// cells whose color lived in the background (the composer's text rows),
-/// producing an inconsistent "black middle, colored edges" look behind a
-/// modal. Clearing first makes the whole area uniformly the backdrop color.
-pub(super) fn draw_dim_backdrop(frame: &mut Frame, area: Rect, color: Color) {
-    frame.render_widget(Clear, area);
-    frame.render_widget(RtBlock::default().style(Style::default().bg(color)), area);
+/// A terminal cannot alpha-blend, so the event loop calls this exactly once
+/// per frame *after* the transcript and chrome are drawn and *before* the
+/// centered modal panel — which then overpaints its own crisp area on top.
+/// The three policies:
+///
+/// - [`Recess::None`] leaves the surface untouched (lightweight floats such as
+///   Question / Permission that never take over).
+/// - [`Recess::Dim`] darkens every cell in place by [`Theme::modal_dim_factor`]
+///   so the background stays visible for context while the modal reads as the
+///   focal layer. This replaces the old opaque full-screen fill: context no
+///   longer vanishes behind a modal.
+/// - [`Recess::Takeover`] clears + fills with [`Theme::backdrop`], fully
+///   occluding the surface for a context switch (session selection).
+///
+/// [`Theme::modal_dim_factor`]: Theme::modal_dim_factor
+pub fn recess_backdrop(frame: &mut Frame, recess: Recess, theme: &Theme) {
+    match recess {
+        Recess::None => {}
+        Recess::Dim => dim_surface(frame, theme.modal_dim_factor()),
+        Recess::Takeover => {
+            let area = frame.size();
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                RtBlock::default().style(Style::default().bg(theme.backdrop())),
+                area,
+            );
+        }
+    }
+}
+
+/// Darken the whole frame buffer in place by scaling each cell's RGB channels
+/// toward black by `factor` (0.0 = invisible, 1.0 = unchanged). This is the
+/// "dim-recess" effect: the surface is rendered normally first, then every
+/// cell is multiplied by `factor`, so context stays visible while clearly
+/// receding behind the modal drawn on top.
+///
+/// Only [`Color::Rgb`] is scaled (the entire palette is RGB, so this covers
+/// every painted cell); named / Reset colors are left untouched so the dim is
+/// additive rather than lossy where they appear.
+fn dim_surface(frame: &mut Frame, factor: f32) {
+    let buffer = frame.buffer_mut();
+    for cell in buffer.content.iter_mut() {
+        cell.fg = scale_color(cell.fg, factor);
+        cell.bg = scale_color(cell.bg, factor);
+    }
+}
+
+/// Multiply an RGB color's channels by `factor`, clamped to `[0, 1]`.
+fn scale_color(color: Color, factor: f32) -> Color {
+    let f = factor.clamp(0.0, 1.0);
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * f).round() as u8,
+            (g as f32 * f).round() as u8,
+            (b as f32 * f).round() as u8,
+        ),
+        other => other,
+    }
 }
 
 /// A borderless panel with a single thick colored left bar (opencode-style).

@@ -81,3 +81,16 @@ impl Tool for SearchHistoryTool {
         self.call(arguments).await.map(ToolOutput::text)
     }
 }
+
+// --- Self-registration -----------------------------------------------------
+//
+// Pulls the per-project embedding index and session store out of the build
+// context (provided as `Arc<RwLock<EmbeddingStore>>` and `Arc<SessionStore>`).
+// Declines when either is absent, so a context without history search simply
+// omits the tool.
+
+neenee_core::register_tool!(SearchHistoryFactory => |ctx| {
+    let store = ctx.shared::<RwLock<EmbeddingStore>>()?;
+    let session = ctx.shared::<SessionStore>()?;
+    SearchHistoryTool::new(store, session)
+});

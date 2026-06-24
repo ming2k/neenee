@@ -243,41 +243,31 @@ iteration budget is uncapped — `usize::MAX` on the wire, see ADR-0009).
 unfinished checkpoint, and `/session new` cancels old work and creates a
 fresh session id.
 
-## Context compaction
+## Context relief
 
 The runner relieves context pressure in three layers, cheapest first. Every
 threshold is derived from the **active model's context window** — measured in
 tokens and re-seeded whenever the provider switches — so a 1M-token model is
 no longer over-compacted at ~3% of its window and a 128k model is no longer
-under-protected. ADR-0019 records the rationale; exact keys and defaults live
-in the [Configuration Reference](../../../reference/configuration.md#compaction).
+under-protected (ADR-0019). All three commit through one durable
+archive-and-replace mechanism (`ContextRelief*`), so the complete transcript
+survives while only the model-visible prefix is replaced.
 
-1. **Tool-result pruning** (on by default). Old tool-role results are cleared
-   in place to a placeholder, protecting the most recent tool output. This
-   runs before a turn and, via a mid-turn relief gate, between tool rounds
-   once pressure crosses the prune threshold (~65% of the window, below the
-   full-compaction trigger). Pruned originals are archived for durability; the
-   `tool_call_id` chain is preserved so providers that require it stay valid.
-2. **Summarizing compaction** once pressure crosses the compaction threshold
-   (~85% of the window). The boundary is the start of an older complete user
-   turn:
-   - Earlier messages move to the durable archive.
-   - System messages are regenerated rather than archived into model context.
-   - By default the active model writes an anchored, structured summary; the
-     previous summary is carried forward so each compaction updates rather than
-     restarts. Any failure falls back to a deterministic newest-first excerpt
-     summary.
-   - The most recent complete turns remain provider-native.
+| Layer | Trigger | Surfaced? |
+|-------|---------|-----------|
+| [Tool-result pruning](context-pruning.md) | ~65% of the window (`prune_utilization`) | Implicit — `debug` trace only |
+| [Summarizing compaction](context-compaction.md) | ~85% of the window (`utilization`) | Visible — `Compacted` notice; `/compact` runs it manually |
+| Overflow recovery | a provider reports context overflow | Reactive (see below) |
 
-   The active window is compressed toward a target (~25% of the window), so
-   compaction happens rarely but deeply.
+The first two layers each have a dedicated deep-dive — [Context
+pruning](context-pruning.md) and [Context compaction](context-compaction.md);
+exact keys and defaults live in the
+[Configuration Reference](../../../reference/configuration.md#compaction).
 
-This preserves the complete transcript while replacing only the model-visible
-prefix. `/compact` runs the same operation manually.
-
-If a provider reports context overflow before any ToolCall event, the runner
-may compact and retry the same logical turn once. Overflow after tool activity
-is terminal so tool side effects are never replayed.
+**Overflow recovery** is the harness's own reactive backstop and has no separate
+page. If a provider reports context overflow *before* any `ToolCall` event, the
+runner may compact and retry the same logical turn once. Overflow *after* tool
+activity is terminal, so tool side effects are never replayed.
 
 ## Extension surfaces
 

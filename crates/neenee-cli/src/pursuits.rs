@@ -32,7 +32,11 @@ pub fn load_legacy_pursuit_from_config() -> Option<Pursuit> {
 pub fn format_pursuit_status(pursuit: &Pursuit) -> String {
     format!(
         "Pursuit [{}]: {}",
-        if pursuit.is_complete { "complete" } else { "active" },
+        if pursuit.is_complete {
+            "complete"
+        } else {
+            "active"
+        },
         pursuit.objective
     )
 }

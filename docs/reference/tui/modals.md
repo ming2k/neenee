@@ -1,19 +1,32 @@
 # Modals
 
-Centered overlays that take over the viewport until dismissed. Most modals
-hide the regular chrome — header, status bar, input box, hint line — by
-setting `chrome_hidden` for the duration of the draw. Two exceptions: the
-[permission sheet](#permission-sheet) (inline), and the
-[question modal](#question-modal) (a lightweight overlay that floats on top
-without hiding or dimming the transcript and inputs).
+Centered overlays that take over the viewport until dismissed. Each modal
+declares a **recess policy** — `Modal::recess`, the single source of truth that
+both the footer-collapse flag and the per-frame paint consult — describing how
+the surface beneath it recedes. A terminal cannot alpha-blend, so recess is
+expressed in one of three ways:
+
+- **Dim** (most centered modals): the footer keeps its height and the whole
+  live surface — transcript, status bar, input box, hint line — is darkened
+  in place so it stays visible for context while the centered panel reads as
+  the focal layer. The brightness is the `modal_dim_factor` theme field.
+- **Takeover** (the sessions picker only): the footer collapses to zero height
+  and the surface is fully occluded — a clean slate for a context switch.
+- **None** ([question modal](#question-modal); the
+  [permission sheet](#permission-sheet) is inline): floats on the fully-live
+  surface with no dimming.
 
 ## Shared chrome
 
 Every centered modal goes through the same primitives in
 `crates/neenee-cli/src/tui/render/primitives.rs`:
 
-- `draw_dim_backdrop(frame, frame.size(), theme.backdrop())` paints a
-  full-frame dim layer so the underlying transcript recedes.
+- `recess_backdrop(frame, modal.recess(), theme)` is called once per frame by
+  the event loop *after* the transcript and chrome are drawn and *before* the
+  centered panel. For a **Dim** modal it scales every cell's color by
+  `theme.modal_dim_factor()` (background stays visible); for **Takeover** it
+  clears + fills with `theme.backdrop()` (full occlusion); for **None** it is a
+  no-op.
 - `centered_rect(px_w, px_h, viewport)` carves the modal rectangle out of
   the viewport (the frame minus the global 1-row top/bottom margin). The
   surrounding gutters are kept as `app_bg`.
@@ -201,10 +214,11 @@ Centered modal for `UserQuestionRequest`. Presents one question at a time
 with options (single- or multi-select), plus a built-in **Other** option
 that exposes a free-text input.
 
-Unlike other centered modals, the question modal does **not** hide or dim
-the chrome — no backdrop is painted and `chrome_hidden` is not set, so the
-transcript, status bar, input box, and hint bar all stay visible. The modal
-panel simply floats on top with its own solid background.
+Unlike other centered modals, the question modal uses the **None** recess
+policy — the surface is not dimmed or occluded and the footer is not
+collapsed, so the transcript, status bar, input box, and hint bar all stay
+fully visible at full brightness. The modal panel simply floats on top with
+its own solid background.
 
 Long text wraps automatically: the question text, option labels, and option
 descriptions all word-wrap to fit the modal body width.
@@ -385,7 +399,7 @@ left+right borders colored by variant.
 ## Source
 
 All modals live in `crates/neenee-cli/src/tui/render/overlays.rs`. Shared
-primitives (`draw_dim_backdrop`, `centered_rect`, `modal_frame`,
+primitives (`recess_backdrop`, `centered_rect`, `modal_frame`,
 `panel_block`, `toast`) are in `crates/neenee-cli/src/tui/render/primitives.rs`.
 The chrome-hiding flag is read by `draw_transcript` in
 `crates/neenee-cli/src/tui/render/mod.rs`.

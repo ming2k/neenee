@@ -42,6 +42,7 @@ pub use overlays::{
     draw_model_editor, draw_permission_sheet, draw_plan_preview_modal, draw_question_modal,
     draw_session_modal, draw_sessions_modal, draw_tool_step_detail_overlay, ActivityModalView,
 };
+pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
 use step::{
     draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
@@ -263,10 +264,8 @@ pub fn draw_transcript(
     // including streaming ("responding"), which is the longest phase and the
     // one where the breathing dot's liveness signal matters most — and hidden
     // only when the harness is idle, so the row returns to the transcript.
-    let status_active = !chrome_hidden
-        && !in_subagent
-        && !activity.is_empty()
-        && activity != "idle";
+    let status_active =
+        !chrome_hidden && !in_subagent && !activity.is_empty() && activity != "idle";
     let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new

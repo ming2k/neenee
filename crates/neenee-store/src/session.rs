@@ -15,7 +15,11 @@ use tokio::sync::Mutex;
 // `session::estimate_chars` / `session::estimate_tokens`.
 pub use neenee_core::{estimate_chars, estimate_tokens};
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// C2 (ADR-0022): added `title` and `title_manual`. A structural no-op for
+/// legacy snapshots, which load with `title = None` / `title_manual = false`
+/// via `#[serde(default)]` and render through the unchanged first-user-message
+/// fallback until they gain a title.
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Sentinel value for `PursuitCheckpoint::max_iterations` indicating an uncapped
 /// run. `/pursue` runs until the model emits the completion marker, the user
@@ -34,9 +38,8 @@ pub struct PursuitCheckpoint {
     pub status: String,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompactionCheckpoint {
+pub struct ContextReliefCheckpoint {
     pub archived_messages: usize,
     pub active_messages: usize,
     pub before_chars: usize,
@@ -53,7 +56,10 @@ struct SessionData {
     messages: Vec<Message>,
     archived_messages: Vec<Message>,
     loop_checkpoint: Option<PursuitCheckpoint>,
-    compaction: Option<CompactionCheckpoint>,
+    /// Stats of the most recent context-relief op (prune or compaction).
+    /// `alias` keeps snapshots written before the rename (`compaction`) loadable.
+    #[serde(rename = "last_relief", alias = "compaction")]
+    last_relief: Option<ContextReliefCheckpoint>,
     /// Working directory this session belongs to. Phase 2 (project isolation)
     /// uses this to route archived sessions to the right per-project bucket
     /// during the one-shot legacy migration. Legacy snapshots missing the
@@ -78,6 +84,16 @@ struct SessionData {
     /// `None` for legacy files written before C10; new writes always populate
     /// it so `neenee doctor` and future loaders can detect corruption.
     checksum: Option<u32>,
+    /// AI-generated session title (ADR-0022). Displayed in the session picker
+    /// in preference to the first-user-message fallback. `None` for legacy
+    /// snapshots and for sessions that have not yet generated a title.
+    #[serde(default)]
+    title: Option<String>,
+    /// Whether `title` was set manually via `/title <text>` and must not be
+    /// overwritten by automatic or on-demand AI generation (ADR-0022).
+    /// `false` for legacy snapshots and AI-generated titles.
+    #[serde(default)]
+    title_manual: bool,
 }
 
 impl Default for SessionData {
@@ -91,12 +107,14 @@ impl Default for SessionData {
             messages: Vec::new(),
             archived_messages: Vec::new(),
             loop_checkpoint: None,
-            compaction: None,
+            last_relief: None,
             project_root: default_project_root(),
             active_plan_path: None,
             todos: neenee_core::TodoList::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
             checksum: None,
+            title: None,
+            title_manual: false,
         }
     }
 }
@@ -114,8 +132,10 @@ fn default_project_root() -> PathBuf {
 /// `schema_version == CURRENT_SCHEMA_VERSION`.
 fn migrate_session_data(mut data: SessionData) -> SessionData {
     // C8: initial schema-version field. No structural migration required yet;
-    // future changes add guarded blocks here, e.g.:
-    // if data.schema_version < 2 { ... }
+    // future changes add guarded blocks here.
+    // C2 (ADR-0022): title fields were added with `#[serde(default)]`, so a
+    // legacy snapshot already loads with `title = None` / `title_manual =
+    // false`; no payload transformation is needed, only the version bump.
     data.schema_version = CURRENT_SCHEMA_VERSION;
     data
 }
@@ -261,14 +281,14 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
             }
             SessionEvent::MessagesReplaced { messages } => data.messages = messages.clone(),
             SessionEvent::CheckpointSet { checkpoint } => data.loop_checkpoint = checkpoint.clone(),
-            SessionEvent::CompactionCommitted {
+            SessionEvent::ContextReliefCommitted {
                 archived,
                 active,
                 checkpoint,
             } => {
                 data.archived_messages.extend(archived.clone());
                 data.messages = active.clone();
-                data.compaction = Some(checkpoint.clone());
+                data.last_relief = Some(checkpoint.clone());
             }
             SessionEvent::Archived { messages } => data.archived_messages.extend(messages.clone()),
             SessionEvent::ActivePlanPathSet { path } => {
@@ -276,6 +296,10 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
             }
             SessionEvent::TodosSet { todos } => {
                 data.todos = todos.clone();
+            }
+            SessionEvent::TitleSet { title, manual } => {
+                data.title = title.clone();
+                data.title_manual = *manual;
             }
             SessionEvent::Reset { id } => {
                 let project_root = data.project_root.clone();
@@ -352,14 +376,24 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             },
         });
     }
-    if let Some(checkpoint) = &data.compaction {
+    if let Some(checkpoint) = &data.last_relief {
         events.push(crate::events::EventEnvelope {
             seq: events.len() as u64,
             timestamp: data.updated_at,
-            event: SessionEvent::CompactionCommitted {
+            event: SessionEvent::ContextReliefCommitted {
                 archived: data.archived_messages.clone(),
                 active: data.messages.clone(),
                 checkpoint: checkpoint.clone(),
+            },
+        });
+    }
+    if data.title.is_some() {
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::TitleSet {
+                title: data.title.clone(),
+                manual: data.title_manual,
             },
         });
     }
@@ -494,7 +528,11 @@ impl SessionStore {
             project_root,
             sessions_dir,
             blob_store,
-            state: Mutex::new(SessionState { path, event_log, data }),
+            state: Mutex::new(SessionState {
+                path,
+                event_log,
+                data,
+            }),
         }
     }
 
@@ -563,17 +601,39 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn compaction(&self) -> Option<CompactionCheckpoint> {
-        self.state.lock().await.data.compaction.clone()
+    pub async fn last_relief(&self) -> Option<ContextReliefCheckpoint> {
+        self.state.lock().await.data.last_relief.clone()
+    }
+
+    /// The current session title and whether it was manually set (ADR-0022).
+    /// `(None, false)` for a session that has not yet generated a title; the
+    /// caller then falls back to the first-user-message overview. A `true`
+    /// `manual` flag means automatic and on-demand AI generation must not
+    /// overwrite the stored title.
+    pub async fn title(&self) -> (Option<String>, bool) {
+        let state = self.state.lock().await;
+        (state.data.title.clone(), state.data.title_manual)
+    }
+
+    /// Replace the session title. `manual = true` marks a user-set title
+    /// (`/title <text>`) that AI generation will not overwrite; the AI runner
+    /// and on-demand refresh always pass `false`. Pass `title = None` with
+    /// `manual = false` to clear. Persists both the snapshot and the event log
+    /// so resume restores the same title.
+    pub async fn set_title(&self, title: Option<String>, manual: bool) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        state.data.title = title.clone();
+        state.data.title_manual = manual;
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state
+            .event_log
+            .append(SessionEvent::TitleSet { title, manual })?;
+        self.persist_locked(&state)
     }
 
     pub async fn archived_count(&self) -> usize {
-        self.state
-            .lock()
-            .await
-            .data
-            .archived_messages
-            .len()
+        self.state.lock().await.data.archived_messages.len()
     }
 
     pub async fn parent_id(&self) -> Option<String> {
@@ -591,7 +651,10 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn set_checkpoint(&self, checkpoint: Option<PursuitCheckpoint>) -> Result<(), String> {
+    pub async fn set_checkpoint(
+        &self,
+        checkpoint: Option<PursuitCheckpoint>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().await;
         state.data.loop_checkpoint = checkpoint;
         state.data.updated_at = unix_timestamp();
@@ -602,18 +665,20 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn commit_compaction(&self, result: CompactionResult) -> Result<(), String> {
+    pub async fn commit_context_relief(&self, result: ContextReliefResult) -> Result<(), String> {
         let mut state = self.state.lock().await;
         state.data.archived_messages.extend(result.archived.clone());
         state.data.messages = result.active.clone();
-        state.data.compaction = Some(result.checkpoint.clone());
+        state.data.last_relief = Some(result.checkpoint.clone());
         state.data.updated_at = unix_timestamp();
         ensure_event_log_started(&state.event_log, &state.data)?;
-        state.event_log.append(SessionEvent::CompactionCommitted {
-            archived: result.archived,
-            active: result.active,
-            checkpoint: result.checkpoint,
-        })?;
+        state
+            .event_log
+            .append(SessionEvent::ContextReliefCommitted {
+                archived: result.archived,
+                active: result.active,
+                checkpoint: result.checkpoint,
+            })?;
         self.persist_locked(&state)
     }
 
@@ -694,6 +759,72 @@ impl SessionStore {
         state.event_log = child_log;
         state.data = child;
         Ok((fork_id, parent_id))
+    }
+
+    /// Fork the current session into a **self-contained side file** without
+    /// disturbing this store's active pointer (ADR-0017). Unlike [`fork`],
+    /// the primary keeps running: this method only *reads* the current
+    /// snapshot, writes a sibling `sessions/<side_id>.{json,jsonl}`, and
+    /// returns `(side_id, parent_id)`. The primary's `state` is left
+    /// untouched, so a concurrent parent turn is not clobbered.
+    ///
+    /// Load the side into its own live store with [`open_side`].
+    pub async fn fork_to_side(&self) -> Result<(String, String), String> {
+        let state = self.state.lock().await;
+        if state.data.messages.is_empty() && state.data.archived_messages.is_empty() {
+            return Err("Cannot fork an empty session.".to_string());
+        }
+        let parent_id = state.data.id.clone();
+        let now = unix_timestamp();
+
+        // Build the side snapshot from the primary's current state.
+        let mut side = state.data.clone();
+        let side_id = uuid::Uuid::new_v4().to_string();
+        side.id = side_id.clone();
+        side.parent_id = Some(parent_id.clone());
+        side.created_at = now;
+        side.updated_at = now;
+        side.loop_checkpoint = None;
+
+        let side_path = self.sessions_dir.join(format!("{side_id}.json"));
+        let side_log = EventLog::new(side_path.with_extension("jsonl"));
+        // Persist the side snapshot and seed its own event log so it is
+        // independently resumable (one store = one file = one log), exactly
+        // like `fork`. The primary's files are never touched.
+        persist_to(&side_path, &side, &self.blob_store)?;
+        let _ = side_log.rewrite(snapshot_to_events(&side));
+
+        // Deliberately do NOT mutate `state` — the primary keeps its active
+        // pointer, history, and in-flight turn intact.
+        Ok((side_id, parent_id))
+    }
+
+    /// Construct a live [`SessionStore`] pinned to a side session file that
+    /// lives in this store's `sessions_dir` (written by [`fork_to_side`]). The
+    /// returned store shares the primary's project root, sessions dir, and blob
+    /// store root, so inherited content (including image blobs) resolves the
+    /// same way as in the primary. It writes only its own `sessions/<id>.*`
+    /// files, so the two stores never race on the same file.
+    pub async fn open_side(&self, side_id: &str) -> Result<SessionStore, String> {
+        let side_path = self.sessions_dir.join(format!("{side_id}.json"));
+        if !side_path.exists() {
+            return Err(format!("Side session '{side_id}' was not found."));
+        }
+        let event_log_path = side_path.with_extension("jsonl");
+        let project_root = self.project_root.clone();
+        let blob_store = BlobStore::new(self.blob_store.root().to_path_buf());
+        let data = load_or_seed(&side_path, &event_log_path, &blob_store, &project_root);
+        let event_log = EventLog::new(event_log_path);
+        Ok(SessionStore {
+            project_root,
+            sessions_dir: self.sessions_dir.clone(),
+            blob_store,
+            state: Mutex::new(SessionState {
+                path: side_path,
+                event_log,
+                data,
+            }),
+        })
     }
 
     /// Switch this store to an existing session file by id (or 4+-char hex
@@ -829,8 +960,7 @@ impl SessionStore {
                 let Ok(session) = serde_json::from_str::<SessionData>(&content) else {
                     continue;
                 };
-                if session.id.starts_with(input)
-                    && !matches.iter().any(|(id, _)| id == &session.id)
+                if session.id.starts_with(input) && !matches.iter().any(|(id, _)| id == &session.id)
                 {
                     matches.push((session.id, path));
                 }
@@ -915,10 +1045,16 @@ fn summary(data: &SessionData, active: bool) -> SessionSummary {
     }
 }
 
-/// Derive a short, human-readable description of a session: the first user
-/// message, falling back to the active pursuit, then to a placeholder.
+/// Derive a short, human-readable description of a session. Precedence
+/// (ADR-0022): a stored title (AI or manual) wins; otherwise the first user
+/// message; then the active pursuit; then a placeholder. A title is already
+/// ≤ [`neenee_core::TITLE_MAX_LEN`] chars, so it is returned verbatim; the
+/// fallback paths are still truncated to the picker-row budget.
 fn session_overview(data: &SessionData) -> String {
     const MAX: usize = 64;
+    if let Some(title) = data.title.as_deref().filter(|t| !t.trim().is_empty()) {
+        return truncate_preview(title, MAX);
+    }
     if let Some(message) = data
         .messages
         .iter()
@@ -950,10 +1086,10 @@ pub(crate) fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-pub struct CompactionResult {
+pub struct ContextReliefResult {
     pub active: Vec<Message>,
     pub archived: Vec<Message>,
-    pub checkpoint: CompactionCheckpoint,
+    pub checkpoint: ContextReliefCheckpoint,
 }
 
 /// Header prepended to every compaction checkpoint message. Doubles as the
@@ -1050,19 +1186,19 @@ pub fn checkpoint_message(summary: &str) -> Message {
     Message::hidden(Role::User, format!("{CHECKPOINT_HEADER}{summary}"))
 }
 
-/// Assemble the final [`CompactionResult`] from a selection and a summary.
+/// Assemble the final [`ContextReliefResult`] from a selection and a summary.
 pub fn build_compaction_result(
     before_chars: usize,
     selection: CompactionSelection,
     summary: String,
-) -> CompactionResult {
+) -> ContextReliefResult {
     let CompactionSelection { archived, tail, .. } = selection;
     let mut active = Vec::with_capacity(tail.len() + 1);
     active.push(checkpoint_message(&summary));
     active.extend(tail);
     let after_chars = estimate_chars(&active);
-    CompactionResult {
-        checkpoint: CompactionCheckpoint {
+    ContextReliefResult {
+        checkpoint: ContextReliefCheckpoint {
             archived_messages: archived.len(),
             active_messages: active.len(),
             before_chars,
@@ -1144,7 +1280,7 @@ pub fn compact_messages(
     messages: &[Message],
     target_tokens: usize,
     preserve_turns: usize,
-) -> Option<CompactionResult> {
+) -> Option<ContextReliefResult> {
     let before_chars = estimate_chars(messages);
     let selection = select_compaction(messages, preserve_turns)?;
     let budget_chars = summary_char_budget(target_tokens);
@@ -1428,7 +1564,7 @@ pub trait CompactionHooks: Send + Sync {
         CompactionDecision::proceed()
     }
 
-    async fn post_compact(&self, _checkpoint: &CompactionCheckpoint) {}
+    async fn post_compact(&self, _checkpoint: &ContextReliefCheckpoint) {}
 }
 
 /// No-op hooks used as the default.
@@ -1451,7 +1587,7 @@ pub async fn run_compaction(
     preserve_turns: usize,
     provider: Option<Arc<dyn Provider>>,
     hooks: &dyn CompactionHooks,
-) -> Result<Option<CompactionResult>, String> {
+) -> Result<Option<ContextReliefResult>, String> {
     let decision = hooks.pre_compact(history).await;
     if !decision.proceed {
         return Ok(None);
@@ -1589,12 +1725,8 @@ pub fn migrate_legacy_active_to_sessions(
         let moved = fs::read_to_string(&legacy_active)
             .ok()
             .and_then(|raw| serde_json::from_str::<SessionData>(&raw).ok())
-            .map(|data| {
-                write_session_file(&dest_snapshot, &data, blob_store).is_ok()
-            })
-            .unwrap_or_else(|| {
-                fs::rename(&legacy_active, &dest_snapshot).is_ok()
-            });
+            .map(|data| write_session_file(&dest_snapshot, &data, blob_store).is_ok())
+            .unwrap_or_else(|| fs::rename(&legacy_active, &dest_snapshot).is_ok());
         if moved {
             let _ = fs::remove_file(&legacy_active);
         }
@@ -2181,6 +2313,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_to_side_leaves_primary_active_pointer_intact() {
+        // ADR-0017: a side fork must NOT repoint the primary's active pointer.
+        // The primary keeps its id, history, and (by construction) any in-flight
+        // turn; only a self-contained sibling file is written.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-session-side-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "parent")])
+            .await
+            .unwrap();
+        let parent_id = store.id().await;
+
+        let (side_id, source_id) = store.fork_to_side().await.unwrap();
+        assert_eq!(source_id, parent_id);
+        assert_ne!(side_id, parent_id);
+
+        // The primary is untouched: same id, still holds "parent", and has no
+        // parent link (it did not become a child).
+        assert_eq!(store.id().await, parent_id);
+        assert_eq!(store.messages().await[0].content, "parent");
+        assert!(store.parent_id().await.is_none());
+
+        // The side loads into its own store with the inherited history and the
+        // parent lineage recorded.
+        let side = store.open_side(&side_id).await.unwrap();
+        assert_eq!(side.id().await, side_id);
+        assert_eq!(side.parent_id().await.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(side.messages().await[0].content, "parent");
+
+        // Writing to the side never reaches the primary.
+        side.replace_messages(vec![Message::new(neenee_core::Role::User, "side")])
+            .await
+            .unwrap();
+        assert_eq!(store.messages().await[0].content, "parent");
+
+        // The side is independently resumable from disk (self-contained file).
+        let reopened = store.open_side(&side_id).await.unwrap();
+        assert_eq!(reopened.messages().await[0].content, "side");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn list_skips_active_session_when_it_has_no_content() {
         // Regression: a fresh empty active session used to be appended to
         // every `list()` call. Because `updated_at` is bumped on startup,
@@ -2285,7 +2462,10 @@ mod tests {
         assert_eq!(loaded.items[0].id, list.items[0].id);
 
         // Clearing persists (empty list is the "no active list" state).
-        reloaded.set_todos(neenee_core::TodoList::default()).await.unwrap();
+        reloaded
+            .set_todos(neenee_core::TodoList::default())
+            .await
+            .unwrap();
         assert!(reloaded.todos().await.is_empty());
 
         let _ = fs::remove_dir_all(directory);

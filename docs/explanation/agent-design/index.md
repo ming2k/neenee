@@ -1,7 +1,7 @@
 # Agent design
 
 This section is the design canon for neenee's agent — a bounded, tool-using,
-semi-autonomous coding agent. The nine pages here are not independent
+semi-autonomous coding agent. The pages here are not independent
 features; they are facets of one system. Read together they describe how a
 single agent turn is steered, gated, isolated, made durable, and kept honest.
 
@@ -63,6 +63,17 @@ model of one agent turn.
    (catalog in the system prompt, body on demand), the source/priority
    cascade, and explicit versus implicit invocation. The reference for the
    extension surface that adds instructions rather than tools.
+
+The harness's [context-relief](harness.md#context-relief) section has two
+deep-dive references, read as a pair:
+
+10. [Context pruning](context-pruning.md) — the cheap, implicit first layer:
+    clearing stale tool-result bodies while preserving the `tool_call_id`
+    chain, gated at ~65% of the window, surfaced only as a `debug` trace.
+11. [Context compaction](context-compaction.md) — the heavier second layer:
+    summarizing older complete turns into a durable checkpoint at ~85%, with
+    a model-written anchored summary, deterministic fallback, and the visible
+    `Compacted` notice.
 
 ## How a turn flows through the canon
 

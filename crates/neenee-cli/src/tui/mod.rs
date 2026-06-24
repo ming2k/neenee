@@ -17,7 +17,7 @@ pub mod step_interaction;
 mod terminal;
 mod transcript;
 
-pub(crate) use app::{App, Modal, SessionTab};
+pub(crate) use app::{App, Modal, Recess, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
     model_display_name, provider_context_window, providers_filtered_from, ProviderPreset, PROVIDERS,
@@ -34,7 +34,7 @@ use crossterm::{
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
     PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
-    SessionOverview, TodoList, TodoStatus, UserQuestionRequest,
+    SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
@@ -168,7 +168,16 @@ pub async fn run_tui(
         let mut reasoning_start: Option<std::time::Instant> = None;
         while let Some(resp) = rx.recv().await {
             match resp {
-                AgentResponse::Text(t) => {
+                // ADR-0017: per-turn events arrive tagged with the session they
+                // belong to. The TUI keys transcript buffers by `session_id`;
+                // today only the primary buffer exists (the `/btw` side buffer
+                // is added in a follow-up), so every turn event still routes to
+                // the primary transcript. The envelope is in place so a side
+                // turn can stream concurrently without structural changes.
+                AgentResponse::Turn { session_id, event } => {
+                    let _session_id = session_id;
+                    match event {
+                TurnEvent::Text(t) => {
                     let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(
@@ -178,16 +187,16 @@ pub async fn run_tui(
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
                 }
-                AgentResponse::Activity(status) => {
+                TurnEvent::Activity(status) => {
                     *activity_clone.lock().await = status;
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::RoundStarted { round } => {
+                TurnEvent::RoundStarted { round } => {
                     // 1-indexed for display: tool_round 0 is the turn's first
                     // model request, shown as `round 1`.
                     *current_round_clone.lock().await = round as u64 + 1;
                 }
-                AgentResponse::StreamStart => {
+                TurnEvent::StreamStart => {
                     let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(
@@ -197,13 +206,13 @@ pub async fn run_tui(
                     ir_clone.store(true, Ordering::SeqCst);
                     *activity_clone.lock().await = "responding".to_string();
                 }
-                AgentResponse::StreamDelta(delta) => {
+                TurnEvent::StreamDelta(delta) => {
                     let mut msgs = messages_clone.lock().await;
                     if let Some(last) = msgs.last_mut() {
                         last.push_stream(&delta);
                     }
                 }
-                AgentResponse::StreamEnd(final_content) => {
+                TurnEvent::StreamEnd(final_content) => {
                     ir_clone.store(true, Ordering::SeqCst);
                     *activity_clone.lock().await = "finalizing response".to_string();
                     let mut msgs = messages_clone.lock().await;
@@ -212,7 +221,7 @@ pub async fn run_tui(
                         last.reparse();
                     }
                 }
-                AgentResponse::StreamDiscard => {
+                TurnEvent::StreamDiscard => {
                     let mut msgs = messages_clone.lock().await;
                     if msgs
                         .last()
@@ -221,7 +230,7 @@ pub async fn run_tui(
                         msgs.pop();
                     }
                 }
-                AgentResponse::StreamReasoningDelta(delta) => {
+                TurnEvent::StreamReasoningDelta(delta) => {
                     let mut msgs = messages_clone.lock().await;
                     if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking()) {
                         last.push_stream(&delta);
@@ -250,13 +259,14 @@ pub async fn run_tui(
                         // default). On completion the transition leaves it as-is
                         // (no auto-collapse), so the user keeps what they were
                         // reading.
-                        thinking
-                            .set_thinking_expanded(config::thinking_default_expanded(&tui_config_clone));
+                        thinking.set_thinking_expanded(config::thinking_default_expanded(
+                            &tui_config_clone,
+                        ));
                         msgs.push(thinking);
                         reasoning_start = Some(std::time::Instant::now());
                     }
                 }
-                AgentResponse::StreamReasoningEnd(content) => {
+                TurnEvent::StreamReasoningEnd(content) => {
                     let duration_ms = reasoning_start
                         .take()
                         .map(|started| started.elapsed().as_millis() as u64);
@@ -293,7 +303,7 @@ pub async fn run_tui(
                         }
                     }
                 }
-                AgentResponse::ToolCall {
+                TurnEvent::ToolCall {
                     id,
                     name,
                     arguments,
@@ -311,7 +321,7 @@ pub async fn run_tui(
                     msgs.push(message);
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::ToolResult {
+                TurnEvent::ToolResult {
                     id,
                     name,
                     output,
@@ -367,7 +377,7 @@ pub async fn run_tui(
                         msgs.push(message);
                     }
                 }
-                AgentResponse::ToolCancelled { id, .. } => {
+                TurnEvent::ToolCancelled { id, .. } => {
                     // Convergence: an in-flight call was aborted by an
                     // interrupt. Flip its step (and any nested sub-agent
                     // children) to Cancelled so it never stays "running".
@@ -392,7 +402,7 @@ pub async fn run_tui(
                         msgs.push(message);
                     }
                 }
-                AgentResponse::ToolStream { id, stream } => {
+                TurnEvent::ToolStream { id, stream } => {
                     // Live partial output from a running tool (e.g. bash
                     // stdout). Accumulate into the running step so it updates
                     // in place instead of freezing on a spinner.
@@ -405,7 +415,7 @@ pub async fn run_tui(
                         // have been dropped with an aborted turn.
                     }
                 }
-                AgentResponse::SubTask {
+                TurnEvent::SubTask {
                     parent_call_id,
                     event,
                 } => {
@@ -417,7 +427,7 @@ pub async fn run_tui(
                         message.push_subtask_event(&event);
                     }
                 }
-                AgentResponse::PermissionRequest(request) => {
+                TurnEvent::PermissionRequest(request) => {
                     // A single model response can carry several write tool
                     // calls, each emitting its own request before blocking on
                     // its reply. Queue them FIFO so none is lost; the UI shows
@@ -426,36 +436,12 @@ pub async fn run_tui(
                     *activity_clone.lock().await = "awaiting permission".to_string();
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::PermissionsCleared => {
-                    pending_permission_clone.lock().await.clear();
-                    activity_clone.lock().await.clear();
-                }
-                AgentResponse::UserQuestionRequest(request) => {
+                TurnEvent::UserQuestionRequest(request) => {
                     pending_question_clone.lock().await.push_back(request);
                     *activity_clone.lock().await = "awaiting user input".to_string();
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::ProviderKeys(status) => {
-                    *key_status_clone.lock().await = status.into_iter().collect();
-                }
-                AgentResponse::ProviderPicker(snapshot) => {
-                    *provider_picker_clone.lock().await = snapshot;
-                }
-                AgentResponse::ConversationCleared => {
-                    messages_clone.lock().await.clear();
-                }
-                AgentResponse::ConversationReplaced(messages) => {
-                    *messages_clone.lock().await =
-                        transcript_messages_from_core(messages, &tui_config_clone);
-                }
-                AgentResponse::SessionsOverview(sessions) => {
-                    *sessions_overview_clone.lock().await = sessions;
-                    open_sessions_clone.store(true, Ordering::SeqCst);
-                }
-                AgentResponse::SessionContext(snapshot) => {
-                    *session_context_clone.lock().await = Some(snapshot);
-                }
-                AgentResponse::Compacted {
+                TurnEvent::Compacted {
                     archived_messages,
                     before_chars,
                     after_chars,
@@ -468,7 +454,7 @@ pub async fn run_tui(
                         ),
                     ));
                 }
-                AgentResponse::HarnessState(snapshot) => {
+                TurnEvent::HarnessState(snapshot) => {
                     let running = snapshot.loop_status != "idle";
                     *harness_clone.lock().await = snapshot;
                     // Each "running" HarnessState marks the start of a new
@@ -514,7 +500,7 @@ pub async fn run_tui(
                     let mut msgs = messages_clone.lock().await;
                     finalize_streaming_reasoning(&mut msgs, duration_ms);
                 }
-                AgentResponse::PursuitUpdated(pursuit) => {
+                TurnEvent::PursuitUpdated(pursuit) => {
                     let prev = harness_clone.lock().await.pursuit.clone();
                     if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
                         messages_clone
@@ -524,10 +510,10 @@ pub async fn run_tui(
                     }
                     harness_clone.lock().await.pursuit = Some(pursuit);
                 }
-                AgentResponse::ModeChanged(mode) => {
+                TurnEvent::ModeChanged(mode) => {
                     harness_clone.lock().await.mode = mode;
                 }
-                AgentResponse::TodosUpdated(list) => {
+                TurnEvent::TodosUpdated(list) => {
                     let prev = todos_clone.lock().await.clone();
                     let notices = describe_todos_change(prev.as_ref(), Some(&list));
                     *todos_clone.lock().await = Some(list);
@@ -538,16 +524,10 @@ pub async fn run_tui(
                         }
                     }
                 }
-                AgentResponse::OpenPlanPreview(path) => {
-                    *open_plan_preview_clone.lock().await = Some(path);
-                }
-                AgentResponse::TriggerVerification => {
-                    trigger_verification_clone.store(true, Ordering::SeqCst);
-                }
-                AgentResponse::AutoApproveChanged(enabled) => {
+                TurnEvent::AutoApproveChanged(enabled) => {
                     harness_clone.lock().await.auto_approve = enabled;
                 }
-                AgentResponse::RetryScheduled {
+                TurnEvent::RetryScheduled {
                     attempt,
                     max_attempts,
                     delay_ms,
@@ -563,11 +543,57 @@ pub async fn run_tui(
                     );
                     ir_clone.store(true, Ordering::SeqCst);
                 }
-                AgentResponse::Error(e) => {
+                TurnEvent::Error(e) => {
                     let mut msgs = messages_clone.lock().await;
                     msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, e));
                     ir_clone.store(false, Ordering::SeqCst);
                     activity_clone.lock().await.clear();
+                }
+                TurnEvent::SessionReview { alert } => {
+                    // Mirror the latest review verdict into the runtime cell
+                    // so the activity bar's `⚠ <alert>` segment shows the
+                    // diagnostic's summary (or clears it when `alert` is
+                    // empty — a healthy review). The frame loop copies this
+                    // into `App::review_alert`, which `draw_activity_bar`
+                    // reads.
+                    *review_alert_clone.lock().await = alert;
+                }
+                    } // end inner `match event`
+                }
+                AgentResponse::ParentStatus(_) => {
+                    // ADR-0017: primary-session status for the `/btw` side
+                    // banner. Surfaced into the banner once the side view lands;
+                    // harmless no-op until then (no emitter exists yet).
+                }
+                AgentResponse::PermissionsCleared => {
+                    pending_permission_clone.lock().await.clear();
+                    activity_clone.lock().await.clear();
+                }
+                AgentResponse::ProviderKeys(status) => {
+                    *key_status_clone.lock().await = status.into_iter().collect();
+                }
+                AgentResponse::ProviderPicker(snapshot) => {
+                    *provider_picker_clone.lock().await = snapshot;
+                }
+                AgentResponse::ConversationCleared => {
+                    messages_clone.lock().await.clear();
+                }
+                AgentResponse::ConversationReplaced(messages) => {
+                    *messages_clone.lock().await =
+                        transcript_messages_from_core(messages, &tui_config_clone);
+                }
+                AgentResponse::SessionsOverview(sessions) => {
+                    *sessions_overview_clone.lock().await = sessions;
+                    open_sessions_clone.store(true, Ordering::SeqCst);
+                }
+                AgentResponse::SessionContext(snapshot) => {
+                    *session_context_clone.lock().await = Some(snapshot);
+                }
+                AgentResponse::OpenPlanPreview(path) => {
+                    *open_plan_preview_clone.lock().await = Some(path);
+                }
+                AgentResponse::TriggerVerification => {
+                    trigger_verification_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
@@ -581,14 +607,9 @@ pub async fn run_tui(
                     *cp_clone.lock().await = provider;
                     *cm_clone.lock().await = model;
                 }
-                AgentResponse::SessionReview { alert } => {
-                    // Mirror the latest review verdict into the runtime cell
-                    // so the activity bar's `⚠ <alert>` segment shows the
-                    // diagnostic's summary (or clears it when `alert` is
-                    // empty — a healthy review). The frame loop copies this
-                    // into `App::review_alert`, which `draw_activity_bar`
-                    // reads.
-                    *review_alert_clone.lock().await = alert;
+                AgentResponse::Error(msg) => {
+                    let mut msgs = messages_clone.lock().await;
+                    msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, msg));
                 }
             }
         }

@@ -72,7 +72,73 @@ pub enum AgentRequest {
 
 #[derive(Debug)]
 pub enum AgentResponse {
+    /// A per-turn event tagged with the session it belongs to (ADR-0017). The
+    /// TUI keys its transcript buffers by `session_id` and routes `event` to
+    /// the matching one, so a primary turn and a live `/btw` side turn can
+    /// stream concurrently over the single harness↔TUI channel without
+    /// clobbering each other's transcript.
+    ///
+    /// Global (non-session-scoped) responses — command replies, modal
+    /// snapshots, provider switches — stay as dedicated top-level variants so
+    /// they are handled once, regardless of which view is focused.
+    Turn {
+        session_id: String,
+        event: TurnEvent,
+    },
+    /// Coarse status of the primary session, surfaced to a side view's banner
+    /// while the user is inside a `/btw`. Emitted by the session registry's
+    /// parent-status watcher; the primary turn is deliberately left running, so
+    /// this is how the user learns the main session hit an approval/input wall.
+    ParentStatus(ParentStatus),
+    PermissionsCleared,
+    /// Lowercase provider name → whether a usable API key is configured.
+    ProviderKeys(Vec<(String, bool)>),
+    /// Full provider-picker state (default id + one row per provider) for the
+    /// provider picker. Supersedes `ProviderKeys` for the picker's needs;
+    /// `ProviderKeys` is retained for the header key-readiness summary.
+    ProviderPicker(ProviderPickerSnapshot),
+    ConversationCleared,
+    ConversationReplaced(Vec<Message>),
+    /// Replace the sessions picker contents (and open the picker).
+    SessionsOverview(Vec<SessionOverview>),
+    /// User asked the TUI to open the plan preview modal (via `/plan` or
+    /// clicking the sticky panel). Carries the active plan path; the TUI
+    /// loads the file content from disk into `App::plan_preview_content`.
+    OpenPlanPreview(std::path::PathBuf),
+    /// User asked the harness to trigger plan verification (via `/verify`).
+    /// The harness turns this into a synthetic hidden prompt that calls
+    /// `verify_plan_execution`, so the verifier result lands in the
+    /// transcript and the model can act on it.
+    TriggerVerification,
+    Error(String),
+    Exit,
+    ProviderSwitched {
+        provider: String,
+        model: String,
+    },
+    /// Full session-context snapshot (model + tools + permissions + skills +
+    /// mcp) for the session modal. Sent in reply to [`AgentRequest::QuerySessionContext`]
+    /// and re-sent after any mutation handled by the harness
+    /// ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`]).
+    SessionContext(SessionContextSnapshot),
+}
+
+/// The session-scoped shapes a single turn/stream emits, carried under an
+/// [`AgentResponse::Turn`] envelope (ADR-0017). Splitting these off
+/// `AgentResponse` makes "which session does this belong to" a first-class
+/// question: every turn event — whether from the primary or a `/btw` side —
+/// arrives tagged with its `session_id`, and global/command responses stay
+/// top-level.
+#[derive(Debug)]
+pub enum TurnEvent {
     Text(String),
+    /// Turn-level error (e.g. a provider failure mid-turn). Distinct from the
+    /// global [`AgentResponse::Error`] only in that it belongs to a specific
+    /// session's transcript and is therefore carried under the [`Turn`]
+    /// envelope.
+    ///
+    /// [`Turn`]: AgentResponse::Turn
+    Error(String),
     ToolCall {
         id: String,
         name: String,
@@ -95,18 +161,7 @@ pub enum AgentResponse {
         name: String,
     },
     PermissionRequest(PermissionRequest),
-    PermissionsCleared,
     UserQuestionRequest(UserQuestionRequest),
-    /// Lowercase provider name → whether a usable API key is configured.
-    ProviderKeys(Vec<(String, bool)>),
-    /// Full provider-picker state (default id + one row per provider) for the
-    /// provider picker. Supersedes `ProviderKeys` for the picker's needs;
-    /// `ProviderKeys` is retained for the header key-readiness summary.
-    ProviderPicker(ProviderPickerSnapshot),
-    ConversationCleared,
-    ConversationReplaced(Vec<Message>),
-    /// Replace the sessions picker contents (and open the picker).
-    SessionsOverview(Vec<SessionOverview>),
     Compacted {
         archived_messages: usize,
         before_chars: usize,
@@ -121,15 +176,6 @@ pub enum AgentResponse {
     /// `/todos clear`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
     /// means "no active task list" and hides the sticky panel.
     TodosUpdated(crate::todos::TodoList),
-    /// User asked the TUI to open the plan preview modal (via `/plan` or
-    /// clicking the sticky panel). Carries the active plan path; the TUI
-    /// loads the file content from disk into `App::plan_preview_content`.
-    OpenPlanPreview(std::path::PathBuf),
-    /// User asked the harness to trigger plan verification (via `/verify`).
-    /// The harness turns this into a synthetic hidden prompt that calls
-    /// `verify_plan_execution`, so the verifier result lands in the
-    /// transcript and the model can act on it.
-    TriggerVerification,
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     AutoApproveChanged(bool),
@@ -165,17 +211,20 @@ pub enum AgentResponse {
         parent_call_id: String,
         event: SubTaskEvent,
     },
-    Error(String),
-    Exit,
-    ProviderSwitched {
-        provider: String,
-        model: String,
-    },
-    /// Full session-context snapshot (model + tools + permissions + skills +
-    /// mcp) for the session modal. Sent in reply to [`AgentRequest::QuerySessionContext`]
-    /// and re-sent after any mutation handled by the harness
-    /// ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`]).
-    SessionContext(SessionContextSnapshot),
+}
+
+/// Coarse status of the primary session, reported to a `/btw` side view's
+/// banner (ADR-0017). This is the codex `SideParentStatus` equivalent: the
+/// whole reason the parent turn is left running instead of cancelled is so the
+/// user can see the main session hit an approval or input wall and jump back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentStatus {
+    Idle,
+    Running,
+    NeedsApproval,
+    NeedsInput,
+    Failed,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

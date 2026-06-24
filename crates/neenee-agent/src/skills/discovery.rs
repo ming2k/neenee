@@ -137,11 +137,7 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
 /// same name — override the earlier entry in place. Scanning runs from lowest
 /// to highest priority, so the last source to claim a name wins, while the
 /// first-seen position is preserved for stable catalog ordering.
-fn upsert_skill(
-    skills: &mut Vec<Skill>,
-    index: &mut HashMap<String, usize>,
-    skill: Skill,
-) {
+fn upsert_skill(skills: &mut Vec<Skill>, index: &mut HashMap<String, usize>, skill: Skill) {
     match index.get(&skill.name).copied() {
         Some(i) => skills[i] = skill,
         None => {

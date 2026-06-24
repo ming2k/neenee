@@ -21,7 +21,7 @@ use ratatui::{
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 
 use super::text_layout::wrap_text;
-use super::{Theme, TRANSCRIPT_BODY_RIGHT_INSET};
+use super::{Theme, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET};
 
 /// Severity presentation: the leading glyph and its color.
 ///
@@ -58,12 +58,14 @@ pub(super) fn draw_notice(
     };
     let (glyph, color) = severity_presentation(severity, theme);
 
-    // 3-col prefix: ` <glyph> ` so the glyph clears the left margin and has
-    // breathing room before the text — matches the prose indent used by
-    // `Block::Text` so notices align with body text rather than hugging the
-    // gutter.
-    let prefix_cols = 3usize;
-    let prefix = format!(" {glyph} ");
+    // Prefix mirrors the prose indent used by `Block::Text` and the attribution
+    // badge: a `TRANSCRIPT_H_INSET` outer gutter (default style) followed by the
+    // severity glyph and a breathing-space, so the glyph clears the left margin
+    // and the wrapped text aligns with body text at `TRANSCRIPT_BODY_PREFIX_COLS`
+    // instead of hugging the gutter.
+    let gutter = " ".repeat(TRANSCRIPT_H_INSET as usize);
+    let glyph_segment = format!("{glyph} ");
+    let prefix_cols = (TRANSCRIPT_H_INSET + 2) as usize;
     let body_wrap_width = area
         .width
         .saturating_sub(TRANSCRIPT_BODY_RIGHT_INSET + prefix_cols as u16)
@@ -83,15 +85,18 @@ pub(super) fn draw_notice(
             break;
         }
 
-        let line_prefix = if idx == 0 {
-            prefix.clone()
+        let line = if idx == 0 {
+            Line::from(vec![
+                Span::styled(gutter.clone(), Style::default()),
+                Span::styled(glyph_segment.clone(), glyph_style),
+                Span::styled(wl.text.clone(), base),
+            ])
         } else {
-            " ".repeat(prefix_cols)
+            Line::from(vec![
+                Span::styled(" ".repeat(prefix_cols), Style::default()),
+                Span::styled(wl.text.clone(), base),
+            ])
         };
-        let line = Line::from(vec![
-            Span::styled(line_prefix, glyph_style),
-            Span::styled(wl.text.clone(), base),
-        ]);
         let line_rect = Rect::new(area.x, *current_y, area.width, 1);
         frame.render_widget(Paragraph::new(line), line_rect);
         *current_y += 1;

@@ -191,7 +191,11 @@ impl Tool for CompletePursuitTool {
 
         match args.status.as_str() {
             "complete" => {
-                let pursuit = self.context.pursuit_service.mark_complete(&thread_id).await?;
+                let pursuit = self
+                    .context
+                    .pursuit_service
+                    .mark_complete(&thread_id)
+                    .await?;
                 Ok(serde_json::to_string(&json!({ "pursuit": pursuit })).unwrap_or_default())
             }
             other => Err(format!("invalid complete_pursuit status: {other}")),

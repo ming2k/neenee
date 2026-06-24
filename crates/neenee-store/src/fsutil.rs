@@ -156,7 +156,10 @@ impl FileLock {
         }
         #[cfg(not(unix))]
         {
-            let _ = OpenOptions::new().create(true).write(true).open(&lock_path)?;
+            let _ = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&lock_path)?;
             Ok(Self { _file: () })
         }
     }
