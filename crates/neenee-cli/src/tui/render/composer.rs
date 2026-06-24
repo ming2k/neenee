@@ -18,7 +18,9 @@ use super::design::{
     COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS, COMPOSER_TEXT_ROW_OFFSET,
     COMPOSER_VERTICAL_CHROME_ROWS,
 };
-use super::text_layout::{block_selection_range, line_selection, padded_tail, wrap_text, WrappedLine};
+use super::text_layout::{
+    block_selection_range, line_selection, padded_tail, wrap_text, WrappedLine,
+};
 use super::Theme;
 
 /// Special message_idx for the live input box in the layout map, so semantic

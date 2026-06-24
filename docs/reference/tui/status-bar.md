@@ -5,25 +5,35 @@ Transient activity indicator shown directly above the input box.
 ## Appearance
 
 ```text
- ● turn 3 · round 2 · making edits
+ ● making edits · ⟴ refactor auth module · plan 2/5 · 23s
 ```
 
-The turn and round segments form a structural prefix (rendered muted) that
-anchors the live status. The round segment is omitted before the first model
-request of a turn — e.g. during `queued` or `preparing context` — since no
-round has started yet:
+The bar surfaces what the user most wants to know mid-turn: the **live
+status** (lead, brand + italic), an optional **pursuit badge** (`⟴ <objective>`,
+shown only while a pursuit is armed), **plan/task progress** (`plan d/t`,
+shown only when a non-empty task list exists), and **elapsed** time (the only
+live counter). Segments are omitted when there is nothing to report, so a
+plain turn reads simply:
 
 ```text
- ● turn 3 · queued
+ ● making edits · 3s
 ```
+
+The structural counters — `turn N · round M · <model>` — no longer live on
+the bar. They take space and change rarely, so they moved into the
+**Activity modal** that this bar opens on click. The whole bar is a click
+target (and `Tab`/`Enter` opens the modal): one glance answers "what's
+happening, is there a plan, how long?", one click shows the full breakdown
+(Activity tab: pursuit, current prompt, turn/round/model/elapsed; Tasks tab:
+the todo list).
 
 | Attribute | Value |
 |-----------|-------|
 | Location | 1 row directly above the input box |
 | Glyph | `●` (`spinner_glyph`), BOLD |
 | Glyph color | `breathing_color(phase, theme.brand(), theme.surface())` — a cosine luminance sweep between brand and surface so the dot breathes at roughly 10 fps instead of cycling braille frames |
-| Prefix (`turn N · round M ·`) | `theme.muted()` |
 | Status text color | `theme.brand()` + ITALIC |
+| Pursuit / plan / elapsed | `theme.muted()` |
 | Indent | 1 space |
 
 The breathing sweep is the TUI's single liveness anchor — every other
@@ -48,14 +58,15 @@ at the streaming boundary.
 
 ## Turn and round
 
-The prefix reports where the agent is in the two-layer execution model. See
-[Turns and rounds](../../explanation/agent-design/turns-and-rounds.md) for
-the full concept; in short:
+The bar no longer shows the turn/round counters; they live in the Activity
+modal (click the bar) as a detail line `turn N · round M · <model> ·
+<elapsed>`. See [Turns and rounds](../../explanation/agent-design/turns-and-rounds.md)
+for the full concept; in short:
 
-| Segment | Meaning |
+| Counter | Meaning |
 |---------|---------|
 | `turn N` | The user-perceived turn number (1-indexed). Bumped once per submitted message. |
-| `round M` | The model-request index within the current turn (1-indexed). Omitted before the first request. A round spans one model request plus the tool work that follows. |
+| `round M` | The model-request index within the current turn (1-indexed). A round spans one model request plus the tool work that follows. |
 
 The round number resets each turn; the turn number resets only on a new
 session.

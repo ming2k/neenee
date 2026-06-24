@@ -17,7 +17,7 @@ pub mod step_interaction;
 mod terminal;
 mod transcript;
 
-pub(crate) use app::{App, Modal, Recess, SessionTab};
+pub(crate) use app::{ActivityTab, App, Modal, Recess, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
     model_display_name, provider_context_window, providers_filtered_from, ProviderPreset, PROVIDERS,
@@ -32,7 +32,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
+    mcp::McpConnectionStatus, AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus,
     PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
     SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
 };
@@ -99,7 +99,6 @@ pub async fn run_tui(
     let is_responding = Arc::new(AtomicBool::new(false));
     let ir_clone = is_responding.clone();
     let harness = Arc::new(Mutex::new(HarnessSnapshot {
-        mode: AgentMode::Build,
         pursuit: None,
         loop_status: "idle".to_string(),
         auto_approve: false,
@@ -140,6 +139,13 @@ pub async fn run_tui(
     let pending_permission_clone = pending_permission.clone();
     let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
     let pending_question_clone = pending_question.clone();
+    // Full-duplex (ADR-0029): side-tables recording which subagent (by parent
+    // tool-call id) surfaced a given permission / ask_user request, so the
+    // modal's reply can be tagged with `parent_call_id` for down-routing.
+    let subagent_permission_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let subtask_permission_parent_clone = subagent_permission_parent.clone();
+    let subagent_question_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let subtask_question_parent_clone = subagent_question_parent.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
     let provider_picker = Arc::new(Mutex::new(ProviderPickerSnapshot::default()));
@@ -162,408 +168,539 @@ pub async fn run_tui(
     // TUI display config shared with the response listener so live tool steps
     // and reasoning traces honor the per-step-kind default expand state.
     let tui_config_clone = tui_config.clone();
+    // `/btw` side-conversation shared state (ADR-0017). The side transcript
+    // buffer, the parent-status mirror, and the one-shot view-transition
+    // signal all cross the listener → loop boundary here.
+    let side_messages = Arc::new(Mutex::new(Vec::<TranscriptMessage>::new()));
+    let side_messages_clone = side_messages.clone();
+    let parent_status = Arc::new(Mutex::new(ParentStatus::Idle));
+    let parent_status_clone = parent_status.clone();
+    let side_view_signal = Arc::new(Mutex::new(None::<event_loop::SideViewSignal>));
+    let side_view_signal_clone = side_view_signal.clone();
 
     // Spawn response listener
     tokio::spawn(async move {
         let mut reasoning_start: Option<std::time::Instant> = None;
+        // Listener-local side routing key: the side `session_id` learned from
+        // `SideViewOpened`. Kept here (not in `UiRuntime`) because only the
+        // listener routes per-turn events; the loop reads the already-routed
+        // `side_messages` buffer.
+        let mut listener_side_id: Option<String> = None;
         while let Some(resp) = rx.recv().await {
             match resp {
-                // ADR-0017: per-turn events arrive tagged with the session they
-                // belong to. The TUI keys transcript buffers by `session_id`;
-                // today only the primary buffer exists (the `/btw` side buffer
-                // is added in a follow-up), so every turn event still routes to
-                // the primary transcript. The envelope is in place so a side
-                // turn can stream concurrently without structural changes.
+                // ADR-0017: per-turn events arrive tagged with the session
+                // they belong to. The listener routes each event to the side
+                // buffer when its `session_id` matches the live side session,
+                // and to the primary transcript otherwise. Permission and
+                // user-question requests stay global so their modals surface
+                // regardless of which view is focused.
                 AgentResponse::Turn { session_id, event } => {
-                    let _session_id = session_id;
-                    match event {
-                TurnEvent::Text(t) => {
-                    let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
-                    let mut msgs = messages_clone.lock().await;
-                    msgs.push(
-                        TranscriptMessage::new(Role::Assistant, t)
-                            .with_attribution(provider, model),
-                    );
-                    ir_clone.store(false, Ordering::SeqCst);
-                    activity_clone.lock().await.clear();
-                }
-                TurnEvent::Activity(status) => {
-                    *activity_clone.lock().await = status;
-                    ir_clone.store(true, Ordering::SeqCst);
-                }
-                TurnEvent::RoundStarted { round } => {
-                    // 1-indexed for display: tool_round 0 is the turn's first
-                    // model request, shown as `round 1`.
-                    *current_round_clone.lock().await = round as u64 + 1;
-                }
-                TurnEvent::StreamStart => {
-                    let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
-                    let mut msgs = messages_clone.lock().await;
-                    msgs.push(
-                        TranscriptMessage::new(Role::Assistant, "")
-                            .with_attribution(provider, model),
-                    );
-                    ir_clone.store(true, Ordering::SeqCst);
-                    *activity_clone.lock().await = "responding".to_string();
-                }
-                TurnEvent::StreamDelta(delta) => {
-                    let mut msgs = messages_clone.lock().await;
-                    if let Some(last) = msgs.last_mut() {
-                        last.push_stream(&delta);
-                    }
-                }
-                TurnEvent::StreamEnd(final_content) => {
-                    ir_clone.store(true, Ordering::SeqCst);
-                    *activity_clone.lock().await = "finalizing response".to_string();
-                    let mut msgs = messages_clone.lock().await;
-                    if let Some(last) = msgs.last_mut() {
-                        last.raw = final_content;
-                        last.reparse();
-                    }
-                }
-                TurnEvent::StreamDiscard => {
-                    let mut msgs = messages_clone.lock().await;
-                    if msgs
-                        .last()
-                        .is_some_and(|message| message.role == Role::Assistant)
-                    {
-                        msgs.pop();
-                    }
-                }
-                TurnEvent::StreamReasoningDelta(delta) => {
-                    let mut msgs = messages_clone.lock().await;
-                    if let Some(last) = msgs.last_mut().filter(|message| message.is_thinking()) {
-                        last.push_stream(&delta);
-                        if let MessageKind::Thinking { content, .. } = &mut last.kind {
-                            content.push_str(&delta);
-                        }
+                    let routes_to_side = listener_side_id.as_deref() == Some(session_id.as_str());
+                    // Select the transcript buffer for this event (ADR-0017):
+                    // the side buffer when the event's `session_id` matches the
+                    // live side session, the primary buffer otherwise. Global
+                    // responding/activity/harness state below is gated on
+                    // `!routes_to_side` so a concurrent side turn never
+                    // clobbers the primary view's chrome; the side view reads
+                    // its own buffer + the parent-status banner instead.
+                    // Permission and user-question requests stay global
+                    // regardless of origin so their modals always surface.
+                    let buf = if routes_to_side {
+                        &side_messages_clone
                     } else {
-                        // StreamStart inserts an empty assistant placeholder before
-                        // the first reasoning delta. Reasoning renders as its own
-                        // reasoning trace, so that placeholder is never used and only
-                        // leaves an extra blank line between the user message and the
-                        // reasoning header. Drop it before creating the reasoning trace
-                        // so restored history and live reasoning have identical
-                        // spacing.
-                        if msgs
-                            .last()
-                            .is_some_and(|m| m.role == Role::Assistant && m.raw.is_empty())
-                        {
-                            msgs.pop();
-                        }
-                        let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
-                        let mut thinking =
-                            TranscriptMessage::thinking(delta).with_attribution(provider, model);
-                        // A reasoning trace's default disclosure honors the
-                        // `[tui.default_expanded] thinking` config (collapsed by
-                        // default). On completion the transition leaves it as-is
-                        // (no auto-collapse), so the user keeps what they were
-                        // reading.
-                        thinking.set_thinking_expanded(config::thinking_default_expanded(
-                            &tui_config_clone,
-                        ));
-                        msgs.push(thinking);
-                        reasoning_start = Some(std::time::Instant::now());
-                    }
-                }
-                TurnEvent::StreamReasoningEnd(content) => {
-                    let duration_ms = reasoning_start
-                        .take()
-                        .map(|started| started.elapsed().as_millis() as u64);
-                    let mut msgs = messages_clone.lock().await;
-                    // The round closes with `AssistantEnd` *before* `ReasoningEnd`
-                    // (see golden_reasoning_precedes_text_in_the_same_round), so by
-                    // the time this arrives the assistant's text message is usually
-                    // the literal last message. Scan backward for the most recent
-                    // Thinking message that is still streaming (`duration_ms: None`)
-                    // instead of relying on it being last — otherwise the trace's
-                    // duration never gets stamped and the spinner runs forever.
-                    let target = msgs.iter_mut().rfind(|message| {
-                        matches!(
-                            &message.kind,
-                            MessageKind::Thinking {
-                                duration_ms: None,
-                                ..
-                            }
-                        )
-                    });
-                    if let Some(last) = target {
-                        last.raw = content.clone();
-                        last.reparse();
-                        if let MessageKind::Thinking {
-                            content: current,
-                            duration_ms: d,
-                            ..
-                        } = &mut last.kind
-                        {
-                            *current = content;
-                            if d.is_none() {
-                                *d = Some(duration_ms.unwrap_or(0));
-                            }
-                        }
-                    }
-                }
-                TurnEvent::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                } => {
-                    *activity_clone.lock().await =
-                        event_loop::tool_activity_status(&name).to_string();
-                    let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
-                    let mut msgs = messages_clone.lock().await;
-                    // A tool step starts collapsed: there's no result to show
-                    // yet. The lifecycle-aware default (see `step_interaction`)
-                    // expands it on completion — Ok follows per-tool density,
-                    // Failed/Denied force-expand to surface the error.
-                    let message = TranscriptMessage::tool_step(id, name, arguments)
-                        .with_attribution(provider, model);
-                    msgs.push(message);
-                    ir_clone.store(true, Ordering::SeqCst);
-                }
-                TurnEvent::ToolResult {
-                    id,
-                    name,
-                    output,
-                    structured,
-                    duration_ms,
-                } => {
-                    *activity_clone.lock().await = "thinking".to_string();
-                    let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
-                    let density = tool_density_clone.load(Ordering::SeqCst);
-                    let mut msgs = messages_clone.lock().await;
-                    let mut finished = false;
-                    for existing in msgs.iter_mut() {
-                        if existing.finish_tool_step(
-                            &id,
-                            output.clone(),
-                            structured.clone(),
-                            duration_ms,
-                        ) {
-                            // Apply the lifecycle-aware default disclosure: Ok
-                            // follows per-tool density, Failed/Denied force-
-                            // expand to surface the error. Respects any user
-                            // pin via the system setter.
-                            if let Some(status) = existing.tool_step_status() {
-                                let default = step_interaction::default_tool_expanded(
-                                    status,
-                                    &name,
-                                    &tui_config_clone,
-                                    density,
-                                );
-                                existing.set_tool_step_expanded(default);
-                            }
-                            finished = true;
-                            break;
-                        }
-                    }
-                    if !finished {
-                        // No matching in-flight call (e.g. turn restored from
-                        // history): synthesize a finished step with its default
-                        // disclosure applied directly.
-                        let mut message =
-                            TranscriptMessage::tool_step(id.clone(), name.clone(), "{}")
-                                .with_attribution(provider, model);
-                        message.finish_tool_step(&id, output, structured, duration_ms);
-                        if let Some(status) = message.tool_step_status() {
-                            let default = step_interaction::default_tool_expanded(
-                                status,
-                                &name,
-                                &tui_config_clone,
-                                density,
+                        &messages_clone
+                    };
+                    match event {
+                        TurnEvent::Text(t) => {
+                            let (provider, model) =
+                                event_loop::attribution(&cp_clone, &cm_clone).await;
+                            let mut msgs = buf.lock().await;
+                            msgs.push(
+                                TranscriptMessage::new(Role::Assistant, t)
+                                    .with_attribution(provider, model),
                             );
-                            message.set_tool_step_expanded(default);
+                            if !routes_to_side {
+                                ir_clone.store(false, Ordering::SeqCst);
+                                activity_clone.lock().await.clear();
+                            }
                         }
-                        msgs.push(message);
-                    }
-                }
-                TurnEvent::ToolCancelled { id, .. } => {
-                    // Convergence: an in-flight call was aborted by an
-                    // interrupt. Flip its step (and any nested sub-agent
-                    // children) to Cancelled so it never stays "running".
-                    let mut msgs = messages_clone.lock().await;
-                    let mut cancelled = false;
-                    for message in msgs.iter_mut() {
-                        if message.cancel_tool_step(&id) {
-                            // Cancelled reads as inert → collapse (respecting
-                            // any user pin via the system setter).
-                            message.set_tool_step_expanded(false);
-                            cancelled = true;
-                            break;
+                        TurnEvent::Activity(status) => {
+                            if !routes_to_side {
+                                *activity_clone.lock().await = status;
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
                         }
-                    }
-                    if !cancelled {
-                        // The ToolCall event may have been dropped with the
-                        // aborted turn; synthesize a minimal cancelled step so
-                        // the user still sees the call was abandoned.
-                        let mut message = TranscriptMessage::tool_step(id.clone(), "tool", "{}");
-                        message.cancel_tool_step(&id);
-                        message.set_tool_step_expanded(false);
-                        msgs.push(message);
-                    }
-                }
-                TurnEvent::ToolStream { id, stream } => {
-                    // Live partial output from a running tool (e.g. bash
-                    // stdout). Accumulate into the running step so it updates
-                    // in place instead of freezing on a spinner.
-                    let mut msgs = messages_clone.lock().await;
-                    if !msgs
-                        .iter_mut()
-                        .any(|message| message.push_tool_stream(&id, &stream))
-                    {
-                        // Unknown id: drop silently — the matching ToolCall may
-                        // have been dropped with an aborted turn.
-                    }
-                }
-                TurnEvent::SubTask {
-                    parent_call_id,
-                    event,
-                } => {
-                    let mut msgs = messages_clone.lock().await;
-                    if let Some(message) = msgs
+                        TurnEvent::RoundStarted { round } => {
+                            if !routes_to_side {
+                                // 1-indexed for display: tool_round 0 is the turn's
+                                // first model request, shown as `round 1`.
+                                *current_round_clone.lock().await = round as u64 + 1;
+                            }
+                        }
+                        TurnEvent::StreamStart => {
+                            let (provider, model) =
+                                event_loop::attribution(&cp_clone, &cm_clone).await;
+                            let mut msgs = buf.lock().await;
+                            msgs.push(
+                                TranscriptMessage::new(Role::Assistant, "")
+                                    .with_attribution(provider, model),
+                            );
+                            if !routes_to_side {
+                                ir_clone.store(true, Ordering::SeqCst);
+                                *activity_clone.lock().await = "responding".to_string();
+                            }
+                        }
+                        TurnEvent::StreamDelta(delta) => {
+                            let mut msgs = buf.lock().await;
+                            if let Some(last) = msgs.last_mut() {
+                                last.push_stream(&delta);
+                            }
+                        }
+                        TurnEvent::StreamEnd(final_content) => {
+                            if !routes_to_side {
+                                ir_clone.store(true, Ordering::SeqCst);
+                                *activity_clone.lock().await = "finalizing response".to_string();
+                            }
+                            let mut msgs = buf.lock().await;
+                            if let Some(last) = msgs.last_mut() {
+                                last.raw = final_content;
+                                last.reparse();
+                            }
+                        }
+                        TurnEvent::StreamDiscard => {
+                            let mut msgs = buf.lock().await;
+                            if msgs
+                                .last()
+                                .is_some_and(|message| message.role == Role::Assistant)
+                            {
+                                msgs.pop();
+                            }
+                        }
+                        TurnEvent::StreamReasoningDelta(delta) => {
+                            let mut msgs = buf.lock().await;
+                            if let Some(last) =
+                                msgs.last_mut().filter(|message| message.is_thinking())
+                            {
+                                last.push_stream(&delta);
+                                if let MessageKind::Thinking { content, .. } = &mut last.kind {
+                                    content.push_str(&delta);
+                                }
+                            } else {
+                                // StreamStart inserts an empty assistant placeholder before
+                                // the first reasoning delta. Reasoning renders as its own
+                                // reasoning trace, so that placeholder is never used and only
+                                // leaves an extra blank line between the user message and the
+                                // reasoning header. Drop it before creating the reasoning trace
+                                // so restored history and live reasoning have identical
+                                // spacing.
+                                if msgs
+                                    .last()
+                                    .is_some_and(|m| m.role == Role::Assistant && m.raw.is_empty())
+                                {
+                                    msgs.pop();
+                                }
+                                let (provider, model) =
+                                    event_loop::attribution(&cp_clone, &cm_clone).await;
+                                let mut thinking = TranscriptMessage::thinking(delta)
+                                    .with_attribution(provider, model);
+                                // A reasoning trace's default disclosure honors the
+                                // `[tui.default_expanded] thinking` config (collapsed by
+                                // default). On completion the transition leaves it as-is
+                                // (no auto-collapse), so the user keeps what they were
+                                // reading.
+                                thinking.set_thinking_expanded(config::thinking_default_expanded(
+                                    &tui_config_clone,
+                                ));
+                                msgs.push(thinking);
+                                reasoning_start = Some(std::time::Instant::now());
+                            }
+                        }
+                        TurnEvent::StreamReasoningEnd(content) => {
+                            let duration_ms = reasoning_start
+                                .take()
+                                .map(|started| started.elapsed().as_millis() as u64);
+                            let mut msgs = buf.lock().await;
+                            // The round closes with `AssistantEnd` *before* `ReasoningEnd`
+                            // (see golden_reasoning_precedes_text_in_the_same_round), so by
+                            // the time this arrives the assistant's text message is usually
+                            // the literal last message. Scan backward for the most recent
+                            // Thinking message that is still streaming (`duration_ms: None`)
+                            // instead of relying on it being last — otherwise the trace's
+                            // duration never gets stamped and the spinner runs forever.
+                            let target = msgs.iter_mut().rfind(|message| {
+                                matches!(
+                                    &message.kind,
+                                    MessageKind::Thinking {
+                                        duration_ms: None,
+                                        ..
+                                    }
+                                )
+                            });
+                            if let Some(last) = target {
+                                last.raw = content.clone();
+                                last.reparse();
+                                if let MessageKind::Thinking {
+                                    content: current,
+                                    duration_ms: d,
+                                    ..
+                                } = &mut last.kind
+                                {
+                                    *current = content;
+                                    if d.is_none() {
+                                        *d = Some(duration_ms.unwrap_or(0));
+                                    }
+                                }
+                            }
+                        }
+                        TurnEvent::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            if !routes_to_side {
+                                *activity_clone.lock().await =
+                                    event_loop::tool_activity_status(&name).to_string();
+                            }
+                            let (provider, model) =
+                                event_loop::attribution(&cp_clone, &cm_clone).await;
+                            let mut msgs = buf.lock().await;
+                            // A tool step starts collapsed: there's no result to show
+                            // yet. The lifecycle-aware default (see `step_interaction`)
+                            // expands it on completion — Ok follows per-tool density,
+                            // Failed/Denied force-expand to surface the error.
+                            let message = TranscriptMessage::tool_step(id, name, arguments)
+                                .with_attribution(provider, model);
+                            msgs.push(message);
+                            if !routes_to_side {
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        TurnEvent::ToolResult {
+                            id,
+                            name,
+                            output,
+                            structured,
+                            duration_ms,
+                        } => {
+                            if !routes_to_side {
+                                *activity_clone.lock().await = "thinking".to_string();
+                            }
+                            let (provider, model) =
+                                event_loop::attribution(&cp_clone, &cm_clone).await;
+                            let density = tool_density_clone.load(Ordering::SeqCst);
+                            let mut msgs = buf.lock().await;
+                            let mut finished = false;
+                            for existing in msgs.iter_mut() {
+                                if existing.finish_tool_step(
+                                    &id,
+                                    output.clone(),
+                                    structured.clone(),
+                                    duration_ms,
+                                ) {
+                                    // Apply the lifecycle-aware default disclosure: Ok
+                                    // follows per-tool density, Failed/Denied force-
+                                    // expand to surface the error. Respects any user
+                                    // pin via the system setter.
+                                    if let Some(status) = existing.tool_step_status() {
+                                        let default = step_interaction::default_tool_expanded(
+                                            status,
+                                            &name,
+                                            &tui_config_clone,
+                                            density,
+                                        );
+                                        existing.set_tool_step_expanded(default);
+                                    }
+                                    finished = true;
+                                    break;
+                                }
+                            }
+                            if !finished {
+                                // No matching in-flight call (e.g. turn restored from
+                                // history): synthesize a finished step with its default
+                                // disclosure applied directly.
+                                let mut message =
+                                    TranscriptMessage::tool_step(id.clone(), name.clone(), "{}")
+                                        .with_attribution(provider, model);
+                                message.finish_tool_step(&id, output, structured, duration_ms);
+                                if let Some(status) = message.tool_step_status() {
+                                    let default = step_interaction::default_tool_expanded(
+                                        status,
+                                        &name,
+                                        &tui_config_clone,
+                                        density,
+                                    );
+                                    message.set_tool_step_expanded(default);
+                                }
+                                msgs.push(message);
+                            }
+                        }
+                        TurnEvent::ToolCancelled { id, .. } => {
+                            // Convergence: an in-flight call was aborted by an
+                            // interrupt. Flip its step (and any nested subagent
+                            // children) to Cancelled so it never stays "running".
+                            let mut msgs = buf.lock().await;
+                            let mut cancelled = false;
+                            for message in msgs.iter_mut() {
+                                if message.cancel_tool_step(&id) {
+                                    // Cancelled reads as inert → collapse (respecting
+                                    // any user pin via the system setter).
+                                    message.set_tool_step_expanded(false);
+                                    cancelled = true;
+                                    break;
+                                }
+                            }
+                            if !cancelled {
+                                // The ToolCall event may have been dropped with the
+                                // aborted turn; synthesize a minimal cancelled step so
+                                // the user still sees the call was abandoned.
+                                let mut message =
+                                    TranscriptMessage::tool_step(id.clone(), "tool", "{}");
+                                message.cancel_tool_step(&id);
+                                message.set_tool_step_expanded(false);
+                                msgs.push(message);
+                            }
+                        }
+                        TurnEvent::ToolStream { id, stream } => {
+                            // Live partial output from a running tool (e.g. bash
+                            // stdout). Accumulate into the running step so it updates
+                            // in place instead of freezing on a spinner.
+                            let mut msgs = buf.lock().await;
+                            if !msgs
+                                .iter_mut()
+                                .any(|message| message.push_tool_stream(&id, &stream))
+                            {
+                                // Unknown id: drop silently — the matching ToolCall may
+                                // have been dropped with an aborted turn.
+                            }
+                        }
+                        TurnEvent::SubAgent {
+                            parent_call_id,
+                            event,
+                        } => {
+                            // Full-duplex (ADR-0029): a subagent's permission broker
+                            // or `ask_user` request bubbles up nested under this
+                            // `parent_call_id`. Surface it in the SAME modal the
+                            // top-level path uses (so the user answers it inline) and
+                            // record the parent so the reply gets tagged for
+                            // down-routing into the child. Falls through to the nested
+                            // transcript rendering below for the ordinary
+                            // stream/tool-call events.
+                            match &event {
+                                neenee_core::SubagentEvent::PermissionRequest(req) => {
+                                    subtask_permission_parent_clone
+                                        .lock()
+                                        .await
+                                        .insert(req.id.clone(), parent_call_id.clone());
+                                    pending_permission_clone.lock().await.push_back(req.clone());
+                                    if !routes_to_side {
+                                        *activity_clone.lock().await =
+                                            "awaiting permission".to_string();
+                                        ir_clone.store(true, Ordering::SeqCst);
+                                    }
+                                }
+                                neenee_core::SubagentEvent::UserQuestionRequest(req) => {
+                                    subtask_question_parent_clone
+                                        .lock()
+                                        .await
+                                        .insert(req.id.clone(), parent_call_id.clone());
+                                    pending_question_clone.lock().await.push_back(req.clone());
+                                    if !routes_to_side {
+                                        *activity_clone.lock().await =
+                                            "awaiting user input".to_string();
+                                        ir_clone.store(true, Ordering::SeqCst);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            let mut msgs = buf.lock().await;
+                            if let Some(message) = msgs
                         .iter_mut()
                         .find(|m| m.is_tool_step() && matches!(&m.kind, crate::tui::document::MessageKind::ToolStep { id, .. } if id == &parent_call_id))
                     {
-                        message.push_subtask_event(&event);
+                        message.push_subagent_event(&event);
                     }
-                }
-                TurnEvent::PermissionRequest(request) => {
-                    // A single model response can carry several write tool
-                    // calls, each emitting its own request before blocking on
-                    // its reply. Queue them FIFO so none is lost; the UI shows
-                    // one sheet at a time and hands off as each is resolved.
-                    pending_permission_clone.lock().await.push_back(request);
-                    *activity_clone.lock().await = "awaiting permission".to_string();
-                    ir_clone.store(true, Ordering::SeqCst);
-                }
-                TurnEvent::UserQuestionRequest(request) => {
-                    pending_question_clone.lock().await.push_back(request);
-                    *activity_clone.lock().await = "awaiting user input".to_string();
-                    ir_clone.store(true, Ordering::SeqCst);
-                }
-                TurnEvent::Compacted {
-                    archived_messages,
-                    before_chars,
-                    after_chars,
-                } => {
-                    messages_clone.lock().await.push(TranscriptMessage::notice(
-                        NoticeSeverity::Info,
-                        format!(
-                            "Compacted {} messages: {} -> {} chars.",
-                            archived_messages, before_chars, after_chars
-                        ),
-                    ));
-                }
-                TurnEvent::HarnessState(snapshot) => {
-                    let running = snapshot.loop_status != "idle";
-                    *harness_clone.lock().await = snapshot;
-                    // Each "running" HarnessState marks the start of a new
-                    // turn; bump the local turn counter mirror so the plan
-                    // panel's stale detector has a frame-current value
-                    // without needing a dedicated event channel. This is
-                    // approximate (one bump per turn start) which matches
-                    // `Agent::bump_turn`'s semantics in the harness.
-                    if running {
-                        let mut tc = turn_count_clone.lock().await;
-                        *tc = tc.saturating_add(1);
-                        // A new turn resets the round counter; it stays 0
-                        // until the first `RoundStarted` of the turn lands.
-                        *current_round_clone.lock().await = 0;
-                        // Reset the review alert and stamp the turn timer so the
-                        // activity bar can render a live `<elapsed>` segment.
-                        *review_alert_clone.lock().await = String::new();
-                        *turn_started_at_clone.lock().await = Some(std::time::Instant::now());
-                    }
-                    ir_clone.store(running, Ordering::SeqCst);
-                    if !running {
-                        activity_clone.lock().await.clear();
-                        *current_round_clone.lock().await = 0;
-                        *review_alert_clone.lock().await = String::new();
-                        *turn_started_at_clone.lock().await = None;
-                    }
-                    // A harness state change is always a turn boundary
-                    // (idle at the end of a turn, "running"/"loop N/M" at the
-                    // start of a new one). If the previous turn ended mid-
-                    // reasoning — e.g. the user interrupted, the provider
-                    // errored, or a fresh turn superseded a still-streaming
-                    // one — `StreamReasoningEnd` never arrives, so the
-                    // in-flight Thinking message keeps `duration_ms: None`.
-                    // That is exactly the state the renderer uses to decide
-                    // the reasoning marker is "running" and should keep
-                    // breathing its spinner, which would flash forever after
-                    // an interrupt. Freeze any such orphaned trace by
-                    // stamping its elapsed time (or 0 if the start instant
-                    // was already consumed) so the spinner stops.
-                    let duration_ms = reasoning_start
-                        .take()
-                        .map(|started| started.elapsed().as_millis() as u64);
-                    let mut msgs = messages_clone.lock().await;
-                    finalize_streaming_reasoning(&mut msgs, duration_ms);
-                }
-                TurnEvent::PursuitUpdated(pursuit) => {
-                    let prev = harness_clone.lock().await.pursuit.clone();
-                    if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
-                        messages_clone
-                            .lock()
-                            .await
-                            .push(TranscriptMessage::notice(NoticeSeverity::Info, text));
-                    }
-                    harness_clone.lock().await.pursuit = Some(pursuit);
-                }
-                TurnEvent::ModeChanged(mode) => {
-                    harness_clone.lock().await.mode = mode;
-                }
-                TurnEvent::TodosUpdated(list) => {
-                    let prev = todos_clone.lock().await.clone();
-                    let notices = describe_todos_change(prev.as_ref(), Some(&list));
-                    *todos_clone.lock().await = Some(list);
-                    if !notices.is_empty() {
-                        let mut msgs = messages_clone.lock().await;
-                        for text in notices {
-                            msgs.push(TranscriptMessage::notice(NoticeSeverity::Info, text));
                         }
-                    }
-                }
-                TurnEvent::AutoApproveChanged(enabled) => {
-                    harness_clone.lock().await.auto_approve = enabled;
-                }
-                TurnEvent::RetryScheduled {
-                    attempt,
-                    max_attempts,
-                    delay_ms,
-                    message,
-                } => {
-                    let seconds = delay_ms.div_ceil(1_000);
-                    *activity_clone.lock().await = format!(
-                        "retry {}/{} in {}s · {}",
-                        attempt,
-                        max_attempts,
-                        seconds,
-                        event_loop::compact_retry_reason(&message)
-                    );
-                    ir_clone.store(true, Ordering::SeqCst);
-                }
-                TurnEvent::Error(e) => {
-                    let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, e));
-                    ir_clone.store(false, Ordering::SeqCst);
-                    activity_clone.lock().await.clear();
-                }
-                TurnEvent::SessionReview { alert } => {
-                    // Mirror the latest review verdict into the runtime cell
-                    // so the activity bar's `⚠ <alert>` segment shows the
-                    // diagnostic's summary (or clears it when `alert` is
-                    // empty — a healthy review). The frame loop copies this
-                    // into `App::review_alert`, which `draw_activity_bar`
-                    // reads.
-                    *review_alert_clone.lock().await = alert;
-                }
+                        TurnEvent::PermissionRequest(request) => {
+                            // A single model response can carry several write tool
+                            // calls, each emitting its own request before blocking on
+                            // its reply. Queue them FIFO so none is lost; the UI shows
+                            // one sheet at a time and hands off as each is resolved.
+                            // Stays global regardless of session so the modal always
+                            // surfaces (ADR-0017: the side auto-approves, so in
+                            // practice only the primary ever reaches here).
+                            pending_permission_clone.lock().await.push_back(request);
+                            if !routes_to_side {
+                                *activity_clone.lock().await = "awaiting permission".to_string();
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        TurnEvent::UserQuestionRequest(request) => {
+                            pending_question_clone.lock().await.push_back(request);
+                            if !routes_to_side {
+                                *activity_clone.lock().await = "awaiting user input".to_string();
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        TurnEvent::Compacted {
+                            archived_messages,
+                            before_chars,
+                            after_chars,
+                        } => {
+                            buf.lock().await.push(TranscriptMessage::notice(
+                                NoticeSeverity::Info,
+                                format!(
+                                    "Compacted {} messages: {} -> {} chars.",
+                                    archived_messages, before_chars, after_chars
+                                ),
+                            ));
+                        }
+                        TurnEvent::HarnessState(snapshot) => {
+                            let running = snapshot.loop_status != "idle";
+                            if !routes_to_side {
+                                *harness_clone.lock().await = snapshot;
+                                // Each "running" HarnessState marks the start of a new
+                                // turn; bump the local turn counter mirror so the plan
+                                // panel's stale detector has a frame-current value
+                                // without needing a dedicated event channel. This is
+                                // approximate (one bump per turn start) which matches
+                                // `Agent::bump_turn`'s semantics in the harness.
+                                if running {
+                                    let mut tc = turn_count_clone.lock().await;
+                                    *tc = tc.saturating_add(1);
+                                    // A new turn resets the round counter; it stays 0
+                                    // until the first `RoundStarted` of the turn lands.
+                                    *current_round_clone.lock().await = 0;
+                                    // Reset the review alert and stamp the turn timer so the
+                                    // activity bar can render a live `<elapsed>` segment.
+                                    *review_alert_clone.lock().await = String::new();
+                                    *turn_started_at_clone.lock().await =
+                                        Some(std::time::Instant::now());
+                                }
+                                ir_clone.store(running, Ordering::SeqCst);
+                                if !running {
+                                    activity_clone.lock().await.clear();
+                                    *current_round_clone.lock().await = 0;
+                                    *review_alert_clone.lock().await = String::new();
+                                    *turn_started_at_clone.lock().await = None;
+                                }
+                            }
+                            // A harness state change is always a turn boundary
+                            // (idle at the end of a turn, "running"/"loop N/M" at the
+                            // start of a new one). If the previous turn ended mid-
+                            // reasoning — e.g. the user interrupted, the provider
+                            // errored, or a fresh turn superseded a still-streaming
+                            // one — `StreamReasoningEnd` never arrives, so the
+                            // in-flight Thinking message keeps `duration_ms: None`.
+                            // That is exactly the state the renderer uses to decide
+                            // the reasoning marker is "running" and should keep
+                            // breathing its spinner, which would flash forever after
+                            // an interrupt. Freeze any such orphaned trace by
+                            // stamping its elapsed time (or 0 if the start instant
+                            // was already consumed) so the spinner stops.
+                            let duration_ms = reasoning_start
+                                .take()
+                                .map(|started| started.elapsed().as_millis() as u64);
+                            let mut msgs = buf.lock().await;
+                            finalize_streaming_reasoning(&mut msgs, duration_ms);
+                        }
+                        TurnEvent::PursuitUpdated(pursuit) => {
+                            let prev = if !routes_to_side {
+                                harness_clone.lock().await.pursuit.clone()
+                            } else {
+                                None
+                            };
+                            if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
+                                buf.lock()
+                                    .await
+                                    .push(TranscriptMessage::notice(NoticeSeverity::Info, text));
+                            }
+                            if !routes_to_side {
+                                harness_clone.lock().await.pursuit = Some(pursuit);
+                            }
+                        }
+                        TurnEvent::TodosUpdated(list) => {
+                            let prev = if !routes_to_side {
+                                todos_clone.lock().await.clone()
+                            } else {
+                                None
+                            };
+                            let notices = describe_todos_change(prev.as_ref(), Some(&list));
+                            if !routes_to_side {
+                                *todos_clone.lock().await = Some(list);
+                            }
+                            if !notices.is_empty() {
+                                let mut msgs = buf.lock().await;
+                                for text in notices {
+                                    msgs.push(TranscriptMessage::notice(
+                                        NoticeSeverity::Info,
+                                        text,
+                                    ));
+                                }
+                            }
+                        }
+                        TurnEvent::AutoApproveChanged(enabled) => {
+                            if !routes_to_side {
+                                harness_clone.lock().await.auto_approve = enabled;
+                            }
+                        }
+                        TurnEvent::RetryScheduled {
+                            attempt,
+                            max_attempts,
+                            delay_ms,
+                            message,
+                        } => {
+                            if !routes_to_side {
+                                let seconds = delay_ms.div_ceil(1_000);
+                                *activity_clone.lock().await = format!(
+                                    "retry {}/{} in {}s · {}",
+                                    attempt,
+                                    max_attempts,
+                                    seconds,
+                                    event_loop::compact_retry_reason(&message)
+                                );
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        TurnEvent::Error(e) => {
+                            let mut msgs = buf.lock().await;
+                            msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, e));
+                            if !routes_to_side {
+                                ir_clone.store(false, Ordering::SeqCst);
+                                activity_clone.lock().await.clear();
+                            }
+                        }
+                        TurnEvent::SessionReview { alert } => {
+                            if !routes_to_side {
+                                // Mirror the latest review verdict into the runtime cell
+                                // so the activity bar's `⚠ <alert>` segment shows the
+                                // diagnostic's summary (or clears it when `alert` is
+                                // empty — a healthy review). The frame loop copies this
+                                // into `App::review_alert`, which `draw_activity_bar`
+                                // reads.
+                                *review_alert_clone.lock().await = alert;
+                            }
+                        }
                     } // end inner `match event`
                 }
-                AgentResponse::ParentStatus(_) => {
+                AgentResponse::ParentStatus(status) => {
                     // ADR-0017: primary-session status for the `/btw` side
-                    // banner. Surfaced into the banner once the side view lands;
-                    // harmless no-op until then (no emitter exists yet).
+                    // banner. Mirrored into `App::parent_status` each frame.
+                    *parent_status_clone.lock().await = status;
+                }
+                AgentResponse::SideViewOpened { side_id, .. } => {
+                    // ADR-0017: enter the side view. Record the routing key so
+                    // subsequent per-turn events stream into the side buffer,
+                    // and queue the view transition for the event loop.
+                    listener_side_id = Some(side_id.clone());
+                    side_messages_clone.lock().await.clear();
+                    *side_view_signal_clone.lock().await =
+                        Some(event_loop::SideViewSignal::Opened { side_id });
+                }
+                AgentResponse::SideViewClosed => {
+                    // ADR-0017: leave the side view. Drop the routing key so
+                    // events route back to the primary buffer.
+                    listener_side_id = None;
+                    *side_view_signal_clone.lock().await = Some(event_loop::SideViewSignal::Closed);
                 }
                 AgentResponse::PermissionsCleared => {
                     pending_permission_clone.lock().await.clear();
@@ -620,6 +757,10 @@ pub async fn run_tui(
     let mut app = App {
         input: String::new(),
         messages: Vec::new(),
+        side_messages: Vec::new(),
+        in_side_view: false,
+        side_session_id: None,
+        parent_status: ParentStatus::Idle,
         scroll: 0,
         follow_bottom: true,
         content_lines: 0,
@@ -659,6 +800,7 @@ pub async fn run_tui(
         turn_started_at: None,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
+        activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
         pending_permission: None,
         pending_question: None,
@@ -714,7 +856,12 @@ pub async fn run_tui(
             pending_permission,
             pending_question,
             is_responding,
+            subagent_permission_parent,
+            subagent_question_parent,
             messages: messages_for_loop,
+            side_messages,
+            parent_status,
+            side_view_signal,
             key_status,
             provider_picker,
             sessions_overview,

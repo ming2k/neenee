@@ -1,37 +1,39 @@
-//! `VerifyPlanExecutionTool` — spawns an independent verifier sub-agent
+//! `VerifyPlanExecutionTool` — spawns an independent verifier subagent
 //! with a fixed prompt so the model has a single-call way to audit its
 //! own implementation against the approved plan. The verifier reports
 //! PASS / PARTIAL / FAIL per section with concrete evidence.
 //!
-//! Lives in `neenee-agent` (next to `TaskTool`) because it constructs a
-//! sub-agent via `TaskTool`, which is an orchestration concern rather
+//! Lives in `neenee-agent` (next to `SubagentTool`) because it constructs a
+//! subagent via `SubagentTool`, which is an orchestration concern rather
 //! than a domain-tool concern.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use neenee_core::{Message, Provider, Role, Tool, ToolAccess};
 
-use crate::plan::PlanToolContext;
-
-/// A lightweight pipeline verifier that replaces the old heavy sub-agent.
-/// 
+/// A lightweight pipeline verifier that replaces the old heavy subagent.
+///
 /// Phase 1: Deterministic Checks — extracts commands from the plan's `Test Plan`
 /// section and runs them directly via bash.
 /// Phase 2: Lightweight LLM Review — feeds the plan and test outputs to a single
 /// `provider.chat()` call for a fast, token-efficient verdict.
 pub struct VerifyPlanExecutionTool {
     provider: Arc<dyn Provider>,
-    context: PlanToolContext,
+    active_plan_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl VerifyPlanExecutionTool {
     pub fn new(
         provider: Arc<dyn Provider>,
         _tools: Vec<Arc<dyn Tool>>,
-        context: PlanToolContext,
+        active_plan_path: Arc<Mutex<Option<PathBuf>>>,
     ) -> Self {
-        Self { provider, context }
+        Self {
+            provider,
+            active_plan_path,
+        }
     }
 }
 
@@ -72,11 +74,7 @@ impl Tool for VerifyPlanExecutionTool {
     }
 
     fn spawns_subagent(&self) -> bool {
-        // No longer spawns a heavy TaskTool sub-agent
-        false
-    }
-
-    fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
+        // No longer spawns a heavy SubagentTool subagent
         false
     }
 
@@ -87,9 +85,11 @@ impl Tool for VerifyPlanExecutionTool {
             .filter(|s| !s.trim().is_empty());
 
         let plan_path = self
-            .context
-            .active_plan_path()
-            .ok_or_else(|| "No active plan to verify. Call plan_exit first.".to_string())?;
+            .active_plan_path
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .ok_or_else(|| "No active plan to verify. Call plan first.".to_string())?;
 
         let plan_display = plan_path.display().to_string();
         let plan_content = std::fs::read_to_string(&plan_path)

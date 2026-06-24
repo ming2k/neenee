@@ -67,6 +67,7 @@ scroll directly. The two [toasts](#toasts) are non-modal and use a different
 | [Tool-step detail](#tool-step-detail-overlay) | `Enter` on focused tool step | 92 × 84 | `draw_tool_step_detail_overlay` |
 | [Help](#help-modal) | `Ctrl+H` / `/help` | 58 × 70 | `draw_help_modal` |
 | [Plan preview](#plan-preview-modal) | `Ctrl+P` / click plan panel | 80 × 70 | `draw_plan_preview_modal` |
+| [Activity](#activity-modal) | Click activity bar | 72 × 70 | `draw_activity_modal` |
 | [Toasts](#toasts) | Transient | top-right, 3 rows | `draw_armed_toast`, `draw_copy_toast` |
 
 ## Closing
@@ -195,7 +196,7 @@ Input-history fuzzy search. Borrows the composer input as the query.
 ╭──────────────────────────────────────────────────╮
 │ Input History  ❯ open                            │  ← caret here
 │                                                  │
-│   1  /mode plan                                  │
+│   1  /plan fix the auth module                    │
 │   2  h̲o̲w̲ do I open the file?                    │  ← matched chars branded
 │   3  explain t̲h̲i̲s̲ function                     │
 │                                                  │
@@ -374,8 +375,24 @@ not hit disk per redraw.
 ```
 
 Body text is rendered verbatim (no markdown styling), wrapped at word
-boundaries. See [Plan mode](../../explanation/agent-design/plan-mode.md)
+boundaries. See [Plan](../../explanation/agent-design/plan.md)
 for when the plan panel is shown.
+
+## Activity modal
+
+Tabbed overview of the current turn, opened by clicking the activity bar.
+Two tabs cycled with `←`/`→`:
+
+| Tab | Contents |
+|-----|----------|
+| **Activity** | Pursuit (if any), the current turn's user prompt (wrapped), and the live status block: `turn N · round M · <model> · <elapsed>` + activity label + optional review alert |
+| **Tasks** | The unified todo list: `done/total` header plus one row per item with a status glyph |
+
+| Key | Effect |
+|-----|--------|
+| `←` / `→` | Cycle tabs |
+| `↑` / `↓` | Scroll the active tab's body |
+| `Esc` | Close |
 
 ## Toasts
 

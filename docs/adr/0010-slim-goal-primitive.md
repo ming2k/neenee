@@ -167,7 +167,7 @@ Negative:
   `format_goal_status`.
 - `crates/neenee-cli/src/tui/render/chrome.rs::draw_goal_bar` —
   `goal.is_complete` guard replaces the status enum check.
-- [Goals](../explanation/agent-design/goals.md) — rewritten around the
+- [Pursuits](../explanation/agent-design/pursuits.md) — rewritten around the
   slimmed primitive.
 - [Harness architecture](../explanation/agent-design/harness.md) —
   goal-state and autonomous-loop sections updated.

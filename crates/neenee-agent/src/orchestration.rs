@@ -192,7 +192,6 @@ pub fn send_harness_state(
     let _ = tx.send(turn(
         session_id,
         TurnEvent::HarnessState(HarnessSnapshot {
-            mode: agent.get_mode(),
             pursuit: agent.get_pursuit(),
             loop_status: loop_status.into(),
             auto_approve: agent.get_auto_approve(),
@@ -617,7 +616,7 @@ pub fn relay_agent_event(
 ) {
     let response = match event {
         AgentEvent::ModelRequestStarted { tool_round } => {
-            // Structured round signal first, so the activity bar can show
+            // Structured round signal first, so the Activity modal can show
             // `turn N · round M · waiting for model` with the round as a
             // first-class field rather than text-mining it out of the status
             // string. The bare status follows as the `Activity` below.
@@ -686,7 +685,6 @@ pub fn relay_agent_event(
             turn(session_id, TurnEvent::ToolStream { id, stream })
         }
         AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
-        AgentEvent::ModeChanged(mode) => turn(session_id, TurnEvent::ModeChanged(mode)),
         AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
         AgentEvent::AutoApproveChanged(enabled) => {
             turn(session_id, TurnEvent::AutoApproveChanged(enabled))
@@ -700,12 +698,12 @@ pub fn relay_agent_event(
         AgentEvent::UserQuestionRequest(request) => {
             turn(session_id, TurnEvent::UserQuestionRequest(request))
         }
-        AgentEvent::SubTask {
+        AgentEvent::SubAgent {
             parent_call_id,
             event,
         } => turn(
             session_id,
-            TurnEvent::SubTask {
+            TurnEvent::SubAgent {
                 parent_call_id,
                 event,
             },

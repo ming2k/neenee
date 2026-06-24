@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use neenee_agent::orchestration::{execute_turn, CompactionSettings, TurnContext, TurnInput};
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
-use neenee_core::{AgentMode, PursuitService, PursuitStore, Role};
+use neenee_core::{PursuitService, PursuitStore, Role};
 use neenee_providers::MockProvider;
 use neenee_store::session::SessionStore;
 
@@ -42,7 +42,6 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     let agent = Arc::new(Agent::new(
         Arc::new(MockProvider),
         Vec::new(),
-        AgentMode::Build,
         pursuit_service.clone(),
         SkillRegistry::empty(),
     ));

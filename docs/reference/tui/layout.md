@@ -106,9 +106,9 @@ collapse it, without forcing a scroll anchor. Rendered by
 
 ## Sub-agent zoom view
 
-When the user zooms into a `task` tool step, the footer is hidden entirely
+When the user zooms into a `subagent` tool step, the footer is hidden entirely
 and the transcript chunk is split to make room for a one-row navigation bar
-at the bottom. The message stream is the focused task's child messages,
+at the bottom. The message stream is the focused sub-agent's child messages,
 not the root conversation.
 
 ```text

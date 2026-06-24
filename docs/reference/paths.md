@@ -95,7 +95,7 @@ Lives with the project root; travels with the repository.
 |------|---------|
 | `.neenee/skills/<name>/SKILL.md` | Project-local skills (highest discovery priority) |
 | `.neenee/commands/<name>.md` | Project-local slash commands (highest discovery priority) |
-| `.neenee/plans/<name>.md` | Plan-mode plan files (only location writable during planning) |
+| `.neenee/plans/<name>.md` | Plan files — the only location a `PLAN` subagent may write (its `WriteScope` grant) |
 | `.neenee/session.json`, `.neenee/sessions/` | Legacy in-project session storage ( transitional) |
 | `.agents/skills/`, `.claude/skills/` | External application conventions (read-only) |
 | `.agents/commands/` | External application conventions (read-only) |

@@ -160,7 +160,6 @@ impl SelectionState {
             SelectionState::TableCell { .. } | SelectionState::None => None,
         }
     }
-
 }
 
 /// Extract the selected text from the document model.

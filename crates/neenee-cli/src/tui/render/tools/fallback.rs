@@ -12,13 +12,18 @@ pub struct FallbackPresenter;
 
 impl ToolPresenter for FallbackPresenter {
     fn summary(&self, view: &ToolView) -> String {
+        // When this step is a subagent run that announced its role
+        // (`plan` / `verify` / …), lead with the role so the header
+        // distinguishes subagent kinds. Falls back to the cleaned tool name
+        // for ordinary unrecognized tools (MCP, etc.), where `profile` is None.
         let name = prettify_tool_name(view.name);
+        let lead = view.profile.unwrap_or(&name).to_string();
         match ["path", "pattern", "command", "name", "url", "query"]
             .iter()
             .find_map(|key| view.str(key))
         {
-            Some(value) => format!("{} {}", name, value),
-            None => name,
+            Some(value) => format!("{} {}", lead, value),
+            None => lead,
         }
     }
 

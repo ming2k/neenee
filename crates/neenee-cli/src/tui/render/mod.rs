@@ -28,9 +28,9 @@ use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
     MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
-    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
-    TRANSCRIPT_H_INSET,
+    SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
+    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
@@ -45,7 +45,7 @@ pub use overlays::{
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
 use step::{
-    draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
+    draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed, draw_subagent_bar,
     draw_subagent_inline_step, draw_tool_step, StickyStep,
 };
 #[cfg(test)]
@@ -140,22 +140,23 @@ pub struct TranscriptView<'a> {
     pub byte_cursor: usize,
     /// When true, the hint bar and input box are hidden (overlay modal open).
     pub chrome_hidden: bool,
-    /// When set, the view is zoomed into a sub-agent task: a navigation bar is
+    /// When set, the view is zoomed into a subagent task: a navigation bar is
     /// rendered and `messages` is the focused task's child stream.
     pub subagent_bar: Option<SubagentBarInfo>,
-    /// Current harness turn counter. Shown in the activity bar as `turn N`.
-    pub turn_count: u64,
-    /// Current tool round within the active turn (1-indexed for display; `0`
-    /// before the first model request lands). Shown in the activity bar as
-    /// `turn N · round M · <status>`.
-    pub current_round: u64,
+    /// When set, the view is inside a `/btw` side conversation (ADR-0017): a
+    /// top banner is rendered reading `Side from main · <status> · Esc back`.
+    /// Carries the coarse primary-session status to surface.
+    pub side_banner: Option<neenee_core::ParentStatus>,
+    /// Active pursuit, if any. Surfaced on the activity bar as a `⟴ <objective>`
+    /// badge so the user can tell at a glance the turn is part of a larger goal.
+    pub pursuit: Option<&'a neenee_core::Pursuit>,
+    /// Live unified task list, if any. Surfaced on the activity bar as
+    /// `plan d/t`. The full per-item breakdown lives in the Activity modal.
+    pub todos: Option<&'a neenee_core::TodoList>,
     /// Session-review alert (ADR-0016), or empty when inactive. While
     /// non-empty the activity bar appends a `⚠ <alert> — Esc to interrupt`
     /// segment.
     pub review_alert: String,
-    /// Display id of the currently active model. Surfaced in the activity bar
-    /// as a muted `<model>` segment.
-    pub current_model: &'a str,
     /// Wall-clock instant the current turn started, or `None` between turns.
     /// Drives the muted `<elapsed>` segment in the activity bar.
     pub turn_started_at: Option<std::time::Instant>,
@@ -173,13 +174,13 @@ pub struct TranscriptView<'a> {
     pub theme: &'a Theme,
 }
 
-/// Info for the sub-agent navigation bar (shown when zoomed into a task).
+/// Info for the subagent navigation bar (shown when zoomed into a task).
 pub struct SubagentBarInfo {
-    /// Label for the focused sub-agent (its task description).
+    /// Label for the focused subagent (its task description).
     pub label: String,
-    /// 1-based index of the focused sub-agent among its siblings.
+    /// 1-based index of the focused subagent among its siblings.
     pub index: usize,
-    /// Total number of sibling sub-agent tasks.
+    /// Total number of sibling subagent tasks.
     pub total: usize,
 }
 
@@ -191,7 +192,7 @@ pub struct TranscriptRender {
     pub hint_rect: Rect,
     /// Screen rect of the activity bar for the current frame, so clicks inside
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
-    /// streaming, sub-agent view, or chrome hidden).
+    /// streaming, subagent view, or chrome hidden).
     pub activity_rect: Option<Rect>,
     /// Total height (in lines) of the rendered message stream, ignoring the
     /// viewport clip. Used by the app loop to pin the view to the bottom.
@@ -231,10 +232,10 @@ pub fn draw_transcript(
         byte_cursor,
         chrome_hidden,
         subagent_bar,
-        turn_count,
-        current_round,
+        side_banner,
+        pursuit,
+        todos,
         review_alert,
-        current_model,
         turn_started_at,
         hovered_step,
         theme,
@@ -254,9 +255,9 @@ pub fn draw_transcript(
 
     let size = viewport;
 
-    // When zoomed into a sub-agent task, the footer (status bar, plan panel,
+    // When zoomed into a subagent task, the footer (status bar, plan panel,
     // input box, hint bar) is hidden: the task detail page is a read-only view
-    // whose only chrome is the sub-agent navigation bar.
+    // whose only chrome is the subagent navigation bar.
     let in_subagent = subagent_bar.is_some();
 
     // The status bar (animated spinner + activity text) sits on its own line
@@ -308,9 +309,9 @@ pub fn draw_transcript(
         .split(size);
 
     // 1. Transcript History
-    // When zoomed into a sub-agent, reserve a 1-line navigation band at the
-    // bottom of the transcript viewport for the sub-agent bar.
-    let (transcript_area, subagent_bar_rect) = if subagent_bar.is_some() {
+    // When zoomed into a subagent, reserve a 1-line navigation band at the
+    // bottom of the transcript viewport for the subagent bar.
+    let (mut transcript_area, subagent_bar_rect) = if subagent_bar.is_some() {
         let sub = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(SUBAGENT_BAR_ROWS)])
@@ -319,6 +320,18 @@ pub fn draw_transcript(
     } else {
         (chunks[0], None)
     };
+    // `/btw` side banner (ADR-0017): a 1-line band at the TOP of the
+    // transcript viewport reading `Side from main · <status> · Esc back`.
+    // The side view keeps the footer (composer), unlike the subagent zoom,
+    // so only this top band is carved off.
+    if let Some(status) = side_banner {
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(SIDE_BANNER_ROWS), Constraint::Min(0)])
+            .split(transcript_area);
+        draw_side_banner(frame, sub[0], status, theme);
+        transcript_area = sub[1];
+    }
     let mut current_y = transcript_area.y;
     // Account for scroll
     let mut skip_rows = scroll as usize;
@@ -468,7 +481,7 @@ pub fn draw_transcript(
         ));
     }
 
-    // Sub-agent navigation band, drawn across the full transcript width (inside the
+    // Subagent navigation band, drawn across the full transcript width (inside the
     // app_bg gutters) so it reads as a continuous bar pinned above the input.
     if let (Some(bar), Some(rect)) = (subagent_bar.as_ref(), subagent_bar_rect) {
         draw_subagent_bar(frame, rect, bar, theme);
@@ -497,10 +510,9 @@ pub fn draw_transcript(
         draw_activity_bar(
             frame,
             Rect::new(footer_x, status_y, footer_w, STATUS_BAR_ROWS),
-            turn_count,
-            current_round,
+            pursuit,
+            todos,
             &review_alert,
-            current_model,
             turn_started_at,
             activity,
             spinner_phase,
@@ -651,10 +663,10 @@ mod tests {
                         byte_cursor: 5,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
@@ -875,8 +887,8 @@ mod tests {
             .unwrap();
     }
 
-    /// Render both the compact sub-agent step (root view) and the zoomed-in
-    /// sub-agent view with its navigation bar, ensuring no layout panics.
+    /// Render both the compact subagent step (root view) and the zoomed-in
+    /// subagent view with its navigation bar, ensuring no layout panics.
     #[test]
     fn subagent_step_and_view_render_without_panicking() {
         use ratatui::backend::TestBackend;
@@ -886,13 +898,13 @@ mod tests {
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        // Root view: a completed sub-agent task renders as a compact step.
+        // Root view: a completed subagent task renders as a compact step.
         let mut task = TranscriptMessage::tool_step(
             "task_1",
-            "task",
+            "subagent",
             r#"{"description":"explore the codebase","prompt":"..."}"#,
         );
-        task.push_subtask_event(&neenee_core::SubTaskEvent::ToolCall {
+        task.push_subagent_event(&neenee_core::SubagentEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
@@ -924,10 +936,10 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
@@ -937,7 +949,7 @@ mod tests {
             })
             .unwrap();
 
-        // Zoomed-in sub-agent view: the task's children are the message stream
+        // Zoomed-in subagent view: the task's children are the message stream
         // and the navigation bar is shown.
         let children = root_messages[1].subagent_children().unwrap().to_vec();
         terminal
@@ -960,10 +972,10 @@ mod tests {
                             index: 1,
                             total: 1,
                         }),
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
@@ -1085,10 +1097,10 @@ mod tests {
                             byte_cursor: input.len(),
                             chrome_hidden: false,
                             subagent_bar: None,
-                            turn_count: 0,
-                            current_round: 0,
+                            side_banner: None,
+                            pursuit: None,
+                            todos: None,
                             review_alert: String::new(),
-                            current_model: "",
                             turn_started_at: None,
                             hovered_step: None,
                             focused_target: None,
@@ -1238,10 +1250,10 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
@@ -1384,10 +1396,10 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
@@ -1463,10 +1475,10 @@ mod tests {
                         byte_cursor: 0,
                         chrome_hidden: false,
                         subagent_bar: None,
-                        turn_count: 0,
-                        current_round: 0,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
                         review_alert: String::new(),
-                        current_model: "",
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,

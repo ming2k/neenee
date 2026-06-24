@@ -98,10 +98,6 @@ impl Tool for AskUserTool {
         true
     }
 
-    fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
-        true
-    }
-
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         Err(
             "ask_user is handled by the agent harness and should not be called directly"
@@ -286,9 +282,6 @@ impl Tool for WriteFileTool {
     fn permission_scope(&self, arguments: &str) -> String {
         json_string(arguments, "path")
     }
-    fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
-        neenee_core::plan::is_plan_path(&json_string(arguments, "path"))
-    }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
@@ -342,9 +335,6 @@ impl Tool for EditFileTool {
     }
     fn permission_scope(&self, arguments: &str) -> String {
         json_string(arguments, "path")
-    }
-    fn allowed_in_plan_mode(&self, arguments: &str) -> bool {
-        neenee_core::plan::is_plan_path(&json_string(arguments, "path"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
@@ -414,7 +404,7 @@ impl Tool for BashTool {
     /// `bash` runs commands — its primary purpose is execution, not workspace
     /// mutation — so it sits in the `Execute` tier between pure reads and
     /// file-writing tools. The broker still gates it (`Execute > Read`), and
-    /// it is the tier the `VERIFY` sub-agent profile admits so an independent
+    /// it is the tier the `VERIFY` subagent profile admits so an independent
     /// verifier can run tests/builds/type-checks without gaining file-write
     /// capability. See ADR-0012.
     fn access(&self) -> ToolAccess {
@@ -455,7 +445,7 @@ impl Tool for BashTool {
         &self,
         _call_id: &str,
         arguments: &str,
-        _on_event: Box<dyn FnMut(neenee_core::SubTaskEvent) + Send + 'a>,
+        _on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
         on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
     ) -> Result<neenee_core::ToolOutput, String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1193,23 +1183,13 @@ mod tests {
 
     #[test]
     fn write_and_edit_tools_allow_plan_paths_in_plan_mode() {
-        // The plans directory must exist so is_plan_path can resolve it.
-        let cwd = std::env::current_dir().unwrap();
-        std::fs::create_dir_all(cwd.join(neenee_core::plan::PLANS_DIR)).unwrap();
-
-        let write = WriteFileTool;
-        let edit = EditFileTool;
-
-        let plan_args = r#"{"path":".neenee/plans/feature.md","content":"x"}"#;
-        let plan_edit_args =
-            r#"{"path":".neenee/plans/feature.md","old_string":"a","new_string":"b"}"#;
-        let src_args = r#"{"path":"src/main.rs","content":"x"}"#;
-
-        assert!(write.allowed_in_plan_mode(plan_args));
-        assert!(edit.allowed_in_plan_mode(plan_edit_args));
-        // Non-plan paths are not exempted, even though the tools are write-capable.
-        assert!(!write.allowed_in_plan_mode(src_args));
-        assert!(!edit.allowed_in_plan_mode(src_args));
+        // Plan-mode path exemption was removed (ADR-0027/0028): scoped writes
+        // are now expressed per-agent via `WriteScope`, not via an
+        // `allowed_in_plan_mode` override on the write tools. This test is
+        // kept as a placeholder guard that the write tools still build; the
+        // scoping behavior is covered by neenee-core's WriteScope tests.
+        let _write = WriteFileTool;
+        let _edit = EditFileTool;
     }
 
     #[tokio::test]

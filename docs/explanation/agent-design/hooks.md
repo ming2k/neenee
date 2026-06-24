@@ -39,11 +39,12 @@ expose the lifecycle events those engines fire on.
 
 ## One event axis, implicit capability
 
-Hooks fire on **lifecycle events**, grouped by cadence into three families:
+Hooks fire on **lifecycle events**, grouped by cadence into four families:
 
 - **per session** — `SessionStart`, `SessionEnd`;
 - **per turn** — `UserPromptSubmit`, `Stop`;
 - **per tool call** — `PreToolUse`, `PostToolUse`, `PostToolUseFailure`;
+- **per round** — `Round` (ADR-0030);
 - plus the compaction pair `PreCompact` / `PostCompact`.
 
 What a hook is *allowed to do* is not a knob the user picks — it is implied by
@@ -72,6 +73,7 @@ event." neenee keeps the first internal and exposes only the second.
 | `Stop` | The model tries to end the turn | Deny (force another round, feeding the reason back) or inject |
 | `PreCompact` | Before a summarizing compaction | Inject (folded into the summary prompt) |
 | `PostCompact` | After a compaction completes | Observe |
+| `Round` | Once per tool round (ADR-0030) | Inject only — **`Deny` is ignored**, so a round-count hook cannot become a de-facto round cap. Carries the read-only-round streak so a hook can target exploration-without-progress. The harness declares no built-in threshold here; users opt in. |
 
 A hook returning a capability the event does not honour is ignored, so a
 script that unconditionally reports a deny only bites on events that act on a
@@ -129,9 +131,9 @@ user a permission prompt for a call it intends to block:
 
 ```text
 tool call declared
-  ├─ [Hooks]      PreToolUse (matcher?)  ── deny? → blocked, reason to model
-  ├─ [Plan mode]  allowed_in_plan_mode?
-  ├─ [Harness]    permission broker (Write / Execute tools)
+  ├─ [Hooks]        PreToolUse (matcher?)  ── deny? → blocked, reason to model
+  ├─ [WriteScope]   per-agent write boundary (subagents only)
+  ├─ [Harness]      permission broker (Write / Execute tools)
   ├─              tool executes
   └─ [Hooks]      PostToolUse (success) | PostToolUseFailure (error)
                         └─ inject context? → hidden message on the next round
@@ -150,9 +152,13 @@ influence what the model summarizes), and `PostCompact` observes the result.
 
 ## What hooks are not
 
-- **Not a threshold, round, or time axis.** Those are the internal engines
-  (`CompactionPolicy`, `/pursue`, `/repeat`). Hooks expose lifecycle events,
-  not the parameters of those engines.
+- **Not a threshold or time axis, and only a constrained round axis.** Context
+  pressure and the clock stay internal (`CompactionPolicy`, `/repeat`). Round
+  counting is exposed as a single `Round` event (ADR-0030) but **`Deny`-forbidden**
+  — it lets a hook inject context at a round boundary (e.g. to react to a
+  read-only streak) without being able to abort the turn, which would recreate
+  the blanket round cap ADR-0009 removed. The harness sets no built-in
+  threshold on it; only the user does, at their own risk.
 - **Not a substitute for permissions.** A hook deny is best-effort and
   non-fatal on failure; the permission broker is the hard enforcement
   surface. Enforce mandatory policy with permissions, use hooks for
@@ -177,3 +183,6 @@ influence what the model summarizes), and `PostCompact` observes the result.
 - [ADR-0025](../../../adr/0025-lifecycle-event-hooks.md) — the decision to
   adopt a single event axis with implicit capability, and the multi-axis
   design rejected along the way
+- [ADR-0030](../../../adr/0030-early-loop-intervention-and-round-hook.md) — the
+  `Deny`-forbidden `Round` event that partially supersedes ADR-0025's exclusion
+  of round-count, plus the in-loop review + anti-anchoring nudge

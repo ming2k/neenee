@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **In-loop loop detection steers a stuck turn before the hard abort
+  (ADR-0030).** A model that repeats the same or near-identical read-only
+  actions (micro-adjusted `read_file` ranges, `grep` argument tweaks) no longer
+  runs unchecked until the equality guard's hard abort — its arguments never
+  compare equal, so it bypassed the guard entirely. The harness now fires the
+  semantic review (`/review`'s `LoopingReview`) once per turn on a read-only
+  round streak or a repeated-call count, and on a `Stuck` verdict injects an
+  **anti-anchoring nudge** that names the loop, forbids re-reading, and demands
+  a forward action — non-terminating, so the user keeps `Esc` and the opt-in
+  `hard_stop_rounds` as the backstop. The new `steering` module is the one home
+  for built-in nudges.
+- **A constrained `Round` lifecycle hook (ADR-0030, partially supersedes
+  ADR-0025).** A new `event = "Round"` hook fires once per tool round, carrying
+  the read-only-round streak. Unlike other events it is **`Deny`-forbidden** —
+  a round-count hook may inject context or observe, but cannot become a de-facto
+  round cap (the ADR-0009 concern). The harness declares no built-in threshold
+  on this axis; it only provides the trigger point users opt into.
+- New `[agent] loop_review_enabled` config key (default `true`) toggles the
+  in-loop review. Always off on sub-agents (no `/review` path, no recursion).
+
 ### Changed
 
 - **Modals no longer erase the background.** Opening a centered modal used to
@@ -31,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PlanProgressUpdated` events, and the persisted `plan_progress` session field
   are removed — they duplicated the `todo` / `todo_update` task list, which is
   now the single source of truth. `plan_exit` now seeds one `TodoList` from the
-  approved plan's `##` headings; `plan_enter` (and `/mode plan`) clear it; the
+  approved plan's `##` headings; `plan_enter` clears it; the
   model tracks steps with `todo` / `todo_update`. One list, one panel, one
   persisted field. Old sessions load with graceful degradation: the dropped
   field triggers at most a checksum warning, and stale `plan_progress_set`

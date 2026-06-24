@@ -1,6 +1,6 @@
 # 0025. Lifecycle event hooks: user-configurable interception at session/turn/tool points
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-24
 
 ## Context

@@ -100,11 +100,15 @@ If the user interrupts the turn (`Ctrl+C` or the equivalent), the harness
 rejects every pending question sender with `None`. Each blocked `ask_user`
 future then resolves to the cancelled result.
 
-## Plan mode
+## Planning
 
-`ask_user` is marked `Read` access and is explicitly allowed in Plan mode.
-Clarifying requirements is a read-only activity, so planners can use it to
-resolve ambiguity before any implementation begins.
+`ask_user` is `Read` access, so the main agent can use it freely to clarify
+requirements before or during planning. Inside a `PLAN` subagent it is gated by
+the profile's `allow_user_interaction` flag and the full-duplex channel
+([ADR-0029](../../adr/0029-full-duplex-subagent-communication.md)); the default
+`PLAN` profile stays non-interactive in practice, so a planner that needs
+clarification surfaces the request up to the main agent rather than calling
+`ask_user` directly.
 
 ## Sub-agents
 

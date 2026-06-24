@@ -6,27 +6,28 @@ turn. MCP server tools and the synthetic pursuit tools (`get_pursuit`, `start_pu
 surface — one page per tool category. For how tools are gated (access tiers,
 capability axes, the permission broker), see [Tool access](access.md).
 
-Most built-in tools live in the `neenee-tools` crate; `task` and `use_skill`
+Most built-in tools live in the `neenee-tools` crate; `subagent` and `use_skill`
 live in `neenee-agent`. The `Tool` trait is defined in
 `crates/neenee-core/src/capability.rs`.
 
 ## Registry
 
 Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::new`
-strips any externally supplied `get_pursuit`, `start_pursuit`,
-`complete_pursuit`, `plan_enter`, and `plan_exit`, then appends its own pursuit tools
-from `crates/neenee-core/src/pursuits/tools.rs` and plan tools from
-`crates/neenee-core/src/plan.rs` so they share the agent's live state. The plan
-tools and the `todo` / `todo_update` tools share one task-list cell, so a plan
-approved by `plan_exit` seeds the same list the model edits with `todo`.
-`TaskTool` is pushed last so it can capture a snapshot of the assembled toolset.
+strips any externally supplied `get_pursuit`, `start_pursuit`, and
+`complete_pursuit`, then appends its own pursuit tools from
+`crates/neenee-core/src/pursuits/tools.rs`, the `plan` + `verify_plan_execution`
+tools from `crates/neenee-agent`, and the `todo` / `todo_update` tools, so they
+share the agent's live state. The plan and todo tools share one todo-list cell,
+so a plan approved via `plan` seeds the same list the model edits with `todo`.
+`SubagentTool` is pushed last so it can capture a snapshot of the assembled
+toolset.
 
 | Tool | Access | Permission scope | Reference page |
 |------|--------|------------------|----------------|
 | `bash` | `Execute` | `command` argument | [bash](bash.md) |
 | `read_file` | `Read` | `*` | [filesystem](filesystem.md) |
-| `write_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | [filesystem](filesystem.md) |
-| `edit_file` | `Write` (Plan-exempt under `.neenee/plans/`) | `path` argument | [filesystem](filesystem.md) |
+| `write_file` | `Write` (scoped to `.neenee/plans/` under the `PLAN` profile) | `path` argument | [filesystem](filesystem.md) |
+| `edit_file` | `Write` (scoped to `.neenee/plans/` under the `PLAN` profile) | `path` argument | [filesystem](filesystem.md) |
 | `grep` | `Read` | `*` | [filesystem](filesystem.md) |
 | `glob` | `Read` | `*` | [filesystem](filesystem.md) |
 | `list_dir` | `Read` | `*` | [filesystem](filesystem.md) |
@@ -38,10 +39,9 @@ approved by `plan_exit` seeds the same list the model edits with `todo`.
 | `get_pursuit` | `Read` | `*` | [pursuits](pursuits.md) |
 | `start_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
 | `complete_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
-| `plan_enter` | `Read` | `*` | [plan](plan.md) |
-| `plan_exit` | `Read` | `*` | [plan](plan.md) |
+| `plan` | `Read` (spawns subagent) | `*` | [plan](plan.md) |
 | `verify_plan_execution` | `Read` | `*` | [plan](plan.md) |
-| `task` | `Read` | `*` | [task](task.md) |
+| `subagent` | `Read` (spawns subagent) | `*` | [subagent](subagent.md) |
 | `use_skill` | `Read` | `*` | [skills](skills.md) |
 | `create_project` | `Write` | `{path}/{name}` or `*` | [projects](projects.md) |
 | `init_config` | `Write` | `path` argument or `.` | [projects](projects.md) |

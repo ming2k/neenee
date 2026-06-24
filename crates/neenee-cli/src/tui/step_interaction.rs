@@ -21,7 +21,7 @@ use crate::tui::layout::{
 /// Which kind of step a pointer hit resolved to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StepKind {
-    /// A tool step or sub-agent task summary.
+    /// A tool step or subagent task summary.
     ToolStep,
     /// A reasoning trace summary.
     Thinking,
@@ -41,7 +41,7 @@ impl StepKind {
 /// message index and kind. Returns `None` for non-summary regions (prose,
 /// code blocks, table cells, the input box, …).
 ///
-/// Drives click routing — toggle / sub-agent navigation / the detail overlay —
+/// Drives click routing — toggle / subagent navigation / the detail overlay —
 /// and the hover affordance, so every call site shares one notion of "what
 /// counts as a step summary".
 pub fn summary_at(cursor: &SemanticCursor) -> Option<(usize, StepKind)> {

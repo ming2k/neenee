@@ -12,7 +12,7 @@
 //! in higher crates (e.g. `SkillRegistry` in `neenee-agent`). The map is the
 //! only seam.
 //!
-//! A handful of "meta" tools genuinely cannot self-register — e.g. a sub-agent
+//! A handful of "meta" tools genuinely cannot self-register — e.g. a subagent
 //! dispatch tool that needs a snapshot of the *rest* of the toolset, which is
 //! the registry's own output. Those are still assembled explicitly where the
 //! dependency is created; the registry collects everything that is

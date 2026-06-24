@@ -157,7 +157,6 @@ fn agent() -> Agent {
     Agent::new(
         Arc::new(TestProvider),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     )
@@ -279,7 +278,6 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
     let agent = Agent::new(
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -346,7 +344,6 @@ async fn stalled_provider_stream_times_out_as_retryable() {
     let agent = Agent::new(
         Arc::new(StalledStreamProvider),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -395,7 +392,6 @@ async fn stream_request_that_never_resolves_times_out() {
     let agent = Agent::new(
         Arc::new(PendingStreamProvider),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -435,7 +431,6 @@ async fn non_streaming_chat_that_never_resolves_times_out() {
     let agent = Agent::new(
         Arc::new(PendingChatProvider),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -484,7 +479,6 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
     let agent = Agent::new(
         Arc::new(ReasoningOnlyProvider),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -540,7 +534,6 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
         vec![Arc::new(BlockingTool {
             started: started.clone(),
         })],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -605,169 +598,12 @@ fn repeated_tool_calls_are_bounded() {
         .is_err());
 }
 
-#[tokio::test]
-async fn plan_mode_blocks_tools_unless_explicitly_read_only() {
-    let agent = Agent::new(
-        Arc::new(TestProvider),
-        vec![Arc::new(WriteTestTool)],
-        AgentMode::Plan,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    let call = ToolCall {
-        id: "call".to_string(),
-        name: "write_test".to_string(),
-        arguments: "{}".to_string(),
-    };
-
-    assert!(agent
-        .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |_| {})
-        .await
-        .unwrap()
-        .to_text()
-        .contains("[Plan mode]"));
-}
-
-#[tokio::test]
-async fn plan_exit_asks_user_and_implements_when_approved() {
-    // Write a real plan file so plan_exit can read its content and seed
-    // the task list for the Activity modal.
-    let cwd = std::env::current_dir().unwrap();
-    let plans_dir = cwd.join(".neenee/plans");
-    std::fs::create_dir_all(&plans_dir).unwrap();
-    let plan_path = plans_dir.join("approval-approve.md");
-    std::fs::write(&plan_path, "# Approve Me\n\n## Summary\n- step 1\n- step 2").unwrap();
-
-    let agent = Arc::new(Agent::new(
-        Arc::new(TestProvider),
-        Vec::new(),
-        AgentMode::Plan,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    ));
-
-    let relative = ".neenee/plans/approval-approve.md";
-    let arguments = format!("{{\"plan_path\":\"{}\"}}", relative.replace('\\', "\\\\"));
-    let call = ToolCall {
-        id: "call".to_string(),
-        name: "plan_exit".to_string(),
-        arguments,
-    };
-
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task_agent = agent.clone();
-    let task = tokio::spawn(async move {
-        task_agent
-            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
-                let _ = event_tx.send(event);
-            })
-            .await
-    });
-
-    // First event is the approval prompt.
-    let request = match event_rx.recv().await.unwrap() {
-        AgentEvent::UserQuestionRequest(request) => request,
-        event => panic!("unexpected event: {:?}", event),
-    };
-    assert!(!task.is_finished(), "task should block on user reply");
-    assert!(
-        request.questions[0]
-            .options
-            .iter()
-            .any(|opt| opt.label == "Approve"),
-        "approval option missing"
-    );
-
-    assert!(agent.reply_user_question(&request.id, vec![vec!["Approve".to_string()]],));
-
-    let output = task.await.unwrap().unwrap().to_text();
-    assert!(output.contains("Plan approved."), "{}", output);
-    assert!(output.contains("step 1"), "plan content echoed: {}", output);
-    assert_eq!(agent.get_mode(), AgentMode::Build);
-    assert_eq!(
-        agent.active_plan_path(),
-        Some(std::path::PathBuf::from(relative))
-    );
-    // The task list is seeded from the approved plan's `## Summary` heading.
-    let todos = agent.todos();
-    assert!(
-        todos.items.iter().any(|i| i.content == "Summary"),
-        "items parsed from plan: {:?}",
-        todos.items
-    );
-}
-
-#[tokio::test]
-async fn plan_exit_keeps_planning_when_rejected() {
-    let agent = Arc::new(Agent::new(
-        Arc::new(TestProvider),
-        Vec::new(),
-        AgentMode::Plan,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    ));
-    let call = ToolCall {
-        id: "call".to_string(),
-        name: "plan_exit".to_string(),
-        arguments: r#"{"plan_path":".neenee/plans/missing-but-ok.md"}"#.to_string(),
-    };
-
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let task_agent = agent.clone();
-    let task = tokio::spawn(async move {
-        task_agent
-            .execute_tool_evented(&call, "call", &CancellationToken::new(), &mut |event| {
-                let _ = event_tx.send(event);
-            })
-            .await
-    });
-
-    let request = match event_rx.recv().await.unwrap() {
-        AgentEvent::UserQuestionRequest(request) => request,
-        event => panic!("unexpected event: {:?}", event),
-    };
-
-    // User picks "Keep planning".
-    assert!(agent.reply_user_question(&request.id, vec![vec!["Keep planning".to_string()]],));
-
-    let output = task.await.unwrap().unwrap().to_text();
-    assert!(output.contains("User wants to keep planning"), "{}", output);
-    assert_eq!(agent.get_mode(), AgentMode::Plan);
-    assert_eq!(agent.active_plan_path(), None);
-    assert!(agent.todos().is_empty());
-}
-
-#[tokio::test]
-async fn manual_mode_switch_to_plan_clears_plan_state() {
-    let agent = Agent::new(
-        Arc::new(TestProvider),
-        Vec::new(),
-        AgentMode::Build,
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/was-here.md")));
-    agent.set_todos(neenee_core::TodoList::from_plan_markdown("## X\n", 100, 1));
-    assert!(agent.active_plan_path().is_some());
-    assert!(!agent.todos().is_empty());
-
-    // Manual /mode plan clears both (mirrors plan_enter's behavior).
-    agent.set_mode(AgentMode::Plan);
-    assert_eq!(agent.active_plan_path(), None);
-    assert!(agent.todos().is_empty());
-
-    // Switching back to Build does not resurrect them.
-    agent.set_mode(AgentMode::Build);
-    assert_eq!(agent.active_plan_path(), None);
-    assert!(agent.todos().is_empty());
-}
 
 #[tokio::test]
 async fn write_tool_waits_for_permission_and_always_is_cached() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
@@ -825,7 +661,6 @@ async fn rejected_permission_does_not_execute_tool() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
@@ -867,7 +702,6 @@ async fn headless_run_rejects_write_tools_without_hanging() {
     let agent = Agent::new(
         Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         pursuit_service,
         crate::skills::SkillRegistry::empty(),
     );
@@ -1042,7 +876,6 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("tool-cancelled {name}")
             }
             AgentEvent::PursuitUpdated(_) => "pursuit-updated".to_string(),
-            AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
             AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
             AgentEvent::SessionReview { alert } => {
                 format!("session-review alert={alert:?}")
@@ -1053,7 +886,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             AgentEvent::UserQuestionRequest(request) => {
                 format!("user-question {}", request.questions.len())
             }
-            AgentEvent::SubTask { .. } => "subtask".to_string(),
+            AgentEvent::SubAgent { .. } => "subtask".to_string(),
             AgentEvent::TodosUpdated(list) => {
                 format!("todos {} items", list.len())
             }
@@ -1092,7 +925,6 @@ async fn golden_native_tool_round_then_final_text() {
             Arc::new(RecordingTool::read("alpha", "A-out")),
             Arc::new(RecordingTool::read("beta", "B-out")),
         ],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1125,7 +957,6 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
             text_round("finished"),
         ])),
         vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1165,10 +996,14 @@ async fn golden_repeated_identical_tool_calls_abort_the_turn() {
             identical(),
         ])),
         vec![Arc::new(tool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
+    // This test exercises the equality guard's hard abort in isolation. The
+    // ADR-0030 in-loop review is disabled so its reviewer sub-agent does not
+    // consume a scripted round and pre-empt the guard (ADR-0016 keeps review
+    // off sub-agents for the same recursion reason).
+    agent.set_loop_review_enabled(false);
 
     let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
 
@@ -1194,7 +1029,6 @@ async fn golden_rejected_write_tool_terminates_turn() {
             text_round("stopped"),
         ])),
         vec![Arc::new(tool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1225,7 +1059,6 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
             ProviderStreamEvent::TextDelta("answer".to_string()),
         ]])),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1266,7 +1099,6 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
             text_round("done"),
         ])),
         vec![Arc::new(neenee_tools::AskUserTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1312,7 +1144,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
@@ -1358,7 +1189,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent2 = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
@@ -1381,7 +1211,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent3 = Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1409,7 +1238,6 @@ async fn agent_without_project_root_never_writes_permissions_file() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
@@ -1458,7 +1286,6 @@ async fn turn_runs_uncapped_until_model_emits_text() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1572,7 +1399,6 @@ async fn hard_stop_aborts_when_budget_configured() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
         vec![Arc::new(tool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1597,7 +1423,7 @@ async fn hard_stop_aborts_when_budget_configured() {
 #[tokio::test]
 async fn review_now_runs_diagnostic_and_returns_verdict() {
     // On-demand review (`/review` → `Agent::review_now`) feeds the transcript
-    // to the REVIEW sub-agent, which shares the scripted provider. The next
+    // to the REVIEW subagent, which shares the scripted provider. The next
     // scripted round is the reviewer's verdict JSON; `review_now` parses it
     // back into a `ReviewVerdict` keyed to the `looping` dimension.
     let verdict_json =
@@ -1606,7 +1432,6 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(vec![text_round(verdict_json)])),
         vec![Arc::new(tool)],
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1656,14 +1481,8 @@ fn should_nudge_verify_only_when_build_mode_and_active_plan_and_no_prior_call() 
     state.verify_called_this_turn = true;
     assert!(!agent.should_nudge_verify(&state));
 
-    // Reset and flip to Plan mode → no nudge, even with an active plan
-    // (Plan mode means there is nothing to verify yet).
+    // Reset, but already nudged → no second nudge (one-shot per turn).
     state.verify_called_this_turn = false;
-    agent.set_mode(AgentMode::Plan);
-    assert!(!agent.should_nudge_verify(&state));
-
-    // Back to Build, but already nudged → no second nudge.
-    agent.set_mode(AgentMode::Build);
     state.verify_nudged = true;
     assert!(!agent.should_nudge_verify(&state));
 }
@@ -1681,7 +1500,6 @@ async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
             text_round("really done"),
         ])),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1712,7 +1530,6 @@ async fn verify_nudge_disabled_when_toggle_off() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(vec![text_round("all done")])),
         Vec::new(),
-        AgentMode::Build,
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
@@ -1757,4 +1574,17 @@ fn verify_nudge_getter_round_trips_setter() {
     assert!(!agent.get_verify_nudge_enabled());
     agent.set_verify_nudge_enabled(true);
     assert!(agent.get_verify_nudge_enabled());
+}
+
+#[test]
+fn loop_review_getter_round_trips_setter() {
+    // ADR-0030: the in-loop review toggle defaults on and round-trips, mirroring
+    // the verify-nudge contract. Sub-agents and the guard-abort golden test flip
+    // it off.
+    let agent = agent();
+    assert!(agent.get_loop_review_enabled());
+    agent.set_loop_review_enabled(false);
+    assert!(!agent.get_loop_review_enabled());
+    agent.set_loop_review_enabled(true);
+    assert!(agent.get_loop_review_enabled());
 }

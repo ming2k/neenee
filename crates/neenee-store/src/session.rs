@@ -1368,18 +1368,18 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
         if message.role == Role::Tool {
             body = truncate_utf8(body.trim(), SUMMARY_TOOL_OUTPUT_CAP).to_string();
         }
-        // Sub-agent transcripts: render a bounded view of the nested work so
+        // Subagent transcripts: render a bounded view of the nested work so
         // the summarizer can capture what each `task` call actually did
         // (otherwise the LLM only sees "[task result]:\n<final text>" and
-        // cannot decide whether the sub-agent's tool usage is worth mentioning
+        // cannot decide whether the subagent's tool usage is worth mentioning
         // in the anchored summary). The nested view is hard-capped to avoid
-        // blowing the budget on a single sub-agent that ran for 30 tool rounds.
+        // blowing the budget on a single subagent that ran for 30 tool rounds.
         if let Some(children) = &message.children {
             if !children.is_empty() {
                 let nested =
                     serialize_subagent_transcript_for_summary(children, SUMMARY_SUBAGENT_CAP);
                 if !nested.is_empty() {
-                    body.push_str("\n[sub-agent transcript]\n");
+                    body.push_str("\n[subagent transcript]\n");
                     body.push_str(&nested);
                 }
             }
@@ -1413,16 +1413,16 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
     )
 }
 
-/// Per-sub-agent character cap when rendering the nested transcript into the
-/// summarizer prompt. Large enough to surface the sub-agent's task, its key
+/// Per-subagent character cap when rendering the nested transcript into the
+/// summarizer prompt. Large enough to surface the subagent's task, its key
 /// tool calls, and its conclusion; small enough that a turn with five
 /// sub-agents cannot crowd out the rest of the conversation.
 const SUMMARY_SUBAGENT_CAP: usize = 2_000;
 
-/// Render a sub-agent's nested transcript as a compact summarizer-facing view.
-/// Recursive: a sub-agent's own `task` results (sub-sub-agents) are rendered
+/// Render a subagent's nested transcript as a compact summarizer-facing view.
+/// Recursive: a subagent's own `task` results (sub-sub-agents) are rendered
 /// one level deeper with an even smaller cap. Depth is bounded in practice by
-/// the `TaskTool` excluding itself from the sub-toolset.
+/// the `SubagentTool` excluding itself from the sub-toolset.
 fn serialize_subagent_transcript_for_summary(children: &[Message], budget: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     for message in children {
@@ -1439,13 +1439,13 @@ fn serialize_subagent_transcript_for_summary(children: &[Message], budget: usize
             body = truncate_utf8(body.trim(), SUMMARY_TOOL_OUTPUT_CAP).to_string();
         }
         // One level deeper, with a much smaller cap, so we never spend more
-        // than ~25% of the parent sub-agent's budget on a single sub-sub-agent.
+        // than ~25% of the parent subagent's budget on a single sub-subagent.
         if let Some(nested) = &message.children {
             if !nested.is_empty() {
                 let inner =
                     serialize_subagent_transcript_for_summary(nested, (budget / 4).max(500));
                 if !inner.is_empty() {
-                    body.push_str("\n[sub-sub-agent transcript]\n");
+                    body.push_str("\n[sub-subagent transcript]\n");
                     body.push_str(&inner);
                 }
             }
@@ -2016,7 +2016,7 @@ mod tests {
     #[tokio::test]
     async fn session_persists_subagent_children_round_trip() {
         // End-to-end persistence contract: a session that contains a `task`
-        // tool call must round-trip the sub-agent's nested transcript through
+        // tool call must round-trip the subagent's nested transcript through
         // session.json, so a subsequent `SessionStore::load_for_project` (the
         // production resume path) restores the children intact. Before Phase 3
         // children were silently dropped because `Message::children` did not
@@ -2028,7 +2028,7 @@ mod tests {
 
         let call = neenee_core::ToolCall {
             id: "call_sub1".to_string(),
-            name: "task".to_string(),
+            name: "subagent".to_string(),
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")

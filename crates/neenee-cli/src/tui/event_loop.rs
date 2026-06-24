@@ -17,8 +17,8 @@ use ratatui::{backend::Backend, Terminal};
 use tokio::sync::mpsc;
 
 use neenee_core::{
-    AgentRequest, HarnessSnapshot, PermissionDecision, PermissionRequest, ProviderPickerSnapshot,
-    Role, SessionOverview, TodoList, UserQuestionRequest,
+    AgentRequest, HarnessSnapshot, ParentStatus, PermissionDecision, PermissionRequest,
+    ProviderPickerSnapshot, Role, SessionOverview, TodoList, UserQuestionRequest,
 };
 
 use crate::tui::clipboard;
@@ -33,7 +33,7 @@ use crate::tui::selection::{
     floor_char_boundary, get_selected_text, inclusive_end, SelectionState,
 };
 use crate::tui::step_interaction;
-use crate::tui::{App, Modal, Recess, SessionTab, PROVIDERS};
+use crate::tui::{ActivityTab, App, Modal, Recess, SessionTab, PROVIDERS};
 
 use tokio::sync::Mutex;
 
@@ -49,7 +49,31 @@ pub(super) struct UiRuntime {
     pub pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
     pub pending_question: Arc<Mutex<VecDeque<UserQuestionRequest>>>,
     pub is_responding: Arc<AtomicBool>,
+    /// Full-duplex (ADR-0029): request_id → the parent tool-call id of the
+    /// subagent that surfaced a permission or `ask_user` request (carried up
+    /// as a `TurnEvent::SubAgent`). When the user answers in the modal, the
+    /// loop looks the id up here to tag the reply with `parent_call_id` so the
+    /// harness routes it down into the live child via the subagent registry.
+    /// Top-level requests are absent here → `None` → legacy path. Kept as a
+    /// side-table so the modal queue and rendering stay unchanged.
+    pub subagent_permission_parent: Arc<Mutex<HashMap<String, String>>>,
+    /// Companion to [`Self::subagent_permission_parent`] for `ask_user` replies.
+    pub subagent_question_parent: Arc<Mutex<HashMap<String, String>>>,
     pub messages: Arc<Mutex<Vec<TranscriptMessage>>>,
+    /// Side-conversation transcript buffer (ADR-0017). The listener appends
+    /// per-turn events tagged with the side `session_id` here; the loop
+    /// clones it into [`App::side_messages`] each frame while the side view
+    /// is active.
+    pub side_messages: Arc<Mutex<Vec<TranscriptMessage>>>,
+    /// Coarse primary-session status, written by the listener from
+    /// [`AgentResponse::ParentStatus`] and read into [`App::parent_status`]
+    /// for the side banner (ADR-0017).
+    pub parent_status: Arc<Mutex<ParentStatus>>,
+    /// One-shot side-view transition (ADR-0017): `Opened` when the harness
+    /// emits [`AgentResponse::SideViewOpened`] (the loop calls
+    /// [`App::enter_side_view`]), `Closed` on [`AgentResponse::SideViewClosed`]
+    /// ([`App::exit_side_view`]). Drained each frame.
+    pub side_view_signal: Arc<Mutex<Option<SideViewSignal>>>,
     pub key_status: Arc<Mutex<HashMap<String, bool>>>,
     /// Model-picker snapshot shared with the response listener.
     pub provider_picker: Arc<Mutex<ProviderPickerSnapshot>>,
@@ -87,6 +111,15 @@ pub(super) struct UiRuntime {
     /// One-shot: when set, the event loop sends a synthetic Chat request
     /// asking the agent to run `verify_plan_execution`. Drained each frame.
     pub trigger_verification: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A pending `/btw` side-view transition queued by the response listener and
+/// drained by the event loop (ADR-0017). `Opened` carries the side routing
+/// key the listener needs to direct subsequent per-turn events to the side
+/// buffer.
+pub(super) enum SideViewSignal {
+    Opened { side_id: String },
+    Closed,
 }
 
 pub(super) async fn run_app_loop<B: Backend>(
@@ -251,6 +284,22 @@ pub(super) async fn run_app_loop<B: Backend>(
 
         // Pull messages from the shared lock into app state for rendering
         app.messages = runtime.messages.lock().await.clone();
+        // Mirror the side buffer + parent status for the `/btw` banner
+        // (ADR-0017). Cloned unconditionally: cheap relative to a frame, and
+        // the side buffer may update while the view is open even if the user
+        // briefly returns to the primary transcript.
+        app.side_messages = runtime.side_messages.lock().await.clone();
+        app.parent_status = *runtime.parent_status.lock().await;
+        // Drain a pending side-view transition (enter/leave `/btw`).
+        match runtime.side_view_signal.lock().await.take() {
+            Some(crate::tui::event_loop::SideViewSignal::Opened { side_id, .. }) => {
+                app.enter_side_view(side_id);
+            }
+            Some(crate::tui::event_loop::SideViewSignal::Closed) => {
+                app.exit_side_view();
+            }
+            None => {}
+        }
 
         // Drain the send queue when the harness returns to idle. The
         // response listener flips `is_responding` to false on the
@@ -345,9 +394,13 @@ pub(super) async fn run_app_loop<B: Backend>(
             let recess = app.active_modal.recess();
             let chrome_hidden = recess == Recess::Takeover;
 
-            // When zoomed into a sub-agent, render its child messages and show
+            // When zoomed into a subagent, render its child messages and show
             // a navigation bar; otherwise render the root conversation.
             let view_messages = app.focused_messages();
+            // `/btw` side banner (ADR-0017): shown only while the side view is
+            // active. The subagent zoom and the side view are mutually
+            // exclusive, so the two banners never coexist.
+            let side_banner = app.in_side_view.then_some(app.parent_status);
             let subagent_bar = app.focus_stack.last().and_then(|current| {
                 let tasks: Vec<&TranscriptMessage> = app
                     .messages
@@ -382,10 +435,10 @@ pub(super) async fn run_app_loop<B: Backend>(
                     byte_cursor: app.byte_cursor(),
                     chrome_hidden,
                     subagent_bar,
-                    turn_count: app.turn_count,
-                    current_round: app.current_round,
+                    side_banner,
+                    pursuit: app.current_pursuit.as_ref(),
+                    todos: app.todos.as_ref(),
                     review_alert: app.review_alert.clone(),
-                    current_model: app.current_model.as_str(),
                     turn_started_at: app.turn_started_at,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
@@ -638,21 +691,31 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.plan_preview_scroll,
                     &app.theme,
                 ),
-                Modal::Activity => render::draw_activity_modal(
-                    f,
-                    render::ActivityModalView {
-                        pursuit: app.current_pursuit.as_ref(),
-                        todos: app.todos.as_ref(),
-                        turn_count: app.turn_count,
-                        current_round: app.current_round,
-                        review_alert: &app.review_alert,
-                        current_model: app.current_model.as_str(),
-                        turn_started_at: app.turn_started_at,
-                        activity: &status,
-                    },
-                    &mut app.activity_scroll,
-                    &app.theme,
-                ),
+                Modal::Activity => {
+                    let user_prompt: Option<String> = app
+                        .focused_messages()
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == neenee_core::Role::User)
+                        .map(|m| m.raw.clone());
+                    render::draw_activity_modal(
+                        f,
+                        render::ActivityModalView {
+                            active_tab: app.activity_tab,
+                            pursuit: app.current_pursuit.as_ref(),
+                            todos: app.todos.as_ref(),
+                            user_prompt: user_prompt.as_deref(),
+                            turn_count: app.turn_count,
+                            current_round: app.current_round,
+                            review_alert: &app.review_alert,
+                            current_model: app.current_model.as_str(),
+                            turn_started_at: app.turn_started_at,
+                            activity: &status,
+                        },
+                        &mut app.activity_scroll,
+                        &app.theme,
+                    )
+                }
                 Modal::None => {}
             }
 
@@ -786,6 +849,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     permission_confirm_always: app.permission_confirm_always,
                     permission_show_details: app.permission_show_details,
                     in_subagent_view,
+                    in_side_view: app.in_side_view,
                     has_focused_target: app.focused_target.is_some(),
                     focus_zone: app.focus_zone,
                     has_queued: !app.pending_dispatch.is_empty(),
@@ -877,12 +941,12 @@ pub(super) async fn run_app_loop<B: Backend>(
                             });
                         }
                     } else if let Some((start, end)) = app.selection.normalized_range() {
-                        // Enter on a selected step: navigate into a sub-agent
+                        // Enter on a selected step: navigate into a subagent
                         // task, otherwise toggle that step's expansion.
                         if start.message_idx == end.message_idx {
                             let mi = start.message_idx;
                             let mut messages = runtime.messages.lock().await;
-                            // A sub-agent task navigates into its view instead
+                            // A subagent task navigates into its view instead
                             // of expanding.
                             let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
                                 .and_then(|message| {
@@ -1201,6 +1265,10 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.modal_index = 0;
                     app.session_scroll = 0;
                 }
+                input::InputAction::ActivityTabCycle { forward } => {
+                    app.activity_tab = app.activity_tab.cycle(forward);
+                    app.activity_scroll = 0;
+                }
                 input::InputAction::SessionSelect { forward } => {
                     // List panes: move the selection cursor (the body scroll
                     // follows it). Read-only panes: no selection, so Up/Down
@@ -1379,6 +1447,12 @@ pub(super) async fn run_app_loop<B: Backend>(
                         && app.active_modal != Modal::Permission
                     {
                         app.active_modal = Modal::None;
+                    } else if app.in_side_view {
+                        // `/btw` side view: Ctrl+C leaves the side
+                        // conversation (ADR-0017), mirroring Esc. Slotted
+                        // after modal-close so an open overlay still wins.
+                        app.exit_side_view();
+                        let _ = app.tx.send(AgentRequest::ExitSideView);
                     } else if runtime.is_responding.load(Ordering::SeqCst) {
                         let _ = app.tx.send(AgentRequest::Interrupt);
                     } else if !app.input.is_empty() {
@@ -1416,7 +1490,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     });
                     let mut messages = runtime.messages.lock().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
-                        // Sub-agent task steps are navigated, not expanded.
+                        // Subagent task steps are navigated, not expanded.
                         // This is a user bulk action → pin each step so the
                         // choice survives later lifecycle transitions.
                         if !message.is_subagent_task() {
@@ -1507,6 +1581,17 @@ pub(super) async fn run_app_loop<B: Backend>(
                 }
                 input::InputAction::ExitSubAgent => {
                     app.exit_subagent();
+                }
+                input::InputAction::ExitSideView => {
+                    // `/btw`: return to the primary transcript (ADR-0017).
+                    // Optimistically flip the view for snappiness and tell the
+                    // harness to tear down the live side session; its
+                    // `SideViewClosed` reply is a backstop in case this fires
+                    // twice (Esc then Ctrl+C).
+                    if app.in_side_view {
+                        app.exit_side_view();
+                        let _ = app.tx.send(AgentRequest::ExitSideView);
+                    }
                 }
                 input::InputAction::PrevSibling => {
                     app.cycle_sibling(-1);
@@ -1812,9 +1897,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                                         .unwrap_or_default()
                                 })
                                 .collect();
+                            let parent_call_id = runtime
+                                .subagent_question_parent
+                                .lock()
+                                .await
+                                .remove(&request_id);
                             let _ = app.tx.send(AgentRequest::UserQuestionReply {
                                 request_id: request_id.clone(),
                                 answers,
+                                parent_call_id,
                             });
                             let mut queue = runtime.pending_question.lock().await;
                             queue.retain(|r| r.id != request_id);
@@ -1833,9 +1924,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                     if app.active_modal == Modal::Question {
                         if let Some(request) = app.pending_question.take() {
                             let request_id = request.id;
+                            let parent_call_id = runtime
+                                .subagent_question_parent
+                                .lock()
+                                .await
+                                .remove(&request_id);
                             let _ = app.tx.send(AgentRequest::UserQuestionReply {
                                 request_id: request_id.clone(),
                                 answers: Vec::new(),
+                                parent_call_id,
                             });
                             let mut queue = runtime.pending_question.lock().await;
                             queue.retain(|r| r.id != request_id);
@@ -1910,9 +2007,15 @@ pub(super) async fn run_app_loop<B: Backend>(
                             }
                         };
                         let request_id = request.id;
+                        let parent_call_id = runtime
+                            .subagent_permission_parent
+                            .lock()
+                            .await
+                            .remove(&request_id);
                         let _ = app.tx.send(AgentRequest::PermissionReply {
                             request_id: request_id.clone(),
                             decision,
+                            parent_call_id,
                         });
                         if decision == PermissionDecision::Reject {
                             // A rejection aborts the turn: resolve every other
@@ -1920,10 +2023,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                             // stay blocked and the batch deadlocks.
                             let queued: Vec<PermissionRequest> =
                                 runtime.pending_permission.lock().await.drain(..).collect();
+                            let mut parents = runtime.subagent_permission_parent.lock().await;
                             for pending in queued {
+                                let parent_call_id = parents.remove(&pending.id);
                                 let _ = app.tx.send(AgentRequest::PermissionReply {
                                     request_id: pending.id,
                                     decision: PermissionDecision::Reject,
+                                    parent_call_id,
                                 });
                             }
                             app.pending_permission = None;
@@ -1957,10 +2063,13 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.modal_index = 0;
                     app.permission_confirm_always = false;
                     app.permission_show_details = false;
+                    let mut parents = runtime.subagent_permission_parent.lock().await;
                     for pending in queued {
+                        let parent_call_id = parents.remove(&pending.id);
                         let _ = app.tx.send(AgentRequest::PermissionReply {
                             request_id: pending.id,
                             decision: PermissionDecision::Reject,
+                            parent_call_id,
                         });
                     }
                 }
@@ -1992,6 +2101,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         app.active_modal = Modal::Activity;
+                        app.activity_tab = ActivityTab::Activity;
                         app.modal_index = 0;
                         app.activity_scroll = 0;
                         app.selection = SelectionState::None;
@@ -2031,7 +2141,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                             app.selection = SelectionState::start_range(cursor);
                             app.drag.start(cursor);
                         } else if let Some((mi, kind)) = step_interaction::summary_at(&cursor) {
-                            // Clicked a step summary: navigate into a sub-agent
+                            // Clicked a step summary: navigate into a subagent
                             // task, otherwise toggle that step's disclosure.
                             app.focused_target = Some(kind.focus_target(mi));
                             let mut messages = runtime.messages.lock().await;
@@ -2150,7 +2260,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     }
                 }
                 input::InputAction::Hover { x, y } => {
-                    // Every step summary (tool step, sub-agent task, reasoning
+                    // Every step summary (tool step, subagent task, reasoning
                     // trace) carries the same hover affordance. When the pointer
                     // rests on one — either the inline summary or the sticky
                     // pinned variant — record its message index so the next draw
@@ -2217,7 +2327,7 @@ pub(super) fn compact_retry_reason(message: &str) -> String {
 
 /// Resolve a mutable reference to the message at index `mi` within the
 /// currently focused view: the root conversation when the focus stack is empty,
-/// or the focused sub-agent task's child stream otherwise. Selection and layout
+/// or the focused subagent task's child stream otherwise. Selection and layout
 /// indices are recorded against whichever slice was rendered, so mutations must
 /// resolve through the same context.
 pub(super) fn resolve_focused_mut<'a>(
@@ -2235,7 +2345,7 @@ pub(super) fn resolve_focused_mut<'a>(
 }
 
 /// Iterate mutable messages in the currently focused view (the root
-/// conversation, or the focused sub-agent task's child stream) for bulk
+/// conversation, or the focused subagent task's child stream) for bulk
 /// expand/collapse operations. Callers filter by kind as needed.
 pub(super) fn focused_messages_mut<'a>(
     messages: &'a mut [TranscriptMessage],
@@ -2322,8 +2432,8 @@ pub(super) fn display_status(
     match (loop_status, activity) {
         ("idle", "") => "idle".to_string(),
         ("idle", activity) => activity.to_string(),
-        // "running" is implied by the activity bar's spinner + `turn N`
-        // prefix, so it would be redundant noise ahead of the status. Drop
+        // "running" is implied by the activity bar's spinner + live status,
+        // so it would be redundant noise ahead of the status. Drop
         // it and show the activity alone — but fall back to "preparing" when
         // no specific activity has landed yet (the gap between turn start
         // and the first `AgentResponse::Activity`), so the activity bar

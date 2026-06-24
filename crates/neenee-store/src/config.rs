@@ -29,6 +29,12 @@ pub const THINKING_KEY: &str = "thinking";
 /// # `verify_plan_execution`. Disable for trusted fast models or
 /// # plan-less workflows.
 /// verify_nudge_enabled = true
+/// # In-loop semantic review + anti-anchoring nudge (ADR-0030). When true the
+/// # harness fires `/review` once per turn on a read-only-round streak or a
+/// # repeated-call count, injecting a steering nudge on a `Stuck` verdict so a
+/// # micro-adjusted re-read loop is corrected instead of running to the
+/// # equality guard's hard abort. Always off on sub-agents.
+/// loop_review_enabled = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,6 +48,12 @@ pub struct AgentConfig {
     /// an approved plan but no `verify_plan_execution` call. Mutated at
     /// runtime via `Agent::set_verify_nudge_enabled`.
     pub verify_nudge_enabled: bool,
+    /// Whether the in-loop semantic review and anti-anchoring nudge are active
+    /// (ADR-0030). When `true` the harness fires `review_now` once per turn on
+    /// a read-only-round streak or a repeated-call count, injecting a steering
+    /// nudge on a `Stuck` verdict. Mutated at runtime via
+    /// `Agent::set_loop_review_enabled`. Always `false` on sub-agents.
+    pub loop_review_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -49,6 +61,7 @@ impl Default for AgentConfig {
         Self {
             hard_stop_rounds: 0,
             verify_nudge_enabled: true,
+            loop_review_enabled: true,
         }
     }
 }

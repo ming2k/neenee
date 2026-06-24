@@ -33,7 +33,7 @@
 //! `ask_user_tool_blocks_and_returns_selected_answers` integration test
 //! can construct a real `AskUserTool`; dev-deps do not form cycles.)
 //!
-//! ## Why catalog and TaskTool live here (not in store / tools)
+//! ## Why catalog and SubagentTool live here (not in store / tools)
 //!
 //! Both got relocated here from their intuitive homes to keep the
 //! dependency graph strictly layered (see ADR-0005):
@@ -43,10 +43,10 @@
 //!   `neenee-providers` — an inversion, since store is otherwise a peer
 //!   of providers. The catalog is fundamentally a factory consumed by
 //!   orchestration, so it lives where orchestration lives.
-//! - **`TaskTool`** spawns sub-agents via `Agent::new`. It used to live
+//! - **`SubagentTool`** spawns sub-agents via `Agent::new`. It used to live
 //!   in `neenee-tools`, which forced tools to depend on this crate —
 //!   another inversion, since tools are below the agent layer. The
-//!   task tool is fundamentally an orchestration primitive that
+//!   subagent tool is fundamentally an orchestration primitive that
 //!   happens to satisfy the `Tool` trait, so it lives here too.
 //!
 //! Everything `neenee-core` exports is re-exported here so consumers can
@@ -62,11 +62,11 @@ pub use neenee_core::*;
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
     prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentMode, AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError,
+    AgentOp, AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError,
     HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp,
     PermissionDecision, PermissionRequest, Provider, ProviderEntry, ProviderPickerRow,
     ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService,
-    PursuitStore, RetryableError, Role, SessionOverview, SkillsConfig, SubTaskEvent,
+    PursuitStore, RetryableError, Role, SessionOverview, SkillsConfig, SubagentEvent,
     SubagentProfile, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult,
     ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
     UserQuestionReply, UserQuestionRequest, WebSearchConfig, EXPLORE, PRUNED_TOOL_PLACEHOLDER,
@@ -103,6 +103,31 @@ const MAX_REPEATED_TOOL_CALLS: usize = 3;
 /// the user explicitly armed — see ADR-0015.
 const MAX_PURSUIT_ITERATIONS: u32 = 50;
 
+/// Per-turn cap on the todo-continuation nudge. In Build mode with an
+/// approved plan, each time the model ends a round while the todo list still
+/// has pending or in-progress items the harness re-injects the list and
+/// forces another round. This cap bounds that forcing so a plan that the
+/// model keeps refusing to advance cannot loop forever — after it fires, the
+/// turn is allowed to end and the user can resume. Small by design: a
+/// willing model starts working after the first nudge; a stuck one should
+/// surface to the user rather than burn rounds.
+const MAX_TODO_NUDGES: u32 = 6;
+
+/// Consecutive all-read-only rounds after which the in-loop semantic review
+/// fires automatically (ADR-0030). A weak trigger only — the verdict still
+/// comes from `LoopingReview`. Micro-adjusted re-reads (which bypass the
+/// equality guard because their arguments never compare equal) show up here,
+/// because every micro-read round is read-only. Tuned below the point a
+/// genuinely stuck model wastes many rounds but above where legitimate
+/// methodical exploration would trip it.
+const LOOP_REVIEW_ROUNDS: u32 = 6;
+
+/// Repeated-call count at which the in-loop semantic review fires automatically
+/// (ADR-0030), independent of the read-only-round trigger. Catches tight loops
+/// that interleave a non-read call. Kept below `MAX_REPEATED_TOOL_CALLS` so the
+/// review can steer the model before the equality guard's hard abort.
+const LOOP_REVIEW_REPEATED: usize = 2;
+
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
 /// deltas) before the stream is considered stalled. All LLM providers use
 /// `reqwest::Client::new()` which sets no read timeout, so without this guard a
@@ -134,15 +159,18 @@ pub mod hooks;
 pub use hooks::{matcher_matches, HookRegistry, UserPromptVerdict};
 pub mod orchestration;
 mod plan_verify;
+pub mod plan_subagent;
 mod prompt;
+mod steering;
 pub mod session_review;
 pub mod session_title;
 pub mod skills;
-pub mod task_tool;
+pub mod subagent_tool;
 
 pub use plan_verify::VerifyPlanExecutionTool;
+pub use plan_subagent::PlanTool;
 pub use session_review::{default_reviews, LoopingReview};
-pub use task_tool::TaskTool;
+pub use subagent_tool::{SubagentRegistry, SubagentTool};
 
 #[cfg(test)]
 mod tests;

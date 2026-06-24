@@ -2,8 +2,8 @@
 //! the orchestration side of the on-demand transcript diagnostic.
 //!
 //! Domain types ([`SessionReview`], [`ReviewVerdict`]) live in `neenee-core`;
-//! this module owns the LLM-backed runner that lives next to [`crate::TaskTool`]
-//! because — like the `task` tool — it spawns a bounded read-only sub-agent via
+//! this module owns the LLM-backed runner that lives next to [`crate::SubagentTool`]
+//! because — like the `task` tool — it spawns a bounded read-only subagent via
 //! [`crate::Agent`]. The difference is who drives it: `task` is a *model* tool
 //! call, whereas the review runner is *user* driven, fired by the `/review`
 //! command ([`Agent::review_now`]) rather than on a round cadence.
@@ -13,12 +13,12 @@
 //! [`LoopingReview`] is the first registered dimension ("is the agent stuck in
 //! an exploration loop?"). Adding a dimension is a new [`SessionReview`] impl
 //! registered on the agent — no dispatch changes, no extra model calls, since
-//! the runner asks one sub-agent to verdict every dimension at once.
+//! the runner asks one subagent to verdict every dimension at once.
 
 use std::sync::Arc;
 
 use neenee_core::{
-    AgentMode, Message, ReviewStatus, ReviewVerdict, Role, SessionReview,
+    Message, ReviewStatus, ReviewVerdict, Role, SessionReview,
     DEFAULT_REVIEWER_HARD_STOP, REVIEW,
 };
 use tokio_util::sync::CancellationToken;
@@ -27,7 +27,7 @@ use crate::agent::Agent;
 use crate::skills::SkillRegistry;
 
 /// Character budget for the transcript snapshot handed to the diagnostic
-/// sub-agent. Keeps the reviewer's prompt cheap while still showing enough
+/// subagent. Keeps the reviewer's prompt cheap while still showing enough
 /// recent tool traffic to judge progress. The most recent messages are kept.
 const TRANSCRIPT_SNAPSHOT_BUDGET_CHARS: usize = 8_000;
 
@@ -66,9 +66,9 @@ impl Agent {
     /// Run the periodic session-review diagnostic against the live transcript
     /// snapshot and return one verdict per registered dimension.
     ///
-    /// Spawns a bounded read-only sub-agent (the [`REVIEW`] profile) with its
+    /// Spawns a bounded read-only subagent (the [`REVIEW`] profile) with its
     /// own review disabled (so it cannot recurse) and a tight hard stop (so a
-    /// runaway reviewer cannot loop). The sub-agent reasons over a compact,
+    /// runaway reviewer cannot loop). The subagent reasons over a compact,
     /// most-recent-first transcript excerpt and returns structured verdicts.
     ///
     /// Failures are deliberately soft: a provider error or unparseable answer
@@ -100,13 +100,16 @@ impl Agent {
         let reviewer = Agent::new(
             self.provider.clone(),
             sub_tools,
-            AgentMode::Build,
             neenee_core::PursuitService::new(pursuit_store),
             SkillRegistry::empty(),
         );
         // The reviewer must not run its own reviews (recursion) and is bounded
         // by a tight hard stop so it cannot loop.
         reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);
+        // ADR-0030: the reviewer is itself a sub-agent — its every round is
+        // read-only, so the loop-review trigger would fire on it by design and
+        // recurse. Disable the in-loop review on the reviewer outright.
+        reviewer.set_loop_review_enabled(false);
 
         let system = build_reviewer_system_prompt(&dimensions);
         let transcript = serialize_transcript(messages, TRANSCRIPT_SNAPSHOT_BUDGET_CHARS);
@@ -132,7 +135,7 @@ impl Agent {
         match result {
             Ok(outcome) => parse_verdicts(&outcome.message.content, &dimensions),
             Err(err) => {
-                tracing::warn!(error = %err, "session-review sub-agent failed");
+                tracing::warn!(error = %err, "session-review subagent failed");
                 vec![ReviewVerdict {
                     dimension: "review".to_string(),
                     status: ReviewStatus::Watch,

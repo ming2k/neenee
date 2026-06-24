@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::tui::app::{App, Modal, SessionTab};
+use crate::tui::app::{ActivityTab, App, Modal, SessionTab};
 use crate::tui::completion::CompletionKind;
 use crate::tui::completion::{manual_walk, mention_range_at, path_query_match};
 use crate::tui::config;
@@ -260,12 +260,12 @@ fn tool_activity_is_semantic_and_loop_progress_is_preserved() {
     );
 }
 
-/// Build a small conversation with two sibling sub-agent tasks, each with a
+/// Build a small conversation with two sibling subagent tasks, each with a
 /// couple of child messages, for focus-navigation tests.
 fn conversation_with_subagents() -> Vec<TranscriptMessage> {
     let mut a = TranscriptMessage::tool_step(
         "task_a",
-        "task",
+        "subagent",
         r#"{"description":"explore a","prompt":"..."}"#,
     );
     a.subagent_children_mut()
@@ -273,7 +273,7 @@ fn conversation_with_subagents() -> Vec<TranscriptMessage> {
         .push(TranscriptMessage::new(Role::Assistant, "child A1"));
     let mut b = TranscriptMessage::tool_step(
         "task_b",
-        "task",
+        "subagent",
         r#"{"description":"explore b","prompt":"..."}"#,
     );
     b.subagent_children_mut()
@@ -480,6 +480,10 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
     let app = App {
         input: String::new(),
         messages: Vec::new(),
+        side_messages: Vec::new(),
+        in_side_view: false,
+        side_session_id: None,
+        parent_status: neenee_core::ParentStatus::Idle,
         scroll: 0,
         follow_bottom: true,
         content_lines: 0,
@@ -519,6 +523,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         turn_started_at: None,
         plan_preview_content: String::new(),
         plan_preview_scroll: 0,
+        activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
         pending_permission: None,
         pending_question: None,

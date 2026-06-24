@@ -54,8 +54,11 @@ pub struct InputContext {
     /// whether ↑/↓ in the compose zone scroll the details body or the
     /// transcript behind it.
     pub permission_show_details: bool,
-    /// Whether the view is zoomed into a sub-agent task (focus stack non-empty).
+    /// Whether the view is zoomed into a subagent task (focus stack non-empty).
     pub in_subagent_view: bool,
+    /// Whether the view is inside a `/btw` side conversation (ADR-0017). Esc
+    /// and Ctrl+C return to the primary transcript instead of interrupting.
+    pub in_side_view: bool,
     /// Whether a keyboard-focusable step or action target is active.
     ///
     /// Part of the in-progress keyboard focus-navigation feature (alongside
@@ -118,6 +121,8 @@ pub enum InputAction {
     /// Cycle the active pane inside the session-context modal. `forward` picks
     /// the direction so Left/Right (and later Tab/Shift+Tab) share one action.
     SessionTabCycle { forward: bool },
+    /// Cycle the active tab inside the Activity modal.
+    ActivityTabCycle { forward: bool },
     /// Move the row cursor inside the session-context modal's list panes
     /// (Skills / Permissions / Tools). `forward` = down, else up.
     SessionSelect { forward: bool },
@@ -252,11 +257,14 @@ pub enum InputAction {
     /// drive hover affordances on clickable elements like reasoning-trace
     /// headers. Suppressed while an overlay modal is open.
     Hover { x: u16, y: u16 },
-    /// Leave the current sub-agent view and return to the parent.
+    /// Leave the current subagent view and return to the parent.
     ExitSubAgent,
-    /// Move to the previous sibling sub-agent task.
+    /// Leave the `/btw` side conversation and return to the primary transcript
+    /// (ADR-0017). Mapped from Esc / Ctrl+C while the side view is focused.
+    ExitSideView,
+    /// Move to the previous sibling subagent task.
     PrevSibling,
-    /// Move to the next sibling sub-agent task.
+    /// Move to the next sibling subagent task.
     NextSibling,
 }
 
@@ -534,6 +542,12 @@ pub fn process_event(
                         // clears the dismissal latch, so Esc then ↑/↓ walks
                         // history instead of suggestions.
                         InputAction::CloseCompletion
+                    } else if context.in_side_view {
+                        // `/btw` side view: Esc returns to the primary
+                        // transcript (ADR-0017). Takes priority over the
+                        // subagent / responding arms because the side view
+                        // and subagent zoom are mutually exclusive.
+                        InputAction::ExitSideView
                     } else if context.in_subagent_view {
                         InputAction::ExitSubAgent
                     } else if context.is_responding {
@@ -902,8 +916,8 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Char(c) => {
-                    // Sibling sub-agent navigation works in both zones (it is a
-                    // sub-agent view feature, not a typing-navigation thing)
+                    // Sibling subagent navigation works in both zones (it is a
+                    // subagent view feature, not a typing-navigation thing)
                     // but only when no text is being composed.
                     if context.active_modal == super::Modal::None
                         && context.in_subagent_view
@@ -1082,6 +1096,9 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Session {
                         return InputAction::SessionTabCycle { forward: false };
                     }
+                    if context.active_modal == super::Modal::Activity {
+                        return InputAction::ActivityTabCycle { forward: false };
+                    }
                     if matches!(
                         context.active_modal,
                         super::Modal::None
@@ -1110,6 +1127,9 @@ pub fn process_event(
                     }
                     if context.active_modal == super::Modal::Session {
                         return InputAction::SessionTabCycle { forward: true };
+                    }
+                    if context.active_modal == super::Modal::Activity {
+                        return InputAction::ActivityTabCycle { forward: true };
                     }
                     if matches!(
                         context.active_modal,
@@ -1318,6 +1338,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1359,6 +1380,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1387,7 +1409,7 @@ mod tests {
 
     #[test]
     fn enter_accepts_a_highlighted_slash_suggestion() {
-        // User typed `/m`, menu shows `/mode` / `/mcp` / `/provider`, user
+        // User typed `/m`, menu shows `/mcp` / `/plan` / `/provider`, user
         // pressed ↓ to highlight `/mcp` (index 1). Enter must accept the
         // highlighted item rather than sending `/m` as a (rejected) command.
         let mut input = "/m".to_string();
@@ -1423,10 +1445,10 @@ mod tests {
 
     #[test]
     fn enter_highlight_wins_over_exact_slash_match() {
-        // User typed `/mode` (exact match) but then pressed ↓ to highlight
+        // User typed `/mcp` (exact match) but then pressed ↓ to highlight
         // `/provider`. The explicit highlight is a stronger signal than the
         // exact-match fast path, so Enter accepts the highlight.
-        let mut input = "/mode".to_string();
+        let mut input = "/mcp".to_string();
         assert_eq!(
             enter_with_completion(
                 &mut input,
@@ -1454,9 +1476,9 @@ mod tests {
     #[test]
     fn esc_closes_slash_completion_menu() {
         // When a slash completion popup is open, Esc dismisses it rather
-        // than falling through to sub-agent exit / interrupt / no-op.
-        let mut input = "/mod".to_string();
-        let mut cursor = 4;
+        // than falling through to subagent exit / interrupt / no-op.
+        let mut input = "/mc".to_string();
+        let mut cursor = 3;
         let mut drag = SelectionDrag::default();
         let action = process_event(
             Event::Key(KeyEvent {
@@ -1477,6 +1499,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1485,7 +1508,7 @@ mod tests {
         );
         assert_eq!(action, InputAction::CloseCompletion);
         // The input text is left untouched — Esc only closes the popup.
-        assert_eq!(input, "/mod");
+        assert_eq!(input, "/mc");
     }
 
     #[test]
@@ -1513,6 +1536,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1548,6 +1572,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1563,11 +1588,11 @@ mod tests {
         // can reset the completion-dismissal latch after an Enter commit or
         // Esc dismiss. The char is already spliced into `input` here; the
         // event loop treats the action as a signal only.
-        let mut input = "/mod".to_string();
-        let mut cursor = 4;
+        let mut input = "/mc".to_string();
+        let mut cursor = 3;
         let mut drag = SelectionDrag::default();
         let action = process_event(
-            Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
             &mut input,
             &mut cursor,
             InputContext {
@@ -1580,23 +1605,24 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
         );
-        assert_eq!(action, InputAction::InsertChar('e'));
-        assert_eq!(input, "/mode");
-        assert_eq!(cursor, 5);
+        assert_eq!(action, InputAction::InsertChar('p'));
+        assert_eq!(input, "/mcp");
+        assert_eq!(cursor, 4);
     }
 
     #[test]
     fn backspace_in_compose_returns_backspace_action() {
         // Same signal contract as InsertChar: Backspace must be returned so
         // the event loop clears completion_dismissed + suggestion_index.
-        let mut input = "/mode".to_string();
-        let mut cursor = 5;
+        let mut input = "/mcp".to_string();
+        let mut cursor = 4;
         let mut drag = SelectionDrag::default();
         let action = process_event(
             Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
@@ -1612,6 +1638,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1619,8 +1646,8 @@ mod tests {
             &mut drag,
         );
         assert_eq!(action, InputAction::Backspace);
-        assert_eq!(input, "/mod");
-        assert_eq!(cursor, 4);
+        assert_eq!(input, "/mc");
+        assert_eq!(cursor, 3);
     }
 
     #[test]
@@ -1648,6 +1675,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1684,6 +1712,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1715,6 +1744,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1787,6 +1817,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1819,6 +1850,7 @@ mod tests {
                 permission_confirm_always: true,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1847,6 +1879,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1875,6 +1908,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1905,6 +1939,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1937,6 +1972,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -1961,6 +1997,7 @@ mod tests {
             permission_confirm_always: false,
             permission_show_details: false,
             in_subagent_view: false,
+            in_side_view: false,
             has_focused_target: false,
             focus_zone: FocusZone::Compose,
             has_queued: false,
@@ -1996,6 +2033,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -2022,6 +2060,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -2048,6 +2087,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
                 has_queued: false,
@@ -2101,6 +2141,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -2136,7 +2177,7 @@ mod tests {
     fn escape_in_browse_does_not_switch_zone() {
         // Zone switching uses Ctrl+B (compose → browse) and printable chars
         // (browse → compose). Esc in Browse is a no-op; Esc still exits
-        // sub-agent views, interrupts a running turn, and closes modals.
+        // subagent views, interrupts a running turn, and closes modals.
         assert_eq!(key_with_focus(KeyCode::Esc), InputAction::None);
     }
 
@@ -2167,6 +2208,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
                 has_queued: false,
@@ -2203,6 +2245,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
                 has_queued: false,
@@ -2220,7 +2263,7 @@ mod tests {
             key_in_view(KeyCode::Esc, true, &mut input),
             InputAction::ExitSubAgent
         );
-        // Outside a sub-agent view, Esc does nothing when idle (no modal).
+        // Outside a subagent view, Esc does nothing when idle (no modal).
         assert_eq!(
             key_in_view(KeyCode::Esc, false, &mut input),
             InputAction::None
@@ -2240,12 +2283,12 @@ mod tests {
         );
 
         // While typing (non-empty input), the brackets insert as characters,
-        // not navigation, even inside a sub-agent view.
+        // not navigation, even inside a subagent view.
         let mut typing = "x".to_string();
         key_in_view(KeyCode::Char('['), true, &mut typing);
         assert_eq!(typing, "x[");
 
-        // Outside a sub-agent view, brackets always insert.
+        // Outside a subagent view, brackets always insert.
         let mut other = String::new();
         key_in_view(KeyCode::Char(']'), false, &mut other);
         assert_eq!(other, "]");
@@ -2282,6 +2325,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: zone,
                 has_queued: false,
@@ -2902,6 +2946,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -2990,6 +3035,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -3017,6 +3063,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued: false,
@@ -3048,6 +3095,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: false,
                 focus_zone: FocusZone::Compose,
                 has_queued,
@@ -3098,6 +3146,7 @@ mod tests {
                 permission_confirm_always: false,
                 permission_show_details: false,
                 in_subagent_view: false,
+                in_side_view: false,
                 has_focused_target: true,
                 focus_zone: FocusZone::Browse,
                 has_queued: true,

@@ -87,7 +87,7 @@ fall back to state. Never assume runtime exists.
 Two categories of file deliberately live outside XDG:
 
 - **The project working tree.** Project-local skills (`.neenee/skills/`),
-  project-local commands (`.neenee/commands/`), and plan-mode plan files
+  project-local commands (`.neenee/commands/`), and plan files
   (`.neenee/plans/`) live with the project. They travel with the
   repository and are owned by the project, not the user's environment.
 - **External applications' conventions.** neenee *reads* skills from

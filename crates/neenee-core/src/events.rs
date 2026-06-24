@@ -16,10 +16,25 @@ pub enum AgentRequest {
     PermissionReply {
         request_id: String,
         decision: PermissionDecision,
+        /// Full-duplex (ADR-0029): when the reply targets a permission
+        /// request surfaced by a *subagent* (carried up as a
+        /// [`TurnEvent::SubAgent`] / [`SubagentEvent::PermissionRequest`]),
+        /// this is the parent tool-call id the request was nested under. The
+        /// harness looks up the live child's [`crate::SubagentHandle`] in the
+        /// task registry by this id and resolves its parked oneshot directly.
+        /// `None` means the request came from the top-level (or `/btw` side)
+        /// agent and is resolved on `context.agent` as before.
+        parent_call_id: Option<String>,
     },
     UserQuestionReply {
         request_id: String,
         answers: Vec<Vec<String>>,
+        /// Full-duplex (ADR-0029): the parent tool-call id when the answered
+        /// question came from a subagent's `ask_user`
+        /// ([`SubagentEvent::UserQuestionRequest`]); `None` for a top-level /
+        /// side agent question. See [`AgentRequest::PermissionReply`] for the
+        /// routing contract.
+        parent_call_id: Option<String>,
     },
     SwitchProvider {
         provider_type: String,
@@ -68,6 +83,12 @@ pub enum AgentRequest {
     ShellCommand {
         command: String,
     },
+    /// Leave the active `/btw` side conversation and return to the primary
+    /// view (ADR-0017). The harness cancels any in-flight side turn, drops
+    /// the live side session (the side file stays on disk, recoverable via
+    /// `/sessions`), and emits [`AgentResponse::SideViewClosed`]. Sent by
+    /// the TUI when the user presses `Esc` / `Ctrl+C` inside the side view.
+    ExitSideView,
 }
 
 #[derive(Debug)]
@@ -90,6 +111,21 @@ pub enum AgentResponse {
     /// parent-status watcher; the primary turn is deliberately left running, so
     /// this is how the user learns the main session hit an approval/input wall.
     ParentStatus(ParentStatus),
+    /// The user entered a `/btw` side conversation (ADR-0017). The TUI seeds
+    /// an empty side transcript buffer keyed by `side_id`, switches to the
+    /// side view, and records `primary_id` so per-turn events route by
+    /// `session_id` (primary → primary buffer, side → side buffer). Emitted
+    /// by the harness after [`SessionStore::fork_to_side`] + side `Agent`
+    /// construction succeed.
+    SideViewOpened {
+        side_id: String,
+        primary_id: String,
+    },
+    /// The user left the `/btw` side view (ADR-0017). The TUI returns to the
+    /// primary transcript and clears the side buffer. Emitted by the harness
+    /// in reply to [`AgentRequest::ExitSideView`] once the live side session
+    /// has been torn down.
+    SideViewClosed,
     PermissionsCleared,
     /// Lowercase provider name → whether a usable API key is configured.
     ProviderKeys(Vec<(String, bool)>),
@@ -169,12 +205,10 @@ pub enum TurnEvent {
     },
     HarnessState(HarnessSnapshot),
     PursuitUpdated(Pursuit),
-    /// The agent mode changed via `plan_enter` / `plan_exit`.
-    ModeChanged(AgentMode),
     /// The task list changed (full-replace via `todo`, surgical update via
-    /// `todo_update`, seeded by `plan_exit`, cleared by `plan_enter` or
-    /// `/todos clear`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
-    /// means "no active task list" and hides the sticky panel.
+    /// `todo_update`, seeded by an approved `plan`). Mirrors
+    /// [`AgentEvent::TodosUpdated`]. An empty list means "no active task
+    /// list" and hides the sticky panel.
     TodosUpdated(crate::todos::TodoList),
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
@@ -206,10 +240,10 @@ pub enum TurnEvent {
     StreamReasoningEnd(String),
     StreamEnd(String),
     StreamDiscard,
-    /// A sub-agent event to render nested inside the parent tool step.
-    SubTask {
+    /// A subagent event to render nested inside the parent tool step.
+    SubAgent {
         parent_call_id: String,
-        event: SubTaskEvent,
+        event: SubagentEvent,
     },
 }
 
@@ -227,15 +261,8 @@ pub enum ParentStatus {
     Interrupted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentMode {
-    Build,
-    Plan,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessSnapshot {
-    pub mode: AgentMode,
     pub pursuit: Option<Pursuit>,
     pub loop_status: String,
     /// Whether write-tool permission prompts are bypassed this session
@@ -283,34 +310,92 @@ pub struct ProviderPickerSnapshot {
     pub rows: Vec<ProviderPickerRow>,
 }
 
-/// Events emitted by a sub-agent spawned through the `task` tool.
+/// Events emitted by a subagent spawned through the `task` tool.
 ///
 /// These are forwarded from the child agent back to the parent harness so that
 /// the TUI can render nested tool steps and streaming output inside the parent
 /// tool step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubTaskEvent {
-    /// The sub-agent started a new response stream.
+pub enum SubagentEvent {
+    /// Emitted once at subagent start, carrying the bound profile's name
+    /// (e.g. `"explore"`, `"plan"`, `"verify"`). Lets the TUI label the
+    /// subagent by its role rather than a generic "Subagent", so a user can
+    /// tell a planning subagent from a research one at a glance.
+    Started {
+        profile: &'static str,
+    },
+    /// The subagent started a new response stream.
     StreamStart,
-    /// New text token from the sub-agent.
+    /// New text token from the subagent.
     StreamDelta(String),
-    /// The sub-agent response stream finished with the final accumulated text.
+    /// The subagent response stream finished with the final accumulated text.
     StreamEnd(String),
-    /// The sub-agent invoked a tool.
+    /// The subagent invoked a tool.
     ToolCall {
         id: String,
         name: String,
         arguments: String,
     },
-    /// A tool invoked by the sub-agent returned a result.
+    /// A tool invoked by the subagent returned a result.
     ToolResult {
         id: String,
         name: String,
         output: String,
         duration_ms: u64,
     },
-    /// A status update from the sub-agent.
+    /// A status update from the subagent.
     Activity(String),
+    /// The subagent's permission broker surfaced a write/execute tool call
+    /// that needs a human decision. Full-duplex (ADR-0029): this carries the
+    /// request *up* to the parent harness so the user can answer it; the
+    /// reply travels back *down* through the subagent handle's
+    /// `reply_permission` (resolving the parked oneshot directly), unblocking
+    /// the subagent's pending tool. Only fires when
+    /// the subagent's profile does not suppress the broker (e.g. via
+    /// `auto_approve`) — a read-only profile never produces one.
+    PermissionRequest(PermissionRequest),
+    /// The subagent called `ask_user` and is blocked awaiting answers.
+    /// Full-duplex (ADR-0029): carries the questions *up*; the reply travels
+    /// back *down* through the subagent handle's `reply_user_question`. Only
+    /// fires for profiles with `allow_user_interaction: true`.
+    UserQuestionRequest(UserQuestionRequest),
+}
+
+/// Steering operations a parent can submit into a running agent's inbox — the
+/// down-direction of full-duplex (ADR-0029). Distinct from the request/reply
+/// class ([`PermissionRequest`] / [`UserQuestionRequest`]), which resolve
+/// instantly via the agent's shared-state oneshots (`reply_permission` /
+/// `reply_user_question`) and therefore do **not** flow through this queue: a
+/// reply must unblock a tool that is parked mid-turn, so it cannot wait for
+/// the driver loop to drain. This enum covers only the "new input / control"
+/// class that is safe to apply at the next tool-round boundary.
+///
+/// Modeled on codex's `Op` (`codex-rs/protocol/src/protocol.rs`), trimmed to
+/// neenee's driver shape: the agent owns an `mpsc` inbox whose receiver is
+/// drained at the top of every tool round (and, for `Interrupt`, raced against
+/// the live stream). The top-level agent and spawned sub-agents share the same
+/// `Op` vocabulary — a subagent is just an agent whose inbox sender the
+/// parent holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentOp {
+    /// Append a visible user message to the live transcript before the next
+    /// model request, as if the user typed it. Lets a parent (or, for a
+    /// subagent, the orchestrating agent) steer a running turn with new
+    /// information without restarting it. codex `inject_if_running` analogue.
+    InjectUserMessage(String),
+    /// Append a hidden (system-level) steering note — like
+    /// [`AgentOp::InjectUserMessage`] but recorded as a hidden user message so
+    /// it informs the model without polluting the visible transcript. codex
+    /// `InterAgentCommunication` analogue.
+    InterAgentMessage { msg: String },
+    /// Abort the current turn at the next boundary. Coarser than the parent's
+    /// `CancellationToken` (which cancels instantly): this is the
+    /// handle-addressable path for a caller that owns the inbox but not the
+    /// cancel token. codex `Op::Interrupt` analogue.
+    Interrupt,
+    /// Tear the agent down (interrupt + signal that the shutdown was
+    /// requested rather than cancelled). codex `Op::Shutdown` analogue.
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -351,11 +436,8 @@ pub enum AgentEvent {
         name: String,
     },
     PursuitUpdated(Pursuit),
-    /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
-    /// uses this to refresh its mode indicator live, mid-turn.
-    ModeChanged(AgentMode),
-    /// The task list changed (`todo` / `todo_update` / `plan_exit` seed /
-    /// `plan_enter` or `/todos clear`). The TUI uses this to refresh the
+    /// The task list changed (`todo` / `todo_update` / an approved `plan`
+    /// seed). The TUI uses this to refresh the
     /// unified sticky panel above the input box.
     TodosUpdated(crate::todos::TodoList),
     /// The auto-approve toggle changed (via `/auto-approve`).
@@ -372,10 +454,10 @@ pub enum AgentEvent {
     },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),
-    /// A sub-agent spawned by a tool (e.g. `task`) emitted an event.
-    SubTask {
+    /// A subagent spawned by a tool (e.g. `task`) emitted an event.
+    SubAgent {
         parent_call_id: String,
-        event: SubTaskEvent,
+        event: SubagentEvent,
     },
 }
 

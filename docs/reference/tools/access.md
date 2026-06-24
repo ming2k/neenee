@@ -13,34 +13,34 @@ and the sub-agent admission policy lives in
 the harness derives threshold rules from). Each consumer expresses its rule as
 a threshold:
 
-| Tier | Plan mode | Permission broker | Examples |
+| Tier | Subagent admission | Permission broker | Examples |
 |------|-----------|-------------------|----------|
-| `Read` | Allowed | Bypassed | `read_file`, `grep`, `glob` |
-| `Execute` | Blocked (above the `Read` line) | Prompted unless a cached `Always` rule matches | `bash` |
-| `Write` (default) | Blocked unless `allowed_in_plan_mode` exempts the call | Prompted unless a cached `Always` rule matches | `write_file`, `edit_file` |
+| `Read` | Admitted by every profile | Bypassed | `read_file`, `grep`, `glob` |
+| `Execute` | Admitted only above a `Read` ceiling (e.g. `VERIFY`) | Prompted unless a cached `Always` rule matches | `bash` |
+| `Write` (default) | Admitted only by a `Write` ceiling or a `write_paths` grant, then scoped by `WriteScope` | Prompted unless a cached `Always` rule matches | `write_file`, `edit_file` |
 
-The broker prompts for any tool above `Read` (`Execute` or `Write`); the
-Plan-mode gate admits `Read` only by default. A tool that does not override
-`access()` is treated as `Write`. `write_file` and `edit_file` override
-`allowed_in_plan_mode` to also permit writes under `.neenee/plans/`. See
-[Plan mode](../../explanation/agent-design/plan-mode.md) for the exemption
-rationale.
+The broker prompts for any tool above `Read` (`Execute` or `Write`). Subagent
+admission is by capability axis (ceiling + `write_paths` grant); a write tool
+admitted to a subagent is then scoped at runtime by the agent's `WriteScope`
+(e.g. the `PLAN` profile writes only under `.neenee/plans/`). A tool that does
+not override `access()` is treated as `Write`. See
+[Plan](../../explanation/agent-design/plan.md) and
+[ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
 
 ## Capability axes
 
 Beyond `access()`, the `Tool` trait exposes two more capability bits that the
-harness consults for sub-agent admission rather than for permissions:
+harness consults for subagent admission rather than for permissions:
 
 | Axis | Method | Consulted by | Overrides |
 |------|--------|--------------|-----------|
-| Needs a human | `requires_user()` (default `false`) | Sub-agent profiles | `ask_user` |
-| Spawns a sub-agent | `spawns_subagent()` (default `false`) | Sub-agent profiles | `task`, `verify_plan_execution` |
+| Needs a human | `requires_user()` (default `false`) | Subagent profiles | `ask_user` |
+| Spawns a subagent | `spawns_subagent()` (default `false`) | Subagent profiles | `subagent`, `plan`, `verify_plan_execution` |
 
-A `requires_user()` tool is excluded from sub-agents because a sub-agent has no
-user reachable to answer it; a `spawns_subagent()` tool is excluded in *every*
-profile to prevent recursion. `Tool::allowed_in_plan_mode` is the pre-existing
-fourth axis, consulted by the Plan-mode gate. See
-[Sub-agent admission](../../explanation/agent-design/subagents.md#tool-admission).
+A `requires_user()` tool is excluded from subagents unless the profile allows
+user interaction; a `spawns_subagent()` tool is excluded in *every* profile to
+prevent recursion. See
+[Subagent admission](../../explanation/agent-design/subagents.md#tool-admission).
 
 ## Permission prompt text
 
@@ -65,5 +65,6 @@ Only `start_pursuit` and `complete_pursuit` currently override them.
 
 - [ADR-0012](../../adr/0012-toolaccess-tier-split.md) — the tier split decision.
 - [Sub-agent profiles](../../explanation/agent-design/subagents.md#profiles) —
-  how the axes drive sub-agent tool admission.
-- [Plan mode](../../explanation/agent-design/plan-mode.md) — the Plan-mode gate.
+  how the axes drive subagent tool admission.
+- [Plan](../../explanation/agent-design/plan.md) — the `PLAN` subagent and its
+  scoped `WriteScope` grant.

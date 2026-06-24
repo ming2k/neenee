@@ -1,100 +1,69 @@
 # How to plan a change before implementing
 
-This guide shows how to use **Plan mode** to research and design a change
-before any workspace edits happen. For the design rationale, see
-[Plan mode](../explanation/agent-design/plan-mode.md). For the mode command and the
-planning tools, see [Slash commands](../reference/commands.md) and
+This guide shows how to plan a change with the `plan` tool, which delegates
+research and design to a read-only `PLAN` subagent before any workspace edits
+happen. For the design rationale, see
+[Plan](../explanation/agent-design/plan.md). For the planning tools, see
 [Built-in tools](../reference/tools/index.md).
 
-## Pick who starts the plan
+## Ask for a plan
 
-Plan mode can be entered two ways; choose based on how much direction you want
-to give up front.
-
-- Let the agent decide: describe the task normally. When the work is complex,
-  multi-file, or architectural, the agent calls `plan_enter` itself, researches,
-  writes the plan, then calls `plan_exit` and implements it.
-- Force it yourself: run `/mode plan` before sending the task. Use this when
-  you want only research and a written plan, with no edits attempted yet.
-
-## Enter Plan mode
-
-Run:
+Describe the task normally. When the work is complex, multi-file, or
+architectural, the agent calls the `plan` tool itself; you can also ask for it
+explicitly:
 
 ```text
-/mode plan
+Plan this change before implementing: rewrite the auth flow.
 ```
 
-The header accent color changes to indicate Plan mode. In this mode the agent
-can use read-only tools freely and can write files only under `.neenee/plans/`.
-Any other write is blocked and returned to the model as an error.
+The `plan` tool spawns a `PLAN` subagent — read-only, plus a scoped write grant
+to `.neenee/plans/` — that researches the codebase and writes the plan to a
+file such as `.neenee/plans/rewrite-auth.md`. Its research runs in its own
+context, so it does not bloat the main conversation.
 
-## Research and write the plan
+## Approve the plan
 
-Send the task. Let the agent explore the codebase with read-only tools
-(`read_file`, `grep`, `glob`, `list_dir`, `task`). Ask it to write the plan to
-a file under the plans directory, for example:
+When the subagent finishes, `plan` raises an *Approve* / *Keep planning*
+prompt showing the plan path and a short excerpt. Choose:
 
-```text
-.neenee/plans/rewrite-auth.md
-```
+- **Approve** to seed the todo list from the plan's `##` headings and start
+  implementing.
+- **Keep planning** to send feedback; the agent re-calls `plan` with the
+  refined request.
 
-That path is the only writable target in Plan mode, so the plan document can be
-persisted without unlocking the rest of the workspace. The write still goes
-through the normal permission flow, so approve it once or always.
-
-## Exit Plan mode and implement
-
-When the plan is complete, switch back to full tool access:
-
-```text
-/mode build
-```
-
-or let the agent call `plan_exit` itself. From here the agent edits, runs
-builds, and verifies the work normally. To resume editing immediately from a
-written plan, point the agent at the plan file, for example:
-
-```text
-Implement the plan at .neenee/plans/rewrite-auth.md
-```
+There is no separate mode to enter or exit — the main agent always has its
+full tool surface, and planning is just the call you approved.
 
 ## Track progress
 
-Once the plan is approved, `plan_exit` seeds the unified **task list** from the
-plan's `##` headings (one item per section, starting `pending`). The list lives
-in the **Activity** modal, showing the done/total ratio and a status glyph per
-step:
+On approval the agent seeds the unified **todo list** from the plan's `##`
+headings (one item per section, starting `pending`). The list lives in the
+**Activity** modal, showing the done/total ratio and a status glyph per step:
 
 ```text
 Tasks  1/4
     ✓ Summary   ● Key Changes   ○ Test Plan   ○ Assumptions
 ```
 
-The model marks steps `in_progress` → `completed` with the `todo` (full-replace)
-or `todo_update` (mark one step) tools as it works. Steps it has not touched
-yet show as `○ pending` — that is honest, not stale: it means "not verified
-yet." To see the list at any time, open the **Activity** modal by clicking the
-pinned activity bar. If you see a step stay on `○` after the model claims it
-is done, ask it to update the task list or to run the verifier.
+The model marks steps `in_progress` → `completed` with the `todo`
+(full-replace) or `todo_update` (mark one step) tools as it works. Steps it
+has not touched yet show as `○ pending` — that is honest, not stale: it means
+"not verified yet." To see the list at any time, open the **Activity** modal by
+clicking the pinned activity bar. If a step stays on `○` after the model
+claims it is done, ask it to update the list or run the verifier.
 
-The list is cleared (and the panel empties) when:
+Calling `plan` again starts a fresh planning cycle and clears the list.
 
-- the agent re-enters Plan mode (a new planning cycle starts), or
-- the user runs `/mode plan` manually, or
-- the session is resumed after the list was cleared.
+## Verify before declaring done
 
-## Stay in control
-
-- `/mode` shows the current mode at any time.
-- `/mode build` is the authoritative override that ends planning immediately,
-  even if the agent entered Plan mode on its own.
-- Plan mode is orthogonal to [pursuit state](../explanation/agent-design/harness.md) and the
-  autonomous loop; a pursuit can be active in either mode.
+When the todo list is drained the workflow nudges the agent to call
+`verify_plan_execution`, which runs the plan's `## Test Plan` commands and
+grades each section `PASS` / `PARTIAL` / `FAIL`. A `PARTIAL` or `FAIL` should
+send the agent back to address the gaps before it reports completion.
 
 ## See also
 
-- [Plan mode](../explanation/agent-design/plan-mode.md) — why the mode exists and how the
-  write exemption works
-- [Slash commands](../reference/commands.md) — the `/mode` command
-- [Built-in tools](../reference/tools/index.md) — `plan_enter` and `plan_exit`
+- [Plan](../explanation/agent-design/plan.md) — the subagent workflow and
+  progression model
+- [Built-in tools](../reference/tools/index.md) — `plan`, `todo`,
+  `todo_update`, `verify_plan_execution`

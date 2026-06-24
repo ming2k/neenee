@@ -15,8 +15,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, ProviderPickerRow,
-    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentRequest, ImagePart, ParentStatus, PermissionRequest,
+    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList,
+    UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -204,10 +205,55 @@ impl SessionTab {
     }
 }
 
+/// Active tab inside the Activity modal. The variant order defines the
+/// tab-strip order (left → right) and the Left/Right cycle order.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum ActivityTab {
+    Activity,
+    Tasks,
+}
+
+impl ActivityTab {
+    pub const ALL: [ActivityTab; 2] = [ActivityTab::Activity, ActivityTab::Tasks];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ActivityTab::Activity => "Activity",
+            ActivityTab::Tasks => "Tasks",
+        }
+    }
+
+    pub fn cycle(self, forward: bool) -> ActivityTab {
+        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        let n = Self::ALL.len();
+        let next = if forward {
+            (idx + 1) % n
+        } else {
+            (idx + n - 1) % n
+        };
+        Self::ALL[next]
+    }
+}
+
 pub struct App {
     pub input: String,
     /// Structured transcript messages (semantic document model).
     pub messages: Vec<TranscriptMessage>,
+    /// Side-conversation transcript (ADR-0017). Populated only while a `/btw`
+    /// side session is live; per-turn events tagged with the side `session_id`
+    /// route here instead of into [`messages`].
+    pub side_messages: Vec<TranscriptMessage>,
+    /// True while the user is composing into the `/btw` side conversation
+    /// (ADR-0017). Drives [`App::focused_messages`] to swap the viewed
+    /// transcript to [`App::side_messages`] and reserves the side banner.
+    pub in_side_view: bool,
+    /// Active side `session_id`, learned from [`AgentResponse::SideViewOpened`].
+    /// The response listener routes a `Turn { session_id, .. }` event into the
+    /// side buffer when this matches, and into the primary buffer otherwise.
+    pub side_session_id: Option<String>,
+    /// Coarse primary-session status, mirrored from
+    /// [`AgentResponse::ParentStatus`] for the side banner.
+    pub parent_status: ParentStatus,
     pub scroll: u16,
     /// Whether the view follows the newest content (auto-scroll to bottom).
     pub follow_bottom: bool,
@@ -222,7 +268,7 @@ pub struct App {
     pub sticky_rect: Option<ratatui::layout::Rect>,
     /// Screen rect of the activity bar for the current frame, so clicks inside
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
-    /// streaming, sub-agent view, or chrome hidden).
+    /// streaming, subagent view, or chrome hidden).
     pub activity_rect: Option<ratatui::layout::Rect>,
     /// Screen rect of the currently-open dismissable overlay modal (the
     /// centered panel, not the full-screen backdrop), so a click that lands
@@ -242,7 +288,7 @@ pub struct App {
     /// content below the collapsed step does not yank the header back down.
     /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
     pub pin_summary_line: Option<usize>,
-    /// Stack of sub-agent task call-ids that the view is zoomed into. Empty
+    /// Stack of subagent task call-ids that the view is zoomed into. Empty
     /// means the root conversation is shown; a non-empty stack renders the
     /// focused `task` tool step's child messages as the main stream, with a
     /// navigation bar to return to the parent or cycle sibling sub-agents.
@@ -253,10 +299,9 @@ pub struct App {
     /// Latched whenever the user explicitly finishes a completion with Enter
     /// (or dismissed one by sending the message). While `true`, the completion
     /// popup is suppressed even if `completion_kind()` would otherwise show
-    /// one — so accepting `/mode` does not immediately flash the
-    /// `/mode build` / `/mode plan` subcommand menu. Cleared by the next
-    /// `InsertChar` / `Backspace` (the user is editing again, so live
-    /// completions are once again useful).
+    /// one — so accepting a command does not immediately flash a subcommand
+    /// menu. Cleared by the next `InsertChar` / `Backspace` (the user is
+    /// editing again, so live completions are once again useful).
     pub completion_dismissed: bool,
     pub custom_commands: Vec<(String, String)>,
     pub cursor_position: usize,
@@ -300,12 +345,14 @@ pub struct App {
     /// `##` headings.
     pub todos: Option<TodoList>,
     /// Harness turn counter, mirrored each frame. Surfaced inside the
-    /// Activity modal as `turn N`, and shown in the activity bar.
+    /// Activity modal as `turn N` (the activity bar itself no longer shows
+    /// the structural counters — it surfaces status/plan/elapsed and is the
+    /// click target that opens the modal).
     pub turn_count: u64,
     /// Current tool round within the active turn (1-indexed for display:
     /// `0` means the turn has started but no model request has fired yet —
     /// e.g. the "queued" / "preparing context" phase). Mirrored each frame
-    /// from the response listener; shown in the activity bar as
+    /// from the response listener; shown in the Activity modal as
     /// `turn N · round M · <status>`.
     pub current_round: u64,
     /// Session-review alert (ADR-0016), or empty when inactive. While
@@ -323,6 +370,9 @@ pub struct App {
     /// Scroll offset inside `Modal::PlanPreview`. Reset to 0 each time the
     /// modal opens.
     pub plan_preview_scroll: u16,
+    /// Active tab inside the Activity modal ([`Modal::Activity`]).
+    /// Ignored while any other modal is open.
+    pub activity_tab: ActivityTab,
     /// Scroll offset inside `Modal::Activity`. Reset to 0 each time the modal
     /// opens; clamped each frame by the modal's body renderer.
     pub activity_scroll: usize,
@@ -661,14 +711,18 @@ impl App {
         self.drag.cancel();
     }
 
-    /// Whether the view is currently zoomed into a sub-agent task.
+    /// Whether the view is currently zoomed into a subagent task.
     pub fn in_subagent_view(&self) -> bool {
         !self.focus_stack.is_empty()
     }
 
-    /// The message slice currently in view: the root conversation, or the
-    /// focused sub-agent task's child messages.
+    /// The message slice currently in view: the `/btw` side transcript when
+    /// the side view is active (ADR-0017), the focused subagent task's child
+    /// messages when zoomed, or the root conversation otherwise.
     pub fn focused_messages(&self) -> &[TranscriptMessage] {
+        if self.in_side_view {
+            return &self.side_messages;
+        }
         let Some(call_id) = self.focus_stack.last() else {
             return &self.messages;
         };
@@ -700,13 +754,13 @@ impl App {
         self.focused_target = None;
     }
 
-    /// Zoom into a sub-agent task's child messages.
+    /// Zoom into a subagent task's child messages.
     pub fn enter_subagent(&mut self, call_id: String) {
         self.focus_stack.push(call_id);
         self.reset_view_state();
     }
 
-    /// Return from the current sub-agent view to its parent. Returns true if a
+    /// Return from the current subagent view to its parent. Returns true if a
     /// view was actually popped.
     pub fn exit_subagent(&mut self) -> bool {
         if self.focus_stack.pop().is_some() {
@@ -717,8 +771,31 @@ impl App {
         }
     }
 
-    /// Cycle to the previous (`dir < 0`) or next (`dir > 0`) sibling sub-agent
-    /// task at the current focus level. No-op when not in a sub-agent view or
+    /// Enter the `/btw` side conversation view (ADR-0017). The side transcript
+    /// ([`App::side_messages`]) becomes the viewed stream and a top banner
+    /// reports the primary session's coarse status. Reuses the subagent
+    /// zoom's `reset_view_state` so the swap feels identical to focusing a
+    /// task step.
+    pub fn enter_side_view(&mut self, side_id: String) {
+        self.side_session_id = Some(side_id);
+        self.in_side_view = true;
+        self.side_messages.clear();
+        self.parent_status = ParentStatus::Idle;
+        self.reset_view_state();
+    }
+
+    /// Leave the `/btw` side view and return to the primary transcript. The
+    /// side buffer is dropped (the side session file remains on disk,
+    /// recoverable via `/sessions`).
+    pub fn exit_side_view(&mut self) {
+        self.in_side_view = false;
+        self.side_session_id = None;
+        self.side_messages.clear();
+        self.reset_view_state();
+    }
+
+    /// Cycle to the previous (`dir < 0`) or next (`dir > 0`) sibling subagent
+    /// task at the current focus level. No-op when not in a subagent view or
     /// when there are no siblings.
     pub fn cycle_sibling(&mut self, dir: i8) {
         let Some(current) = self.focus_stack.last().cloned() else {

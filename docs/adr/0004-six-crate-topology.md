@@ -1,6 +1,6 @@
 # 0004. Six-crate topology: core / app / providers / tools / harness / cli
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0005
 - **Date:** 2026-06-20
 - **Supersedes:** ADR-0003 (which framed the topology as four crates with a
   standalone `neenee-tui`; that boundary was correct at the time but the

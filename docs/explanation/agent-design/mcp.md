@@ -3,7 +3,7 @@
 neenee discovers local stdio [Model Context Protocol][mcp] servers at startup
 and exposes their tools alongside the built-in ones, using the same execution
 path. This page covers discovery, the tool wrapper, failure isolation, and how
-MCP tools interact with [Plan mode](plan-mode.md) and the permission broker.
+MCP tools interact with [subagent admission](subagents.md) and the permission broker.
 For the per-tool parameter surface, see [Built-in tools](../../reference/tools/index.md).
 
 [mcp]: https://modelcontextprotocol.io/
@@ -39,7 +39,7 @@ read_only = false
 | `command` | — | argv; first element is the program |
 | `environment` | empty | Env vars applied at spawn |
 | `enabled` | `true` | When `false`, the server is recorded as disabled and never spawned |
-| `read_only` | `false` | Sets the tool's access tier; gates [Plan mode](#plan-mode) and the permission broker |
+| `read_only` | `false` | Sets the tool's access tier; gates [subagent admission](#access-tier-and-subagent-admission) and the permission broker |
 
 `command` is argv-style, not a shell string — users pre-split it
 (`["npx", "-y", "..."]`). The map key is the server name, which becomes the
@@ -136,18 +136,18 @@ MCP servers:
 
 The session modal (`Ctrl+I`) shows the same data plus per-server tool names.
 
-## Plan mode
+## Access tier and subagent admission
 
-An MCP tool inherits the default plan-mode check: it is admitted only when its
-access tier is `Read`. The consequence is exactly the inverse of the
-`.neenee/plans/` write exemption that built-in file tools enjoy:
+An MCP tool's `read_only` flag sets its `ToolAccess` tier, which a subagent
+profile admits by capability axis (ADR-0011). The `PLAN` profile, for example,
+admits `Read` MCP tools plus scoped writes; an MCP server that needs to be
+usable inside a planner must declare `read_only = true`. Outside subagents the
+main agent is unrestricted, so an MCP tool's tier only gates its *subagent*
+admission and the permission broker (below), never the main agent.
 
-- `read_only = true` server → `Read` → **allowed** in Plan mode.
-- `read_only = false` server (the default) → `Write` → **blocked** in Plan
-  mode, with no per-invocation exemption.
-
-A project that wants an MCP tool usable during planning must opt in by setting
-`read_only = true` in config.
+- `read_only = true` server → `Read` → admitted by `EXPLORE`/`PLAN`/`VERIFY`.
+- `read_only = false` server (the default) → `Write` → admitted only where the
+  profile grants writes (and then scoped by `WriteScope`).
 
 ## Permission broker
 
@@ -173,8 +173,8 @@ sent `SIGKILL`.
 
 - [Built-in tools](../../reference/tools/index.md) — `mcp__<server>__<tool>`
   parameter surface and the MCP tools subsection
-- [Plan mode](plan-mode.md) — the access-tier gate and the `.neenee/plans/`
-  write exemption
+- [Plan](plan.md) — the `PLAN` subagent and its scoped `.neenee/plans/`
+  write grant
 - [Sub-agents](subagents.md) — why `read_only` MCP servers are visible
   to sub-agents and write servers are not
 - [Harness architecture](harness.md) — the 8-second MCP init bound and the

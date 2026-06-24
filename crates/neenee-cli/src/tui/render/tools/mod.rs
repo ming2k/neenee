@@ -44,7 +44,7 @@ pub enum ToolStatus {
     Ok,
     /// Output present and the call failed. Failure is determined by the
     /// structured [`ToolStepStatus`] (set from `ToolOutput::is_error()` in
-    /// `document.rs`), not by string-sniffing the output text — sub-agent
+    /// `document.rs`), not by string-sniffing the output text — subagent
     /// failures carry an explicit `failed` flag and tool errors use
     /// `ToolOutput::Error`.
     Failed,
@@ -68,7 +68,7 @@ impl ToolStatus {
     }
 
     /// Theme color used for the status rail / step accent. Centralizes the
-    /// status→color mapping that step headers, sticky pins, and sub-agent steps
+    /// status→color mapping that step headers, sticky pins, and subagent steps
     /// previously each duplicated.
     pub fn color(self, theme: &Theme) -> Color {
         match self {
@@ -124,6 +124,10 @@ pub enum ArgLayout {
 pub struct ToolView<'a> {
     pub name: &'a str,
     pub args: &'a serde_json::Map<String, Value>,
+    /// The subagent profile name (`explore` / `plan` / …) when this step is a
+    /// subagent run that has announced its role; `None` otherwise. Lets the
+    /// [`SubagentPresenter`] label the step by role instead of "Subagent".
+    pub profile: Option<&'a str>,
 }
 
 impl ToolView<'_> {
@@ -174,7 +178,7 @@ pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
         "webfetch" => &web::WebFetchPresenter,
         "websearch" => &web::WebSearchPresenter,
         "todo" => &meta::TodoPresenter,
-        "task" => &meta::TaskPresenter,
+        "subagent" => &meta::SubagentPresenter,
         "use_skill" => &meta::UseSkillPresenter,
         "create_project" => &meta::CreateProjectPresenter,
         _ => &fallback::FallbackPresenter,
@@ -191,12 +195,16 @@ const SUMMARY_BUDGET: usize = 72;
 /// truncated raw string (preserving the pre-refactor behavior for malformed
 /// or scalar argument payloads). This is the entry point step 2 will call from
 /// `document.rs` in place of `argument_summary`.
-pub fn summary_for(name: &str, arguments: &str) -> String {
+pub fn summary_for(name: &str, arguments: &str, profile: Option<&str>) -> String {
     let parsed: Option<Value> = serde_json::from_str(arguments).ok();
     let Some(obj) = parsed.as_ref().and_then(Value::as_object) else {
         return truncate(arguments, SUMMARY_BUDGET);
     };
-    let view = ToolView { name, args: obj };
+    let view = ToolView {
+        name,
+        args: obj,
+        profile,
+    };
     truncate(&presenter_for(name).summary(&view), SUMMARY_BUDGET)
 }
 
@@ -234,7 +242,7 @@ mod tests {
     use super::*;
 
     fn summary(name: &str, args: serde_json::Value) -> String {
-        summary_for(name, &args.to_string())
+        summary_for(name, &args.to_string(), None)
     }
 
     #[test]
@@ -283,7 +291,7 @@ mod tests {
 
     #[test]
     fn non_object_arguments_truncate_raw() {
-        assert_eq!(summary_for("bash", "not json"), "not json");
+        assert_eq!(summary_for("bash", "not json", None), "not json");
     }
 
     #[test]

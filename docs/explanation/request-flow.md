@@ -174,7 +174,7 @@ the assistant message as a synthetic `tool_calls` entry, and executes a
 single call.
 
 In both cases the actual side-effecting work goes through one path: tool
-lookup, Plan-mode gating, the permission broker, then execution.
+lookup, the write-scope gate, the permission broker, then execution.
 
 ### Messages evolution
 

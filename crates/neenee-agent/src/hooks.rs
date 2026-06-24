@@ -308,6 +308,39 @@ impl HookRegistry {
         };
         let _ = self.fire(HookEventKind::SessionEnd, None, &ctx).await;
     }
+
+    /// `Round` (ADR-0030): fires once per tool round. Every `Inject` context is
+    /// collected as hidden user messages for the next round. `Deny` is
+    /// **ignored** by contract — a round-count hook cannot abort the turn (the
+    /// ADR-0009 concern). `consecutive_readonly` carries the read-only streak
+    /// so a hook can target exploration-without-progress without re-deriving it.
+    pub async fn run_round(
+        &self,
+        round: usize,
+        consecutive_readonly: u32,
+        session_id: &str,
+        cwd: Option<&Path>,
+    ) -> Vec<String> {
+        if self.hooks.is_empty() {
+            return Vec::new();
+        }
+        let ctx = HookContext {
+            session_id: session_id.to_string(),
+            cwd: cwd.map(Path::to_path_buf),
+            event: HookEvent::Round {
+                round,
+                consecutive_readonly,
+            },
+        };
+        self.fire(HookEventKind::Round, None, &ctx)
+            .await
+            .into_iter()
+            .filter_map(|o| match o {
+                HookOutcome::Inject { context } => Some(context),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// The decision a `UserPromptSubmit` hook produces.

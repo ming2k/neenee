@@ -49,19 +49,19 @@ pub struct Message {
     pub model: Option<String>,
     #[serde(default)]
     pub hidden: bool,
-    /// Nested sub-agent transcript. Populated only on the `Tool`-role result
-    /// message of a `task` tool call (see `TaskTool`). Each entry is a
-    /// `Message` from the sub-agent's own conversation (System, User,
+    /// Nested subagent transcript. Populated only on the `Tool`-role result
+    /// message of a `task` tool call (see `SubagentTool`). Each entry is a
+    /// `Message` from the subagent's own conversation (System, User,
     /// Assistant with tool_calls, Tool results, …), in chronological order.
-    /// Recursive: a sub-agent's own `task` results carry their own `children`,
-    /// so arbitrarily deep sub-agent trees round-trip through session.json.
+    /// Recursive: a subagent's own `task` results carry their own `children`,
+    /// so arbitrarily deep subagent trees round-trip through session.json.
     ///
-    /// `None` for every message that is not a sub-agent's tool result; this
+    /// `None` for every message that is not a subagent's tool result; this
     /// keeps the legacy flat shape unchanged for non-task messages and lets
     /// old session.json files (which predate the field) deserialize as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<Message>>,
-    /// Metadata about the sub-agent run that produced [`Message::children`].
+    /// Metadata about the subagent run that produced [`Message::children`].
     /// Populated only on the same message that has `children = Some(_)`. The
     /// two fields are convention-paired (presence of one implies presence of
     /// the other); they are kept separate rather than bundled into a single
@@ -73,7 +73,7 @@ pub struct Message {
     pub subagent_meta: Option<SubagentMeta>,
 }
 
-/// Sidecar metadata for a sub-agent run. Lives next to
+/// Sidecar metadata for a subagent run. Lives next to
 /// [`Message::children`] on the same `Tool`-role result message. Captures
 /// information that the live event stream knows but the bare transcript
 /// cannot reconstruct on resume.
@@ -81,29 +81,29 @@ pub struct Message {
 pub struct SubagentMeta {
     /// The task description supplied by the parent agent (from the `task`
     /// tool_call's `arguments.description` field). Cached here so the TUI
-    /// does not have to re-parse the JSON arguments to label the sub-agent
+    /// does not have to re-parse the JSON arguments to label the subagent
     /// view's navigation bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Wall-clock duration of the sub-agent run in milliseconds. Filled from
+    /// Wall-clock duration of the subagent run in milliseconds. Filled from
     /// the parent `record_tool_result`'s `duration_ms` parameter (which
-    /// already measures the full sub-agent run because the `task` tool blocks
-    /// until the sub-agent finishes).
+    /// already measures the full subagent run because the `task` tool blocks
+    /// until the subagent finishes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Number of read-only tools the sub-agent had access to. Useful as a
+    /// Number of read-only tools the subagent had access to. Useful as a
     /// debugging signal when reviewing archived runs.
     #[serde(default)]
     pub toolset_count: u32,
-    /// Provider / model that served the sub-agent. Currently always equal to
-    /// the parent's provider/model (TaskTool clones the parent's provider),
+    /// Provider / model that served the subagent. Currently always equal to
+    /// the parent's provider/model (SubagentTool clones the parent's provider),
     /// but persisted separately so a future "cheaper model for sub-agents"
     /// feature does not require a schema change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Whether the sub-agent finished by hitting an error path (32-round
+    /// Whether the subagent finished by hitting an error path (32-round
     /// limit, repeated-call guard, provider error). Mirrors
     /// `ToolOutput::Subagent { summary.starts_with("Error") }` but stored
     /// explicitly so consumers do not have to string-sniff.
@@ -189,11 +189,11 @@ impl Message {
         }
     }
 
-    /// Attach a sub-agent's full internal transcript to a `Tool`-role result
+    /// Attach a subagent's full internal transcript to a `Tool`-role result
     /// message. Builder-style companion to [`Message::tool_result`]. Storing
     /// the nested transcript on the result message (rather than on the
     /// assistant `tool_calls` message) keeps the data close to where it was
-    /// produced and lets resume reconstruct the sub-agent view by reading a
+    /// produced and lets resume reconstruct the subagent view by reading a
     /// single message.
     pub fn with_children(mut self, children: Vec<Message>) -> Self {
         self.children = if children.is_empty() {
@@ -204,7 +204,7 @@ impl Message {
         self
     }
 
-    /// Attach sub-agent sidecar metadata to a `Tool`-role result message.
+    /// Attach subagent sidecar metadata to a `Tool`-role result message.
     /// Pair with [`Message::with_children`]; the two fields travel together
     /// but are kept separate for schema-backward-compat (see
     /// [`Message::subagent_meta`] docs).
@@ -249,12 +249,12 @@ mod tests {
 
     #[test]
     fn children_round_trip_through_json() {
-        // A tool result with a sub-agent transcript must survive a
+        // A tool result with a subagent transcript must survive a
         // serialise → deserialise round trip with the nested messages intact,
         // including their own nested children (sub-sub-agents).
         let call = ToolCall {
             id: "call_root".to_string(),
-            name: "task".to_string(),
+            name: "subagent".to_string(),
             arguments: "{}".to_string(),
         };
         let nested_call = ToolCall {
@@ -295,12 +295,12 @@ mod tests {
         assert_eq!(children.len(), 4);
         // The grep call inside the subagent kept its tool_calls.
         assert!(children[2].tool_calls.is_some());
-        // The inner Tool message kept its own nested children (sub-sub-agent).
+        // The inner Tool message kept its own nested children (sub-subagent).
         let inner = &children[3];
         assert_eq!(inner.role, Role::Tool);
         assert!(
             inner.children.is_some(),
-            "sub-sub-agent children must survive"
+            "sub-subagent children must survive"
         );
         assert_eq!(inner.children.as_ref().unwrap().len(), 1);
     }
@@ -309,7 +309,7 @@ mod tests {
     fn with_children_empty_vec_is_none() {
         let call = ToolCall {
             id: "c".to_string(),
-            name: "task".to_string(),
+            name: "subagent".to_string(),
             arguments: "{}".to_string(),
         };
         let m = Message::tool_result(&call, "x").with_children(Vec::new());

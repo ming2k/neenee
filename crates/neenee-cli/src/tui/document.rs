@@ -4,7 +4,7 @@
 //! so that selection and copy operate on semantic units (blocks) rather than
 //! terminal grid characters.
 
-use neenee_core::{Role, SubTaskEvent};
+use neenee_core::{Role, SubagentEvent};
 
 /// Lifecycle of a tool step, stored explicitly (not inferred from `output`)
 /// so an aborted call has its own terminal state instead of being stuck in
@@ -39,6 +39,11 @@ pub enum MessageKind {
     ToolStep {
         id: String,
         name: String,
+        /// The bound subagent profile name (`explore` / `plan` / `verify` / …)
+        /// for a subagent-spawning tool step, populated from the first
+        /// `SubagentEvent::Started` and used to label the step by its role.
+        /// `None` for non-subagent steps, or until the `Started` event lands.
+        profile: Option<String>,
         arguments: String,
         output: Option<String>,
         /// Typed result (ADR-0001). `None` until the result lands, then a
@@ -66,11 +71,11 @@ pub enum MessageKind {
         user_pinned: bool,
         duration_ms: Option<u64>,
         /// Wall-clock instant the step started, so the UI can show a live
-        /// elapsed time while the call (or sub-agent) is still running.
+        /// elapsed time while the call (or subagent) is still running.
         /// `Instant` is cheap to capture at construction time and is not
         /// serialized — session restore reconstructs finished steps without it.
         started_at: Option<std::time::Instant>,
-        /// Child events emitted by a sub-agent spawned from this tool step.
+        /// Child events emitted by a subagent spawned from this tool step.
         children: Vec<TranscriptMessage>,
     },
     Thinking {
@@ -318,6 +323,7 @@ impl TranscriptMessage {
             kind: MessageKind::ToolStep {
                 id: id.into(),
                 name: name.into(),
+                profile: None,
                 arguments: arguments.into(),
                 output: None,
                 structured: None,
@@ -359,7 +365,7 @@ impl TranscriptMessage {
         }
         let output = output.into();
         // Classify from the structured result (data-level: a non-zero shell
-        // exit, an explicit `ToolOutput::Error`, a `failed` sub-agent). The
+        // exit, an explicit `ToolOutput::Error`, a `failed` subagent). The
         // legacy `starts_with("Error")` text fallback was removed once tool
         // error sites migrated to `ToolOutput::Error` and sub-agents carried
         // an explicit `failed` flag — classification is now fully data-driven.
@@ -423,9 +429,9 @@ impl TranscriptMessage {
 
     /// Mark a still-running tool step as cancelled. Idempotent: a step that
     /// already reached a terminal state (`Ok` / `Failed` / `Cancelled`) is left
-    /// untouched and returns `false`. When the step is a `task` (sub-agent),
+    /// untouched and returns `false`. When the step is a `task` (subagent),
     /// its still-running nested tool children are cancelled too, so an aborted
-    /// sub-agent never leaves a "running" child step behind.
+    /// subagent never leaves a "running" child step behind.
     pub fn cancel_tool_step(&mut self, id: &str) -> bool {
         let MessageKind::ToolStep {
             id: step_id,
@@ -445,7 +451,7 @@ impl TranscriptMessage {
     }
 
     /// Recursively cancel every still-running tool step within this message
-    /// (used for sub-agent children and as a defensive sweep). Returns `true`
+    /// (used for subagent children and as a defensive sweep). Returns `true`
     /// if anything transitioned.
     pub fn cancel_all_running(&mut self) -> bool {
         let (step_running, child_changed) = {
@@ -491,18 +497,29 @@ impl TranscriptMessage {
         }
     }
 
-    /// Append a sub-agent event as a nested child of this tool step.
+    /// Append a subagent event as a nested child of this tool step.
     ///
     /// Returns `true` if this message is a tool step and the event was stored.
-    pub fn push_subtask_event(&mut self, event: &SubTaskEvent) -> bool {
-        let MessageKind::ToolStep { children, .. } = &mut self.kind else {
+    pub fn push_subagent_event(&mut self, event: &SubagentEvent) -> bool {
+        let MessageKind::ToolStep {
+            children,
+            profile,
+            ..
+        } = &mut self.kind
+        else {
             return false;
         };
         match event {
-            SubTaskEvent::StreamStart => {
+            // The subagent announced its role — stamp it on the step so the
+            // label can render "explore: …" / "plan: …" instead of a generic
+            // "Subagent". No child message is produced.
+            SubagentEvent::Started { profile: name } => {
+                *profile = Some(name.to_string());
+            }
+            SubagentEvent::StreamStart => {
                 children.push(TranscriptMessage::new(Role::Assistant, ""));
             }
-            SubTaskEvent::StreamDelta(delta) => {
+            SubagentEvent::StreamDelta(delta) => {
                 if let Some(last) = children
                     .last_mut()
                     .filter(|m| m.role == Role::Assistant && matches!(m.kind, MessageKind::Text))
@@ -514,7 +531,7 @@ impl TranscriptMessage {
                     children.push(msg);
                 }
             }
-            SubTaskEvent::StreamEnd(content) => {
+            SubagentEvent::StreamEnd(content) => {
                 if let Some(last) = children.last_mut().filter(|m| m.role == Role::Assistant) {
                     last.raw = content.clone();
                     last.reparse();
@@ -522,7 +539,7 @@ impl TranscriptMessage {
                     children.push(TranscriptMessage::new(Role::Assistant, content.clone()));
                 }
             }
-            SubTaskEvent::ToolCall {
+            SubagentEvent::ToolCall {
                 id,
                 name,
                 arguments,
@@ -533,7 +550,7 @@ impl TranscriptMessage {
                     arguments.clone(),
                 ));
             }
-            SubTaskEvent::ToolResult {
+            SubagentEvent::ToolResult {
                 id,
                 output,
                 duration_ms,
@@ -569,7 +586,17 @@ impl TranscriptMessage {
                     children.push(msg);
                 }
             }
-            SubTaskEvent::Activity(_) => {}
+            SubagentEvent::Activity(_) => {}
+            // Full-duplex (ADR-0029): a subagent surfaced a permission /
+            // ask_user request up through the subagent tool. The down-direction
+            // reply (registry → handle → reply_permission / reply_user_question)
+            // is wired at the agent layer; rendering the nested prompt in the
+            // TUI and routing the user's answer back down is the harness↔TUI
+            // integration step that follows. Until then these are observed but
+            // not rendered as a nested child step (the request still reaches
+            // the harness via the `TurnEvent::SubAgent` envelope, so a future
+            // handler can attach without changing the event shape).
+            SubagentEvent::PermissionRequest(_) | SubagentEvent::UserQuestionRequest(_) => {}
         }
         true
     }
@@ -620,16 +647,16 @@ impl TranscriptMessage {
         }
     }
 
-    /// The `task` tool spawns a sub-agent. Such tool steps are rendered as a
-    /// compact, non-expandable step that navigates into a dedicated sub-agent
+    /// The `subagent` tool spawns a subagent. Such tool steps are rendered as a
+    /// compact, non-expandable step that navigates into a dedicated subagent
     /// view on activation (see the TUI focus stack) rather than expanding
     /// inline.
     pub fn is_subagent_task(&self) -> bool {
-        matches!(&self.kind, MessageKind::ToolStep { name, .. } if name == "task")
+        matches!(&self.kind, MessageKind::ToolStep { name, .. } if name == "subagent")
     }
 
     /// The call id of a tool step, used as the addressable identity of a
-    /// sub-agent task for the focus stack.
+    /// subagent task for the focus stack.
     pub fn tool_step_call_id(&self) -> Option<&str> {
         match &self.kind {
             MessageKind::ToolStep { id, .. } => Some(id),
@@ -637,7 +664,7 @@ impl TranscriptMessage {
         }
     }
 
-    /// The nested child messages emitted by a sub-agent task. Returns `None`
+    /// The nested child messages emitted by a subagent task. Returns `None`
     /// for non-tool-step messages.
     pub fn subagent_children(&self) -> Option<&[TranscriptMessage]> {
         match &self.kind {
@@ -647,7 +674,7 @@ impl TranscriptMessage {
     }
 
     /// Mutable access to a tool step's child messages (used when the view is
-    /// zoomed into a sub-agent and its children are the active message stream).
+    /// zoomed into a subagent and its children are the active message stream).
     pub fn subagent_children_mut(&mut self) -> Option<&mut Vec<TranscriptMessage>> {
         match &mut self.kind {
             MessageKind::ToolStep { children, .. } => Some(children),
@@ -655,22 +682,32 @@ impl TranscriptMessage {
         }
     }
 
-
-    /// Short label for the sub-agent (its task description), shown in the
-    /// sub-agent view's navigation bar.
+    /// Short label for the subagent, shown in the subagent view's navigation
+    /// bar. Prefixed with the role (`explore` / `plan` / `verify` / …) when
+    /// the `Started` event has identified it, so the bar reads e.g.
+    /// `plan · write the implementation plan` rather than a bare description.
     pub fn subagent_label(&self) -> String {
-        let MessageKind::ToolStep { arguments, .. } = &self.kind else {
-            return "Task".to_string();
+        let MessageKind::ToolStep {
+            arguments,
+            profile,
+            ..
+        } = &self.kind
+        else {
+            return "Subagent".to_string();
         };
         let label = parse_arguments_kv(arguments)
             .into_iter()
             .find(|(k, _)| k == "description")
             .map(|(_, v)| v)
-            .unwrap_or_else(|| "Task".to_string());
-        truncate(&label, 48)
+            .unwrap_or_else(|| "Subagent".to_string());
+        let label = truncate(&label, 48);
+        match profile {
+            Some(role) => format!("{} · {}", role, label),
+            None => label,
+        }
     }
 
-    /// One-line live status derived from the sub-agent's children and the
+    /// One-line live status derived from the subagent's children and the
     /// parent tool step's completion state, e.g. `↳ Running · 3 tool calls ·
     /// Grep "foo"` or `↳ Completed · 3 tool calls · 1.2s`. Returns
     /// `None` for non-task steps. Duration is only shown once the step reaches
@@ -858,6 +895,7 @@ impl TranscriptMessage {
     pub fn tool_step_summary(&self) -> Option<String> {
         let MessageKind::ToolStep {
             name,
+            profile,
             arguments,
             status,
             duration_ms,
@@ -866,7 +904,7 @@ impl TranscriptMessage {
         else {
             return None;
         };
-        let summary = crate::tui::render::tools::summary_for(name, arguments);
+        let summary = crate::tui::render::tools::summary_for(name, arguments, profile.as_deref());
         Some(match status {
             ToolStepStatus::Running => summary,
             ToolStepStatus::Ok => format!("{} · {}", summary, duration_text(*duration_ms)),
@@ -886,6 +924,7 @@ impl TranscriptMessage {
         let MessageKind::ToolStep {
             id: _,
             name,
+            profile,
             arguments,
             output,
             structured: _,
@@ -923,7 +962,7 @@ impl TranscriptMessage {
             }
             self.blocks = blocks;
         } else {
-            let summary = crate::tui::render::tools::summary_for(name, arguments);
+            let summary = crate::tui::render::tools::summary_for(name, arguments, profile.as_deref());
             let suffix = match status {
                 ToolStepStatus::Running => String::new(),
                 ToolStepStatus::Ok => format!(" · {}", duration_text(*duration_ms)),
@@ -953,7 +992,6 @@ impl TranscriptMessage {
         self.raw.push_str(delta);
         self.reparse();
     }
-
 }
 
 /// Parse a JSON arguments string into ordered `(key, display_value)` pairs
@@ -1804,7 +1842,7 @@ mod tests {
     fn subagent_task_is_detected_and_addressable() {
         let task = TranscriptMessage::tool_step(
             "call_42",
-            "task",
+            "subagent",
             r#"{"description":"explore src","prompt":"..."}"#,
         );
         assert!(task.is_subagent_task());
@@ -1812,30 +1850,56 @@ mod tests {
         assert_eq!(task.subagent_children().map(|c| c.len()), Some(0));
         assert_eq!(task.subagent_label(), "explore src");
 
-        // A regular tool step is not a sub-agent task.
+        // A regular tool step is not a subagent task.
         let read = TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"a"}"#);
         assert!(!read.is_subagent_task());
         assert!(read.subagent_status_line().is_none());
     }
 
     #[test]
+    fn subagent_started_event_labels_step_by_role() {
+        // A `Started` event stamps the bound profile name on the step so the
+        // nav bar / collapsed summary read by role (`plan · …`) instead of a
+        // generic "Subagent".
+        let mut task = TranscriptMessage::tool_step(
+            "call_7",
+            "subagent",
+            r#"{"description":"write the plan","prompt":"..."}"#,
+        );
+        assert_eq!(task.subagent_label(), "write the plan");
+        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started {
+            profile: "plan",
+        }));
+        assert_eq!(task.subagent_label(), "plan · write the plan");
+        // The collapsed header picks the role up via `tool_step_summary` too.
+        let header = task.tool_step_summary().expect("summary");
+        assert!(
+            header.starts_with("plan:"),
+            "collapsed summary should lead with the role; got: {header}"
+        );
+    }
+
+    #[test]
     fn subagent_status_reflects_children_and_completion() {
-        let mut task =
-            TranscriptMessage::tool_step("call_9", "task", r#"{"description":"d","prompt":"p"}"#);
+        let mut task = TranscriptMessage::tool_step(
+            "call_9",
+            "subagent",
+            r#"{"description":"d","prompt":"p"}"#,
+        );
 
         // No children yet, still running.
         let running = task.subagent_status_line().expect("running status");
         assert!(running.starts_with("↳ Running"), "got: {running}");
 
         // Streaming assistant text => a "thinking" suffix.
-        task.push_subtask_event(&SubTaskEvent::StreamStart);
-        task.push_subtask_event(&SubTaskEvent::StreamDelta("partial".into()));
+        task.push_subagent_event(&SubagentEvent::StreamStart);
+        task.push_subagent_event(&SubagentEvent::StreamDelta("partial".into()));
         let thinking = task.subagent_status_line().expect("thinking status");
         assert!(thinking.starts_with("↳ Running"), "got: {thinking}");
         assert!(thinking.ends_with("thinking"), "got: {thinking}");
 
         // An in-flight child tool call surfaces the tool's header.
-        task.push_subtask_event(&SubTaskEvent::ToolCall {
+        task.push_subagent_event(&SubagentEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
@@ -1856,20 +1920,20 @@ mod tests {
         assert!(done.contains("1 tool calls"), "got: {done}");
         assert!(done.contains("1.5s"), "got: {done}");
 
-        // Children are accessible for the dedicated sub-agent view.
+        // Children are accessible for the dedicated subagent view.
         assert_eq!(task.subagent_children().map(|c| c.len()), Some(2));
     }
 
     #[test]
     fn subagent_failed_status_reports_failure() {
         let mut task =
-            TranscriptMessage::tool_step("c", "task", r#"{"description":"d","prompt":"p"}"#);
-        task.push_subtask_event(&SubTaskEvent::ToolCall {
+            TranscriptMessage::tool_step("c", "subagent", r#"{"description":"d","prompt":"p"}"#);
+        task.push_subagent_event(&SubagentEvent::ToolCall {
             id: "i".into(),
             name: "bash".into(),
             arguments: "{}".into(),
         });
-        // The sub-agent failure is now signalled by the structured `failed`
+        // The subagent failure is now signalled by the structured `failed`
         // flag on `ToolOutput::Subagent`, not by an "Error:" text prefix.
         let structured = neenee_core::ToolOutput::Subagent {
             summary: "Error: boom".into(),
@@ -1955,10 +2019,13 @@ mod tests {
 
     #[test]
     fn cancelling_a_subagent_also_cancels_its_running_children() {
-        let mut task =
-            TranscriptMessage::tool_step("task_1", "task", r#"{"description":"d","prompt":"p"}"#);
+        let mut task = TranscriptMessage::tool_step(
+            "task_1",
+            "subagent",
+            r#"{"description":"d","prompt":"p"}"#,
+        );
         // A nested tool call still in flight.
-        task.push_subtask_event(&SubTaskEvent::ToolCall {
+        task.push_subagent_event(&SubagentEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
@@ -1970,7 +2037,7 @@ mod tests {
         );
 
         // Interrupting the parent task cancels it AND the nested running child,
-        // so the sub-agent view never shows a stuck "running" step.
+        // so the subagent view never shows a stuck "running" step.
         assert!(task.cancel_tool_step("task_1"));
         assert_eq!(task.tool_step_status(), Some(ToolStepStatus::Cancelled));
         let children = task.subagent_children().expect("has children");

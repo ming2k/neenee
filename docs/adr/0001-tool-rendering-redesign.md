@@ -1,6 +1,6 @@
 # 0001. Tool-step rendering redesign: log entries over expandable cards
 
-- **Status:** Implemented
+- **Status:** Accepted
 - **Date:** 2026-06-19
 
 ## Context

@@ -50,7 +50,6 @@ macro_rules! define_builtin_commands {
 
 define_builtin_commands! {
     Provider    = "/provider"     : "Select an LLM provider",
-    Mode        = "/mode"         : "Show or switch mode (build, plan)",
     Plan        = "/plan"         : "Open the active plan file in a preview modal",
     Verify      = "/verify"       : "Trigger independent plan verification",
     VerifyNudge = "/verify-nudge" : "Toggle the verify-plan hard nudge at turn end (on/off)",
@@ -63,6 +62,7 @@ define_builtin_commands! {
     Search      = "/search"       : "Semantic search over the project's session history",
     Session     = "/session"      : "Manage durable sessions (status|list|resume|fork|open|new)",
     Sessions    = "/sessions"     : "Browse past sessions",
+    Btw         = "/btw"          : "Open a side conversation that runs alongside the main session",
     Resume      = "/resume"       : "Resume the most recent or selected session",
     Pursue      = "/pursue"       : "Pursue a condition: drive the agent until it is met, or manage the pursuit",
     Repeat      = "/repeat"       : "Schedule a prompt on a cron: /repeat <cron> <prompt>",

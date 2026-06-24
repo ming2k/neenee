@@ -38,6 +38,11 @@ pub enum HookEventKind {
     Stop,
     PreCompact,
     PostCompact,
+    /// Fires once per tool round (ADR-0030). Constrained: only `Inject` is
+    /// honoured — `Deny` is ignored so a round-count hook cannot become a
+    /// de-facto round cap (the ADR-0009 concern). The harness declares no
+    /// built-in threshold on this axis; it only provides the trigger point.
+    Round,
 }
 
 impl HookEventKind {
@@ -62,7 +67,7 @@ pub struct HookContext {
 
 /// The payload for one fire. Tool events carry a name + a reduced view of the
 /// input/output — commands read JSON on stdin, not live Rust values, so the
-/// full [`crate::ToolOutput`] (which may embed a sub-agent transcript) is not
+/// full [`crate::ToolOutput`] (which may embed a subagent transcript) is not
 /// forwarded wholesale; its `to_text()` summary is.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
@@ -85,6 +90,14 @@ pub enum HookEvent {
     Stop { last_message: String },
     PreCompact,
     PostCompact,
+    /// Fires once per tool round (ADR-0030). `consecutive_readonly` carries the
+    /// read-only-round streak so a hook can act on "exploration without
+    /// progress" without re-deriving it. Only `Inject` is honoured (see
+    /// [`HookEventKind::Round`]).
+    Round {
+        round: usize,
+        consecutive_readonly: u32,
+    },
 }
 
 impl HookEvent {
@@ -99,6 +112,7 @@ impl HookEvent {
             Self::Stop { .. } => HookEventKind::Stop,
             Self::PreCompact => HookEventKind::PreCompact,
             Self::PostCompact => HookEventKind::PostCompact,
+            Self::Round { .. } => HookEventKind::Round,
         }
     }
 
@@ -125,11 +139,12 @@ pub enum HookOutcome {
     Pass,
     /// `PreToolUse`: the call is blocked; `reason` becomes the tool error the
     /// model sees. `Stop`: the turn continues for another round with `reason`
-    /// fed back as a hidden user message. Ignored on other events.
+    /// fed back as a hidden user message. Ignored on other events, including
+    /// `Round` (ADR-0030: a round-count hook may not become a de-facto cap).
     Deny { reason: String },
     /// Inject `context` as a hidden user message the model sees on its next
-    /// round. Honoured on `UserPromptSubmit` (prepended), `Stop`, and
-    /// `PostToolUse`. Ignored elsewhere.
+    /// round. Honoured on `UserPromptSubmit` (prepended), `Stop`,
+    /// `PostToolUse`, and `Round`. Ignored elsewhere.
     Inject { context: String },
 }
 

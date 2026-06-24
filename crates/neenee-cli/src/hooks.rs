@@ -142,7 +142,10 @@ async fn write_stdin_and_collect(
             // Timed out; best-effort kill. `child.wait()` borrows, so the child
             // is still ours to kill here.
             let _ = child.start_kill();
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "hook timed out"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "hook timed out",
+            ))
         }
     }
 }
@@ -228,7 +231,10 @@ fn context_to_json(ctx: &HookContext) -> String {
         HookEvent::UserPromptSubmit { prompt } => {
             value["prompt"] = json!(prompt);
         }
-        HookEvent::PreToolUse { tool_name, tool_input } => {
+        HookEvent::PreToolUse {
+            tool_name,
+            tool_input,
+        } => {
             value["tool_name"] = json!(tool_name);
             value["tool_input"] = tool_input.clone();
         }
@@ -248,6 +254,13 @@ fn context_to_json(ctx: &HookContext) -> String {
         HookEvent::Stop { last_message } => {
             value["last_message"] = json!(last_message);
         }
+        HookEvent::Round {
+            round,
+            consecutive_readonly,
+        } => {
+            value["round"] = json!(round);
+            value["consecutive_readonly"] = json!(consecutive_readonly);
+        }
         HookEvent::PreCompact | HookEvent::PostCompact => {}
     }
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
@@ -264,6 +277,7 @@ fn event_name(event: &HookEvent) -> &'static str {
         HookEvent::Stop { .. } => "Stop",
         HookEvent::PreCompact => "PreCompact",
         HookEvent::PostCompact => "PostCompact",
+        HookEvent::Round { .. } => "Round",
     }
 }
 
@@ -317,7 +331,9 @@ mod tests {
     fn json_deny_wins_over_exit_code() {
         assert_eq!(
             interpret_output(result(r#"{"decision":"deny","reason":"bad"}"#, "", Some(0))),
-            HookOutcome::Deny { reason: "bad".into() }
+            HookOutcome::Deny {
+                reason: "bad".into()
+            }
         );
     }
 

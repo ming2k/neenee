@@ -63,16 +63,20 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
 ///
-/// Layout: `<spinner> turn N · round M · <model> · <elapsed> · <status>`. The
-/// turn/round/model/elapsed prefix is structural context (rendered muted) so
-/// the eye lands on the status; the status itself is brand + italic as the
-/// live signal. The round segment is omitted while `current_round == 0` — the
-/// pre-request phase (queued / preparing context) has no round yet, and
-/// showing `round 0` would be noise. The model segment is omitted when the
-/// model id is empty (e.g. before the first provider handshake), and the
-/// elapsed segment is omitted while `turn_started_at` is `None` (e.g. between
-/// turns). When the status string already carries a reason (e.g.
-/// `retry 1/4 in 3s · <message>`), it flows through unchanged as the tail.
+/// Layout: `<spinner> <status> [· ⟴ <pursuit>] [· plan d/t] · <elapsed>`.
+///
+/// The bar surfaces what the user most wants to know mid-turn — the live
+/// status, whether a pursuit/plan is in flight, and how long the turn has
+/// run — and is the click target that opens the Activity modal for the full
+/// detail. The structural counters (`turn N · round M · <model>`) live in
+/// the modal: they change rarely and take space, while the bar is a glance
+/// surface. Segments are omitted when there is nothing to report:
+/// - pursuit badge only when a pursuit is armed (`⟴ <truncated objective>`);
+/// - `plan d/t` only when a non-empty task list exists;
+/// - elapsed only while the turn timer is running.
+///
+/// When the status string already carries a reason (e.g.
+/// `retry 1/4 in 3s · <message>`), it flows through unchanged as the lead.
 ///
 /// Returns `Some(rect)` when the bar is drawn so the event loop can hit-test
 /// clicks and open the Activity modal; `None` when the bar is hidden.
@@ -80,10 +84,9 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 pub fn draw_activity_bar(
     frame: &mut Frame,
     rect: Rect,
-    turn: u64,
-    current_round: u64,
+    pursuit: Option<&neenee_core::Pursuit>,
+    todos: Option<&neenee_core::TodoList>,
     review_alert: &str,
-    current_model: &str,
     turn_started_at: Option<Instant>,
     status: &str,
     spinner_phase: usize,
@@ -110,36 +113,46 @@ pub fn draw_activity_bar(
         ),
     ];
 
-    // Structural prefix: `turn N` always (the bar only renders mid-turn),
-    // `round M` once a model request has fired, `model` while a provider is
-    // bound, and `elapsed` while the turn timer is running. All muted so the
-    // status — the thing that changes frame to frame — stays the visual focus.
+    // Lead segment: the live status — the thing that changes frame to frame,
+    // so it is the visual focus (brand + italic). The structural counters
+    // (turn/round/model) are deliberately absent; they live in the Activity
+    // modal that this bar opens on click.
     let dim = Style::default().fg(theme.muted());
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(format!("turn {}", turn), dim));
-    if current_round >= 1 {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(format!("round {}", current_round), dim));
-    }
-    if !current_model.is_empty() {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(
-            crate::tui::model_display_name(current_model),
-            dim,
-        ));
-    }
-    if let Some(started) = turn_started_at {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(format_elapsed(started.elapsed()), dim));
-    }
-    spans.push(Span::styled(" · ", dim));
-
     spans.push(Span::styled(
         status,
         Style::default()
             .fg(theme.brand())
             .add_modifier(Modifier::ITALIC),
     ));
+
+    // Pursuit badge: shown only while a pursuit is armed, as `⟴ <objective>`,
+    // so the user can tell at a glance that the turn is part of a larger
+    // goal. The objective is truncated to keep the single-line bar compact;
+    // the full text is one click away in the Activity modal.
+    if let Some(p) = pursuit.filter(|p| !p.is_complete) {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled("⟴ ", dim));
+        spans.push(Span::styled(truncate_for_bar(&p.objective, 32), dim));
+    }
+
+    // Plan/task progress: `plan d/t` while a non-empty task list exists, so
+    // a glance answers "is there a plan, and how far along?". The per-item
+    // breakdown lives in the modal.
+    if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
+        use neenee_core::TodoStatus;
+        let done = list.count(TodoStatus::Completed);
+        let total = list.items.len();
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(format!("plan {done}/{total}"), dim));
+    }
+
+    // Elapsed: the only live counter on the bar, shown while the turn timer
+    // runs. Dropped between turns (no `turn_started_at`).
+    if let Some(started) = turn_started_at {
+        spans.push(Span::styled(" · ", dim));
+        spans.push(Span::styled(format_elapsed(started.elapsed()), dim));
+    }
 
     // Session-review alert (ADR-0016): surfaced when a periodic diagnostic
     // judged the turn watch-worthy or stuck. Rendered with the same breathing
@@ -158,6 +171,17 @@ pub fn draw_activity_bar(
 
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
     Some(rect)
+}
+
+/// Truncate `s` to at most `max` display cells, appending `…` when cut, so a
+/// long pursuit objective does not overflow the single-line activity bar.
+fn truncate_for_bar(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
 }
 
 /// Draw a completion menu anchored above the input box. Renders each

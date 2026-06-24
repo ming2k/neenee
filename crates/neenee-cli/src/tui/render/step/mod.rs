@@ -1,7 +1,7 @@
 //! Step state machine and presentation primitives.
 //!
 //! A "step" is any collapsible block in the transcript — a tool step, a
-//! sub-agent task, or a reasoning trace. Historically each kind computed its
+//! subagent task, or a reasoning trace. Historically each kind computed its
 //! summary-line color from a tangle of ad-hoc flags (`expanded`, `focused`,
 //! `hovered`, status…) scattered across the data, interaction, and render
 //! layers. That conflation was the root cause of bugs like "a collapsed step
@@ -46,7 +46,7 @@ use super::Theme;
 mod renderers;
 mod state;
 pub use renderers::{
-    draw_reasoning_trace, draw_sticky_summary_if_needed, draw_subagent_bar,
+    draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed, draw_subagent_bar,
     draw_subagent_inline_step, draw_tool_step, StickyStep,
 };
 pub use state::{summary_text_color, Disclosure, Interaction};

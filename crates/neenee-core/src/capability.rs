@@ -3,7 +3,7 @@
 //! ([`ProviderStreamEvent`]), and the mid-turn context-relief hook
 //! ([`ContextReliefGate`]).
 
-use crate::{Message, SubTaskEvent, ToolOutput, ToolStream};
+use crate::{Message, SubagentEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
 use std::sync::Arc;
@@ -84,12 +84,6 @@ pub trait Tool: Send + Sync {
     fn access(&self) -> ToolAccess {
         ToolAccess::Write
     }
-    /// Whether this specific invocation may run while the agent is in Plan
-    /// mode. Defaults to read-only tools; write-capable tools can override to
-    /// permit safe scopes (e.g. writing files under the plan directory).
-    fn allowed_in_plan_mode(&self, _arguments: &str) -> bool {
-        matches!(self.access(), ToolAccess::Read)
-    }
 
     /// Whether executing this tool may block awaiting a live human decision
     /// (e.g. `ask_user`, an approval-gated mode switch). Non-interactive
@@ -100,7 +94,7 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    /// Whether invoking this tool spawns a nested agent. Sub-agent profiles
+    /// Whether invoking this tool spawns a nested agent. Subagent profiles
     /// exclude these unconditionally to prevent unbounded recursion — the
     /// outermost dispatch tool (`task`) and wrappers around it
     /// (`verify_plan_execution`) override to `true`. See ADR-0011.
@@ -159,13 +153,13 @@ pub trait Tool: Send + Sync {
         &self,
         _call_id: &str,
         arguments: &str,
-        _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+        _on_event: Box<dyn FnMut(SubagentEvent) + Send + 'a>,
         _on_stream: &mut (dyn FnMut(ToolStream) + Send + 'a),
     ) -> Result<ToolOutput, String> {
         self.call_structured(arguments).await
     }
 
-    /// Execute the tool while optionally emitting events (e.g. sub-agent steps).
+    /// Execute the tool while optionally emitting events (e.g. subagent steps).
     ///
     /// The default implementation simply calls `call()` and emits no events.
     /// Tools that spawn sub-agents can override this to stream child events back
@@ -174,7 +168,7 @@ pub trait Tool: Send + Sync {
         &self,
         _call_id: &str,
         arguments: &str,
-        _on_event: Box<dyn FnMut(SubTaskEvent) + Send + 'a>,
+        _on_event: Box<dyn FnMut(SubagentEvent) + Send + 'a>,
     ) -> Result<String, String> {
         self.call(arguments).await
     }
@@ -194,19 +188,20 @@ pub trait Tool: Send + Sync {
 
 /// A tool's capability class, ordered `Read < Execute < Write`. Each consumer
 /// of the axis expresses its rule as a threshold rather than a binary, so the
-/// three surfaces that consult it compose cleanly:
+/// surfaces that consult it compose cleanly:
 ///
 /// - **Permission broker** — prompts for any tool with `access() > Read`
 ///   (i.e. `Execute` or `Write`): both have side effects the user should
 ///   approve.
-/// - **Plan-mode gate** — the default `allowed_in_plan_mode` admits `Read`
-///   only; `Execute` and `Write` are blocked unless a tool explicitly exempts
-///   a scope (e.g. writes under `.neenee/plans/`).
-/// - **Sub-agent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
-///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`.
-///   `EXPLORE` (ceiling `Read`) gets pure read tools; `VERIFY` (ceiling
-///   `Execute`) additionally gets command execution for tests/builds; neither
-///   admits `Write`. See ADR-0012.
+/// - **Write-scope gate** — a per-agent [`WriteScope`] boundary blocks write
+///   tools whose target is outside the agent's granted paths (e.g. a `PLAN`
+///   subagent may write only under `.neenee/plans/`). See ADR-0028.
+/// - **Subagent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
+///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`, or
+///   when it is a write tool covered by a `write_paths` grant. `EXPLORE`
+///   (ceiling `Read`) gets pure read tools; `VERIFY` (ceiling `Execute`)
+///   additionally gets command execution for tests/builds; `PLAN` (ceiling
+///   `Read` + `write_paths`) additionally gets scoped writes. See ADR-0012/0028.
 ///
 /// Variant order is load-bearing: it defines the ordering used by the derived
 /// `Ord`. Do not reorder.
@@ -218,7 +213,107 @@ pub enum ToolAccess {
     /// is not a workspace-mutation primitive (e.g. `bash`). Broker-gated.
     Execute,
     /// The tool's purpose is to mutate the workspace (e.g. `write_file`,
-    /// `edit_file`). Broker-gated; excluded from sub-agents by every
-    /// built-in profile.
+    /// `edit_file`). Broker-gated on the main agent; scoped by [`WriteScope`]
+    /// on sub-agents.
     Write,
+}
+
+/// Runtime filesystem-write boundary for an agent. A **hard capability limit,
+/// not a prompt**: writes outside the scope are blocked outright. Orthogonal
+/// to [`ToolAccess`], which admits *whether* a tool runs; `WriteScope` scopes
+/// *where* an admitted write tool may land. See ADR-0028.
+///
+/// The main agent carries [`WriteScope::Unrestricted`] (the broker is still
+/// the interactive layer inside it); a subagent carries the scope resolved
+/// from its profile's `write_paths` grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteScope {
+    /// No writes permitted (read-only / execute-only agents).
+    None,
+    /// Writes permitted only under these canonicalized directory prefixes.
+    Scoped(Vec<std::path::PathBuf>),
+    /// Writes permitted anywhere — the main agent.
+    Unrestricted,
+}
+
+impl Default for WriteScope {
+    /// The main agent is unrestricted by default; sub-agents override this at
+    /// spawn via [`crate::subagent::SubagentProfile::resolve_write_scope`].
+    fn default() -> Self {
+        WriteScope::Unrestricted
+    }
+}
+
+impl WriteScope {
+    /// Whether a write to `path_str` (the value a write tool returns from
+    /// [`Tool::permission_scope`]) is permitted under this scope.
+    /// [`WriteScope::Unrestricted`] admits everything; [`WriteScope::None`]
+    /// admits nothing; [`WriteScope::Scoped`] canonicalizes the target's
+    /// parent and re-appends the file name (so a not-yet-existing file still
+    /// resolves) and checks it starts with one of the granted directories.
+    pub fn allows(&self, path_str: &str) -> bool {
+        match self {
+            WriteScope::Unrestricted => true,
+            WriteScope::None => false,
+            WriteScope::Scoped(dirs) => match resolve_for_check(path_str) {
+                Some(target) => dirs.iter().any(|dir| target.starts_with(dir)),
+                None => false,
+            },
+        }
+    }
+}
+
+/// Resolve a (relative or absolute) path for a prefix-containment check: join
+/// to the cwd, canonicalize the parent directory and re-append the file name
+/// so a new file that does not exist yet still resolves. Mirrors the
+/// plan-path resolver in `plan.rs`.
+fn resolve_for_check(path: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+    let p = Path::new(path);
+    let cwd = std::env::current_dir().ok()?;
+    // Path::join with an absolute path replaces the base, so absolute inputs
+    // are handled correctly too.
+    let parent = p.parent();
+    let file_name = p.file_name();
+    let resolved = match (parent, file_name) {
+        (Some(parent), Some(file_name)) if !parent.as_os_str().is_empty() => {
+            let abs_parent = cwd.join(parent);
+            let canon_parent = abs_parent.canonicalize().unwrap_or(abs_parent);
+            canon_parent.join(file_name)
+        }
+        _ => {
+            let abs: PathBuf = cwd.join(p);
+            abs.canonicalize().unwrap_or(abs)
+        }
+    };
+    Some(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WriteScope;
+    use std::path::PathBuf;
+
+    #[test]
+    fn unrestricted_allows_everything_and_none_allows_nothing() {
+        assert!(WriteScope::Unrestricted.allows("anywhere/x.rs"));
+        assert!(WriteScope::Unrestricted.allows(""));
+        assert!(!WriteScope::None.allows("anywhere/x.rs"));
+    }
+
+    #[test]
+    fn scoped_allows_under_granted_dir_and_blocks_outside() {
+        // Simulate resolve_write_scope's output: a canonical dir prefix. Use
+        // a (possibly non-existent) plans dir under the cwd; resolution falls
+        // back to the joined path, so membership still holds.
+        let cwd = std::env::current_dir().unwrap();
+        let granted: PathBuf = cwd.join(".neenee/plans");
+        let scope = WriteScope::Scoped(vec![granted.clone()]);
+
+        // A new file under the granted dir resolves to granted/file and is allowed,
+        // even though neither the dir nor the file exists yet.
+        assert!(scope.allows(&granted.join("feature.md").display().to_string()));
+        // A path outside the granted dir is blocked.
+        assert!(!scope.allows(&cwd.join("src/main.rs").display().to_string()));
+    }
 }

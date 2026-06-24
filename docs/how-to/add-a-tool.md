@@ -9,7 +9,7 @@ Most built-in tools live in the `neenee-tools` crate. Pick the module that
 matches the tool's domain: filesystem and web tools go in
 `crates/neenee-tools/src/lib.rs`, project scaffolding tools go in
 `crates/neenee-tools/src/project.rs`, MCP integration lives in
-`crates/neenee-tools/src/mcp.rs`. `use_skill` and `task` are the exceptions —
+`crates/neenee-tools/src/mcp.rs`. `use_skill` and `subagent` are the exceptions —
 they live in `crates/neenee-agent/src/` because they need orchestration state.
 
 ## Implement the `Tool` trait
@@ -104,7 +104,7 @@ fn access(&self) -> ToolAccess {
 }
 ```
 
-`Read` tools bypass the permission broker and run in Plan mode. `Write`
+`Read` tools bypass the permission broker and pass the write-scope gate. `Write`
 tools prompt the user once per `(tool, scope)` pair unless an `Always` rule
 is cached. See [Built-in tools](../reference/tools/access.md) for the
 full gating matrix.
@@ -167,7 +167,7 @@ override `call_with_events` (`crates/neenee-core/src/capability.rs`) instead
 of `call`. The default implementation delegates to `call`, so overriding
 `call` alone is enough for synchronous tools.
 
-`TaskTool` (`crates/neenee-agent/src/task_tool.rs`) is currently the only
+`SubagentTool` (`crates/neenee-agent/src/subagent_tool.rs`) is currently the only
 tool that overrides `call_with_events`. It forwards `SubTaskEvent`s from
 the sub-agent so the parent harness can render live progress. Read its
 implementation before adopting the same pattern; the event surface is
@@ -189,7 +189,7 @@ let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
 ];
 ```
 
-Tools added before `tools.extend(mcp.tools)` are visible to the `task`
+Tools added before `tools.extend(mcp.tools)` are visible to the `subagent`
 sub-agent, which snapshots the assembled toolset at construction and then
 admits tools via the bound `EXPLORE` profile
 (`crates/neenee-core/src/subagent.rs`). Admission is by capability axis, not

@@ -12,17 +12,17 @@ Project and user-defined commands are covered under
 | Command | Description |
 |---------|-------------|
 | `/provider` | Select an LLM provider |
-| `/mode` | Show or switch mode (build, plan) |
 | `/mcp` | Show configured MCP server status |
 | `/compact` | Compact older complete turns now |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
 | `/auto-approve [on\|off]` | Toggle bypassing write-tool permission prompts |
-| `/review [N [M]\|off\|default]` | Show or set session-review cadence ([ADR-0016](../adr/0016-session-review-cadence.md)); `0` disables |
+| `/review` | Run an on-demand session-review diagnostic of the current turn |
 | `/verify-nudge [on\|off]` | Toggle the verify-plan hard nudge at turn end |
 | `/search <query>` | Semantic search over the project's session history |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
 | `/sessions` | Browse past sessions |
+| `/btw` | Open a side conversation that runs alongside the main session |
 | `/resume [id]` | Resume the most recent or selected session |
 | `/pursue [condition\|status\|stop\|done\|edit\|clear]` | Pursue a pursuit: the harness keeps the turn going until the condition is met |
 | `/repeat [cron prompt\|list\|cancel id]` | Schedule a prompt on a cron expression |
@@ -37,16 +37,6 @@ Project and user-defined commands are covered under
 by the agent backend.
 
 ## Subcommands
-
-### `/mode`
-
-| Form | Effect |
-|------|--------|
-| `/mode` | Show the current mode |
-| `/mode build` | Full read/write tool access |
-| `/mode plan` | Read-only tools plus writes under `.neenee/plans/`; the model can also switch modes itself via `plan_enter`/`plan_exit`. See [Plan mode](../explanation/agent-design/plan-mode.md). |
-| `/plan` | Open the active plan file in a read-only preview modal. |
-| `/verify` | Trigger independent plan verification — spawns a clean-context sub-agent that re-reads the plan and reports PASS/PARTIAL/FAIL per section. |
 
 ### `/pursue`
 
@@ -111,19 +101,23 @@ clock-driven scheduler, independent of `/pursue`. See
 When on, the harness stops prompting for confirmation before write tools
 (`bash`, `write_file`, `edit_file`, …) run. Affects the live process only.
 
-### `/review`
+### `/btw`
 
 | Form | Effect |
 |------|--------|
-| `/review` | Show the current review cadence (start line, interval) |
-| `/review off` | Disable periodic review (pure [ADR-0009](../adr/0009-review-tool.md)) |
-| `/review <N>` | Set the start line; keep the current interval |
-| `/review <N> <M>` | Set the start line `<N>` and interval `<M>` |
-| `/review default` | Reset to the config values |
+| `/btw` | Open a side conversation that runs alongside the main session |
 
-Sets the session-review cadence ([ADR-0016](../adr/0016-session-review-cadence.md)).
-`0` disables review. After `<N>` lines a periodic review runs, then every `<M>`
-lines, emitting diagnostics into the conversation.
+Opens a lightweight side conversation for asking quick questions without
+disturbing the main session context
+([ADR-0017](../adr/0017-side-conversations.md)).
+
+### `/review`
+
+On-demand only — triggers a bounded read-only `REVIEW` subagent that
+diagnoses the current turn and reports verdicts. `/review` takes no
+arguments; the periodic-cadence design was superseded (see
+[ADR-0018](../adr/0018-per-project-multi-instance-concurrency.md)
+revising [ADR-0016](../adr/0016-session-review-over-round-counting.md)).
 
 ### `/verify-nudge`
 
@@ -135,7 +129,7 @@ lines, emitting diagnostics into the conversation.
 
 When on, at the end of each turn the harness re-injects a plan-verification
 nudge if the active plan looks unfinished. See
-[Plan mode](../explanation/agent-design/plan-mode.md).
+[Plan](../explanation/agent-design/plan.md).
 
 ### `/search`
 
@@ -170,12 +164,12 @@ Returns the most relevant past messages for the query (see the
 
 | Form | Effect |
 |------|--------|
-| `/export` | Render the live conversation as Markdown — metadata header (session id, provider/model, mode, pursuit, active plan, exported-at), pursuit checklist, then a chronological transcript of user prompts, assistant replies, tool calls, and inlined tool results — and copy it to the system clipboard so it can be pasted into another agent to continue the work. |
+| `/export` | Render the live conversation as Markdown — metadata header (session id, provider/model, pursuit, active plan, exported-at), pursuit checklist, then a chronological transcript of user prompts, assistant replies, tool calls, and inlined tool results — and copy it to the system clipboard so it can be pasted into another agent to continue the work. |
 
 The receiving agent gets the full chain of decisions and side effects: hidden
 and system messages are skipped (mirroring TUI rendering), reasoning traces
 are folded into collapsible `<details>` blocks, and sub-agent transcripts
-nested under `task` results are summarised by message counts instead of
+nested under `subagent` results are summarised by message counts instead of
 dumped in full. If the system clipboard is unavailable, the export falls
 back to OSC52 or surfaces the underlying clipboard error.
 

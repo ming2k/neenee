@@ -47,7 +47,7 @@ when one is open); it is not a zone toggle.
 | [Tool step](tool-step.md) | Expandable step for tool calls |
 | [Thinking step](thinking-step.md) | Expandable step for reasoning text |
 | [Step state machine](step-state.md) | The three orthogonal axes (Lifecycle × Disclosure × Interaction) and the accent/weight color channels |
-| [Sub-agent view](subagent-view.md) | Inline task step + zoomed-in child stream + navigation bar + focus stack |
+| [Sub-agent view](subagent-view.md) | Inline sub-agent step + zoomed-in child stream + navigation bar + focus stack |
 | [Status bar](status-bar.md) | Breathing-dot activity indicator + label |
 | [Hint bar](hint-line.md) | Focus-zone pill + model/context cluster |
 | [Pursuit bar](pursuit-bar.md) | Active-pursuit indicator with objective + checklist progress; clickable to surface `/pursuit status` |

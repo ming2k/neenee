@@ -1,6 +1,6 @@
 # 0017. Side conversations: session-native `/btw`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-24
 
 ## Context
@@ -204,6 +204,52 @@ Migration:
   `/session fork` keep their current semantics. The `AgentResponse` envelope is
   an internal protocol change (the binary and TUI ship together), so no
   on-disk format migration is involved.
+
+## Implementation
+
+Landed alongside this ADR being marked `Accepted`. The five decision points
+map to the code as follows:
+
+1. **`Turn { session_id, event }` envelope** — already in place; the TUI's
+   response listener now routes each `TurnEvent` to the side buffer when its
+   `session_id` matches the live side session and to the primary buffer
+   otherwise (`crates/neenee-cli/src/tui/mod.rs`).
+2. **Live-session ownership** — instead of refactoring the primary's loose
+   per-turn state into a `SessionRegistry`, the primary machinery is left
+   exactly as-is and peered with an optional `SideSession`
+   (`crates/neenee-cli/src/main.rs`) bundling its own `Agent`, `SessionStore`,
+   history mutex, token slot, and generation counter. An `active_view_side`
+   flag routes `Chat` to whichever session the user is composing into via
+   `start_active_turn`. This is the minimal `{ primary, side: Option<_> }`
+   shape; generalizing to a `HashMap` later is the only step needed for N>1.
+3. **`fork_to_side` + `open_side`** — unchanged; the `/btw` arm calls them to
+   mint the self-contained side file and load a peer store pinned to it.
+4. **`/btw [prompt]` zoom-in view** — a top banner (`draw_side_banner`,
+   `Side from main · <status> · Esc back`) carved off the transcript viewport;
+   `Esc` and `Ctrl+C` exit (send `AgentRequest::ExitSideView`). The composer
+   stays live in the side view, unlike the sub-agent zoom.
+5. **Parent-status passthrough** — `spawn_parent_status_watcher` polls the
+   primary token slot and emits `AgentResponse::ParentStatus` on change.
+
+Four scoping choices, all deferring polish without contradicting the decision:
+
+- **Side `Agent` runs with `auto_approve(true)`** (mirroring `TaskTool`'s
+  sub-agent). A side chat is a quick aside; suppressing its permission prompts
+  sidesteps the fact that the shared permission-reply channel routes to the
+  primary `Agent`. The primary's prompts are unaffected and still modal. A
+  side `UserQuestionRequest` is forwarded to whichever agent owns it
+  (`reply_user_question` tries primary then side).
+- **The side toolset excludes `TaskTool`** (mirrors the sub-agent profile
+  filter), so a side chat cannot spawn nested sub-agents.
+- **Global responding/activity/harness state is gated to the primary session.**
+  A concurrent side turn drives only its own transcript buffer; the primary
+  view's chrome is never disturbed. The side view's "is it working" signal is
+  the transcript growing plus the parent-status banner.
+- **`ParentStatus` currently surfaces only `Running`/`Idle`** (derived from
+  the primary token slot). The remaining variants are carried by the enum but
+  not yet populated by the watcher — a primary permission/question still
+  surfaces globally as a modal, which covers the same "main hit a wall" UX.
+  Wiring the finer-grained statuses is additive future work.
 
 ## References
 

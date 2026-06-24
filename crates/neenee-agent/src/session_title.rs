@@ -4,7 +4,7 @@
 //! Mirrors the split established by [`crate::session_review`]: the domain
 //! vocabulary and the pure post-processing ([`clean_title`]) live in
 //! `neenee-core`, while the provider call lives here next to the `Agent`.
-//! Like `session_review` this runs a bounded sub-agent of the primary agent,
+//! Like `session_review` this runs a bounded subagent of the primary agent,
 //! but the title task is pure text-in/text-out — it needs no tools and no
 //! ReAct loop — so the runner is a single [`Provider::chat`] call framed by
 //! the [`TITLE`] profile's system prompt, not a full
@@ -30,7 +30,7 @@ use neenee_core::Provider;
 
 use crate::agent::Agent;
 
-/// Character budget for the transcript excerpt handed to the title sub-agent.
+/// Character budget for the transcript excerpt handed to the title subagent.
 /// Generous enough to show the opening request and the recent arc (so an
 /// on-demand regen after a topic shift sees the new direction), bounded enough
 /// that the call stays cheap. The opening user message is always included in
@@ -84,13 +84,13 @@ impl Agent {
         {
             Ok(Ok(message)) => message,
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, "title sub-agent provider call failed");
+                tracing::warn!(error = %error, "title subagent provider call failed");
                 return None;
             }
             Err(_elapsed) => {
                 tracing::warn!(
                     timeout_secs = TITLE_CALL_TIMEOUT.as_secs(),
-                    "title sub-agent call timed out"
+                    "title subagent call timed out"
                 );
                 return None;
             }
@@ -203,7 +203,6 @@ mod tests {
         let agent = Agent::new(
             provider.clone(),
             Vec::new(),
-            neenee_core::AgentMode::Build,
             neenee_core::PursuitService::new(store),
             crate::skills::SkillRegistry::empty(),
         );

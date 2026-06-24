@@ -65,10 +65,10 @@ Selection is **not** FIFO-by-age. For each older tool result it decides both
 
 It is **idempotent and convergent**: an already-cleared result is skipped, and a
 truncated result escalates to a clear on the next pass, so repeated calls settle.
-Nested sub-agent transcripts descend the same policy: a `task` result carries
+Nested sub-agent transcripts descend the same policy: a `subagent` result carries
 its child's whole conversation as `children`, which is real weight the parent
 pays for, so the same plan recurses into it (bounded by the schema rule that
-prevents `task` from spawning `task`).
+prevents `subagent` from spawning `subagent`).
 
 ## Two entry points, one threshold
 

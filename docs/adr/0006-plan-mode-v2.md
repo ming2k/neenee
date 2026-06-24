@@ -1,7 +1,12 @@
 # 0006. Plan mode v2: approval gate, active plan path, proposed-plan rendering
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0027
 - **Date:** 2026-06-21
+
+> Superseded by [ADR-0027](0027-plan-as-subagent.md): plan is no longer a mode
+> of the main agent but a delegated `PLAN` subagent, so the approval gate,
+> `AgentMode`, and `plan_enter`/`plan_exit` described here are removed. This
+> record stays intact as the history of the mode-based design.
 
 ## Context
 
@@ -136,7 +141,7 @@ Migration:
 
 ## References
 
-- [Plan mode](../explanation/agent-design/plan-mode.md) — updated explanation of the
+- [Plan mode](../explanation/agent-design/plan.md) — updated explanation of the
   end-to-end flow
 - [How to plan a change](../how-to/plan-a-change.md) — step-by-step guide
 - [Built-in tools](../reference/tools/index.md) — `plan_enter` and `plan_exit`

@@ -1,6 +1,6 @@
 # 0003. Extract `neenee-app` from the binary crate
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0004
 - **Date:** 2026-06-20
 
 ## Context

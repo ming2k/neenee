@@ -1020,11 +1020,11 @@ fn draw_diff_content(
     }
 }
 
-/// Render a sub-agent `task` tool step as a compact, non-expandable step.
-/// Activating it (click / Enter) navigates into a dedicated sub-agent view
+/// Render a subagent `task` tool step as a compact, non-expandable step.
+/// Activating it (click / Enter) navigates into a dedicated subagent view
 /// rather than expanding a body inline. The step shows a one-line summary
 /// (the task description + duration) and a live status line summarizing the
-/// sub-agent's progress.
+/// subagent's progress.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_subagent_inline_step(
     frame: &mut Frame,
@@ -1114,7 +1114,7 @@ pub fn draw_subagent_inline_step(
                 Span::styled(padded_tail(ctx.full_width, used), bg_style),
             ]);
             // Make the whole status line part of the same clickable summary so
-            // clicking anywhere on the step enters the sub-agent view.
+            // clicking anywhere on the step enters the subagent view.
             if let Some(rect) = ctx.paint(line) {
                 ctx.layout_map.push(BlockRegion {
                     message_idx: mi,
@@ -1130,7 +1130,7 @@ pub fn draw_subagent_inline_step(
     }
 }
 
-/// Render the sub-agent navigation bar: the focused task's label + position
+/// Render the subagent navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full transcript width inside the app_bg gutters.
 pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, theme: &Theme) {
@@ -1147,7 +1147,7 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
         .add_modifier(Modifier::BOLD);
     let accent = Style::default().bg(bg).fg(theme.brand());
 
-    let left_label = format!(" {} ", "Task");
+    let left_label = format!(" {} ", "Subagent");
     let desc = bar.label.to_string();
     let count = if bar.total > 1 {
         format!(" ({} of {}) ", bar.index, bar.total)
@@ -1162,6 +1162,61 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
         Span::styled(left_label, label_style),
         Span::styled(desc, accent),
         Span::styled(count, muted),
+        Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+        Span::styled(right, muted),
+    ];
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    if used < full_width {
+        spans.push(Span::styled(
+            " ".repeat(full_width - used),
+            Style::default().bg(bg),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), band);
+}
+
+/// Render the `/btw` side banner (ADR-0017): a top band reading
+/// `Side from main · <parent status> · Esc back`. Mirrors `draw_subagent_bar`'s
+/// style palette so the two zoom modes share a visual language; the parent
+/// status segment is accented so the user notices when the main session hits a
+/// running / idle transition.
+pub fn draw_side_banner(
+    frame: &mut Frame,
+    rect: Rect,
+    status: neenee_core::ParentStatus,
+    theme: &Theme,
+) {
+    let band = transcript_band_rect(rect);
+    let full_width = band.width as usize;
+    if full_width < STEP_MIN_WIDTH {
+        return;
+    }
+    let bg = theme.body();
+    let muted = Style::default().bg(bg).fg(theme.muted());
+    let label_style = Style::default()
+        .bg(bg)
+        .fg(theme.fg())
+        .add_modifier(Modifier::BOLD);
+    let accent = Style::default().bg(bg).fg(theme.brand());
+
+    let left_label = " Side from main ".to_string();
+    let status_label = match status {
+        neenee_core::ParentStatus::Idle => "main idle",
+        neenee_core::ParentStatus::Running => "main running",
+        neenee_core::ParentStatus::NeedsApproval => "main needs approval",
+        neenee_core::ParentStatus::NeedsInput => "main needs input",
+        neenee_core::ParentStatus::Failed => "main failed",
+        neenee_core::ParentStatus::Interrupted => "main interrupted",
+    };
+    let sep = " · ";
+    let right = " Esc back ".to_string();
+
+    let left_used = left_label.width() + sep.width() + status_label.width();
+    let gap = full_width.saturating_sub(left_used + right.width());
+    let mut spans = vec![
+        Span::styled(left_label, label_style),
+        Span::styled(sep, muted),
+        Span::styled(status_label, accent),
         Span::styled(" ".repeat(gap), Style::default().bg(bg)),
         Span::styled(right, muted),
     ];
@@ -1362,7 +1417,7 @@ pub fn draw_tool_step(
             }
         }
 
-        // ── Nested sub-agent children ──.
+        // ── Nested subagent children ──.
         if let crate::tui::document::MessageKind::ToolStep { children, .. } = &msg.kind {
             if !children.is_empty() {
                 let mut ctx = RenderCtx::from_cursor(

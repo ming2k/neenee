@@ -90,14 +90,14 @@ pub enum ToolOutput {
         new: String,
         start_line: usize,
     },
-    /// A read-only sub-agent run (produced by the `task` tool). Carries the
-    /// sub-agent's full internal transcript so it can be persisted on the
+    /// A read-only subagent run (produced by the `task` tool). Carries the
+    /// subagent's full internal transcript so it can be persisted on the
     /// parent session and replayed on resume, plus the actual token usage so
     /// parent-side pursuit accounting no longer under-counts by 100x. `summary`
     /// is the short text the parent model sees as the tool result.
     ///
-    /// `failed` is the structured failure flag set explicitly by the task tool
-    /// when the sub-agent hit a guardrail or errored, replacing the old
+    /// `failed` is the structured failure flag set explicitly by the subagent tool
+    /// when the subagent hit a guardrail or errored, replacing the old
     /// `summary.starts_with("Error")` text sniff. The summary text still
     /// carries an `Error:` prefix for the *parent model's* benefit (so it
     /// understands the sub-task did not succeed), but UI classification now
@@ -168,7 +168,7 @@ impl ToolOutput {
                 PatchOp::Edit => format!("Edited '{}' successfully", path),
                 PatchOp::Delete => format!("Deleted '{}'", path),
             },
-            // The parent model sees the sub-agent's textual summary only; the
+            // The parent model sees the subagent's textual summary only; the
             // structured transcript travels out-of-band via the parent harness
             // attaching `messages` to the Tool-role message's `children`.
             ToolOutput::Subagent { summary, .. } => summary.clone(),
@@ -464,7 +464,7 @@ mod tests {
     fn subagent_to_text_returns_summary_only() {
         // The parent model only sees the summary; the structured transcript
         // travels out-of-band. This is the contract that lets us persist the
-        // sub-agent transcript without polluting the parent's context window.
+        // subagent transcript without polluting the parent's context window.
         let usage = crate::TokenUsage {
             prompt_tokens: 1000,
             completion_tokens: 200,
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn subagent_failed_flag_drives_is_error_not_summary_text() {
-        // Regression for the text-sniff removal: a sub-agent whose summary
+        // Regression for the text-sniff removal: a subagent whose summary
         // starts with "Error" but carries `failed: false` must NOT classify
         // as an error, and vice versa.
         let with_flag = ToolOutput::Subagent {

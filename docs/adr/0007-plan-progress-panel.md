@@ -162,7 +162,7 @@ Migration:
 
 ## References
 
-- [Plan mode](../explanation/agent-design/plan-mode.md) — overall mode design
+- [Plan mode](../explanation/agent-design/plan.md) — overall mode design
 - [ADR-0006](0006-plan-mode-v2.md) — approval gate + active plan path +
   `<proposed_plan>` rendering, of which this is a direct follow-up
 - codex `update_plan` tool (`codex-rs/core/src/tools/handlers/plan.rs`)

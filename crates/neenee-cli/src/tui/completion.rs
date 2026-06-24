@@ -268,25 +268,7 @@ impl App {
     pub fn completions(&mut self) -> Vec<Completion> {
         let current = self.input.to_lowercase();
 
-        // Subcommand completion for /mode
-        if let Some(after) = current.strip_prefix("/mode ") {
-            return [
-                ("/mode build", "Build mode — full read/write tool access"),
-                (
-                    "/mode plan",
-                    "Plan mode — read-only tools, safe exploration",
-                ),
-            ]
-            .iter()
-            .filter(|(cmd, _)| {
-                cmd.strip_prefix("/mode ")
-                    .map(|sub| sub.to_lowercase().starts_with(after))
-                    .unwrap_or(false)
-            })
-            .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))
-            .collect();
-        }
-
+        // Subcommand completion for /pursue
         if let Some(after) = current.strip_prefix("/pursue ") {
             return [
                 ("/pursue status", "Show the current pursuit"),

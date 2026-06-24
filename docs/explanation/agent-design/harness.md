@@ -180,7 +180,7 @@ made redundant:
 - "Is the agent looping?" is the first dimension (`LoopingReview`); adding more
   (context bloat, tool-error storms, …) is a `SessionReview` trait impl, no
   dispatch changes and no extra model call per dimension.
-- Sub-agents (`task`, `verify_plan_execution`) run with review **disabled**, so
+- Sub-agents (`subagent`, `verify_plan_execution`) run with review **disabled**, so
   a short-lived read-only research sub-agent never pays for a diagnostic and
   review cannot recurse.
 
@@ -190,13 +190,14 @@ Configure or inspect live via the `/review` slash command
 These are execution bounds, not a security sandbox. Tool permission policy is
 a separate future layer.
 
-Plan mode is enforced per-invocation through each tool's plan-mode access
-check, which
-defaults to read-only access and exempts writes under `.neenee/plans/`. MCP
-servers are therefore blocked in Plan mode unless their config explicitly sets
-`read_only = true`. The model can also switch modes itself via the injected
-`plan_enter`/`plan_exit` tools; see [Plan mode](plan-mode.md) for the full
-workflow and the write exemption.
+Write capability is enforced per-agent through a `WriteScope` boundary
+(ADR-0028): the main agent is unrestricted (the permission broker is still the
+interactive layer inside it); a subagent carries a scope resolved from its
+profile, and a write tool whose target is outside that scope is blocked. The
+`PLAN` profile, for example, is scoped to `.neenee/plans/`. MCP servers with
+`read_only = false` declare `Write` and are subject to the same gate when run
+inside a scoped subagent. The model plans via the injected `plan` tool, which
+delegates to a `PLAN` subagent; see [Plan](plan.md) for the full workflow.
 
 ## Permission broker
 

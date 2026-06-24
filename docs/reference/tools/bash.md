@@ -3,7 +3,7 @@
 `BashTool` (`crates/neenee-tools/src/lib.rs`) executes a shell command. It is
 the one built-in tool in the `Execute` access tier — it runs commands but is
 not a file-mutation primitive, so it sits between pure reads and file writes.
-The permission broker still gates it (`Execute > Read`); Plan mode blocks it.
+The permission broker still gates it (`Execute > Read`). It is excluded from read-only subagent profiles (`EXPLORE`, `PLAN`) and admitted only by `VERIFY`.
 See [Tool access](access.md) and [ADR-0012](../../adr/0012-toolaccess-tier-split.md).
 
 | Parameter | Type | Required | Default | Notes |

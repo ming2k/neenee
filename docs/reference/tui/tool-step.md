@@ -87,7 +87,7 @@ step's complete output — the full structured payload, not the
 transcript-truncated view. For `Shell` it renders `$ command`, stdout, stderr
 (in `error_fg`), and the exit/truncation footer directly from the
 `ToolOutput::Shell` fields. `↑`/`↓`/wheel scrolls; `Esc`/`Enter` closes.
-Sub-agent `task` steps still navigate into the child session on `Enter`
+Sub-agent `subagent` steps still navigate into the child session on `Enter`
 instead of opening the overlay. The bulk `Ctrl+T` toggle still inline-expands
 every step for those who want the old all-expanded view. See
 [ADR-0001](../../adr/0001-tool-rendering-redesign.md).

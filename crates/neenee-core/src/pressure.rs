@@ -153,8 +153,8 @@ pub(crate) fn message_chars(message: &Message) -> usize {
                     .sum::<usize>()
             })
             .unwrap_or(0);
-    // Recursively count nested sub-agent transcripts. A `task` tool result
-    // carries the sub-agent's full conversation as `children`, and that
+    // Recursively count nested subagent transcripts. A `task` tool result
+    // carries the subagent's full conversation as `children`, and that
     // conversation is real context weight the parent model is effectively
     // paying for (it sees the summary, but the children live in the same
     // session.json and survive resume — both the context-pressure meter and
@@ -300,7 +300,7 @@ fn plan_prune(messages: &[Message], protect_recent_chars: usize) -> Vec<PrunePla
 }
 
 /// Apply a plan, recording originals for archival and recursing into any nested
-/// sub-agent transcript on the messages it touches.
+/// subagent transcript on the messages it touches.
 fn apply_prune(
     messages: &mut [Message],
     plan: Vec<PrunePlan>,
@@ -313,10 +313,10 @@ fn apply_prune(
         outcome.cleared_count += 1;
         messages[item.index].content = item.new_content;
         messages[item.index].reasoning_content = None;
-        // A `task` result carries the sub-agent's whole transcript as
+        // A `task` result carries the subagent's whole transcript as
         // `children`; its old `Tool` results are the same kind of bulky weight,
         // so prune them too (ungated — durability already happened when the
-        // sub-agent finished; here we relieve in-memory pressure).
+        // subagent finished; here we relieve in-memory pressure).
         if let Some(children) = messages[item.index].children.as_mut() {
             let child_plan = plan_prune(children, protect_recent_chars);
             if !child_plan.is_empty() {

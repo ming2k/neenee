@@ -1,7 +1,7 @@
 # Sub-agent view
 
-When the user zooms into a `task` tool call, the TUI swaps the root
-conversation for that task's child messages, hides the footer, and pins a
+When the user zooms into a `subagent` tool call, the TUI swaps the root
+conversation for that sub-agent's child messages, hides the footer, and pins a
 one-row navigation bar at the bottom of the transcript area. This page
 documents that view's layout and key bindings. The isolation model and
 event streaming that produce the children live on the
@@ -11,7 +11,7 @@ the inline (non-zoomed) rendering of the task step lives on the
 
 ## Two render modes
 
-A `task` tool step has two render modes, switched by the
+A `subagent` tool step has two render modes, switched by the
 [focus stack](#focus-stack):
 
 | Mode | When | What renders |
@@ -82,22 +82,22 @@ navigation strip rather than as another modal panel.
 
 ## Focus stack
 
-The focus stack is a `Vec<String>` of `task` call ids stored on `App`. It
+The focus stack is a `Vec<String>` of `subagent` call ids stored on `App`. It
 is the source of truth for "which conversation are we looking at":
 
 | State | `focused_messages()` returns | `in_subagent_view()` |
 |-------|------------------------------|----------------------|
 | Empty | `&self.messages` (the root conversation) | `false` |
-| Non-empty | The `subagent_children()` of the root-level `task` step whose call id equals the stack's top | `true` |
+| Non-empty | The `subagent_children()` of the root-level `subagent` step whose call id equals the stack's top | `true` |
 
 Transitions are entirely caller-driven — the renderer never pushes or pops.
-The stack supports nesting: zooming into a `task` that itself spawned a
-`task` pushes a second call id, and the focused slice is the innermost
-task's children.
+The stack supports nesting: zooming into a `subagent` that itself spawned a
+`subagent` pushes a second call id, and the focused slice is the innermost
+sub-agent's children.
 
 | Action | Effect on focus stack |
 |--------|-----------------------|
-| `Enter` / click on an inline `task` summary | Push that step's call id; `reset_view_state` clears scroll, selection, sticky pinning |
+| `Enter` / click on an inline `subagent` summary | Push that step's call id; `reset_view_state` clears scroll, selection, sticky pinning |
 | `Esc` from a zoomed view | Pop the top; if the stack is now empty, restore the root view |
 | `[` (left bracket) | Pop the top and re-push the previous sibling's call id — cycle to the previous sibling task at this depth |
 | `]` (right bracket) | Pop the top and re-push the next sibling's call id — cycle to the next sibling |
@@ -107,9 +107,9 @@ sibling's 1-based position among the parent's child tasks. The previous
 scroll position is not restored — each sibling enters with
 `reset_view_state`, since the streams are unrelated.
 
-## Re-entering an existing task
+## Re-entering an existing sub-agent
 
-If the user re-opens a task that already has children (e.g. a task that
+If the user re-opens a sub-agent that already has children (e.g. a sub-agent that
 finished earlier in the session), the existing children are shown
 immediately — they are persisted on the message via `subagent_children()`.
 Live updates still go through `push_subtask_event`; the resume path uses
@@ -124,4 +124,4 @@ storage. See `document.rs` for both entry points.
 | `render/mod.rs` | `SubagentBarInfo`, wiring the bar into `draw_transcript` when `view.subagent_bar` is `Some` |
 | `app.rs` | `focus_stack`, `in_subagent_view`, `focused_messages`, `reset_view_state` |
 | `document.rs` | `is_subagent_task`, `tool_step_call_id`, `subagent_children`, `subagent_children_mut`, `attach_subagent_children`, `subagent_status_line` |
-| `input.rs` | `in_subagent_view` flag on `InputContext`, used so `Enter` on an inline task navigates instead of submitting the composer |
+| `input.rs` | `in_subagent_view` flag on `InputContext`, used so `Enter` on an inline sub-agent step navigates instead of submitting the composer |

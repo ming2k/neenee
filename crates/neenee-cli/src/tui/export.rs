@@ -4,11 +4,11 @@
 //! clipboard so it can be pasted into another tool's prompt.
 //!
 //! Format is intentionally agent-readable: a metadata header (session id,
-//! provider / model, mode, pursuit, exported-at) followed by a preamble that
+//! provider / model, pursuit, exported-at) followed by a preamble that
 //! tells the receiving agent how to use the document, then a chronological
 //! transcript of user prompts, assistant replies, tool calls, and tool
 //! results. Hidden and system messages are skipped (mirroring
-//! [`crate::tui::transcript`] rendering), and sub-agent transcripts nested
+//! [`crate::tui::transcript`] rendering), and subagent transcripts nested
 //! under `task` tool results are summarised inline rather than dumped in full
 //! so the export stays scannable.
 
@@ -22,7 +22,6 @@ pub struct ExportContext<'a> {
     pub session_id: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
-    pub mode: &'a str,
     pub pursuit: Option<&'a Pursuit>,
     pub active_plan_path: Option<&'a std::path::Path>,
 }
@@ -38,7 +37,6 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
         "- **Provider / Model:** {} / {}\n",
         ctx.provider, ctx.model
     ));
-    out.push_str(&format!("- **Mode:** {}\n", ctx.mode));
     match ctx.pursuit {
         Some(pursuit) => out.push_str(&format!(
             "- **Pursuit [{}]:** {}\n",
@@ -213,7 +211,7 @@ fn render_tool_call<'a>(
     }
 }
 
-/// Summarise a sub-agent transcript inlined on a `task` tool result. Dumping
+/// Summarise a subagent transcript inlined on a `task` tool result. Dumping
 /// the full nested transcript would balloon the export past what a receiving
 /// agent needs; instead we surface the task description, message count, and
 /// whether the run finished in an error state.
@@ -286,7 +284,6 @@ mod tests {
                 session_id: "abcd1234ef",
                 provider: "kimi-code",
                 model: "kimi-k2.7-code",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
@@ -294,7 +291,6 @@ mod tests {
         );
         assert!(out.contains("Session ID:** `abcd1234ef`"));
         assert!(out.contains("Provider / Model:** kimi-code / kimi-k2.7-code"));
-        assert!(out.contains("**Mode:** build"));
         assert!(out.contains("**Pursuit:** _none_"));
         assert!(out.contains("A fresh agent can read it as context"));
     }
@@ -310,7 +306,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: Some(&pursuit),
                 active_plan_path: None,
             },
@@ -331,7 +326,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
@@ -359,7 +353,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
@@ -394,7 +387,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
@@ -423,7 +415,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
@@ -439,7 +430,6 @@ mod tests {
                 session_id: "id",
                 provider: "p",
                 model: "m",
-                mode: "build",
                 pursuit: None,
                 active_plan_path: None,
             },
