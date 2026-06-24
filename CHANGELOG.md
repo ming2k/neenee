@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-24
+
 ### Removed
 
 - **The per-plan progress tracker is consolidated into the unified task list
@@ -161,6 +163,7 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ming2k/neenee/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ming2k/neenee/releases/tag/v0.1.0
 [0.0.1]: https://github.com/ming2k/neenee/releases/tag/v0.0.1
