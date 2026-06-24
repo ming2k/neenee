@@ -18,7 +18,7 @@ use neenee_agent::TaskTool;
 use neenee_core::{async_trait, Message, ProviderStreamEvent};
 use neenee_core::{
     AgentMode, AgentRequest, AgentResponse, CronExpr, Provider, Pursuit, PursuitService,
-    PursuitStore, RepeatStore, Tool, EXPLORE,
+    PursuitStore, RepeatStore, Tool, CHARS_PER_TOKEN, EXPLORE, resolve_model,
 };
 use neenee_providers::MockProvider;
 use neenee_store::{
@@ -46,7 +46,7 @@ use session_view::{
     build_session_context, build_sessions_overview, provider_key_status, resume_session,
     short_session_id,
 };
-use startup::{init_tracing, parse_args, split_custom_command, StartupMode, BUILTIN_COMMANDS};
+use startup::{init_tracing, parse_args, split_custom_command, BuiltinCmd, StartupMode};
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -57,6 +57,25 @@ use std::sync::{
 use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 
+/// Resolve the active model's context window (tokens) from the live provider.
+/// `0` means unknown (a user-defined or local model not in the registry); the
+/// compaction policy substitutes a conservative fallback at resolve time.
+fn active_context_window(agent: &Agent) -> usize {
+    resolve_model(&agent.provider.model()).context_window
+}
+
+/// Re-seed the mid-turn prune threshold from the active model's context window.
+/// Called at startup and after every provider/model switch so mid-turn relief
+/// tracks the live model instead of a frozen, model-agnostic budget. A no-op
+/// when pruning is disabled (no gate is installed in that case).
+fn reseed_prune_threshold(agent: &Agent, config: &Config) {
+    if !config.compaction_prune {
+        return;
+    }
+    let window = active_context_window(agent);
+    agent.set_context_prune_threshold(config.compaction.resolve(window).prune_threshold_tokens);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _tracing_guard = init_tracing();
@@ -64,7 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (resp_tx, resp_rx) = mpsc::unbounded_channel::<AgentResponse>();
     let custom_commands = discover_commands()
         .into_iter()
-        .filter(|command| !BUILTIN_COMMANDS.contains(&command.name.as_str()))
+        .filter(|command| {
+            !BuiltinCmd::ALL
+                .iter()
+                .any(|(name, _)| *name == command.name)
+        })
         .map(|command| (command.name.clone(), command))
         .collect::<HashMap<String, CustomCommand>>();
     let custom_command_suggestions = {
@@ -121,20 +144,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
     // `neenee doctor` -> verify stored session integrity.
-    let (startup, project_override, auto_approve_at_start) =
+    let (startup, project_override, auto_approve_at_start, single_instance) =
         parse_args(std::env::args().skip(1).collect());
     let project_root = project_override.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
 
-    // C9: per-project advisory lock. Doctor intentionally skips it so it can
-    // inspect stores while another instance is running.
-    let _lock = if matches!(startup, StartupMode::Doctor) {
-        None
-    } else {
+    // ADR-0018: the per-project advisory lock is opt-in. The default is
+    // unlocked so multiple `neenee` instances can run in one project — each
+    // pins its own `sessions/<id>.{json,jsonl}` and never shares a mutable
+    // file. `--single-instance` restores the pre-0018 exclusive lock for users
+    // who want it. Doctor always skips the lock so it can inspect stores while
+    // another instance is running.
+    let _lock = if single_instance && !matches!(startup, StartupMode::Doctor) {
         Some(lock::ProcessLock::acquire(
             &paths::get().project_lock_file(&project_root),
         )?)
+    } else {
+        None
     };
 
     if matches!(startup, StartupMode::Doctor) {
@@ -142,22 +169,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Session loading honors the startup mode. The previous active session is
-    // archived and remains available through /resume or /session resume.
+    // Session loading honors the startup mode. Under ADR-0018
+    // `load_for_project` pins a fresh `sessions/<id>.{json,jsonl}`, so a bare
+    // `neenee` always starts a new session; prior sessions stay on disk and
+    // are reachable through the picker or `resume`. Resume opens an existing
+    // session file by id.
     let session = Arc::new(SessionStore::load_for_project(project_root.clone()));
     let open_picker_on_start = match &startup {
-        StartupMode::Fresh => {
-            session.reset().await.map_err(std::io::Error::other)?;
-            false
-        }
-        StartupMode::Picker => {
-            session.reset().await.map_err(std::io::Error::other)?;
-            true
-        }
+        StartupMode::Fresh => false,
+        StartupMode::Picker => true,
         StartupMode::Resume(id) => {
             if let Err(error) = session.resume(id.as_deref()).await {
                 eprintln!("resume failed: {error}; starting a fresh session.");
-                session.reset().await.map_err(std::io::Error::other)?;
             }
             false
         }
@@ -236,16 +259,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Mid-turn context relief: when pruning is enabled, install a gate that
     // clears old tool results between tool rounds once pressure crosses the
-    // mid-turn threshold (before the full pre-turn compaction threshold).
+    // prune threshold. The threshold is derived from the active model's context
+    // window and re-seeded whenever the provider switches (see
+    // `reseed_prune_threshold`), so it tracks the live model rather than a
+    // fixed character budget.
     if config.compaction_prune {
-        let mid_turn_budget = config.compaction_max_chars
-            * CompactionSettings::MID_TURN_TRIGGER_NUM
-            / CompactionSettings::MID_TURN_TRIGGER_DEN;
-        agent.set_context_budget_chars(mid_turn_budget);
         agent.set_compaction_gate(Some(Arc::new(MidTurnCompactionGate {
             session: session.clone(),
-            prune_protect_chars: config.compaction_prune_protect_chars,
+            prune_protect_chars: config.compaction_prune_protect_tokens * CHARS_PER_TOKEN,
         })));
+        reseed_prune_threshold(&agent, &config);
     }
 
     // Wire the `[agent]` config table: the opt-in hard-stop budget and the
@@ -267,16 +290,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
 
-    // Restore the active plan path + plan progress from the persisted
-    // session so resume re-enters Build mode with the "you are implementing
-    // X" hint intact and the sticky panel showing the same sections. If the
-    // session was in Plan mode when last saved both will be None (plan_enter
-    // clears them), so there is nothing to restore.
+    // Restore the active plan path from the persisted session so resume
+    // re-enters Build mode with the "you are implementing X" hint intact.
+    // If the session was in Plan mode when last saved this will be None
+    // (plan_enter clears it), so there is nothing to restore.
     if let Some(plan_path) = session.active_plan_path().await {
         agent.set_active_plan_path(Some(plan_path));
-    }
-    if let Some(progress) = session.plan_progress().await {
-        agent.set_plan_progress(Some(progress));
     }
 
     // Restore the unified task list so resume re-shows the sticky panel with
@@ -353,6 +372,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent.reject_pending_permissions();
                     agent.reject_pending_user_questions();
                     let _ = resp_tx.send(AgentResponse::PermissionsCleared);
+
+                    // Flip the harness to idle the instant interrupt is
+                    // requested — BEFORE the in-flight turn unwinds. The work
+                    // itself stops the moment the token is cancelled below, but
+                    // the turn task's own terminal "idle" snapshot is only sent
+                    // at the very end of its cleanup, which is gated behind
+                    // persistence fsyncs (`session.replace_messages` inside
+                    // `execute_turn`, then `set_checkpoint` in `start_pursuit`).
+                    // Without this eager snapshot the activity bar keeps showing
+                    // the stale "pursue"/"running" loop_status — and a climbing
+                    // elapsed timer — for the whole disk-write window, which
+                    // reads as "still working" when the work is already stopped.
+                    //
+                    // This is idempotent with the stale task's later idle send:
+                    // if no new turn starts, both snapshots are "idle"; if one
+                    // does, it bumps generation itself and its "running" snapshot
+                    // supersedes, while the stale task's generation-guarded idle
+                    // send is skipped (`orchestration.rs` start_pursuit /
+                    // start_interactive_turn / run_shell_command).
+                    send_harness_state(&resp_tx, &agent, "idle");
+
                     let mut token = ctt_clone.write().await;
                     if let Some(t) = token.take() {
                         t.cancel();
@@ -441,6 +481,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = new_p;
 
+                    // The new model may have a different context window; re-seed
+                    // the mid-turn prune threshold so relief tracks it.
+                    reseed_prune_threshold(&agent, &config);
+
                     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(&config)));
                     // Record the switch as an activation so the picker's recency
                     // ordering tracks it. Best-effort: telemetry is rebuildable.
@@ -484,6 +528,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *provider_for_task
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = new_p;
+                    // Re-seed mid-turn relief for the newly activated model's
+                    // context window.
+                    reseed_prune_threshold(&agent, &config);
                     provider_usage.record(&id);
                     if let Err(error) = provider_usage.save() {
                         tracing::warn!(?error, "could not persist model usage telemetry");
@@ -547,11 +594,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if parts.is_empty() {
                         continue;
                     }
-                    match parts[0] {
-                        "/provider" => {
+                    match BuiltinCmd::from_slash(parts[0]) {
+                        Some(BuiltinCmd::Provider) => {
                             // Handled in TUI
                         }
-                        "/mode" => {
+                        Some(BuiltinCmd::Mode) => {
                             if parts.len() > 1 {
                                 let new_mode = match parts[1].to_lowercase().as_str() {
                                     "build" => AgentMode::Build,
@@ -566,10 +613,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 agent.set_mode(new_mode);
                                 // `set_mode(Plan)` clears the active plan
-                                // path and progress in-memory; mirror that
-                                // to the session so a resume after a manual
-                                // mode switch does not resurrect a stale
-                                // plan hint or stale progress.
+                                // `set_mode(Plan)` clears the active plan
+                                // path in-memory; mirror that to the session
+                                // so a resume after a manual mode switch does
+                                // not resurrect a stale plan hint.
                                 let agent_plan = agent.active_plan_path();
                                 let stored_plan = session.active_plan_path().await;
                                 if agent_plan != stored_plan {
@@ -580,14 +627,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                     }
                                 }
-                                let agent_progress = agent.plan_progress();
-                                let stored_progress = session.plan_progress().await;
-                                if agent_progress != stored_progress {
-                                    if let Err(err) =
-                                        session.set_plan_progress(agent_progress).await
-                                    {
+                                // Mirror the task list too, since entering
+                                // Plan mode clears it.
+                                let agent_todos = agent.todos();
+                                let stored_todos = session.todos().await;
+                                if agent_todos != stored_todos {
+                                    if let Err(err) = session.set_todos(agent_todos).await {
                                         let _ = resp_tx.send(AgentResponse::Error(format!(
-                                            "could not persist plan progress: {err}"
+                                            "could not persist todos: {err}"
                                         )));
                                     }
                                 }
@@ -603,7 +650,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                         }
-                        "/mcp" => {
+                        Some(BuiltinCmd::Mcp) => {
                             let message = if mcp_statuses.is_empty() {
                                 "No MCP servers configured.".to_string()
                             } else {
@@ -618,7 +665,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let _ = resp_tx.send(AgentResponse::Text(message));
                         }
-                        "/plan" => {
+                        Some(BuiltinCmd::Plan) => {
                             // Open the plan preview modal. The TUI loads
                             // the file content from disk on its side; the
                             // harness just signals that the modal should
@@ -635,7 +682,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/verify" => {
+                        Some(BuiltinCmd::Verify) => {
                             // Trigger plan verification by submitting a
                             // hidden prompt that calls the
                             // verify_plan_execution tool. The turn runs
@@ -653,7 +700,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/permissions" => {
+                        Some(BuiltinCmd::Permissions) => {
                             if parts.get(1) == Some(&"clear") {
                                 agent.clear_allowed_tools();
                                 let _ = resp_tx.send(AgentResponse::Text(
@@ -669,7 +716,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = resp_tx.send(AgentResponse::Text(message));
                             }
                         }
-                        "/auto-approve" => {
+                        Some(BuiltinCmd::AutoApprove) => {
                             let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
                                 Some("on") | Some("true") | Some("1") => Some(true),
                                 Some("off") | Some("false") | Some("0") => Some(false),
@@ -692,7 +739,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = resp_tx.send(AgentResponse::AutoApproveChanged(enabled));
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
-                        "/review" => {
+                        Some(BuiltinCmd::Review) => {
                             // /review — on-demand session review (ADR-0018,
                             // superseding the periodic ADR-0016 design).
                             // Runs the bounded read-only REVIEW sub-agent
@@ -729,7 +776,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = resp_tx
                                 .send(AgentResponse::Text(format_review_report(&verdicts, rounds)));
                         }
-                        "/verify-nudge" => {
+                        Some(BuiltinCmd::VerifyNudge) => {
                             // /verify-nudge        → show current state
                             // /verify-nudge on|off → set explicitly
                             let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
@@ -753,7 +800,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if enabled { "will" } else { "won't" },
                             )));
                         }
-                        "/search" => {
+                        Some(BuiltinCmd::Search) => {
                             let query = cmd.strip_prefix("/search").unwrap_or("").trim();
                             if query.is_empty() {
                                 let _ = resp_tx.send(AgentResponse::Text(
@@ -802,7 +849,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/resume" => {
+                        Some(BuiltinCmd::Resume) => {
                             generation_clone.fetch_add(1, Ordering::SeqCst);
                             agent.reject_pending_permissions();
                             let _ = resp_tx.send(AgentResponse::PermissionsCleared);
@@ -824,7 +871,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/session" => match parts.get(1).copied().unwrap_or("status") {
+                        Some(BuiltinCmd::Session) => match parts.get(1).copied().unwrap_or("status") {
                             "status" => {
                                 let id = session.id().await;
                                 let parent_id = session
@@ -988,14 +1035,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                         },
-                        "/sessions" => {
+                        Some(BuiltinCmd::Sessions) => {
                             let _ = resp_tx.send(AgentResponse::SessionsOverview(
                                 build_sessions_overview(&session).await,
                             ));
                         }
-                        "/compact" => {
+                        Some(BuiltinCmd::Compact) => {
                             let mut current = history.lock().await.clone();
-                            let settings = CompactionSettings::from(&config);
+                            let settings = CompactionSettings::from_config(&config, active_context_window(&agent));
                             let hooks = RelayCompactionHooks {
                                 tx: resp_tx.clone(),
                             };
@@ -1022,7 +1069,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/pursue" => {
+                        Some(BuiltinCmd::Pursue) => {
                             let thread_id = session.id().await;
                             let argument = cmd.strip_prefix("/pursue").unwrap_or("").trim();
                             let rest = argument;
@@ -1209,7 +1256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         generation_counter: generation_clone.clone(),
                                         session: session.clone(),
                                         pursuit_service: pursuit_service.clone(),
-                                        compaction: CompactionSettings::from(&config),
+                                        compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
                                         retry_max_attempts: config.provider_retry_max_attempts,
                                         retry_base_ms: config.provider_retry_base_ms,
                                         retry_max_ms: config.provider_retry_max_ms,
@@ -1221,7 +1268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             send_harness_state(&resp_tx, &agent, "idle");
                         }
-                        "/repeat" => {
+                        Some(BuiltinCmd::Repeat) => {
                             let rest = cmd.strip_prefix("/repeat").unwrap_or("").trim();
                             if rest.is_empty() || rest == "help" {
                                 let _ = resp_tx.send(AgentResponse::Text(
@@ -1325,7 +1372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/init" => {
+                        Some(BuiltinCmd::Init) => {
                             let target = parts.get(1).copied().unwrap_or(".");
                             match init_neenee_config(std::path::Path::new(target)) {
                                 Ok(created) if created.is_empty() => {
@@ -1350,7 +1397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/skills" => {
+                        Some(BuiltinCmd::Skills) => {
                             let sub = parts.get(1).copied().unwrap_or("list");
                             match sub {
                                 "list" => {
@@ -1387,7 +1434,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/skill" => {
+                        Some(BuiltinCmd::Skill) => {
                             let name = cmd.strip_prefix("/skill").unwrap_or("").trim();
                             if name.is_empty() {
                                 let _ = resp_tx
@@ -1407,7 +1454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/clear" => {
+                        Some(BuiltinCmd::Clear) => {
                             history.lock().await.clear();
                             let _ = session.replace_messages(Vec::new()).await;
                             let _ = resp_tx.send(AgentResponse::ConversationCleared);
@@ -1415,7 +1462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "Conversation history cleared.".to_string(),
                             ));
                         }
-                        "/export" => {
+                        Some(BuiltinCmd::Export) => {
                             let messages = history.lock().await.clone();
                             let session_id = session.id().await;
                             let provider_id = agent.provider.provider_id();
@@ -1464,7 +1511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        "/help" => {
+                        Some(BuiltinCmd::Help) => {
                             let custom_help = if commands_for_task.is_empty() {
                                 String::new()
                             } else {
@@ -1486,36 +1533,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .join("\n")
                                 )
                             };
-                            let _ = resp_tx.send(AgentResponse::Text(
-                                format!("Slash commands:\n\
-                                /provider — Select an LLM provider\n\
-                                /mode     — Show or switch mode (build, plan)\n\
-                                /mcp      — Show configured MCP server status\n\
-                                /compact  — Compact older complete turns now\n\
-                                /clear    — Clear the conversation history\n\
-                                                                /permissions [clear] — Show or clear always-allowed tool rules
-                                /auto-approve [on|off] — Toggle bypassing write-tool permission prompts
-                                /review — Run an on-demand session-review diagnostic of the current turn (ADR-0018)
-                                /verify-nudge [on|off] — Toggle the verify-plan hard nudge at turn end
-                                /search <query> — Semantic search over the project's session history
-\n\
-                                /session [status|list|resume|fork|open|new] — Manage durable sessions\n\
-                                /sessions — Browse past sessions\n\
-                                /resume [id] — Resume the most recent or selected session\n\
-                                /pursue [condition|status|stop|done|edit|clear] — Pursue a pursuit: the harness keeps the turn going until the condition is met\n\
-                                /repeat [cron prompt|list|cancel id] — Schedule a prompt on a cron expression\n\
-                                /init [path] — Initialize a .neenee/ config tree\n\
-                                /skills [list|reload] — List or reload available skills\n\
-                                /skill <name> — Load a skill by name\n\
-                                /export   — Export this conversation to the clipboard as Markdown\n\
-                                /help     — Show available commands and keybindings\n\
-                                /exit     — Exit the program{}", custom_help)
-                            ));
+                            let mut lines = vec!["Slash commands:".to_string()];
+                            for (name, desc) in BuiltinCmd::ALL {
+                                lines.push(format!("{name:<13} — {desc}"));
+                            }
+                            let _ = resp_tx
+                                .send(AgentResponse::Text(format!("{}
+{custom_help}", lines.join("
+"))));
                         }
-                        "/exit" => {
+                        Some(BuiltinCmd::Exit) => {
                             let _ = resp_tx.send(AgentResponse::Exit);
                         }
-                        _ => {
+                        None => {
                             let (name, arguments) = split_custom_command(&cmd);
                             let Some(command) = commands_for_task.get(name) else {
                                 let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -1533,7 +1563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     generation_counter: generation_clone.clone(),
                                     session: session.clone(),
                                     pursuit_service: pursuit_service.clone(),
-                                    compaction: CompactionSettings::from(&config),
+                                    compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
                                     retry_max_attempts: config.provider_retry_max_attempts,
                                     retry_base_ms: config.provider_retry_base_ms,
                                     retry_max_ms: config.provider_retry_max_ms,
@@ -1559,7 +1589,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             generation_counter: generation_clone.clone(),
                             session: session.clone(),
                             pursuit_service: pursuit_service.clone(),
-                            compaction: CompactionSettings::from(&config),
+                            compaction: CompactionSettings::from_config(&config, active_context_window(&agent)),
                             retry_max_attempts: config.provider_retry_max_attempts,
                             retry_base_ms: config.provider_retry_base_ms,
                             retry_max_ms: config.provider_retry_max_ms,
@@ -1924,7 +1954,7 @@ mod tests {
                 session,
                 pursuit_service,
                 compaction: CompactionSettings {
-                    max_chars: 100_000,
+                    budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                     preserve_turns: 6,
                     summarize: false,
                     prune: false,
@@ -2007,7 +2037,7 @@ mod tests {
                 session,
                 pursuit_service,
                 compaction: CompactionSettings {
-                    max_chars: 100_000,
+                    budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                     preserve_turns: 6,
                     summarize: false,
                     prune: false,

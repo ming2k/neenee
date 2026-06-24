@@ -9,9 +9,9 @@
 //! such that a power loss after `rename` leaves neither the old nor the new
 //! file reachable.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Owner-only mode (`rw-------`) applied to every file we write and `rwx------`
 /// to its parent directory on Unix. Config and session files hold secrets (API
@@ -100,6 +100,73 @@ pub fn atomic_write_json<T: serde::Serialize + ?Sized>(
 ) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     atomic_write_bytes(path, &bytes).map_err(|e| e.to_string())
+}
+
+/// Guard for a blocking exclusive advisory lock held on a companion
+/// `<path>.lock` file. Used to serialise short read-modify-write windows on
+/// shared global files (`provider_usage.json`, slash-command history, the
+/// per-project embedding index) so two concurrently-running `neenee` instances
+/// in the same project — or across projects — never silently lose each other's
+/// updates. Dropping the guard closes the fd and releases the lock.
+///
+/// The lock is held on a **companion** file rather than the data file itself
+/// because the data file is rewritten via temp-file + `rename(2)` (see
+/// [`atomic_write_bytes`]), which swaps the underlying inode. A `flock` on the
+/// data file's old fd would not protect the newly-renamed inode, so concurrent
+/// writers could each believe they held the lock. The companion file is
+/// opened once and never renamed, so its file-description lock reliably
+/// serialises every holder for the lock's lifetime.
+///
+/// On non-Unix platforms this is a structural no-op (the companion file is
+/// created for symmetry, but no mutual exclusion is enforced). The state it
+/// guards is rebuildable cosmetic telemetry, so the residual race is
+/// acceptable there and is documented in ADR-0018.
+pub struct FileLock {
+    #[cfg(unix)]
+    _file: File,
+    #[cfg(not(unix))]
+    _file: (),
+}
+
+impl FileLock {
+    /// Acquire a blocking exclusive lock on `<path>.lock`. Creates the
+    /// companion file (and its parent directory) if missing, then blocks
+    /// until an exclusive `flock(2)` is obtained.
+    pub fn acquire(path: &Path) -> std::io::Result<Self> {
+        let lock_path = lock_companion(path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&lock_path)?;
+            // Blocking exclusive lock. We intentionally do not pass `LOCK_NB`:
+            // RMW sections are short, so waiting for the prior holder is both
+            // correct (no lost update) and cheap.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { _file: file })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = OpenOptions::new().create(true).write(true).open(&lock_path)?;
+            Ok(Self { _file: () })
+        }
+    }
+}
+
+/// Companion lock-file path for `path`: `<path>.lock`.
+fn lock_companion(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
 #[cfg(test)]

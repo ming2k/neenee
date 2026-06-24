@@ -28,9 +28,9 @@ use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
     MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_BOTTOM_GAP_ROWS,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
-    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
+    STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS, TOOL_STEP_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
+    TRANSCRIPT_H_INSET,
 };
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
@@ -124,7 +124,8 @@ pub struct TranscriptView<'a> {
     pub scroll: u16,
     pub selection: &'a SelectionState,
     /// Transient running status shown in a thin bar above the input box.
-    /// Empty / "idle" / "responding" means the status bar is hidden.
+    /// Empty / "idle" means the status bar is hidden; every other value
+    /// (including "responding") keeps the bar up for the full turn lifecycle.
     pub activity: &'a str,
     /// Spinner animation phase (cycles through braille frames while active).
     pub spinner_phase: usize,
@@ -258,13 +259,14 @@ pub fn draw_transcript(
     let in_subagent = subagent_bar.is_some();
 
     // The status bar (animated spinner + activity text) sits on its own line
-    // directly above the input box. It is shown only for non-streaming,
-    // non-idle activity so the transcript reclaims that row when nothing is running.
+    // directly above the input box. It is shown for every active phase —
+    // including streaming ("responding"), which is the longest phase and the
+    // one where the breathing dot's liveness signal matters most — and hidden
+    // only when the harness is idle, so the row returns to the transcript.
     let status_active = !chrome_hidden
         && !in_subagent
         && !activity.is_empty()
-        && activity != "idle"
-        && activity != "responding";
+        && activity != "idle";
     let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new
@@ -485,9 +487,12 @@ pub fn draw_transcript(
 
     let status_y = chunks[1].y;
 
-    // The transient activity bar sits directly above the input box. Hidden
-    // while text is actively streaming ("responding"), since the streamed
-    // response is itself the feedback in that phase, and hidden when idle.
+    // The transient activity bar sits directly above the input box. It stays
+    // up for the entire active turn lifecycle (queued → responding → tool
+    // work → finalizing), including the streaming phase, and hides only when
+    // idle. Keeping it up during "responding" avoids a layout shift at the
+    // stream boundary and sustains the breathing-dot liveness anchor
+    // (ADR-0008) through the longest phase.
     // Returns its rect so the event loop can hit-test clicks → Activity modal.
     let activity_rect = if status_active {
         draw_activity_bar(

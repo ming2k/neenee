@@ -3,41 +3,15 @@
 //! keystroke re-derives the candidates from the live text and the (cached)
 //! recursive project scan.
 
+use crate::startup::BuiltinCmd;
 use crate::tui::App;
 
-// Canonical command list. The descriptions here are the single source of
-// truth and must stay in sync with the `/help` text in `crates/neenee/src/main.rs`
-// and `docs/reference/commands.md`. Order is logical grouping, not alphabetical.
-pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/provider", "Select an LLM provider"),
-    ("/session", "Open the session context overview"),
-    ("/mode", "Show or switch mode (build, plan)"),
-    ("/plan", "Open the active plan file in a preview modal"),
-    ("/verify", "Trigger independent plan verification"),
-    ("/mcp", "Show configured MCP server status"),
-    ("/compact", "Compact older complete turns now"),
-    ("/clear", "Clear the conversation history"),
-    ("/permissions", "Show or clear always-allowed tool rules"),
-    (
-        "/auto-approve",
-        "Toggle bypassing write-tool permission prompts (on/off)",
-    ),
-    ("/session", "Manage durable sessions"),
-    ("/sessions", "Browse past sessions"),
-    ("/resume", "Resume the most recent or selected session"),
-    ("/pursue", "Pursue a condition: drive the agent until it is met, or manage the pursuit"),
-    (
-        "/repeat",
-        "Schedule a prompt on a cron: /repeat <cron> <prompt>",
-    ),
-    ("/init", "Initialize a .neenee/ config tree"),
-    ("/help", "Show available commands and keybindings"),
-    ("/exit", "Exit the program"),
-    (
-        "/export",
-        "Export this conversation to the clipboard as Markdown",
-    ),
-];
+// The built-in slash-command vocabulary (names + descriptions) lives in ONE
+// place: `startup::BuiltinCmd::ALL`. Completion, `/help`, and the dispatch
+// `match` in `main.rs` all derive from it, and that dispatch is a
+// non-exhaustive match over `Option<BuiltinCmd>` — so a command added to the
+// table without a handler arm (or vice versa) fails to compile. There is no
+// second list here to drift out of sync.
 
 /// Kind of completion menu the input box is currently offering. Drives the
 /// keyboard shortcuts that cycle / accept entries: Tab, ↑/↓, and (for slash
@@ -407,7 +381,7 @@ impl App {
         }
 
         if current.starts_with('/') {
-            return SLASH_COMMANDS
+            return BuiltinCmd::ALL
                 .iter()
                 .filter(|(cmd, _)| cmd.starts_with(&current))
                 .map(|(cmd, desc)| Completion::whole_input(cmd, desc, self.input.len()))

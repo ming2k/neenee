@@ -9,7 +9,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block as RtBlock, Borders, Clear, Paragraph},
+    widgets::{Block as RtBlock, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -1049,7 +1049,6 @@ pub fn draw_question_modal(
     highlighted: usize,
     theme: &Theme,
 ) {
-    draw_dim_backdrop(frame, frame.size(), theme.backdrop());
     let area = centered_rect(78, 70, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -1116,7 +1115,7 @@ pub fn draw_question_modal(
             &mut body,
             other_index,
             OTHER_OPTION_LABEL,
-            Some(OTHER_OPTION_PLACEHOLDER),
+            None,
             q_selected.is_some_and(|s| s.contains(&other_index)),
             other_highlighted,
             q.multi_select,
@@ -1143,7 +1142,10 @@ pub fn draw_question_modal(
             ]));
         }
     }
-    render_body(frame, f.body, body, &mut 0, None);
+    frame.render_widget(
+        Paragraph::new(body).wrap(Wrap { trim: false }),
+        f.body,
+    );
 
     if let Some(fo) = f.footer {
         frame.render_widget(
@@ -1202,26 +1204,26 @@ fn render_question_option(
     } else {
         Style::default().fg(theme.fg())
     };
-    let desc_style = Style::default().fg(if is_highlighted {
-        theme.fg()
-    } else {
-        theme.muted()
-    });
     let focus = if is_highlighted { "❯" } else { " " };
 
-    let mut spans = vec![
+    let label_line = Line::from(vec![
         Span::styled(format!("{} {:>2} ", focus, number), focus_style),
         Span::styled(format!("{} ", marker), marker_style),
         Span::styled(label.to_string(), text_style),
-    ];
-    if let Some(desc) = description {
-        spans.push(Span::styled(" — ", desc_style));
-        spans.push(Span::styled(desc.to_string(), desc_style));
-    }
+    ]);
     if !lines.is_empty() {
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(spans));
+    lines.push(label_line);
+
+    if let Some(desc) = description {
+        let desc_style = Style::default().fg(theme.dim());
+        let indent = if multi_select { "         " } else { "       " };
+        lines.push(Line::from(vec![
+            Span::styled(indent.to_string(), desc_style),
+            Span::styled(desc.to_string(), desc_style),
+        ]));
+    }
 }
 
 /// Draw a blocking tool permission request inline, replacing the composer
@@ -1730,9 +1732,9 @@ pub struct ActivityModalView<'a> {
     /// Active pursuit, if any. Shown as an objective line plus one row per
     /// checklist item.
     pub pursuit: Option<&'a neenee_core::Pursuit>,
-    /// Live plan-progress snapshot, if any. Shown as a header (file name +
-    /// done/total) plus one row per section.
-    pub plan: Option<&'a neenee_core::PlanProgress>,
+    /// Live unified task list, if any. Shown as a header (done/total) plus
+    /// one row per item with a status glyph.
+    pub todos: Option<&'a neenee_core::TodoList>,
     /// Harness turn counter (`turn N`).
     pub turn_count: u64,
     /// Current tool round within the turn (1-indexed; `0` before the first
@@ -1748,18 +1750,15 @@ pub struct ActivityModalView<'a> {
     pub activity: &'a str,
 }
 
-/// Foreground color for a plan-section status glyph. Done/in-progress pop in
-/// `ok`/`warn`; pending/skipped stay muted so the eye is drawn to active work.
-fn plan_section_glyph_color(
-    status: neenee_core::PlanSectionStatus,
-    theme: &Theme,
-    muted: Color,
-) -> Color {
-    use neenee_core::PlanSectionStatus;
+/// Foreground color for a todo-status glyph. Completed/in-progress pop in
+/// `ok`/`warn`; pending/cancelled stay muted so the eye is drawn to active
+/// work.
+fn todo_status_glyph_color(status: neenee_core::TodoStatus, theme: &Theme, muted: Color) -> Color {
+    use neenee_core::TodoStatus;
     match status {
-        PlanSectionStatus::Done => theme.ok(),
-        PlanSectionStatus::InProgress => theme.warn(),
-        PlanSectionStatus::Pending | PlanSectionStatus::Skipped => muted,
+        TodoStatus::Completed => theme.ok(),
+        TodoStatus::InProgress => theme.warn(),
+        TodoStatus::Pending | TodoStatus::Cancelled => muted,
     }
 }
 
@@ -1776,7 +1775,7 @@ pub fn draw_activity_modal(
 ) {
     let ActivityModalView {
         pursuit,
-        plan,
+        todos,
         turn_count,
         current_round,
         review_alert,
@@ -1828,38 +1827,31 @@ pub fn draw_activity_modal(
         ]));
     }
 
-    // ── Plan ──
-    if let Some(progress) = plan {
+    // ── Tasks ──
+    if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
         if have_section {
             lines.push(Line::from(""));
         }
         have_section = true;
-        let path_str = progress
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| progress.path.display().to_string());
-        let done = progress.done_count();
-        let total = progress.sections.len();
+        use neenee_core::TodoStatus;
+        let done = list.count(TodoStatus::Completed);
+        let total = list.items.len();
         lines.push(Line::from(vec![
             Span::styled(
-                "Plan",
+                "Tasks",
                 Style::default()
                     .fg(theme.brand())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {path_str}  {done}/{total}"),
-                Style::default().fg(muted),
-            ),
+            Span::styled(format!("  {done}/{total}"), Style::default().fg(muted)),
         ]));
-        for section in &progress.sections {
-            let glyph_color = plan_section_glyph_color(section.status, theme, muted);
+        for item in &list.items {
+            let glyph_color = todo_status_glyph_color(item.status, theme, muted);
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
-                Span::styled(section.status.glyph(), Style::default().fg(glyph_color)),
+                Span::styled(item.status.glyph(), Style::default().fg(glyph_color)),
                 Span::styled(" ", Style::default()),
-                Span::styled(section.name.clone(), Style::default().fg(theme.fg())),
+                Span::styled(item.content.clone(), Style::default().fg(theme.fg())),
             ]));
         }
     }
@@ -1868,7 +1860,7 @@ pub fn draw_activity_modal(
     if have_section {
         lines.push(Line::from(""));
     }
-    let idle = activity.is_empty() || activity == "idle" || activity == "responding";
+    let idle = activity.is_empty() || activity == "idle";
     lines.push(Line::from(vec![Span::styled(
         "Activity",
         Style::default()

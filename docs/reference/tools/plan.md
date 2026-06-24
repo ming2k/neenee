@@ -1,21 +1,27 @@
 # Plan tools
 
-`plan_enter`, `plan_exit`, `update_plan_progress`, and `verify_plan_execution`
-drive the Plan-mode workflow. `PlanEnterTool`, `PlanExitTool`, and
-`UpdatePlanProgressTool` are force-injected by `Agent::new` from
-`crates/neenee-core/src/plan.rs` (any externally supplied copies are stripped
-first). They share a `PlanToolContext` carrying the same
+`plan_enter`, `plan_exit`, and `verify_plan_execution` drive the Plan-mode
+workflow. `PlanEnterTool` and `PlanExitTool` are force-injected by
+`Agent::new` from `crates/neenee-core/src/plan.rs` (any externally supplied
+copies are stripped first). They share a `PlanToolContext` carrying the same
 `Arc<Mutex<AgentMode>>` the `Agent` owns, so each tool flips the mode in place.
-All three are `Read` and bypass the permission broker; after `plan_enter` or
+Both are `Read` and bypass the permission broker; after `plan_enter` or
 `plan_exit` returns, the agent emits a `ModeChanged` event so the TUI refreshes
 its mode indicator. The Plan-mode gate exempts `.neenee/plans/` writes through
 `Tool::allowed_in_plan_mode`.
+
+There is no separate plan-progress tool. When a plan is approved, `plan_exit`
+seeds the [unified task list](interaction.md) (`todo` / `todo_update`) from the
+plan's `##` headings, and the model tracks per-step progress with those tools.
+See [ADR-0020](../../adr/0020-unified-task-list.md).
 
 ### `plan_enter`
 
 No parameters. Switches the agent to `Plan` mode. The model calls it when a
 request would benefit from designing before implementing; it should not be
-called for simple tasks or when the user wants immediate implementation. See
+called for simple tasks or when the user wants immediate implementation. It
+also clears the active plan path and the task list, since re-entering Plan mode
+starts a fresh planning cycle. See
 [Plan mode](../../explanation/agent-design/plan-mode.md).
 
 ### `plan_exit`
@@ -28,24 +34,11 @@ Asks the user to approve the plan, then switches the agent back to `Build`
 mode. The model calls it only after the plan is written and decision-complete.
 On approval the mode flips, the `plan_path` is recorded as the active plan,
 the plan body is read from disk and echoed back in the tool result, and the
-markdown is parsed into `##` sections that drive the sticky progress panel
-above the input box. If the user picks **Keep planning** the agent stays in
-`Plan` mode. Manual `/mode build` skips the approval step. See
+markdown's `##` headings are seeded into the task list (one `Pending` item
+each), which the model then tracks with `todo` / `todo_update`. If the user
+picks **Keep planning** the agent stays in `Plan` mode. Manual `/mode build`
+skips the approval step. See
 [Plan mode](../../explanation/agent-design/plan-mode.md).
-
-### `update_plan_progress`
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `section` | string | yes | Substring of the `##` heading to update (case-insensitive) |
-| `status` | enum: `pending` / `in_progress` / `done` / `skipped` | yes | New status for the section |
-
-Mark a section of the active plan. The agent calls this as it works through the
-implementation so the sticky panel above the input box reflects the current
-state. The section argument is matched case-insensitively as a substring of any
-`##` heading, so the model does not have to echo the exact title. Has no effect
-if there is no active plan (the call returns a clear "no active plan" hint
-instead of erroring). See [Plan mode](../../explanation/agent-design/plan-mode.md).
 
 ### `verify_plan_execution`
 

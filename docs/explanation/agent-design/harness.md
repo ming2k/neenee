@@ -151,11 +151,12 @@ replayed.
 
 Distinct tool calls and autonomous loop iterations are both **uncapped**,
 matching the codex / claude-code agentic-loop model. Context compaction
-(`compaction_max_chars` plus mid-turn pruning) is the backstop that keeps
-unbounded loops from exhausting the context window; the user can interrupt at
-any time with `Esc` or `/pursue stop`. See ADR-0009 for the rationale and
-the prior caps (32 tool rounds per turn, 50 autonomous iterations per
-`/loop`) that this decision removed.
+(thresholds derived from the active model's context window, plus mid-turn
+pruning) is the backstop that keeps unbounded loops from exhausting the
+context window; the user can interrupt at any time with `Esc` or
+`/pursue stop`. See ADR-0009 for the rationale and the prior caps (32 tool
+rounds per turn, 50 autonomous iterations per `/loop`) that this decision
+removed.
 
 ### Session review (ADR-0016)
 
@@ -244,24 +245,32 @@ fresh session id.
 
 ## Context compaction
 
-The runner relieves context pressure in three layers, cheapest first:
+The runner relieves context pressure in three layers, cheapest first. Every
+threshold is derived from the **active model's context window** — measured in
+tokens and re-seeded whenever the provider switches — so a 1M-token model is
+no longer over-compacted at ~3% of its window and a 128k model is no longer
+under-protected. ADR-0019 records the rationale; exact keys and defaults live
+in the [Configuration Reference](../../../reference/configuration.md#compaction).
 
-1. **Tool-result pruning** (`compaction_prune`, on by default). Old tool-role
-   results are cleared in place to `[Old tool result content cleared]`,
-   protecting the most recent `compaction_prune_protect_chars` of tool output.
-   This runs both before a turn and, via a mid-turn relief gate, between
-   tool rounds once pressure crosses ~¾ of `compaction_max_chars`. Pruned
-   originals are archived for durability; the `tool_call_id` chain is preserved
-   so providers that require it stay valid.
-2. **Summarizing compaction** when size still exceeds `compaction_max_chars`.
-   The boundary is the start of an older complete user turn:
+1. **Tool-result pruning** (on by default). Old tool-role results are cleared
+   in place to a placeholder, protecting the most recent tool output. This
+   runs before a turn and, via a mid-turn relief gate, between tool rounds
+   once pressure crosses the prune threshold (~65% of the window, below the
+   full-compaction trigger). Pruned originals are archived for durability; the
+   `tool_call_id` chain is preserved so providers that require it stay valid.
+2. **Summarizing compaction** once pressure crosses the compaction threshold
+   (~85% of the window). The boundary is the start of an older complete user
+   turn:
    - Earlier messages move to the durable archive.
    - System messages are regenerated rather than archived into model context.
-   - When `compaction_summarize` is on (default), the active model writes an
-     anchored, structured summary; the previous summary is carried forward in a
-     `<previous-summary>` block so each compaction updates rather than restarts.
-     Any failure falls back to a deterministic newest-first excerpt summary.
-   - The latest `compaction_preserve_turns` remain provider-native.
+   - By default the active model writes an anchored, structured summary; the
+     previous summary is carried forward so each compaction updates rather than
+     restarts. Any failure falls back to a deterministic newest-first excerpt
+     summary.
+   - The most recent complete turns remain provider-native.
+
+   The active window is compressed toward a target (~25% of the window), so
+   compaction happens rarely but deeply.
 
 This preserves the complete transcript while replacing only the model-visible
 prefix. `/compact` runs the same operation manually.

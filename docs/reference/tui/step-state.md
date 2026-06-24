@@ -100,7 +100,8 @@ toggle just re-pins to the new value.
 ### Auto defaults
 
 Default disclosure is a pure function of `(kind, lifecycle)`, evaluated by
-`step_interaction::default_tool_expanded` and `default_thinking_expanded`:
+`step_interaction::default_tool_expanded` (tools) and
+`config::thinking_default_expanded` (reasoning):
 
 | Step kind | Lifecycle | Default disclosure | Reason |
 |-----------|-----------|--------------------|--------|
@@ -109,7 +110,7 @@ Default disclosure is a pure function of `(kind, lifecycle)`, evaluated by
 | Tool | `Denied` | Expanded | the denial message must be visible without an extra click |
 | Tool | `Cancelled` | Collapsed | an aborted call reads as inert |
 | Tool | `Ok` | per-tool `[tui.default_expanded]` entry, or `true` under Comfortable density | `edit_file` shows its diff; `bash` / `read_file` stay collapsed |
-| Thinking | streaming | Expanded | live reasoning is the value of a trace |
+| Thinking | streaming | Collapsed (or `[tui.default_expanded] thinking`) | reasoning defaults to collapsed; opt in to auto-expand via config |
 | Thinking | finished | Unchanged | no auto-collapse — do not yank away content the user was reading |
 
 ## Interaction FSM
@@ -187,6 +188,6 @@ one of the historical bugs the state machine was introduced to fix:
 | `render/step/mod.rs` | The three-axes architectural overview and the public re-exports |
 | `render/step/renderers.rs` | Concrete step renderers that feed the axes in: `draw_tool_step`, `draw_reasoning_trace`, `draw_subagent_bar`, `draw_subagent_inline_step` |
 | `render/tools/mod.rs` | `ToolStatus` (5 states), `ToolStatus::color` |
-| `step_interaction.rs` | `default_tool_expanded`, `default_thinking_expanded`, summary-at-pointer classification (`summary_at`, `hovered_summary`) |
+| `step_interaction.rs` | `default_tool_expanded`, summary-at-pointer classification (`summary_at`, `hovered_summary`) |
 | `document.rs` | `set_*_expanded` (auto, no-op if pinned) and `pin_*_expanded` (user, sets `user_pinned`); the `user_pinned` field on `MessageKind::ToolStep` / `MessageKind::Thinking` |
 | `app.rs` | `toggle_step_pinned` — wires the user toggle to the pin setter and the sticky-scroll keep-anchored behavior |

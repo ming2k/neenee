@@ -57,7 +57,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             session: session.clone(),
             pursuit_service,
             compaction: CompactionSettings {
-                max_chars: 100_000,
+                budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
                 summarize: false,
                 prune: false,

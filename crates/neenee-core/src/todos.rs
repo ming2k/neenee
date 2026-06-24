@@ -1,25 +1,20 @@
-//! Unified task list (todos).
+//! Unified task list (todos) — the single source of truth for "what is the
+//! agent working on and what is left to do."
 //!
-//! The single source of truth for "what is the agent working on and what is
-//! left to do." It supersedes the old parallel concepts:
+//! One list, one sticky panel, one persisted field. There is no longer a
+//! parallel "plan progress" tracker: the [`crate::plan`] module owns only the
+//! Plan *Mode* workflow (`plan_enter` / `plan_exit` / the plan document), and
+//! on `plan_exit` it seeds a [`TodoList`] (see [`TodoList::from_plan_markdown`])
+//! rather than maintaining its own progress type. Entering Plan mode clears
+//! the list.
 //!
-//! - The scratchpad `TodoWriteTool` that lived in `neenee-tools` with a
-//!   process-local `Arc<Mutex<Vec>>` (never persisted, never rendered).
-//! - The `PlanProgress` section tracker in [`crate::plan`], which was a
-//!   second, parallel "ordered list of named items each with a status."
-//!
-//! Both were the same feature. This module is that feature, once. The
-//! [`crate::plan`] module keeps the Plan *Mode* workflow (`plan_enter` /
-//! `plan_exit` / the plan document), but on `plan_exit` it seeds a
-//! [`TodoList`] rather than maintaining its own progress type. One list, one
-//! sticky panel, one persisted field.
-//!
-//! Architecture mirrors [`crate::plan`]: domain types live here, a shared
-//! [`TodoToolContext`] holds the `Arc<Mutex<TodoList>>` that the host `Agent`
-//! (in `neenee-agent`) also owns, and the tools mutate that shared cell so a
-//! call takes effect immediately for the next system prompt and the TUI. The
-//! harness mirrors the cell back into the session each turn (event-sourced),
-//! and replays it on resume.
+//! Architecture: domain types live here, a shared [`TodoToolContext`] holds
+//! the `Arc<Mutex<TodoList>>` that the host `Agent` (in `neenee-agent`) also
+//! owns, and the tools mutate that shared cell so a call takes effect
+//! immediately for the next system prompt and the TUI. The same context is
+//! embedded in [`crate::plan::PlanToolContext`] so the plan workflow can
+//! reseed/clear the list. The harness mirrors the cell back into the session
+//! each turn (event-sourced) and replays it on resume.
 //!
 //! ## Identity vs. display
 //! [`TodoItem::id`] is a stable, monotonic identifier used for persistence
@@ -46,9 +41,9 @@ use crate::{Tool, ToolAccess};
 pub const MAX_TODOS: usize = 50;
 
 /// Number of harness turns the todos panel may go without any change before
-/// the TUI renders it dimmed with a "not updated for N turns" hint. Absorbed
-/// from the former `PLAN_STALE_TURN_THRESHOLD`: a model that abandons the
-/// list after the first item should not display trustworthy-looking checks.
+/// the TUI renders it dimmed with a "not updated for N turns" hint: a model
+/// that abandons the list after the first item should not display
+/// trustworthy-looking checks.
 pub const TODO_STALE_TURN_THRESHOLD: u64 = 5;
 
 /// Stable, monotonic identifier for a single todo item. Opaque to callers —
@@ -58,8 +53,7 @@ pub const TODO_STALE_TURN_THRESHOLD: u64 = 5;
 #[serde(transparent)]
 pub struct TodoId(pub u64);
 
-/// Lifecycle of a single todo item. A superset of the former
-/// `PlanSectionStatus`: `Done`→`Completed`, `Skipped`→`Cancelled`.
+/// Lifecycle of a single todo item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -247,9 +241,9 @@ impl TodoList {
 
     /// Update the status of items matched by `key`. `key` is either a 1-based
     /// display position (`"1"`, `"3"`) or, when not a valid position, a
-    /// case-insensitive substring of the content (all matches updated, like
-    /// the former `update_plan_progress`). Returns the number of items
-    /// changed. Stamps `updated_at_turn` only when at least one item moved.
+    /// case-insensitive substring of the content (all matches updated).
+    /// Returns the number of items changed. Stamps `updated_at_turn` only
+    /// when at least one item moved.
     pub fn update(&mut self, key: &str, status: TodoStatus, now: u64, turn: u64) -> usize {
         let mut changed = 0;
         let trimmed = key.trim();
@@ -345,8 +339,7 @@ impl TodoList {
         }
     }
 
-    /// Seed a list from a plan document's `##` headings (absorbed from the
-    /// former `PlanProgress::from_markdown`). Each heading becomes a
+    /// Seed a list from a plan document's `##` headings. Each heading becomes a
     /// `Pending` item, in document order. If the plan has no headings a
     /// single synthetic "Plan" item is used so the panel still renders.
     pub fn from_plan_markdown(content: &str, now: u64, turn: u64) -> Self {
@@ -388,8 +381,8 @@ impl TodoList {
 
 /// Extract `## ` (level-2) heading text from a markdown plan. Deeper
 /// headings (`### `+) are sub-bullets inside a section and do not become
-/// items. Absorbed verbatim from the former `plan::parse_plan_headings`;
-/// duplicated only until `PlanProgress` is removed in the migration.
+/// items. Used by [`TodoList::from_plan_markdown`] to seed the list when a
+/// plan is approved via `plan_exit`.
 fn parse_plan_headings(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in content.lines() {
@@ -408,7 +401,10 @@ fn parse_plan_headings(content: &str) -> Vec<String> {
     out
 }
 
-fn unix_now() -> u64 {
+/// Current wall-clock time in Unix-epoch seconds. Shared with [`crate::plan`]
+/// so `plan_exit` can stamp `created_at` when seeding a [`TodoList`] from the
+/// approved plan markdown.
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -574,8 +570,8 @@ const TODO_UPDATE_DESCRIPTION: &str =
 
 /// Surgical update tool: change the status of items matched by position or
 /// content substring, leaving everything else untouched. Complements
-/// [`TodoWriteTool`] so the model can mark a step done without re-emitting
-/// the entire list (absorbs the former `update_plan_progress`).
+/// [`TodoWriteTool`] so the model can mark a step done without re-emitting the
+/// entire list.
 pub struct TodoUpdateTool {
     context: TodoToolContext,
 }

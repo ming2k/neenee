@@ -89,7 +89,12 @@ pub fn draw_activity_bar(
     spinner_phase: usize,
     theme: &Theme,
 ) -> Option<Rect> {
-    if status.is_empty() || status == "idle" || status == "responding" {
+    // The bar is the TUI's single liveness anchor (ADR-0008). It stays up
+    // for *every* active phase — including "responding" (streaming text),
+    // which is often the longest phase and the one most in need of a
+    // persistent liveness signal. It hides only when the harness is truly
+    // idle (empty status or "idle"), never on a transient activity value.
+    if status.is_empty() || status == "idle" {
         return None;
     }
     let spinner = spinner_glyph();

@@ -57,14 +57,16 @@ impl Agent {
                      step. If you discover the plan is wrong or incomplete, pause and tell \
                      the user rather than silently deviating. You may re-enter Plan mode by \
                      calling plan_enter if a redesign is required; that clears this plan.\n\n\
-                     Use the update_plan_progress tool to mark each `##` section as you work: \
-                     in_progress when you start it, done when it is complete. The user sees a \
-                     sticky panel with section status, so keeping it current is part of the \
-                     job. Before declaring the work complete, call verify_plan_execution to \
-                     spawn an independent verifier sub-agent with a clean context that \
-                     re-reads the plan and the workspace, then reports PASS / PARTIAL / FAIL \
-                     per section with concrete evidence. Address every PARTIAL and FAIL \
-                     before reporting completion to the user.",
+                     A task list has been seeded from the plan's `##` headings — keep it \
+                     current with the `todo` tool (full-replace) or `todo_update` (mark one \
+                     step by position or name): move a step to in_progress when you start it \
+                     and completed the moment it is done. The user sees a sticky panel with \
+                     step status, so keeping it honest is part of the job. Before declaring \
+                     the work complete, call verify_plan_execution to spawn an independent \
+                     verifier sub-agent with a clean context that re-reads the plan and the \
+                     workspace, then reports PASS / PARTIAL / FAIL per section with concrete \
+                     evidence. Address every PARTIAL and FAIL before reporting completion to \
+                     the user.",
                     display = display,
                 ));
             }

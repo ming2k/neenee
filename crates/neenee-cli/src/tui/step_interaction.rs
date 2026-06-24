@@ -65,10 +65,10 @@ pub fn hovered_summary(cursor: &SemanticCursor) -> Option<usize> {
 // A step's default disclosure is a pure function of (kind, lifecycle) — NOT
 // set once at creation. Tool steps stay collapsed while running (no result
 // yet) and expand on completion; failures force-expand so the error is
-// visible; reasoning traces expand while streaming so the live thinking is
-// readable. These are the "auto" defaults; a manual user toggle pins the
-// step (see `document::TranscriptMessage::pin_*`) and opts out of further
-// automatic changes.
+// visible. Reasoning traces do not auto-expand (their default disclosure is
+// driven by `[tui.default_expanded] thinking`, collapsed by default); a manual
+// user toggle pins the step (see `document::TranscriptMessage::pin_*`) and
+// opts out of further automatic changes.
 
 /// Default disclosure for a tool step at its current lifecycle. The caller
 /// applies this through the system setter, which no-ops once the user has
@@ -95,14 +95,6 @@ pub fn default_tool_expanded(
         ToolStepStatus::Cancelled => false,
         ToolStepStatus::Ok => density || tool_default_expanded(config, name),
     }
-}
-
-/// Default disclosure for a reasoning trace. Expanded while streaming —
-/// watching the model think live is the value of a reasoning trace — and on
-/// completion the transition handler leaves it as-is (no auto-collapse: don't
-/// yank away the content the user was just reading).
-pub fn default_thinking_expanded(running: bool) -> bool {
-    running
 }
 
 #[cfg(test)]
@@ -200,11 +192,5 @@ mod tests {
             &cfg,
             true
         ));
-    }
-
-    #[test]
-    fn thinking_expands_only_while_running() {
-        assert!(default_thinking_expanded(true));
-        assert!(!default_thinking_expanded(false));
     }
 }

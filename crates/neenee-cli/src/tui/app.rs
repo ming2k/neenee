@@ -16,9 +16,8 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, PlanProgress,
-    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList,
-    UserQuestionRequest,
+    mcp::McpConnectionStatus, AgentRequest, ImagePart, PermissionRequest, ProviderPickerRow,
+    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, UserQuestionRequest,
 };
 
 use crate::tui::completion::PathScan;
@@ -258,14 +257,11 @@ pub struct App {
     /// snapshot; shown as a badge in the hint bar so the elevated state is
     /// always visible.
     pub auto_approve: bool,
-    /// Live plan progress snapshot, mirrored from the harness. Shown inside
-    /// the Activity modal (and no longer pinned above the input box) so the
-    /// footer reclaims the vertical space. `None` outside Build mode with an
-    /// active plan.
-    pub plan_progress: Option<PlanProgress>,
-    /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. `None`
-    /// (or an empty list) hides the sticky panel. Absorbs the former
-    /// plan-progress section tracker and the scratchpad todo tool.
+    /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. Shown
+    /// inside the Activity modal (and no longer pinned above the input box) so
+    /// the footer reclaims the vertical space. `None` (or an empty list)
+    /// hides it. A plan approved via `plan_exit` seeds this list from its
+    /// `##` headings.
     pub todos: Option<TodoList>,
     /// Harness turn counter, mirrored each frame. Surfaced inside the
     /// Activity modal as `turn N`, and shown in the activity bar.

@@ -206,8 +206,9 @@ weight, never the reverse.
 
 The `user_pinned` flag on every step is the single boundary between
 automatic and manual disclosure. Lifecycle transitions may set the
-default — `Failed` expands, `Running` collapses, reasoning expands while
-streaming — but the moment the user manually toggles a step, the flag goes
+default — `Failed` expands, `Running` collapses, reasoning is collapsed unless
+`[tui.default_expanded] thinking` opts in — but the moment the user manually
+toggles a step, the flag goes
 true and later transitions no-op. There is no "auto-collapse what the user
 was just reading" path; a finished reasoning trace is left exactly where
 the user had it. This is what prevents the historical class of bug where

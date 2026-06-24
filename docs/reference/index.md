@@ -12,6 +12,10 @@ Lookup-oriented documentation — tables, lists, and exact values.
 
 - [Slash commands](commands.md) — built-in commands, subcommands, custom commands
 
+## Configuration
+
+- [Configuration](configuration.md) — every `config.toml` key with its default
+
 ## Files and persistence
 
 - [Paths](paths.md) — every file neenee reads or writes, by XDG category,

@@ -1,9 +1,11 @@
 # Modals
 
-Centered overlays that take over the viewport until dismissed. With one
-explicit exception (the [permission sheet](#permission-sheet), which is
-inline), every modal hides the regular chrome — header, status bar, input
-box, hint line — by setting `chrome_hidden` for the duration of the draw.
+Centered overlays that take over the viewport until dismissed. Most modals
+hide the regular chrome — header, status bar, input box, hint line — by
+setting `chrome_hidden` for the duration of the draw. Two exceptions: the
+[permission sheet](#permission-sheet) (inline), and the
+[question modal](#question-modal) (a lightweight overlay that floats on top
+without hiding or dimming the transcript and inputs).
 
 ## Shared chrome
 
@@ -199,18 +201,27 @@ Centered modal for `UserQuestionRequest`. Presents one question at a time
 with options (single- or multi-select), plus a built-in **Other** option
 that exposes a free-text input.
 
+Unlike other centered modals, the question modal does **not** hide or dim
+the chrome — no backdrop is painted and `chrome_hidden` is not set, so the
+transcript, status bar, input box, and hint bar all stay visible. The modal
+panel simply floats on top with its own solid background.
+
+Long text wraps automatically: the question text, option labels, and option
+descriptions all word-wrap to fit the modal body width.
+
 ```text
 ╭────────────────────────────────────────────────────────╮
 │ Question 1/2                                           │
 │                                                        │
 │  Which framework?                                      │
 │                                                        │
-│ ❯ 1.  ● React   — component-based                     │  ← highlighted
+│ ❯ 1.  ● React                                          │  ← highlighted
+│       component-based                                  │  ← description (dim)
 │                                                        │
-│   2.  ○ Vue    — progressive                           │
+│   2.  ○ Vue                                            │
+│       progressive                                      │
 │                                                        │
-│   3.  ○ Other  — Type your own answer                  │
-│       ▏ Type your own answer                          │  ← revealed on Other
+│   3.  ○ Other                                          │
 │                                                        │
 │ ↑↓ navigate · Space toggle · 1-9 jump · Enter submit · │
 │ Esc cancel                                             │
@@ -218,7 +229,9 @@ that exposes a free-text input.
 ```
 
 `[x]` / `[ ]` mark multi-select; `●` / `○` mark single-select. The leading
-digit prefix (`1.`–`8.`) advertises the 1-9 jump shortcut.
+digit prefix (`1.`–`8.`) advertises the 1-9 jump shortcut. Each option's
+description (when present) is rendered on its own indented line in the dim
+foreground color.
 
 | Key | Effect |
 |-----|--------|

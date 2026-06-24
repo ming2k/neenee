@@ -16,7 +16,9 @@ Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::ne
 strips any externally supplied `get_pursuit`, `start_pursuit`,
 `complete_pursuit`, `plan_enter`, and `plan_exit`, then appends its own pursuit tools
 from `crates/neenee-core/src/pursuits/tools.rs` and plan tools from
-`crates/neenee-core/src/plan.rs` so they share the agent's live state.
+`crates/neenee-core/src/plan.rs` so they share the agent's live state. The plan
+tools and the `todo` / `todo_update` tools share one task-list cell, so a plan
+approved by `plan_exit` seeds the same list the model edits with `todo`.
 `TaskTool` is pushed last so it can capture a snapshot of the assembled toolset.
 
 | Tool | Access | Permission scope | Reference page |
@@ -30,6 +32,7 @@ from `crates/neenee-core/src/pursuits/tools.rs` and plan tools from
 | `list_dir` | `Read` | `*` | [filesystem](filesystem.md) |
 | `ask_user` | `Read` | `*` | [interaction](interaction.md) |
 | `todo` | `Read` | `*` | [interaction](interaction.md) |
+| `todo_update` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |
 | `websearch` | `Read` | `*` | [web](web.md) |
 | `get_pursuit` | `Read` | `*` | [pursuits](pursuits.md) |
@@ -37,7 +40,6 @@ from `crates/neenee-core/src/pursuits/tools.rs` and plan tools from
 | `complete_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
 | `plan_enter` | `Read` | `*` | [plan](plan.md) |
 | `plan_exit` | `Read` | `*` | [plan](plan.md) |
-| `update_plan_progress` | `Read` | `*` | [plan](plan.md) |
 | `verify_plan_execution` | `Read` | `*` | [plan](plan.md) |
 | `task` | `Read` | `*` | [task](task.md) |
 | `use_skill` | `Read` | `*` | [skills](skills.md) |

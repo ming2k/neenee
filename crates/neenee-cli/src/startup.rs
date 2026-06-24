@@ -9,31 +9,70 @@
 use std::path::PathBuf;
 use tracing_appender::non_blocking::WorkerGuard;
 
-/// Built-in slash commands understood directly by the harness. Anything not in
-/// this list is treated as a custom command (from the `[commands]` table or an
-/// on-disk script) and dispatched via `neenee_tools::commands`.
-pub const BUILTIN_COMMANDS: &[&str] = &[
-    "models",
-    "mode",
-    "mcp",
-    "permissions",
-    "auto-approve",
-    "review",
-    "verify-nudge",
-    "session",
-    "sessions",
-    "resume",
-    "compact",
-    "pursue",
-    "repeat",
-    "init",
-    "skills",
-    "skill",
-    "export",
-    "clear",
-    "help",
-    "exit",
-];
+/// Single source of truth for the built-in slash-command vocabulary.
+///
+/// Each entry `Variant = "/name" : "description"` generates a [`BuiltinCmd`]
+/// enum variant, a row in [`BuiltinCmd::ALL`] (consumed by input completion,
+/// `/help`, and the custom-command filter), and an arm of
+/// [`BuiltinCmd::from_slash`].
+///
+/// The dispatch `match` in `main.rs` is over `Option<BuiltinCmd>` and is kept
+/// non-exhaustive (no `Some(_)` catch-all). Adding a variant here without a
+/// matching handler arm is therefore a **compile error**, so completion,
+/// `/help`, and dispatch can never drift — a command appears in all three or
+/// the build breaks.
+macro_rules! define_builtin_commands {
+    ( $( $variant:ident = $name:literal : $desc:literal ),+ $(,)? ) => {
+        /// The set of built-in slash commands. Generated from a single
+        /// declarative list — see [`define_builtin_commands`].
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum BuiltinCmd {
+            $( $variant ),+
+        }
+
+        impl BuiltinCmd {
+            /// Every built-in command as `(slash_name, description)`, in
+            /// declaration order. Completion, `/help`, and the custom-command
+            /// filter all read from this — it is the only place command
+            /// metadata is written.
+            pub const ALL: &[(&'static str, &'static str)] = &[ $( ($name, $desc) ),+ ];
+
+            /// Parse a `/<name>` token into a variant, or `None` when it is
+            /// not a built-in (i.e. a custom command). The dispatch `match`
+            /// consumes the `None` arm to run the custom-command path.
+            pub fn from_slash(input: &str) -> Option<Self> {
+                $( if input == $name { return Some(BuiltinCmd::$variant); } )+
+                None
+            }
+        }
+    };
+}
+
+define_builtin_commands! {
+    Provider    = "/provider"     : "Select an LLM provider",
+    Mode        = "/mode"         : "Show or switch mode (build, plan)",
+    Plan        = "/plan"         : "Open the active plan file in a preview modal",
+    Verify      = "/verify"       : "Trigger independent plan verification",
+    VerifyNudge = "/verify-nudge" : "Toggle the verify-plan hard nudge at turn end (on/off)",
+    Mcp         = "/mcp"          : "Show configured MCP server status",
+    Compact     = "/compact"      : "Compact older complete turns now",
+    Clear       = "/clear"        : "Clear the conversation history",
+    Permissions = "/permissions"  : "Show or clear always-allowed tool rules",
+    AutoApprove = "/auto-approve" : "Toggle bypassing write-tool permission prompts (on/off)",
+    Review      = "/review"       : "Run an on-demand session-review diagnostic of the current turn",
+    Search      = "/search"       : "Semantic search over the project's session history",
+    Session     = "/session"      : "Manage durable sessions (status|list|resume|fork|open|new)",
+    Sessions    = "/sessions"     : "Browse past sessions",
+    Resume      = "/resume"       : "Resume the most recent or selected session",
+    Pursue      = "/pursue"       : "Pursue a condition: drive the agent until it is met, or manage the pursuit",
+    Repeat      = "/repeat"       : "Schedule a prompt on a cron: /repeat <cron> <prompt>",
+    Skills      = "/skills"       : "List or reload available skills (list|reload)",
+    Skill       = "/skill"        : "Load a skill by name",
+    Init        = "/init"         : "Initialize a .neenee/ config tree",
+    Export      = "/export"       : "Export this conversation to the clipboard as Markdown",
+    Help        = "/help"         : "Show available commands and keybindings",
+    Exit        = "/exit"         : "Exit the program",
+}
 
 /// Split `/<name> <arguments>` into `(name_without_slash, arguments_trimmed)`.
 /// A bare `/name` with no arguments yields an empty arguments string.
@@ -52,10 +91,11 @@ pub enum StartupMode {
     Doctor,
 }
 
-pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool) {
+pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, bool) {
     let mut iter = args.into_iter().peekable();
     let mut project: Option<PathBuf> = None;
     let mut auto_approve = false;
+    let mut single_instance = false;
     let mut rest = Vec::new();
     while let Some(arg) = iter.next() {
         if arg == "--project" {
@@ -64,6 +104,8 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool) {
             project = Some(PathBuf::from(value));
         } else if arg == "--auto-approve" {
             auto_approve = true;
+        } else if arg == "--single-instance" {
+            single_instance = true;
         } else {
             rest.push(arg);
         }
@@ -76,13 +118,13 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool) {
         [cmd, ..] if cmd == "doctor" => StartupMode::Doctor,
         [cmd, ..] => {
             eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity\n\nOptions:\n  --project <path>    operate on the project at <path>\n  --auto-approve      bypass write-tool permission prompts for this session",
+                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity\n\nOptions:\n  --project <path>    operate on the project at <path>\n  --auto-approve      bypass write-tool permission prompts for this session\n  --single-instance   require exclusive per-project lock (pre-ADR-0018 default)",
                 cmd
             );
             std::process::exit(2);
         }
     };
-    (mode, project, auto_approve)
+    (mode, project, auto_approve, single_instance)
 }
 
 /// Initialise file-based tracing when `NEENEE_LOG` names a log file.

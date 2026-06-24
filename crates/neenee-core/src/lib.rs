@@ -27,7 +27,6 @@ pub mod events;
 pub mod mcp;
 pub mod model;
 pub mod plan;
-pub use plan::{PlanProgress, PlanSection, PlanSectionStatus};
 pub mod todos;
 pub use todos::{
     TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext, TodoUpdateTool, TodoWriteTool,
@@ -50,7 +49,8 @@ pub use events::{
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
-    estimate_chars, estimate_tokens, prune_tool_results, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
+    estimate_chars, estimate_tokens, prune_tool_results, CHARS_PER_TOKEN, CompactionPolicy,
+    ContextBudget, PruneOutcome, PRUNED_TOOL_PLACEHOLDER,
 };
 pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
 pub use skillsconfig::SkillsConfig;

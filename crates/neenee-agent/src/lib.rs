@@ -85,9 +85,9 @@ use tokio_util::sync::CancellationToken;
 /// errors out. This is the only per-turn backstop: distinct tool calls are
 /// allowed to run unbounded, matching the codex / claude-code model where
 /// the agentic loop runs until the model itself stops calling tools. Context
-/// compaction (`compaction_max_chars` plus mid-turn pruning) keeps the
-/// transcript bounded; the user can interrupt at any time with `Esc` or
-/// `/pursue stop`.
+/// compaction (thresholds derived from the active model's context window, plus
+/// mid-turn pruning) keeps the transcript bounded; the user can interrupt at
+/// any time with `Esc` or `/pursue stop`.
 const MAX_REPEATED_TOOL_CALLS: usize = 3;
 
 /// Safety cap on the number of rounds the `/pursue` stop-gate will drive

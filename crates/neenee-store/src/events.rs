@@ -52,17 +52,11 @@ pub enum SessionEvent {
     /// the agent re-enters Plan mode). Mirrored from `Agent::active_plan_path`
     /// so resume restores the Build-mode "you are implementing X" hint.
     ActivePlanPathSet { path: Option<std::path::PathBuf> },
-    /// The plan progress snapshot changed (set by `plan_exit`, mutated by
-    /// `update_plan_progress`, cleared by `plan_enter`). Mirrored from
-    /// `Agent::plan_progress` so resume restores the sticky panel.
-    PlanProgressSet {
-        progress: Option<neenee_core::PlanProgress>,
-    },
     /// The unified task list changed (`todo` / `todo_update` / `plan_exit`
     /// seed / `plan_enter` or `/todos clear`). Mirrored from `Agent::todos`
     /// so resume restores the sticky panel. The full list is stored on every
-    /// change (snapshot semantics, matching `PlanProgressSet`); history of
-    /// individual items is reconstructable from the log itself.
+    /// change (snapshot semantics); history of individual items is
+    /// reconstructable from the log itself.
     TodosSet { todos: neenee_core::TodoList },
 }
 

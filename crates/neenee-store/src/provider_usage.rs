@@ -9,7 +9,6 @@
 //! The store is a flat map of model id → `UsageEntry`. Ids are stored as
 //! given; preset ids are unique and there is no alias mapping.
 
-use crate::fsutil;
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,10 +55,33 @@ impl ProviderUsage {
         entry.use_count = entry.use_count.saturating_add(1);
     }
 
-    /// Persist atomically. Best-effort: callers ignore the result since usage
-    /// tracking is non-critical.
+    /// Persist atomically, merged with whatever another `neenee` instance may
+    /// have written since this store was loaded. The merge is per-key and
+    /// **commutative**: each model keeps `max(last_used_ms)` and
+    /// `max(use_count)` of the in-memory and on-disk values, so two instances
+    /// recording concurrently never regress recency or lose an activation
+    /// regardless of write order (ADR-0018). The whole reload-merge-write
+    /// window is serialised by a companion `flock` so the merge reads a
+    /// consistent snapshot.
+    ///
+    /// Best-effort: callers ignore the result since usage tracking is
+    /// non-critical. `use_count` is merged by `max` (not sum) because a sum
+    /// would require a per-process baseline that is not tracked; `max` still
+    /// preserves recency, which is the only field the picker reads today.
     pub fn save(&self) -> Result<(), String> {
-        fsutil::atomic_write_json(&paths::get().provider_usage_file(), self)
+        let path = paths::get().provider_usage_file();
+        let _lock = crate::fsutil::FileLock::acquire(&path)
+            .map_err(|e| format!("could not lock usage file: {e}"))?;
+        // Re-read under the lock so we merge against the latest on-disk state,
+        // not the snapshot this process loaded at startup.
+        let mut merged = ProviderUsage::load();
+        for (id, entry) in &self.entries {
+            let disk = merged.entries.entry(id.clone()).or_default();
+            disk.last_used_ms = disk.last_used_ms.max(entry.last_used_ms);
+            disk.use_count = disk.use_count.max(entry.use_count);
+        }
+        let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
+        crate::fsutil::atomic_write_bytes(&path, &bytes).map_err(|e| e.to_string())
     }
 
     /// Last-used timestamp (epoch ms) for a model id. `None` when the model

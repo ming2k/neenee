@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The per-plan progress tracker is consolidated into the unified task list
+  (ADR-0020, supersedes ADR-0007).** `update_plan_progress`, the
+  `PlanProgress` / `PlanSection` / `PlanSectionStatus` types, the
+  `PlanProgressUpdated` events, and the persisted `plan_progress` session field
+  are removed — they duplicated the `todo` / `todo_update` task list, which is
+  now the single source of truth. `plan_exit` now seeds one `TodoList` from the
+  approved plan's `##` headings; `plan_enter` (and `/mode plan`) clear it; the
+  model tracks steps with `todo` / `todo_update`. One list, one panel, one
+  persisted field. Old sessions load with graceful degradation: the dropped
+  field triggers at most a checksum warning, and stale `plan_progress_set`
+  event-log lines are skipped, so previously persisted progress is simply not
+  restored.
+
 ### Changed
+
+- **Context compaction is now relative to the active model's context window
+  (ADR-0019).** Compaction previously triggered on a single fixed character
+  budget (`compaction_max_chars`, default ~30k tokens) regardless of model —
+  so a 1M-token model was over-compacted at ~3% of its window and a 128k model
+  was merely coincidental. Thresholds are now derived from the live model's
+  context window (token-denominated): cheap tool-result pruning at 65%, a full
+  summarizing compaction at 85%, compressed toward a 25% target, with a 32k
+  fallback window for unknown/local models. The mid-turn prune threshold is
+  re-seeded on every `/provider` switch so relief tracks the current model
+  instead of the one active at startup. Pressure is estimated in tokens to
+  match the window's unit; provider-reported `prompt_tokens` is a future
+  enhancement that slots in without changing the threshold shape. See the
+  [Configuration Reference](docs/reference/configuration.md#compaction).
+  - Config: `compaction_max_chars` and `compaction_prune_protect_chars` are
+    removed; a `[compaction]` table (`utilization`, `target_utilization`,
+    `prune_utilization`, `fallback_window_tokens`) and
+    `compaction_prune_protect_tokens` (default 6_000) replace them. Existing
+    `config.toml` files keep parsing (the removed keys are ignored).
 
 - **The base system prompt now directs the agent to be concise and direct.**
   `build_system_prompt` previously stated only the agent's identity and current

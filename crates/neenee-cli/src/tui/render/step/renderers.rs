@@ -30,9 +30,9 @@ use crate::tui::render::text_layout::{
 use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::tui::render::{
     transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, REASONING_TRACE_BLOCK_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_BOTTOM_GAP_ROWS,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
-    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
+    TRANSCRIPT_H_INSET,
 };
 
 /// Cursor + environment carried through the tool-step body renderers.
@@ -1393,19 +1393,10 @@ pub fn draw_tool_step(
             }
         }
 
-        {
-            let mut ctx = RenderCtx::from_cursor(
-                frame,
-                transcript_area,
-                full_width,
-                theme,
-                layout_map,
-                skip_rows,
-                current_y,
-                content_lines,
-            );
-            draw_blank_rows(&mut ctx, pad, TOOL_STEP_BODY_BOTTOM_GAP_ROWS);
-        }
+        // No trailing bottom gap here: the message-level separator
+        // (`MESSAGE_GAP_ROWS`) already provides a single blank row between
+        // this step and the next component. Adding another would double the
+        // gap when expanded, diverging from the collapsed layout.
     }
 
     if expanded {

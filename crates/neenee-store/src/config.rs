@@ -1,8 +1,6 @@
 use crate::fsutil;
 use crate::paths;
-use neenee_core::McpServerConfig;
-use neenee_core::SkillsConfig;
-use neenee_core::WebSearchConfig;
+use neenee_core::{CompactionPolicy, McpServerConfig, SkillsConfig, WebSearchConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -136,7 +134,10 @@ pub struct UserProviderConfig {
 pub struct Config {
     pub default_provider: String,
     pub mcp: HashMap<String, McpServerConfig>,
-    pub compaction_max_chars: usize,
+    /// Context-compaction thresholds expressed as fractions of the active
+    /// model's context window, plus a fallback window for unknown models. See
+    /// [`CompactionPolicy`] for the per-field semantics.
+    pub compaction: CompactionPolicy,
     pub compaction_preserve_turns: usize,
     /// Use the active model to produce an anchored, structured summary when
     /// compacting. When `false` (or when the summarization call fails) compaction
@@ -146,8 +147,8 @@ pub struct Config {
     /// tool outputs in place to relieve context pressure before a full
     /// compaction is needed.
     pub compaction_prune: bool,
-    /// Character budget of the most recent tool results protected from pruning.
-    pub compaction_prune_protect_chars: usize,
+    /// Token budget of the most recent tool results protected from pruning.
+    pub compaction_prune_protect_tokens: usize,
     pub provider_retry_max_attempts: usize,
     pub provider_retry_base_ms: u64,
     pub provider_retry_max_ms: u64,
@@ -204,11 +205,11 @@ impl Default for Config {
         Self {
             default_provider: "kimi-code".to_string(),
             mcp: HashMap::new(),
-            compaction_max_chars: 120_000,
+            compaction: CompactionPolicy::default(),
             compaction_preserve_turns: 6,
             compaction_summarize: true,
             compaction_prune: true,
-            compaction_prune_protect_chars: 24_000,
+            compaction_prune_protect_tokens: 6_000,
             provider_retry_max_attempts: 4,
             provider_retry_base_ms: 1_000,
             provider_retry_max_ms: 30_000,
@@ -271,7 +272,28 @@ impl Config {
 
     pub fn save_history(history: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::history_file_path();
-        fsutil::atomic_write_json(&path, history).map_err(Box::<dyn std::error::Error>::from)?;
+        // Serialise against other `neenee` instances and merge so a concurrent
+        // process's recent commands survive this write (ADR-0018). Without the
+        // lock + reload the last writer would erase the other's history; the
+        // merge takes the union, keeping first-seen order from disk and
+        // appending this process's entries that are not already present.
+        let _lock = fsutil::FileLock::acquire(&path)
+            .map_err(|e| format!("could not lock history file: {e}"))?;
+        let mut merged: Vec<String> = fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default();
+        for entry in history {
+            if !merged.iter().any(|existing| existing == entry) {
+                merged.push(entry.clone());
+            }
+        }
+        const HISTORY_CAP: usize = 1_000;
+        if merged.len() > HISTORY_CAP {
+            let drain = merged.len() - HISTORY_CAP;
+            merged.drain(..drain);
+        }
+        fsutil::atomic_write_json(&path, &merged).map_err(Box::<dyn std::error::Error>::from)?;
         Ok(())
     }
 }

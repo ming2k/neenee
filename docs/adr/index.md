@@ -17,7 +17,7 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0004](0004-six-crate-topology.md) | Six-crate topology: core / app / providers / tools / harness / cli | Superseded by ADR-0005 |
 | [0005](0005-strict-layering-and-renames.md) | Strictly-layered topology + scenario-bound store | Accepted |
 | [0006](0006-plan-mode-v2.md) | Plan mode v2: approval gate, active plan path, proposed-plan rendering | Accepted |
-| [0007](0007-plan-progress-panel.md) | Plan progress sticky panel above input box | Accepted |
+| [0007](0007-plan-progress-panel.md) | Plan progress sticky panel above input box | Superseded by ADR-0020 |
 | [0008](0008-single-breathing-anchor.md) | Single breathing anchor for TUI liveness | Accepted |
 | [0009](0009-uncapped-agentic-loop.md) | Uncapped agentic loop (remove per-turn round cap and `/loop` iteration cap) | Accepted |
 | [0010](0010-slim-goal-primitive.md) | Slim the goal primitive (drop status machine, token budget, time accounting) | Accepted |
@@ -28,3 +28,6 @@ See [ADR Workflow](../dev/documentation/adr-workflow.md) for the process.
 | [0015](0015-pursue-stop-gate-and-repeat-cron.md) | Pursue stop-gate + repeat cron scheduler (replace `/goal` + `/loop`) | Accepted |
 | [0016](0016-session-review-over-round-counting.md) | Session review over round-counting stall detection (diagnostic sub-agent + opt-in hard stop) | Accepted |
 | [0017](0017-side-conversations.md) | Side conversations: session-native `/btw` (concurrent parent + side, event envelope, `fork_to_side`) | Proposed |
+| [0018](0018-per-project-multi-instance-concurrency.md) | Per-project multi-instance concurrency (drop the per-project flock; one session file per live instance; file-scoped locks on shared global state) | Accepted |
+| [0019](0019-model-relative-context-compaction.md) | Model-relative context compaction (token thresholds derived from the active model's context window) | Accepted |
+| [0020](0020-unified-task-list.md) | Unified task list (supersede the per-plan progress panel with one shared `TodoList`) | Accepted |

@@ -1,0 +1,141 @@
+# Configuration Reference
+
+Every option in `config.toml`, with its default. The file lives at
+`$XDG_CONFIG_HOME/neenee/config.toml` — see [Paths](paths.md) for the resolved
+location and override precedence.
+
+All keys are optional: a missing key, a missing table, or an absent file uses
+the defaults below. Unknown keys are ignored, so removing or renaming a key
+never breaks parsing.
+
+## Compaction
+
+Context compaction keeps the uncapped agentic loop bounded. Thresholds are
+derived from the **active model's context window** (token-denominated) and
+re-seeded on every provider switch, so they track the live model rather than a
+fixed budget. See the [harness explanation](../explanation/agent-design/harness.md#context-compaction)
+and ADR-0019 for the design.
+
+Pressure is estimated in tokens (`estimate_tokens`, ~4 chars/token) and compared
+against the resolved thresholds. Each fraction is multiplied by the active
+model's context window (`0` → the fallback window) to produce an absolute
+threshold.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `compaction.utilization` | `0.85` | Trigger a full summarizing compaction once pressure reaches this fraction of the window |
+| `compaction.target_utilization` | `0.25` | After a full compaction, compress the active window down to this fraction |
+| `compaction.prune_utilization` | `0.65` | Trigger cheap tool-result pruning at this fraction (below `utilization`) |
+| `compaction.fallback_window_tokens` | `32000` | Assumed window (tokens) when the model's context window is unknown |
+| `compaction_preserve_turns` | `6` | Number of recent complete user turns kept verbatim after a full compaction |
+| `compaction_summarize` | `true` | Use the active model for an anchored structured summary; `false` uses the deterministic excerpt fallback |
+| `compaction_prune` | `true` | Enable cheap tool-result pruning (pre-turn and mid-turn) |
+| `compaction_prune_protect_tokens` | `6000` | Most recent tool results (tokens) protected from pruning |
+
+Resolved thresholds per model (defaults):
+
+| Model | Window | Prune at | Compact at | Target |
+|-------|--------|----------|------------|--------|
+| `glm-5.2`, Gemini, DeepSeek | 1,000,000 | 650,000 | 850,000 | 250,000 |
+| `kimi-k2.7-code` | 262,144 | 170,393 | 222,822 | 65,536 |
+| `gpt-4o` | 128,000 | 83,200 | 108,800 | 32,000 |
+| unknown / local | 32,000 (fallback) | 20,800 | 27,200 | 8,000 |
+
+```toml
+[compaction]
+utilization = 0.85
+target_utilization = 0.25
+prune_utilization = 0.65
+fallback_window_tokens = 32000
+
+compaction_preserve_turns = 6
+compaction_summarize = true
+compaction_prune = true
+compaction_prune_protect_tokens = 6000
+```
+
+## Agent behavior
+
+The optional `[agent]` table.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `agent.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
+| `agent.verify_nudge_enabled` | `true` | Inject a hidden reminder if the model ends a turn with an approved plan but no `verify_plan_execution` call |
+
+```toml
+[agent]
+hard_stop_rounds = 0
+verify_nudge_enabled = true
+```
+
+## Provider selection and retry
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `default_provider` | `"kimi-code"` | Provider id activated at startup and after `/provider` reset |
+| `provider_retry_max_attempts` | `4` | Max retry attempts for a transient provider error within a turn |
+| `provider_retry_base_ms` | `1000` | Base delay for exponential backoff, in milliseconds |
+| `provider_retry_max_ms` | `30000` | Cap on the backoff delay, in milliseconds |
+
+## Built-in provider credentials and models
+
+API keys accept an environment variable or an inline value; see
+[Providers](providers.md) for the env-var names and capability matrix.
+
+| Key | Default model | Purpose |
+|-----|---------------|---------|
+| `openai_api_key`, `openai_model` | `gpt-4o` | OpenAI |
+| `gemini_api_key`, `gemini_model` | `gemini-2.5-flash` | Google Gemini |
+| `moonshot_api_key`, `moonshot_model` | `kimi-k2.7-code` | Moonshot / Kimi Code |
+| `deepseek_api_key`, `deepseek_flash_model`, `deepseek_pro_model` | `deepseek-v4-flash` / `deepseek-v4-pro` | DeepSeek V4 (shared key) |
+| `zai_api_key`, `zai_model` | `glm-5.2` | Z.AI coding plan (GLM-5) |
+| `llama_base_url`, `llama_model` | `http://localhost:8080` / `local-model` | Local Llama server (keyless) |
+
+## User-defined providers
+
+`providers` is an array of `[[providers]]` tables, each with one or more
+channels. A user entry whose `id` matches a built-in replaces it; otherwise it
+adds a new model. See [Add a provider](../how-to/add-a-provider.md) for the
+full schema and examples.
+
+```toml
+[[providers]]
+id = "acme"
+name = "Acme Relay"
+default_channel = 0
+
+  [[providers.channels]]
+  label = "Default"
+  transport = "openai_compat"   # openai_compat | gemini_native | llama
+  model = "acme-7b"
+  base_url = "https://relay.example.com/v1"
+  api_key_env = "ACME_API_KEY"  # env var name; wins over api_key
+```
+
+| `favorites` | Default | Meaning |
+|-----|---------|---------|
+| `favorites` | `[]` | Provider ids pinned for quick access in the picker |
+
+## TUI presentation
+
+The optional `[tui]` table. `default_expanded` maps a tool name (or `thinking`
+for reasoning traces) to its default expand state.
+
+```toml
+[tui.default_expanded]
+edit_file = true
+bash = true
+thinking = false
+```
+
+## Feature tables
+
+These sub-tables have their own reference pages; only the table name is
+configured here.
+
+| Table | Configures | Reference |
+|-------|------------|-----------|
+| `[skills]` | Skill sources, extra paths, disabled skills | [Skills](tools/skills.md) |
+| `[websearch]` | Web-search backend, proxy, timeout | [Web tool](tools/web.md) |
+| `[mcp.<server>]` | MCP servers (one table per server) | [MCP](tools/mcp.md) |

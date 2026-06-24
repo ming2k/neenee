@@ -24,11 +24,13 @@ pub(super) const MESSAGE_GAP_ROWS: usize = 1;
 /// row and one bottom transition row.
 pub(super) const USER_MESSAGE_TRANSITION_ROWS: usize = 1;
 
-/// Breathing room inside expanded tool steps.
+/// Breathing room inside expanded tool steps. There is no bottom-gap token:
+/// the message-level separator (`MESSAGE_GAP_ROWS`) already supplies the single
+/// blank row between a step and the next component, so an extra trailing gap
+/// would double it.
 pub(super) const TOOL_STEP_BODY_TOP_GAP_ROWS: usize = 1;
 pub(super) const TOOL_STEP_SECTION_GAP_ROWS: usize = 1;
 pub(super) const TOOL_STEP_CHILDREN_GAP_ROWS: usize = TOOL_STEP_SECTION_GAP_ROWS;
-pub(super) const TOOL_STEP_BODY_BOTTOM_GAP_ROWS: usize = 1;
 
 /// Breathing room inside expanded reasoning traces. These stay independent
 /// from tool-step spacing because reasoning is prose-like, not a panel.

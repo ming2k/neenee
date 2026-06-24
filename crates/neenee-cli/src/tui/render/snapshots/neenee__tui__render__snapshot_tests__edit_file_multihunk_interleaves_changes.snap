@@ -1,6 +1,6 @@
 ---
 source: crates/neenee-cli/src/tui/render/snapshot_tests.rs
-assertion_line: 293
+assertion_line: 292
 expression: "render_grid(&m, 80, 40)"
 ---
   - Edit a.rs +2 -2
@@ -28,4 +28,3 @@ backgrounds:
 8: .2 D18 E2 D56
 9: .2 F18 G3 F55
 10: .2 C76
-11: .2 B76

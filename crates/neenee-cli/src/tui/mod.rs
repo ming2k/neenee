@@ -33,8 +33,8 @@ use crossterm::{
 };
 use neenee_core::{
     mcp::McpConnectionStatus, AgentMode, AgentRequest, AgentResponse, HarnessSnapshot, Message,
-    PermissionRequest, PlanProgress, PlanSectionStatus, ProviderPickerSnapshot, Pursuit, Role,
-    SessionContextSnapshot, SessionOverview, TodoList, UserQuestionRequest,
+    PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
+    SessionOverview, TodoList, TodoStatus, UserQuestionRequest,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
@@ -105,10 +105,8 @@ pub async fn run_tui(
         auto_approve: false,
     }));
     let harness_clone = harness.clone();
-    let plan_progress: Arc<Mutex<Option<PlanProgress>>> = Arc::new(Mutex::new(None));
-    let plan_progress_clone = plan_progress.clone();
     // Unified task list, mirrored from `AgentResponse::TodosUpdated`. Empty
-    // (`None`) hides the sticky panel.
+    // (`None`) hides the panel.
     let todos: Arc<Mutex<Option<TodoList>>> = Arc::new(Mutex::new(None));
     let todos_clone = todos.clone();
     let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -247,14 +245,13 @@ pub async fn run_tui(
                         let (provider, model) = event_loop::attribution(&cp_clone, &cm_clone).await;
                         let mut thinking =
                             TranscriptMessage::thinking(delta).with_attribution(provider, model);
-                        // A reasoning trace expands while streaming — watching
-                        // the model think live is the value of the trace. On
-                        // completion the transition leaves it as-is (no
-                        // auto-collapse), so the user keeps what they were
+                        // A reasoning trace's default disclosure honors the
+                        // `[tui.default_expanded] thinking` config (collapsed by
+                        // default). On completion the transition leaves it as-is
+                        // (no auto-collapse), so the user keeps what they were
                         // reading.
-                        thinking.set_thinking_expanded(
-                            step_interaction::default_thinking_expanded(true),
-                        );
+                        thinking
+                            .set_thinking_expanded(config::thinking_default_expanded(&tui_config_clone));
                         msgs.push(thinking);
                         reasoning_start = Some(std::time::Instant::now());
                     }
@@ -530,19 +527,16 @@ pub async fn run_tui(
                 AgentResponse::ModeChanged(mode) => {
                     harness_clone.lock().await.mode = mode;
                 }
-                AgentResponse::PlanProgressUpdated(progress) => {
-                    let prev = plan_progress_clone.lock().await.clone();
-                    let notices = describe_plan_change(prev.as_ref(), progress.as_ref());
-                    *plan_progress_clone.lock().await = progress;
+                AgentResponse::TodosUpdated(list) => {
+                    let prev = todos_clone.lock().await.clone();
+                    let notices = describe_todos_change(prev.as_ref(), Some(&list));
+                    *todos_clone.lock().await = Some(list);
                     if !notices.is_empty() {
                         let mut msgs = messages_clone.lock().await;
                         for text in notices {
                             msgs.push(TranscriptMessage::notice(NoticeSeverity::Info, text));
                         }
                     }
-                }
-                AgentResponse::TodosUpdated(list) => {
-                    *todos_clone.lock().await = Some(list);
                 }
                 AgentResponse::OpenPlanPreview(path) => {
                     *open_plan_preview_clone.lock().await = Some(path);
@@ -637,7 +631,6 @@ pub async fn run_tui(
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         auto_approve: false,
-        plan_progress: None,
         todos: None,
         turn_count: 0,
         current_round: 0,
@@ -707,7 +700,6 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
-            plan_progress,
             todos,
             turn_count,
             current_round,
@@ -762,17 +754,6 @@ pub async fn start_tui(
     .await
 }
 
-/// Lowercase word for a plan-section status, used in inline transcript notices
-/// so a section change reads as `Key Changes → done`.
-fn plan_status_label(status: PlanSectionStatus) -> &'static str {
-    match status {
-        PlanSectionStatus::Pending => "pending",
-        PlanSectionStatus::InProgress => "in progress",
-        PlanSectionStatus::Done => "done",
-        PlanSectionStatus::Skipped => "skipped",
-    }
-}
-
 /// Format an inline-transcript notice for a pursuit update, or `None` when the
 /// update carries nothing user-visible (a no-op re-broadcast of the same
 /// pursuit). The pursuit bar is gone from the footer; these notices are how pursuit
@@ -789,36 +770,38 @@ fn describe_pursuit_change(prev: Option<&Pursuit>, new: &Pursuit) -> Option<Stri
     None
 }
 
-/// Format inline-transcript notices for a plan-progress update. Returns one
-/// line per section whose status changed (so each step the model ticks off
-/// leaves a breadcrumb in the transcript), plus a tally line when a plan first
-/// appears or its section list grows/shrinks. Empty when nothing changed.
-fn describe_plan_change(prev: Option<&PlanProgress>, new: Option<&PlanProgress>) -> Vec<String> {
-    let Some(new) = new else {
+/// Lowercase word for a todo status, used in inline transcript notices so a
+/// status change reads as `Design UI → completed`.
+fn todo_status_label(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Pending => "pending",
+        TodoStatus::InProgress => "in progress",
+        TodoStatus::Completed => "completed",
+        TodoStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Format inline-transcript notices for a task-list update. Returns one line
+/// per item whose status changed (so each step the model ticks off leaves a
+/// breadcrumb in the transcript), plus a tally line when a list first appears
+/// or its size changes. Empty when nothing changed.
+fn describe_todos_change(prev: Option<&TodoList>, new: Option<&TodoList>) -> Vec<String> {
+    let Some(new) = new.filter(|l| !l.items.is_empty()) else {
         return Vec::new();
     };
-    let path = new
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| new.path.display().to_string());
-    let done = new.done_count();
-    let total = new.sections.len();
-    let Some(prev) = prev else {
-        return vec![format!("plan started · {path}  {done}/{total}")];
+    let done = new.count(TodoStatus::Completed);
+    let total = new.items.len();
+    let Some(prev) = prev.filter(|l| !l.items.is_empty()) else {
+        return vec![format!("tasks started · {done}/{total}")];
     };
     let mut out = Vec::new();
-    for (a, b) in prev.sections.iter().zip(new.sections.iter()) {
+    for (a, b) in prev.items.iter().zip(new.items.iter()) {
         if a.status != b.status {
-            out.push(format!(
-                "{path} · {} → {}",
-                b.name,
-                plan_status_label(b.status),
-            ));
+            out.push(format!("{} → {}", b.content, todo_status_label(b.status)));
         }
     }
-    if prev.sections.len() != new.sections.len() {
-        out.push(format!("plan · {path}  {done}/{total}"));
+    if prev.items.len() != new.items.len() {
+        out.push(format!("tasks · {done}/{total}"));
     }
     out
 }

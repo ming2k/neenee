@@ -36,11 +36,15 @@ moves. See [ADR-0008](../../adr/0008-single-breathing-anchor.md).
 | Condition | Visible? |
 |-----------|----------|
 | Idle | No |
-| Streaming assistant text ("responding") | No — the streamed text is the feedback |
+| Streaming assistant text ("responding") | Yes — the bar stays up across the whole turn lifecycle, sustaining the breathing-dot liveness anchor (ADR-0008) through the longest phase |
 | Running tool / queued / waiting | Yes |
 | Overlay modal open | No |
 
-When hidden, the row is returned to the transcript viewport.
+The bar persists from turn start (user submits) through every phase —
+`queued`, `responding`, tool work, `finalizing response` — and only
+disappears when the harness returns to idle. This keeps the breathing dot
+in peripheral vision for the entire active turn and avoids a layout shift
+at the streaming boundary.
 
 ## Turn and round
 

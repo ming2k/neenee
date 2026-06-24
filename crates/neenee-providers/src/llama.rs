@@ -131,30 +131,18 @@ impl Provider for LlamaServerProvider {
             .map_err(|error| transport_error("LlamaServer", error))?;
         let response = ensure_success(response, "LlamaServer").await?;
 
-        let mut buffer = String::new();
-        let stream = response.bytes_stream().map(move |item| match item {
-            Ok(bytes) => {
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-                let mut content = String::new();
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer.drain(..pos + 1);
-
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(v) = serde_json::from_str::<Value>(data) {
-                            if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                                content.push_str(delta);
-                            }
-                        }
-                    }
+        // SSE byte reassembly (incl. multi-byte UTF-8 split across chunks) is
+        // handled by `sse::data_payloads`; here we only map each payload to the
+        // OpenAI-compatible delta content shape.
+        let stream = crate::sse::data_payloads(response, "LlamaServer").map(|item| {
+            let data = item?;
+            let mut content = String::new();
+            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    content.push_str(delta);
                 }
-                Ok(content)
             }
-            Err(error) => Err(transport_error("LlamaServer", error)),
+            Ok(content)
         });
 
         Ok(stream.boxed())

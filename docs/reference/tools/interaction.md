@@ -1,8 +1,8 @@
 # Interaction tools
 
 Tools for the agent to manage its own state and to query the user mid-task.
-Both are `Read` and bypass the permission broker. Source:
-`crates/neenee-tools/src/lib.rs`.
+All are `Read` and bypass the permission broker. `ask_user` lives in
+`neenee-tools`; `todo` and `todo_update` live in `crates/neenee-core/src/todos.rs`.
 
 ### `ask_user`
 
@@ -20,8 +20,26 @@ Each option: `{ "label": string, "description"?: string }`. The model should put
 
 ### `todo`
 
+Full-replace the unified task list — the single source of truth for "what is
+left to do," shown in the [Activity](../tui/modals.md) modal and persisted
+across restarts. A plan approved via `plan_exit` seeds this list from the
+plan's `##` headings. The tool reconciles the desired list against the current
+one, preserving item identity when content is unchanged, so re-sending the same
+steps does not reset their timestamps. See
+[ADR-0020](../../adr/0020-unified-task-list.md).
+
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
-| `items` | array | yes | Max 50 items |
+| `items` | array | yes | Max 50 items; at most one `in_progress` |
 
-Each item: `{ "content": string, "status": "pending" | "in_progress" | "completed" }`.
+Each item: `{ "content": string, "status": "pending" | "in_progress" | "completed" | "cancelled" }`.
+
+### `todo_update`
+
+Surgically update the status of one or more existing items without re-sending
+the whole list. Prefer this over `todo` when marking progress on a single step.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `key` | string | yes | 1-based position (e.g. `"1"`) or case-insensitive content substring (all matches update) |
+| `status` | enum: `pending` / `in_progress` / `completed` / `cancelled` | yes | New status for the matched item(s) |

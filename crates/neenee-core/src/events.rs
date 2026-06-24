@@ -116,10 +116,6 @@ pub enum AgentResponse {
     PursuitUpdated(Pursuit),
     /// The agent mode changed via `plan_enter` / `plan_exit`.
     ModeChanged(AgentMode),
-    /// Plan progress snapshot changed (set by `plan_exit`, mutated by
-    /// `update_plan_progress`, cleared by `plan_enter`). Mirrors
-    /// [`AgentEvent::PlanProgressUpdated`].
-    PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The task list changed (full-replace via `todo`, surgical update via
     /// `todo_update`, seeded by `plan_exit`, cleared by `plan_enter` or
     /// `/todos clear`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
@@ -309,10 +305,6 @@ pub enum AgentEvent {
     /// The agent mode changed (e.g. via `plan_enter` / `plan_exit`). The TUI
     /// uses this to refresh its mode indicator live, mid-turn.
     ModeChanged(AgentMode),
-    /// The plan progress snapshot changed (set by `plan_exit`, mutated by
-    /// `update_plan_progress`, cleared by `plan_enter`). The TUI uses this
-    /// to refresh the sticky panel above the input box.
-    PlanProgressUpdated(Option<crate::plan::PlanProgress>),
     /// The task list changed (`todo` / `todo_update` / `plan_exit` seed /
     /// `plan_enter` or `/todos clear`). The TUI uses this to refresh the
     /// unified sticky panel above the input box.

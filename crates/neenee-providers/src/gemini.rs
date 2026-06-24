@@ -182,39 +182,36 @@ impl Provider for GeminiProvider {
             .map_err(|error| transport_error("Gemini", error))?;
         let response = ensure_success(response, "Gemini").await?;
 
-        let stream = response.bytes_stream().map(|item| match item {
-            Ok(bytes) => {
-                let s = String::from_utf8_lossy(&bytes);
-                let mut content = String::new();
-                for line in s.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(v) = serde_json::from_str::<Value>(data) {
-                            if let Some(candidates) = v.get("candidates").and_then(|c| c.as_array())
-                            {
-                                if !candidates.is_empty() {
-                                    if let Some(parts) =
-                                        candidates[0]["content"]["parts"].as_array()
-                                    {
-                                        for part in parts {
-                                            if let Some(text) =
-                                                part.get("text").and_then(|t| t.as_str())
-                                            {
-                                                content.push_str(text);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(content)
-            }
-            Err(error) => Err(transport_error("Gemini", error)),
-        });
+        // SSE byte reassembly (incl. multi-byte UTF-8 split across chunks) is
+        // handled by `sse::data_payloads`; here we only map each payload to the
+        // Gemini `streamGenerateContent` text shape.
+        let stream = crate::sse::data_payloads(response, "Gemini")
+            .map(|item| item.map(|payload| extract_text(&payload)));
 
         Ok(stream.boxed())
     }
+}
+
+/// Parse one `streamGenerateContent` SSE payload and concatenate the text from
+/// `candidates[0].content.parts[].text`. Returns an empty string when the
+/// payload carries no text part (e.g. a finish-reason-only chunk).
+fn extract_text(payload: &str) -> String {
+    let value: Value = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(_) => return String::new(),
+    };
+    value
+        .get("candidates")
+        .and_then(|candidates| candidates.as_array())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate["content"]["parts"].as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                .collect::<String>()
+        })
+        .unwrap_or_default()
 }
 
 // Gemini relies on the `Provider::stream_chat_events` trait default because
@@ -237,6 +234,18 @@ mod tests {
             "pursuit and tools"
         );
         assert_eq!(body["contents"][0]["role"], "user");
+    }
+
+    #[test]
+    fn extract_text_concatenates_parts_and_preserves_cjk() {
+        let payload = r#"{"candidates":[{"content":{"parts":[{"text":"并行"},{"text":"开发"}]}}]}"#;
+        assert_eq!(extract_text(payload), "并行开发");
+    }
+
+    #[test]
+    fn extract_text_returns_empty_for_non_text_payload() {
+        assert_eq!(extract_text(r#"{"candidates":[{"finishReason":"STOP"}]}"#), "");
+        assert_eq!(extract_text("not json"), "");
     }
 
     #[test]

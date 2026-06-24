@@ -64,15 +64,11 @@ struct SessionData {
     /// "you are implementing X" hint. `None` for legacy snapshots.
     #[serde(default)]
     active_plan_path: Option<PathBuf>,
-    /// Live plan progress snapshot, mirrored from `Agent::plan_progress`.
-    /// Drives the sticky panel above the input box on resume.
-    #[serde(default)]
-    plan_progress: Option<neenee_core::PlanProgress>,
     /// Unified task list, mirrored from `Agent::todos`. The single source of
-    /// truth for "what is left to do" — absorbs the former plan-progress
-    /// section tracker and the former scratchpad `todo` tool state. An empty
-    /// list means no active task list. `#[serde(default)]` so legacy
-    /// snapshots load as an empty list with no migration.
+    /// truth for "what is left to do" — a plan approved by `plan_exit` seeds
+    /// this list (one `Pending` item per `##` heading). An empty list means
+    /// no active task list. `#[serde(default)]` so legacy snapshots load as
+    /// an empty list with no migration.
     #[serde(default)]
     todos: neenee_core::TodoList,
     /// Schema version of this session file. Migrations increment this and are
@@ -98,7 +94,6 @@ impl Default for SessionData {
             compaction: None,
             project_root: default_project_root(),
             active_plan_path: None,
-            plan_progress: None,
             todos: neenee_core::TodoList::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
             checksum: None,
@@ -279,9 +274,6 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
             SessionEvent::ActivePlanPathSet { path } => {
                 data.active_plan_path = path.clone();
             }
-            SessionEvent::PlanProgressSet { progress } => {
-                data.plan_progress = progress.clone();
-            }
             SessionEvent::TodosSet { todos } => {
                 data.todos = todos.clone();
             }
@@ -351,15 +343,6 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             },
         });
     }
-    if let Some(progress) = &data.plan_progress {
-        events.push(crate::events::EventEnvelope {
-            seq: events.len() as u64,
-            timestamp: data.updated_at,
-            event: SessionEvent::PlanProgressSet {
-                progress: Some(progress.clone()),
-            },
-        });
-    }
     if !data.todos.is_empty() {
         events.push(crate::events::EventEnvelope {
             seq: events.len() as u64,
@@ -396,83 +379,122 @@ pub struct SessionSummary {
     pub active: bool,
 }
 
+/// The mutable bits a [`SessionStore`] pins to one session file: the snapshot
+/// path, its event log, and the in-memory session data. Grouped under a single
+/// [`tokio::sync::Mutex`] so repointing the store (reset / fork / open) — which
+/// swaps both the path and the event log — is atomic with respect to every
+/// reader and writer. There is no second lock to deadlock against.
+struct SessionState {
+    /// Absolute path of this session's snapshot: `<sessions_dir>/<id>.json`.
+    path: PathBuf,
+    /// This session's append-only event log at `<sessions_dir>/<id>.jsonl`.
+    event_log: EventLog,
+    /// In-memory session, authoritative between writes; the event log is the
+    /// durable authority across restarts.
+    data: SessionData,
+}
+
 pub struct SessionStore {
     project_root: PathBuf,
-    path: PathBuf,
-    archive_dir: PathBuf,
-    event_log: EventLog,
+    /// Directory holding every session file for this project (or, for
+    /// [`SessionStore::for_path`], the parent of the pinned snapshot). All
+    /// `reset` / `fork` / `open` targets live here, so the store never writes
+    /// outside it.
+    sessions_dir: PathBuf,
     blob_store: BlobStore,
-    data: Mutex<SessionData>,
+    state: Mutex<SessionState>,
 }
 
 impl SessionStore {
-    /// Load the active session for `project_root`. The on-disk layout is
-    /// `data_dir/projects/<sha256(cwd)[..16]>/{session.json, sessions/}` —
-    /// each project's sessions live under their own bucket so two working
-    /// directories never see each other's history.
+    /// Open a per-project store pinned to a **fresh** session file.
     ///
-    /// On the first launch after the Phase 2 upgrade the legacy flat
-    /// `data_dir/sessions/*.json` archives are lazily migrated into this
-    /// project's bucket (each one routed by its own `project_root` field,
-    /// defaulting to the current cwd when missing).
+    /// As of ADR-0018 the project bucket no longer keeps a single shared
+    /// `session.json` "active pointer": every running `neenee` instance mints
+    /// its own `sessions/<id>.json` + `sessions/<id>.jsonl`, so two instances
+    /// in the same project never share a mutable file. To continue a previous
+    /// session the caller picks one via the `/sessions` picker or
+    /// [`Self::open`] / [`Self::resume`].
+    ///
+    /// On the first launch after the upgrade the legacy project-root
+    /// `session.json` + `events.jsonl` are lazily migrated into
+    /// `sessions/<legacy-id>.*` under a per-project lock, and the older flat
+    /// `data_dir/sessions/*.json` layout is migrated by
+    /// [`migrate_flat_sessions_to_project_buckets`].
     pub fn load_for_project(project_root: PathBuf) -> Self {
         let dirs = paths::get();
         let project_dir = dirs.project_dir(&project_root);
-        if let Err(e) = std::fs::create_dir_all(project_dir.join("sessions")) {
-            tracing::warn!(error = %e, "could not create project session dir");
+        let sessions_dir = dirs.project_sessions_dir(&project_root);
+        if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
+            tracing::warn!(error = %e, "could not create project sessions dir");
         }
-        let path = project_dir.join("session.json");
-        let archive_dir = project_dir.join("sessions");
-        let event_log = EventLog::new(project_dir.join("events.jsonl"));
         let blob_store = BlobStore::new(dirs.blobs_dir());
-        // Lazy one-shot migration of the legacy flat layout. See
-        // [`migrate_flat_sessions_to_project_buckets`].
+        // Lazy one-shot migrations. The flat-layout migration is global and
+        // idempotent (guarded by a marker file); the per-bucket active→sessions
+        // migration is guarded by a per-project flock so concurrent first-time
+        // starts do not race it.
         let _ = migrate_flat_sessions_to_project_buckets(&dirs, &blob_store);
+        migrate_legacy_active_to_sessions(&project_dir, &sessions_dir, &blob_store);
 
-        let mut data = match event_log.load() {
-            Ok(envelopes) if !envelopes.is_empty() => {
-                let mut data = SessionData::default();
-                apply_events(&mut data, &envelopes);
-                if let Err(error) = load_session_blobs(&mut data, &blob_store) {
-                    tracing::warn!(error = %error, "could not load session blobs from event log");
-                }
-                if let Err(error) = verify_checksum(&data) {
-                    tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
-                }
-                data
-            }
-            _ => {
-                // No event log yet: import from the snapshot file or start fresh.
-                let mut data = fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|content| serde_json::from_str::<SessionData>(&content).ok())
-                    .unwrap_or_else(|| SessionData {
-                        project_root: project_root.clone(),
-                        ..Default::default()
-                    });
-                if let Err(error) = load_session_blobs(&mut data, &blob_store) {
-                    tracing::warn!(error = %error, "could not load session blobs from snapshot");
-                }
-                if let Err(error) = verify_checksum(&data) {
-                    tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
-                }
-                let events = snapshot_to_events(&data);
-                let _ = event_log.rewrite(events);
-                data
-            }
-        };
+        Self::pin_fresh(project_root, sessions_dir, blob_store)
+    }
 
-        if data.schema_version < CURRENT_SCHEMA_VERSION {
-            data = migrate_session_data(data);
-        }
-        let _ = write_session_file(&path, &data, &blob_store);
+    /// Backwards-compatible alias for [`Self::load_for_project`] using the
+    /// current process cwd.
+    #[allow(dead_code)]
+    pub fn load() -> Self {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::load_for_project(project_root)
+    }
+
+    /// Open a `SessionStore` pinned to an explicit snapshot `path`. The
+    /// session's event log lives at `path.with_extension("jsonl")`, and its
+    /// sibling session files (forks, archives) live in `path.parent()` — i.e.
+    /// the parent directory plays the role of the project's `sessions/` dir.
+    ///
+    /// This is the low-level constructor used by sub-agents / side
+    /// conversations (ADR-0017) and by tests that want a throwaway file
+    /// without wiring up the global paths table. Production startup uses
+    /// [`Self::load_for_project`].
+    pub fn for_path(path: PathBuf) -> Self {
+        let sessions_dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let event_log_path = path.with_extension("jsonl");
+        let project_root = sessions_dir.clone();
+        let blob_store = BlobStore::new(sessions_dir.join("blobs"));
+        let data = load_or_seed(&path, &event_log_path, &blob_store, &project_root);
+        let event_log = EventLog::new(event_log_path);
         Self {
             project_root,
-            path,
-            archive_dir,
-            event_log,
+            sessions_dir,
             blob_store,
-            data: Mutex::new(data),
+            state: Mutex::new(SessionState {
+                path,
+                event_log,
+                data,
+            }),
+        }
+    }
+
+    /// Construct a store pinned to a brand-new, empty session file in
+    /// `sessions_dir`. The file is **not** written until the session gains
+    /// real content, so a `neenee` that starts and exits without a turn
+    /// leaves no empty-file litter behind.
+    fn pin_fresh(project_root: PathBuf, sessions_dir: PathBuf, blob_store: BlobStore) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = sessions_dir.join(format!("{id}.json"));
+        let event_log = EventLog::new(path.with_extension("jsonl"));
+        let data = SessionData {
+            id,
+            project_root: project_root.clone(),
+            ..Default::default()
+        };
+        Self {
+            project_root,
+            sessions_dir,
+            blob_store,
+            state: Mutex::new(SessionState { path, event_log, data }),
         }
     }
 
@@ -482,200 +504,145 @@ impl SessionStore {
         &self.project_root
     }
 
-    /// Backwards-compatible alias for [`Self::load_for_project`] using the
-    /// current process cwd. New code should call `load_for_project` explicitly.
-    #[allow(dead_code)]
-    pub fn load() -> Self {
-        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::load_for_project(project_root)
-    }
-
-    /// Open a `SessionStore` against an explicit `session.json` path.
-    ///
-    /// This is the low-level constructor: most callers want
-    /// [`SessionStore::load_for_project`], which resolves paths through the
-    /// global [`crate::paths`] table. Kept `pub` so external crates' tests
-    /// (e.g. the binary crate's retry tests) can point at a throwaway file
-    /// without re-wiring the global paths table.
-    pub fn for_path(path: PathBuf) -> Self {
-        let archive_dir = session_archive_dir(&path);
-        let project_root = path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let event_log = EventLog::new(path.with_extension("jsonl"));
-        let blob_store = BlobStore::new(
-            path.parent()
-                .map(|p| p.join("blobs"))
-                .unwrap_or_else(|| PathBuf::from("blobs")),
-        );
-        let data = match event_log.load() {
-            Ok(envelopes) if !envelopes.is_empty() => {
-                let mut data = SessionData::default();
-                apply_events(&mut data, &envelopes);
-                let _ = load_session_blobs(&mut data, &blob_store);
-                data
-            }
-            _ => SessionData::default(),
-        };
-        Self {
-            project_root,
-            archive_dir,
-            path: path.clone(),
-            event_log,
-            blob_store,
-            data: Mutex::new(data),
-        }
-    }
-
     pub async fn id(&self) -> String {
-        self.data.lock().await.id.clone()
+        self.state.lock().await.data.id.clone()
     }
 
     pub async fn messages(&self) -> Vec<Message> {
-        self.data.lock().await.messages.clone()
+        self.state.lock().await.data.messages.clone()
     }
 
     pub async fn transcript(&self) -> Vec<Message> {
-        let data = self.data.lock().await;
-        let mut messages = data.archived_messages.clone();
-        messages.extend(data.messages.clone());
+        let state = self.state.lock().await;
+        let mut messages = state.data.archived_messages.clone();
+        messages.extend(state.data.messages.clone());
         messages
     }
 
     pub async fn checkpoint(&self) -> Option<PursuitCheckpoint> {
-        self.data.lock().await.loop_checkpoint.clone()
+        self.state.lock().await.data.loop_checkpoint.clone()
     }
 
     /// Path to the plan file most recently approved via `plan_exit`. Mirrored
     /// from `Agent::active_plan_path` so a resumed session restores the
     /// Build-mode "you are implementing X" hint.
     pub async fn active_plan_path(&self) -> Option<PathBuf> {
-        self.data.lock().await.active_plan_path.clone()
+        self.state.lock().await.data.active_plan_path.clone()
     }
 
     /// Replace the active plan path. Pass `None` to clear (used when the
     /// agent re-enters Plan mode). Persists both the snapshot and the event
     /// log so resume restores the same path.
     pub async fn set_active_plan_path(&self, path: Option<PathBuf>) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.active_plan_path = path.clone();
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log
+        let mut state = self.state.lock().await;
+        state.data.active_plan_path = path.clone();
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state
+            .event_log
             .append(SessionEvent::ActivePlanPathSet { path })?;
-        self.persist(&data)
-    }
-
-    /// Live plan progress snapshot, mirrored from `Agent::plan_progress` so
-    /// resume restores the sticky panel above the input box.
-    pub async fn plan_progress(&self) -> Option<neenee_core::PlanProgress> {
-        self.data.lock().await.plan_progress.clone()
-    }
-
-    /// Replace the plan progress snapshot. Persists both the snapshot and
-    /// the event log so resume restores the same picture.
-    pub async fn set_plan_progress(
-        &self,
-        progress: Option<neenee_core::PlanProgress>,
-    ) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.plan_progress = progress.clone();
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log
-            .append(SessionEvent::PlanProgressSet { progress })?;
-        self.persist(&data)
+        self.persist_locked(&state)
     }
 
     /// The unified task list, mirrored from `Agent::todos`. Empty means no
     /// active task list. Read on resume to seed the agent and the sticky
     /// panel.
     pub async fn todos(&self) -> neenee_core::TodoList {
-        self.data.lock().await.todos.clone()
+        self.state.lock().await.data.todos.clone()
     }
 
     /// Replace the task list. Persists both the snapshot and the event log so
     /// resume restores the same list (and so per-item history is retained in
     /// the log).
     pub async fn set_todos(&self, todos: neenee_core::TodoList) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.todos = todos.clone();
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log.append(SessionEvent::TodosSet { todos })?;
-        self.persist(&data)
+        let mut state = self.state.lock().await;
+        state.data.todos = todos.clone();
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state.event_log.append(SessionEvent::TodosSet { todos })?;
+        self.persist_locked(&state)
     }
 
     pub async fn compaction(&self) -> Option<CompactionCheckpoint> {
-        self.data.lock().await.compaction.clone()
+        self.state.lock().await.data.compaction.clone()
     }
 
     pub async fn archived_count(&self) -> usize {
-        self.data.lock().await.archived_messages.len()
+        self.state
+            .lock()
+            .await
+            .data
+            .archived_messages
+            .len()
     }
 
     pub async fn parent_id(&self) -> Option<String> {
-        self.data.lock().await.parent_id.clone()
+        self.state.lock().await.data.parent_id.clone()
     }
 
     pub async fn replace_messages(&self, messages: Vec<Message>) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.messages = messages;
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log.append(SessionEvent::MessagesReplaced {
-            messages: data.messages.clone(),
+        let mut state = self.state.lock().await;
+        state.data.messages = messages;
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state.event_log.append(SessionEvent::MessagesReplaced {
+            messages: state.data.messages.clone(),
         })?;
-        self.persist(&data)
+        self.persist_locked(&state)
     }
 
     pub async fn set_checkpoint(&self, checkpoint: Option<PursuitCheckpoint>) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.loop_checkpoint = checkpoint;
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log.append(SessionEvent::CheckpointSet {
-            checkpoint: data.loop_checkpoint.clone(),
+        let mut state = self.state.lock().await;
+        state.data.loop_checkpoint = checkpoint;
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state.event_log.append(SessionEvent::CheckpointSet {
+            checkpoint: state.data.loop_checkpoint.clone(),
         })?;
-        self.persist(&data)
+        self.persist_locked(&state)
     }
 
     pub async fn commit_compaction(&self, result: CompactionResult) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        data.archived_messages.extend(result.archived.clone());
-        data.messages = result.active.clone();
-        data.compaction = Some(result.checkpoint.clone());
-        data.updated_at = unix_timestamp();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log.append(SessionEvent::CompactionCommitted {
+        let mut state = self.state.lock().await;
+        state.data.archived_messages.extend(result.archived.clone());
+        state.data.messages = result.active.clone();
+        state.data.compaction = Some(result.checkpoint.clone());
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state.event_log.append(SessionEvent::CompactionCommitted {
             archived: result.archived,
             active: result.active,
             checkpoint: result.checkpoint,
         })?;
-        self.persist(&data)
+        self.persist_locked(&state)
     }
 
+    /// Start a brand-new session and repoint this store at it. The previous
+    /// session's file is left intact on disk (it was already persisted on
+    /// every mutation) and stays reachable through [`Self::list`] /
+    /// [`Self::resume`]. Returns the new session id.
+    ///
+    /// Under ADR-0018 this no longer mutates a shared "active" file: it simply
+    /// mints a new `sessions/<id>.{json,jsonl}` and switches this process to
+    /// writing it, so a concurrent instance cannot clobber the previous
+    /// session.
     pub async fn reset(&self) -> Result<String, String> {
-        let mut data = self.data.lock().await;
-        if has_content(&data) {
-            self.persist_archive(&data)?;
-            if !data.messages.is_empty() {
-                self.event_log.append(SessionEvent::Archived {
-                    messages: data.messages.clone(),
-                })?;
-            }
-        }
-        let project_root = data.project_root.clone();
-        let schema_version = data.schema_version;
-        *data = SessionData::default();
-        data.project_root = project_root;
-        data.schema_version = schema_version;
-        let id = data.id.clone();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log
-            .append(SessionEvent::Reset { id: id.clone() })?;
-        self.persist(&data)?;
+        let project_root = self.project_root.clone();
+        let mut state = self.state.lock().await;
+        let sessions_dir = self.sessions_dir.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = sessions_dir.join(format!("{id}.json"));
+        let event_log = EventLog::new(path.with_extension("jsonl"));
+        let data = SessionData {
+            project_root,
+            ..Default::default()
+        };
+        ensure_event_log_started(&event_log, &data)?;
+        state.path = path;
+        state.event_log = event_log;
+        state.data = data;
+        // Do not persist an empty snapshot — a session that never gains
+        // content leaves no empty-file litter (see ADR-0018).
         Ok(id)
     }
 
@@ -691,149 +658,150 @@ impl SessionStore {
                 .ok_or_else(|| "No previous session is available to resume.".to_string())?,
         };
         self.open(&target).await?;
-        Ok(self.data.lock().await.id.clone())
+        Ok(self.state.lock().await.data.id.clone())
     }
 
+    /// Fork the current session: write its state to a new child file and
+    /// repoint this store at the child. The parent's file is untouched
+    /// (already current) and remains reachable. Returns `(child_id,
+    /// parent_id)`.
     pub async fn fork(&self) -> Result<(String, String), String> {
-        let mut data = self.data.lock().await;
-        if data.messages.is_empty() && data.archived_messages.is_empty() {
+        let mut state = self.state.lock().await;
+        if state.data.messages.is_empty() && state.data.archived_messages.is_empty() {
             return Err("Cannot fork an empty session.".to_string());
         }
-        self.persist_archive(&data)?;
-        if !data.messages.is_empty() {
-            self.event_log.append(SessionEvent::Archived {
-                messages: data.messages.clone(),
-            })?;
-        }
-        let parent_id = data.id.clone();
+        let parent_id = state.data.id.clone();
         let now = unix_timestamp();
-        data.id = uuid::Uuid::new_v4().to_string();
-        data.parent_id = Some(parent_id.clone());
-        data.created_at = now;
-        data.updated_at = now;
-        data.loop_checkpoint = None;
-        let fork_id = data.id.clone();
-        ensure_event_log_started(&self.event_log, &data)?;
-        self.event_log.append(SessionEvent::Forked {
-            id: fork_id.clone(),
-            parent_id: parent_id.clone(),
-        })?;
-        self.persist(&data)?;
-        self.persist_archive(&data)?;
+
+        // Build the child snapshot from the parent's current state.
+        let mut child = state.data.clone();
+        let fork_id = uuid::Uuid::new_v4().to_string();
+        child.id = fork_id.clone();
+        child.parent_id = Some(parent_id.clone());
+        child.created_at = now;
+        child.updated_at = now;
+        child.loop_checkpoint = None;
+
+        let child_path = self.sessions_dir.join(format!("{fork_id}.json"));
+        let child_log = EventLog::new(child_path.with_extension("jsonl"));
+        // Persist the child snapshot and seed its own event log so it is
+        // independently resumable (one store = one file = one log).
+        persist_to(&child_path, &child, &self.blob_store)?;
+        let _ = child_log.rewrite(snapshot_to_events(&child));
+
+        // Repoint this store at the child; the parent file is already current.
+        state.path = child_path;
+        state.event_log = child_log;
+        state.data = child;
         Ok((fork_id, parent_id))
     }
 
+    /// Switch this store to an existing session file by id (or 4+-char hex
+    /// prefix). The session's state is reloaded from its own event log (the
+    /// durable authority), so `open` always reflects the latest on-disk
+    /// content — even if another process wrote it.
     pub async fn open(&self, id: &str) -> Result<(), String> {
-        let mut data = self.data.lock().await;
-        let id = self.resolve_id(id, &data)?;
-        if data.id != id {
-            if has_content(&data) {
-                self.persist_archive(&data)?;
-                if !data.messages.is_empty() {
-                    self.event_log.append(SessionEvent::Archived {
-                        messages: data.messages.clone(),
-                    })?;
-                }
-            }
-            let path = self.archive_path(&id);
-            let content = fs::read_to_string(&path)
-                .map_err(|error| format!("Could not open session '{}': {}", id, error))?;
-            let loaded: SessionData =
-                serde_json::from_str(&content).map_err(|error| error.to_string())?;
-            if !loaded.archived_messages.is_empty() {
-                self.event_log.append(SessionEvent::Archived {
-                    messages: loaded.archived_messages.clone(),
-                })?;
-            }
-            data.clone_from(&loaded);
-            data.updated_at = unix_timestamp();
-            ensure_event_log_started(&self.event_log, &data)?;
-            self.event_log.append(SessionEvent::MessagesReplaced {
-                messages: data.messages.clone(),
-            })?;
-            self.persist(&data)?;
+        let (resolved, path) = {
+            let state = self.state.lock().await;
+            self.resolve_session(id, &state)?
+        };
+        // No-op when the caller asks for the session we already hold.
+        let already_active = self.state.lock().await.data.id == resolved;
+        if already_active {
+            return Ok(());
         }
+
+        let event_log_path = path.with_extension("jsonl");
+        let project_root = self.project_root.clone();
+        let data = load_or_seed(&path, &event_log_path, &self.blob_store, &project_root);
+        let mut state = self.state.lock().await;
+        state.path = path;
+        state.event_log = EventLog::new(event_log_path);
+        state.data = data;
         Ok(())
     }
 
     /// Delete a session by id or short id prefix. Deleting the active session
-    /// removes its file and resets the store to a fresh empty session; archived
-    /// sessions have their file removed from the sessions directory.
+    /// removes its snapshot and event log, then repoints the store at a fresh
+    /// empty session; other sessions just have their two files removed from
+    /// the sessions directory.
     pub async fn delete(&self, id: &str) -> Result<(), String> {
-        let data = self.data.lock().await;
-        let resolved = self.resolve_id(id, &data)?;
-        let is_active = data.id == resolved;
-        drop(data);
+        let (resolved, snapshot, is_active) = {
+            let state = self.state.lock().await;
+            let (resolved, path) = self.resolve_session(id, &state)?;
+            (resolved.clone(), path, state.data.id == resolved)
+        };
 
-        if is_active {
-            let _ = fs::remove_file(&self.path);
-            let _ = fs::remove_file(self.event_log.path());
-            let mut data = self.data.lock().await;
-            let project_root = data.project_root.clone();
-            let schema_version = data.schema_version;
-            *data = SessionData::default();
-            data.project_root = project_root;
-            data.schema_version = schema_version;
-            self.event_log.append(SessionEvent::Reset {
-                id: data.id.clone(),
-            })?;
-            self.persist(&data)
-        } else {
-            let path = self.archive_path(&resolved);
-            fs::remove_file(&path)
-                .map_err(|error| format!("Could not delete session '{}': {}", resolved, error))?;
-            Ok(())
+        let log = snapshot.with_extension("jsonl");
+        let existed = snapshot.exists() || log.exists();
+        let _ = fs::remove_file(&snapshot);
+        let _ = fs::remove_file(&log);
+
+        if !existed {
+            return Err(format!(
+                "Could not delete session '{}': files not found.",
+                resolved
+            ));
         }
+        // Repoint at a fresh session so the store stays usable after the
+        // active session is removed.
+        if is_active {
+            self.reset().await?;
+        }
+        Ok(())
     }
 
     pub async fn list(&self) -> Result<Vec<SessionSummary>, String> {
-        let data = self.data.lock().await;
+        let active_id = self.state.lock().await.data.id.clone();
         let mut summaries = Vec::new();
-        if self.archive_dir.exists() {
-            for entry in fs::read_dir(&self.archive_dir).map_err(|error| error.to_string())? {
+        if self.sessions_dir.exists() {
+            for entry in fs::read_dir(&self.sessions_dir).map_err(|error| error.to_string())? {
                 let entry = entry.map_err(|error| error.to_string())?;
-                if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
                     continue;
                 }
-                let content =
-                    fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
-                let session: SessionData =
-                    serde_json::from_str(&content).map_err(|error| error.to_string())?;
-                if session.id != data.id {
-                    summaries.push(summary(&session, false));
-                }
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(session) = serde_json::from_str::<SessionData>(&content) else {
+                    continue;
+                };
+                summaries.push(summary(&session, session.id == active_id));
             }
-        }
-        // Only surface the active session when it actually has content. A
-        // fresh empty session is what the user is already in — listing it at
-        // the top (where the freshly-touched `updated_at` sorts it) just
-        // shows a permanent "(empty session)" row that cannot be usefully
-        // resumed. Real archived sessions stay reachable.
-        if has_content(&data) {
-            summaries.push(summary(&data, true));
         }
         summaries.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
         Ok(summaries)
     }
 
-    fn persist(&self, data: &SessionData) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        write_session_file(&self.path, data, &self.blob_store)
+    /// Persist the in-memory state to its pinned snapshot path. Assumes the
+    /// caller already holds the state lock.
+    fn persist_locked(&self, state: &SessionState) -> Result<(), String> {
+        persist_to(&state.path, &state.data, &self.blob_store)
     }
 
+    /// Write `data` to `sessions_dir/<data.id>.json`. Used to materialise a
+    /// session file for a snapshot that is not (or not yet) the pinned one —
+    /// for example seeding an archived branch in tests.
+    #[allow(dead_code)]
     fn persist_archive(&self, data: &SessionData) -> Result<(), String> {
-        fs::create_dir_all(&self.archive_dir).map_err(|error| error.to_string())?;
-        let path = self.archive_path(&data.id);
-        write_session_file(&path, data, &self.blob_store)
+        let path = self.sessions_dir.join(format!("{}.json", data.id));
+        persist_to(&path, data, &self.blob_store)
     }
 
-    fn archive_path(&self, id: &str) -> PathBuf {
-        self.archive_dir.join(format!("{}.json", id))
-    }
-
-    fn resolve_id(&self, input: &str, active: &SessionData) -> Result<String, String> {
+    /// Resolve `input` (a 4+ char hex id or prefix) to the full session id
+    /// **and the file path** that holds it. Identity is matched against the
+    /// `id` field stored inside each snapshot, not the filename, so a session
+    /// pinned via [`SessionStore::for_path`] under an arbitrary name (e.g. a
+    /// test's `session.json`, or a not-yet-migrated legacy active file) is
+    /// found just as reliably as a canonical `sessions/<id>.json`. The active
+    /// session is matched against its in-memory id first so a prefix of the
+    /// current session resolves without touching disk.
+    fn resolve_session(
+        &self,
+        input: &str,
+        active: &SessionState,
+    ) -> Result<(String, PathBuf), String> {
         if input.len() < 4
             || !input
                 .chars()
@@ -844,24 +812,32 @@ impl SessionStore {
                 input
             ));
         }
-        let mut matches = Vec::new();
-        if active.id.starts_with(input) {
-            matches.push(active.id.clone());
+        let mut matches: Vec<(String, PathBuf)> = Vec::new();
+        if active.data.id.starts_with(input) {
+            matches.push((active.data.id.clone(), active.path.clone()));
         }
-        if self.archive_dir.exists() {
-            for entry in fs::read_dir(&self.archive_dir).map_err(|error| error.to_string())? {
+        if self.sessions_dir.exists() {
+            for entry in fs::read_dir(&self.sessions_dir).map_err(|error| error.to_string())? {
                 let entry = entry.map_err(|error| error.to_string())?;
                 let path = entry.path();
-                let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(content) = fs::read_to_string(&path) else {
                     continue;
                 };
-                if stem.starts_with(input) && !matches.iter().any(|id| id == stem) {
-                    matches.push(stem.to_string());
+                let Ok(session) = serde_json::from_str::<SessionData>(&content) else {
+                    continue;
+                };
+                if session.id.starts_with(input)
+                    && !matches.iter().any(|(id, _)| id == &session.id)
+                {
+                    matches.push((session.id, path));
                 }
             }
         }
         match matches.as_slice() {
-            [id] => Ok(id.clone()),
+            [(id, path)] => Ok((id.clone(), path.clone())),
             [] => Err(format!("No session matches '{}'.", input)),
             _ => Err(format!(
                 "Session prefix '{}' is ambiguous ({} matches).",
@@ -872,11 +848,59 @@ impl SessionStore {
     }
 }
 
-fn has_content(data: &SessionData) -> bool {
-    !data.messages.is_empty()
-        || !data.archived_messages.is_empty()
-        || data.loop_checkpoint.is_some()
-        || data.compaction.is_some()
+/// Write `data` to `path`, creating its parent directory first.
+fn persist_to(path: &Path, data: &SessionData, blob_store: &BlobStore) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    write_session_file(path, data, blob_store)
+}
+
+/// Load the session for `path` from its event log when one exists; otherwise
+/// import from the snapshot file (seeding a fresh log from it), or start from
+/// an empty session when neither exists. This is the single load path shared
+/// by [`SessionStore::for_path`] and [`SessionStore::open`], and it also
+/// lazily seeds event logs for legacy archived snapshots that predate the
+/// per-session log layout (ADR-0018).
+fn load_or_seed(
+    path: &Path,
+    event_log_path: &Path,
+    blob_store: &BlobStore,
+    project_root: &Path,
+) -> SessionData {
+    let event_log = EventLog::new(event_log_path.to_path_buf());
+    if let Ok(envelopes) = event_log.load() {
+        if !envelopes.is_empty() {
+            let mut data = SessionData::default();
+            apply_events(&mut data, &envelopes);
+            if let Err(error) = load_session_blobs(&mut data, blob_store) {
+                tracing::warn!(error = %error, "could not load session blobs from event log");
+            }
+            if let Err(error) = verify_checksum(&data) {
+                tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
+            }
+            return data;
+        }
+    }
+    // No event log: import from the snapshot, or start fresh.
+    let mut data = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<SessionData>(&content).ok())
+        .unwrap_or_else(|| SessionData {
+            project_root: project_root.to_path_buf(),
+            ..Default::default()
+        });
+    if let Err(error) = load_session_blobs(&mut data, blob_store) {
+        tracing::warn!(error = %error, "could not load session blobs from snapshot");
+    }
+    if let Err(error) = verify_checksum(&data) {
+        tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
+    }
+    if data.schema_version < CURRENT_SCHEMA_VERSION {
+        data = migrate_session_data(data);
+    }
+    let _ = event_log.rewrite(snapshot_to_events(&data));
+    data
 }
 
 fn summary(data: &SessionData, active: bool) -> SessionSummary {
@@ -1004,8 +1028,12 @@ pub fn select_compaction(
     })
 }
 
-fn summary_budget(max_chars: usize) -> usize {
-    (max_chars / 8).clamp(2_000, 16_000)
+/// Character budget for the compaction summary, derived from the post-
+/// compaction token target. The summary may fill the target (the preserved
+/// tail sits alongside it), bounded to a sane range so huge windows do not
+/// produce enormous summaries and tiny windows still get a useful digest.
+fn summary_char_budget(target_tokens: usize) -> usize {
+    (target_tokens * neenee_core::CHARS_PER_TOKEN).clamp(8_000, 96_000)
 }
 
 fn label_for(role: Role) -> Option<&'static str> {
@@ -1114,15 +1142,15 @@ pub fn build_excerpt_summary(
 #[allow(dead_code)]
 pub fn compact_messages(
     messages: &[Message],
-    max_chars: usize,
+    target_tokens: usize,
     preserve_turns: usize,
 ) -> Option<CompactionResult> {
     let before_chars = estimate_chars(messages);
     let selection = select_compaction(messages, preserve_turns)?;
-    let budget = summary_budget(max_chars);
+    let budget_chars = summary_char_budget(target_tokens);
     let summary = build_excerpt_summary(
         &selection.archived,
-        budget,
+        budget_chars,
         selection.previous_summary.as_deref(),
     );
     Some(build_compaction_result(before_chars, selection, summary))
@@ -1419,7 +1447,7 @@ impl CompactionHooks for NoopCompactionHooks {}
 /// veto the run or supply extra context.
 pub async fn run_compaction(
     history: &mut Vec<Message>,
-    max_chars: usize,
+    target_tokens: usize,
     preserve_turns: usize,
     provider: Option<Arc<dyn Provider>>,
     hooks: &dyn CompactionHooks,
@@ -1435,7 +1463,7 @@ pub async fn run_compaction(
         return Ok(None);
     };
 
-    let budget = summary_budget(max_chars);
+    let budget_chars = summary_char_budget(target_tokens);
     let summary = match provider.as_ref() {
         Some(provider) => {
             match summarize_with_provider(
@@ -1443,7 +1471,7 @@ pub async fn run_compaction(
                 &selection.archived,
                 selection.previous_summary.as_deref(),
                 &decision.extra_context,
-                budget,
+                budget_chars,
             )
             .await
             {
@@ -1455,7 +1483,7 @@ pub async fn run_compaction(
                     );
                     build_excerpt_summary(
                         &selection.archived,
-                        budget,
+                        budget_chars,
                         selection.previous_summary.as_deref(),
                     )
                 }
@@ -1463,7 +1491,7 @@ pub async fn run_compaction(
         }
         None => build_excerpt_summary(
             &selection.archived,
-            budget,
+            budget_chars,
             selection.previous_summary.as_deref(),
         ),
     };
@@ -1492,14 +1520,88 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-/// Resolve the on-disk archive directory that sits alongside `path` (its
-/// parent's `sessions/` sibling). Used by [`SessionStore::for_path`] so
-/// callers stay isolated under their own temp directory regardless of the
-/// global [`paths::Dirs`].
-fn session_archive_dir(path: &std::path::Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("sessions")
+/// One-shot migration of a project bucket's legacy "active" files into the
+/// per-session layout. Pre-ADR-0018 a bucket kept `session.json` (the active
+/// snapshot) and `events.jsonl` (the active log) at its root, plus archived
+/// branches under `sessions/<id>.json`. ADR-0018 retires the shared active
+/// pointer: every session lives at `sessions/<id>.json` + `sessions/<id>.jsonl`.
+///
+/// This moves the legacy root `session.json` → `sessions/<legacy-id>.json` and
+/// `events.jsonl` → `sessions/<legacy-id>.jsonl`, leaving the archived
+/// `sessions/*.json` snapshots where they are (their event logs are seeded
+/// lazily by [`load_or_seed`] when first opened). It is guarded by a
+/// per-project `flock` on `sessions.lock` so two instances starting for the
+/// first time cannot race the move: the second waits, then sees the root
+/// files gone and no-ops. Fully idempotent and best-effort — a failed move is
+/// logged and skipped, never fatal.
+pub fn migrate_legacy_active_to_sessions(
+    project_dir: &std::path::Path,
+    sessions_dir: &std::path::Path,
+    blob_store: &BlobStore,
+) {
+    let legacy_active = project_dir.join("session.json");
+    let legacy_log = project_dir.join("events.jsonl");
+    if !legacy_active.exists() && !legacy_log.exists() {
+        return;
+    }
+    if let Err(e) = fs::create_dir_all(sessions_dir) {
+        tracing::warn!(error = %e, "could not create sessions dir for migration");
+        return;
+    }
+    // Serialise concurrent first-time starts. Blocking flock; the window is
+    // one rename pair, so waiting is correct and cheap.
+    let lock_path = project_dir.join("sessions.lock");
+    let _lock = match crate::fsutil::FileLock::acquire(&lock_path) {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not acquire migration lock; skipping");
+            return;
+        }
+    };
+
+    // Re-check under the lock: a concurrent instance may have just migrated.
+    if !legacy_active.exists() && !legacy_log.exists() {
+        return;
+    }
+
+    // Resolve the legacy session id so the moved files keep their identity.
+    // Parse from the snapshot when present; otherwise mint a fresh id so the
+    // log is not orphaned.
+    let id = fs::read_to_string(&legacy_active)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<SessionData>(&raw).ok())
+        .map(|data| {
+            if data.id.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                data.id
+            }
+        })
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let dest_snapshot = sessions_dir.join(format!("{id}.json"));
+    let dest_log = sessions_dir.join(format!("{id}.jsonl"));
+
+    if legacy_active.exists() && !dest_snapshot.exists() {
+        // Re-write through `write_session_file` so the moved snapshot gets a
+        // fresh checksum (the legacy file may predate checksumming). Falls
+        // back to a plain rename when the snapshot cannot be parsed.
+        let moved = fs::read_to_string(&legacy_active)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<SessionData>(&raw).ok())
+            .map(|data| {
+                write_session_file(&dest_snapshot, &data, blob_store).is_ok()
+            })
+            .unwrap_or_else(|| {
+                fs::rename(&legacy_active, &dest_snapshot).is_ok()
+            });
+        if moved {
+            let _ = fs::remove_file(&legacy_active);
+        }
+    }
+    if legacy_log.exists() && !dest_log.exists() {
+        let _ = fs::rename(&legacy_log, &dest_log);
+    }
 }
 
 /// One-shot migration from the Phase 1 flat `data_dir/sessions/<uuid>.json`
@@ -1657,18 +1759,28 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
     }
 
     fn scan_bucket(path: &std::path::Path, report: &mut Report) {
-        let active = path.join("session.json");
-        if active.exists() {
-            inspect(&active, report);
+        // ADR-0018: every session lives under `sessions/<id>.json` with its
+        // matching `<id>.jsonl` log. A stray pre-migration root `session.json`
+        // is still inspected if present (it should have been migrated on the
+        // first post-0018 start, but doctor must report it either way).
+        let legacy_active = path.join("session.json");
+        if legacy_active.exists() {
+            inspect(&legacy_active, report);
         }
-        let archive_dir = path.join("sessions");
-        if let Ok(entries) = fs::read_dir(&archive_dir) {
+        let sessions_dir = path.join("sessions");
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("json") {
                     continue;
                 }
                 inspect(&path, report);
+                // Verify the matching event log exists; flag its absence as a
+                // soft note rather than corruption (it will be seeded on open).
+                let log = path.with_extension("jsonl");
+                if !log.exists() {
+                    println!("note     {} (no event log; seeded on open)", log.display());
+                }
             }
         }
     }
@@ -1735,14 +1847,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-session-test-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
         let messages = vec![Message::new(neenee_core::Role::User, "hello")];
         store.replace_messages(messages.clone()).await.unwrap();
         store
@@ -1837,14 +1942,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-subagent-persist-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
 
         let call = neenee_core::ToolCall {
             id: "call_sub1".to_string(),
@@ -1938,19 +2036,27 @@ mod tests {
             let bucket_a = crate::paths::project_bucket_name(&PathBuf::from("/projects/alpha"));
             let bucket_b = crate::paths::project_bucket_name(&PathBuf::from("/projects/beta"));
             assert_ne!(bucket_a, bucket_b);
+
+            // ADR-0018: each instance pins its own `sessions/<id>.json`. There
+            // is no longer a project-root `session.json`.
+            let id_a = store_a.id().await;
+            let id_b = store_b.id().await;
             assert!(dirs
-                .project_dir(&PathBuf::from("/projects/alpha"))
-                .join("session.json")
+                .project_sessions_dir(&PathBuf::from("/projects/alpha"))
+                .join(format!("{id_a}.json"))
                 .exists());
             assert!(dirs
-                .project_dir(&PathBuf::from("/projects/beta"))
-                .join("session.json")
+                .project_sessions_dir(&PathBuf::from("/projects/beta"))
+                .join(format!("{id_b}.json"))
                 .exists());
 
-            // Reloading alpha does not see beta's messages.
+            // Reloading alpha starts fresh but the prior session is resumable,
+            // and alpha never sees beta's messages.
             let reloaded_a = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
+            reloaded_a.resume(Some(&id_a)).await.unwrap();
             assert_eq!(reloaded_a.messages().await[0].content, "alpha work");
             let reloaded_b = SessionStore::load_for_project(PathBuf::from("/projects/beta"));
+            reloaded_b.resume(Some(&id_b)).await.unwrap();
             assert_eq!(reloaded_b.messages().await[0].content, "beta work");
 
             // list() is scoped per project — alpha only sees its own session.
@@ -1984,6 +2090,7 @@ mod tests {
                 project_root: PathBuf::from("/projects/alpha"),
                 ..SessionData::default()
             };
+            let alpha_active_id = alpha_active.id.clone();
             fsutil::atomic_write_json(&dirs.data_dir.join("session.json"), &alpha_active).unwrap();
             let alpha_archive = SessionData {
                 id: "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
@@ -2009,7 +2116,13 @@ mod tests {
             let _ = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
 
             let alpha_dir = dirs.project_dir(&PathBuf::from("/projects/alpha"));
-            assert!(alpha_dir.join("session.json").exists());
+            // ADR-0018: the legacy active session is migrated all the way into
+            // `sessions/<id>.json`, not left at the project-root `session.json`.
+            assert!(alpha_dir
+                .join("sessions")
+                .join(format!("{alpha_active_id}.json"))
+                .exists());
+            assert!(!alpha_dir.join("session.json").exists());
             assert!(alpha_dir
                 .join("sessions")
                 .join(format!("{}.json", alpha_archive.id))
@@ -2038,14 +2151,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-session-fork-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
         store
             .replace_messages(vec![Message::new(neenee_core::Role::User, "parent")])
             .await
@@ -2087,14 +2193,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
 
         // Seed one archived session so the picker has something to show,
         // then keep the active session empty (the default state).
@@ -2127,20 +2226,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_state_round_trips_through_disk() {
+    async fn active_plan_path_round_trips_through_disk() {
         let directory =
             std::env::temp_dir().join(format!("neenee-plan-state-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
         assert_eq!(store.active_plan_path().await, None);
-        assert_eq!(store.plan_progress().await, None);
 
         let plan = PathBuf::from(".neenee/plans/feature-x.md");
         store
@@ -2148,29 +2239,17 @@ mod tests {
             .await
             .unwrap();
 
-        let progress =
-            neenee_core::PlanProgress::from_markdown(plan.clone(), "## Summary\n## Key Changes\n");
-        store
-            .set_plan_progress(Some(progress.clone()))
-            .await
-            .unwrap();
-
-        // Reload from disk and confirm both values round-trip.
+        // Reload from disk and confirm the path round-trips.
         let reloaded = SessionStore::for_path(path.clone());
         assert_eq!(
             reloaded.active_plan_path().await.as_deref(),
             Some(plan.as_path()),
             "active plan path should round-trip through disk"
         );
-        let loaded_progress = reloaded.plan_progress().await.expect("progress persisted");
-        assert_eq!(loaded_progress.path, plan);
-        assert_eq!(loaded_progress.sections.len(), 2);
 
         // Clearing also persists.
         reloaded.set_active_plan_path(None).await.unwrap();
-        reloaded.set_plan_progress(None).await.unwrap();
         assert_eq!(reloaded.active_plan_path().await, None);
-        assert_eq!(reloaded.plan_progress().await, None);
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2180,14 +2259,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-todos-state-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
         assert!(store.todos().await.is_empty());
 
         // Seed via the domain helper (same path plan_exit will use) and persist.
@@ -2224,14 +2296,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("neenee-session-resume-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
-        let store = SessionStore {
-            project_root: directory.clone(),
-            path: path.clone(),
-            archive_dir: directory.join("sessions"),
-            event_log: EventLog::new(path.with_extension("jsonl")),
-            blob_store: BlobStore::new(path.parent().unwrap().join("blobs")),
-            data: Mutex::new(SessionData::default()),
-        };
+        let store = SessionStore::for_path(path.clone());
         store
             .replace_messages(vec![Message::new(neenee_core::Role::User, "previous")])
             .await
@@ -2292,7 +2357,6 @@ mod tests {
             let project_root = PathBuf::from("/projects/event-import-test");
             let project_dir = dirs.project_dir(&project_root);
             let path = project_dir.join("session.json");
-            let event_path = project_dir.join("events.jsonl");
             std::fs::create_dir_all(&project_dir).unwrap();
 
             let snapshot = SessionData {
@@ -2304,11 +2368,25 @@ mod tests {
             write_session_file(&path, &snapshot, &blob_store).unwrap();
 
             let store = SessionStore::load_for_project(project_root);
+            // ADR-0018: load_for_project pins a fresh session and migrates the
+            // legacy project-root snapshot into sessions/<id>.json. The legacy
+            // content is reached by resuming the migrated id, which also seeds
+            // the per-session event log from the snapshot.
+            let migrated_snapshot = project_dir
+                .join("sessions")
+                .join(format!("{}.json", snapshot.id));
+            assert!(migrated_snapshot.exists(), "legacy snapshot migrated");
+            assert!(!path.exists(), "legacy project-root session.json removed");
+
+            store.resume(Some(&snapshot.id)).await.unwrap();
             assert_eq!(store.id().await, snapshot.id);
             assert_eq!(store.messages().await[0].content, "from snapshot");
             assert!(
-                event_path.exists(),
-                "event log should be seeded from snapshot"
+                project_dir
+                    .join("sessions")
+                    .join(format!("{}.jsonl", snapshot.id))
+                    .exists(),
+                "event log should be seeded from snapshot on resume"
             );
 
             paths::set_test_default(None);

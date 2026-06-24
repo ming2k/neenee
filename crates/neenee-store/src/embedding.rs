@@ -203,6 +203,15 @@ impl EmbeddingStore {
     }
 
     async fn save(&self) -> Result<(), String> {
+        // Serialise against other `neenee` instances in the same project so
+        // concurrent saves don't interleave temp-file writes or lose updates
+        // (ADR-0018). The index is per-project and shared across instances, so
+        // the last writer would otherwise erase entries another process just
+        // added. The lock wraps the whole rewrite window; reload-merge is not
+        // needed here because the in-memory index already accumulates every
+        // `upsert` this process has done and is the union to persist.
+        let _lock = crate::fsutil::FileLock::acquire(&self.path)
+            .map_err(|e| format!("could not lock embedding index: {e}"))?;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await

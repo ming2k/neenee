@@ -51,20 +51,15 @@ pub struct Agent {
     /// in context without re-reading the file each turn. Cleared by
     /// `plan_enter` and `/mode plan`. Shared with the plan tools.
     active_plan_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
-    /// Live plan progress snapshot, parsed from the approved plan markdown
-    /// and updated by the `update_plan_progress` tool. Drives the sticky
-    /// TUI panel above the input box. Shared with the plan tools.
-    plan_progress: Arc<std::sync::Mutex<Option<plan::PlanProgress>>>,
     /// Unified task list, the single source of truth for "what is left to
     /// do." Drives the sticky panel and persists across restarts. Shared
-    /// with the `todo` / `todo_update` tools via `TodoToolContext`. Absorbs
-    /// the role of the plan-progress section tracker (a plan approved by
-    /// `plan_exit` seeds this list) and the former scratchpad `todo` tool.
+    /// with the `todo` / `todo_update` tools via `TodoToolContext`, and with
+    /// the plan workflow tools via `PlanToolContext` (a plan approved by
+    /// `plan_exit` seeds this list; entering Plan mode clears it).
     todos: Arc<std::sync::Mutex<neenee_core::TodoList>>,
     /// Harness turn counter, bumped at the start of every `execute_turn`.
-    /// Shared with `PlanToolContext` and `UpdatePlanProgressTool` so the
-    /// latter can stamp `PlanProgress::updated_at_turn` for the TUI stale
-    /// detector.
+    /// Shared with the plan + todo tools so they can stamp
+    /// `updated_at_turn` for the TUI stale detector.
     turn_counter: Arc<std::sync::Mutex<u64>>,
     /// In-memory runtime view of the active pursuit.
     pursuit: Arc<std::sync::Mutex<Option<Pursuit>>>,
@@ -95,10 +90,10 @@ pub struct Agent {
     pub(crate) skills_registry: skills::SkillRegistry,
     pursuit_service: PursuitService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
-    /// Context-pressure threshold (in chars) above which the harness asks the
+    /// Context-pressure threshold (in tokens) above which the harness asks the
     /// [`CompactionGate`] to relieve pressure between tool rounds. `0` disables
-    /// mid-turn relief.
-    context_budget_chars: Arc<std::sync::Mutex<usize>>,
+    /// mid-turn relief. Derived from the active model's context window.
+    context_prune_threshold_tokens: Arc<std::sync::Mutex<usize>>,
     /// Optional mid-turn context-relief gate (see [`CompactionGate`]).
     compaction_gate: Arc<std::sync::Mutex<Option<Arc<dyn CompactionGate>>>>,
     /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
@@ -177,42 +172,30 @@ impl Agent {
             context.clone(),
         )));
 
-        // Plan-mode workflow tools share the mode handle, the active plan
-        // path, and the plan progress snapshot — the same `Arc`s the agent
-        // itself holds — so a tool call takes effect immediately and is
-        // reflected in the next system prompt and the TUI panel. The turn
-        // counter is shared so `update_plan_progress` can stamp
-        // `PlanProgress::updated_at_turn` for the stale detector.
-        let active_plan_path = Arc::new(std::sync::Mutex::new(None));
-        let plan_progress = Arc::new(std::sync::Mutex::new(None));
-        let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
-        let plan_context = plan::PlanToolContext::shared(
-            Arc::clone(&mode),
-            Arc::clone(&active_plan_path),
-            Arc::clone(&plan_progress),
-            Arc::clone(&turn_counter),
-        );
-        tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
-        tools.push(Arc::new(plan::PlanExitTool::new(plan_context.clone())));
-        tools.push(Arc::new(plan::UpdatePlanProgressTool::new(
-            plan_context.clone(),
-            Arc::clone(&turn_counter),
-        )));
-        tools.push(Arc::new(crate::plan_verify::VerifyPlanExecutionTool::new(
-            verify_provider,
-            verify_tools,
-            plan_context,
-        )));
-
-        // The unified task list shares the same turn counter as the plan
-        // tools so the stale detector (panel not updated for N turns) works
-        // identically. The tools mutate the shared cell, so a call is visible
+        // The unified task list shares its cell + turn counter with the plan
+        // workflow tools, so a plan transition (plan_exit seeds, plan_enter
+        // clears) and an ad-hoc task edit (todo / todo_update) move one
+        // shared list. The tools mutate the shared cell, so a call is visible
         // to the next system prompt and the TUI immediately.
+        let active_plan_path = Arc::new(std::sync::Mutex::new(None));
+        let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
         let todo_context = neenee_core::TodoToolContext::shared(
             Arc::clone(&todos),
             Arc::clone(&turn_counter),
         );
+        let plan_context = plan::PlanToolContext::shared(
+            Arc::clone(&mode),
+            Arc::clone(&active_plan_path),
+            todo_context.clone(),
+        );
+        tools.push(Arc::new(plan::PlanEnterTool::new(plan_context.clone())));
+        tools.push(Arc::new(plan::PlanExitTool::new(plan_context.clone())));
+        tools.push(Arc::new(crate::plan_verify::VerifyPlanExecutionTool::new(
+            verify_provider,
+            verify_tools,
+            plan_context,
+        )));
         tools.push(Arc::new(neenee_core::TodoWriteTool::new(todo_context.clone())));
         tools.push(Arc::new(neenee_core::TodoUpdateTool::new(todo_context)));
 
@@ -222,7 +205,6 @@ impl Agent {
             disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
             mode,
             active_plan_path,
-            plan_progress,
             todos,
             turn_counter,
             pursuit,
@@ -235,7 +217,7 @@ impl Agent {
             skills_registry,
             pursuit_service,
             thread_id,
-            context_budget_chars: Arc::new(std::sync::Mutex::new(0)),
+            context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             compaction_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
@@ -243,13 +225,14 @@ impl Agent {
         }
     }
 
-    /// Context-pressure threshold (in chars) for mid-turn relief. `0` (the
-    /// default) disables the mid-turn [`CompactionGate`].
-    pub fn set_context_budget_chars(&self, budget: usize) {
+    /// Context-pressure threshold (in tokens) for mid-turn relief. `0` (the
+    /// default) disables the mid-turn [`CompactionGate`]. Re-seed on provider
+    /// switch so the threshold tracks the new model's context window.
+    pub fn set_context_prune_threshold(&self, budget_tokens: usize) {
         *self
-            .context_budget_chars
+            .context_prune_threshold_tokens
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = budget;
+            .unwrap_or_else(|e| e.into_inner()) = budget_tokens;
     }
 
     /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_rounds`
@@ -321,10 +304,10 @@ impl Agent {
         cancel: &CancellationToken,
     ) -> Result<(), HarnessError> {
         let budget = *self
-            .context_budget_chars
+            .context_prune_threshold_tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if budget == 0 || estimate_chars(messages) <= budget {
+        if budget == 0 || estimate_tokens(messages) <= budget {
             return Ok(());
         }
         let gate = self
@@ -375,7 +358,7 @@ impl Agent {
         // still sees the right "you are implementing X" hint.
         if mode == AgentMode::Plan {
             self.clear_active_plan_path();
-            self.clear_plan_progress();
+            self.clear_todos();
         }
     }
 
@@ -406,31 +389,6 @@ impl Agent {
         }
     }
 
-    /// Current plan progress snapshot, if any. Read by the harness to emit
-    /// `AgentEvent::PlanProgressUpdated` and by the TUI to render the sticky
-    /// panel.
-    pub fn plan_progress(&self) -> Option<plan::PlanProgress> {
-        self.plan_progress
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-    }
-
-    /// Replace the plan progress snapshot. Used by session-restore paths.
-    pub fn set_plan_progress(&self, progress: Option<plan::PlanProgress>) {
-        if let Ok(mut guard) = self.plan_progress.lock() {
-            *guard = progress;
-        }
-    }
-
-    /// Drop the plan progress. Called when entering Plan mode so the panel
-    /// disappears as soon as the user starts a fresh planning cycle.
-    pub fn clear_plan_progress(&self) {
-        if let Ok(mut guard) = self.plan_progress.lock() {
-            *guard = None;
-        }
-    }
-
     /// Current task list snapshot. Read by the harness to mirror into the
     /// session and by the TUI to render the sticky panel.
     pub fn todos(&self) -> neenee_core::TodoList {
@@ -449,10 +407,19 @@ impl Agent {
         }
     }
 
+    /// Drop the task list. Called when entering Plan mode (via `plan_enter`
+    /// or `/mode plan`) so the panel disappears as soon as the user starts a
+    /// fresh planning cycle.
+    pub fn clear_todos(&self) {
+        if let Ok(mut guard) = self.todos.lock() {
+            *guard = neenee_core::TodoList::default();
+        }
+    }
+
     /// Current harness turn counter — bumped at the start of every
-    /// `execute_turn`. Used by the TUI to detect a stale plan panel (one
+    /// `execute_turn`. Used by the TUI to detect a stale task panel (one
     /// whose `updated_at_turn` lags the current turn by more than
-    /// `PLAN_STALE_TURN_THRESHOLD`).
+    /// `TODO_STALE_TURN_THRESHOLD`).
     pub fn turn_count(&self) -> u64 {
         self.turn_counter.lock().map(|g| *g).unwrap_or(0)
     }
@@ -1449,7 +1416,6 @@ impl Agent {
         }
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_mode_change(call, on_event);
-        self.emit_plan_progress_change(call, on_event);
         self.emit_todos_change(call, on_event);
         if emit_event {
             on_event(AgentEvent::ToolResult {
@@ -1620,23 +1586,6 @@ impl Agent {
     {
         if call.name == "plan_enter" || call.name == "plan_exit" {
             on_event(AgentEvent::ModeChanged(self.get_mode()));
-        }
-    }
-
-    /// Notify the harness that the plan progress snapshot changed. Emitted
-    /// after `plan_exit` (seeds the panel from the approved plan markdown),
-    /// after `plan_enter` (clears it), and after `update_plan_progress`
-    /// (mutates a section). The TUI stores the snapshot and re-renders the
-    /// sticky panel above the input box.
-    fn emit_plan_progress_change<F>(&self, call: &ToolCall, on_event: &mut F)
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        if matches!(
-            call.name.as_str(),
-            "plan_enter" | "plan_exit" | "update_plan_progress"
-        ) {
-            on_event(AgentEvent::PlanProgressUpdated(self.plan_progress()));
         }
     }
 

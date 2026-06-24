@@ -534,30 +534,18 @@ impl Provider for OpenAiCompatProvider {
             .map_err(|error| transport_error("OpenAI", error))?;
         let response = ensure_success(response, "OpenAI").await?;
 
-        let mut buffer = String::new();
-        let stream = response.bytes_stream().map(move |item| match item {
-            Ok(bytes) => {
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-                let mut content = String::new();
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer.drain(..pos + 1);
-
-                    if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
-                        if data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(v) = serde_json::from_str::<Value>(data) {
-                            if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                                content.push_str(delta);
-                            }
-                        }
-                    }
+        // SSE byte reassembly (incl. multi-byte UTF-8 split across chunks) is
+        // handled by `sse::data_payloads`; here we only map each payload to the
+        // OpenAI delta content shape.
+        let stream = crate::sse::data_payloads(response, "OpenAI").map(|item| {
+            let data = item?;
+            let mut content = String::new();
+            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    content.push_str(delta);
                 }
-                Ok(content)
             }
-            Err(error) => Err(transport_error("OpenAI", error)),
+            Ok(content)
         });
 
         Ok(stream.boxed())
@@ -577,25 +565,17 @@ impl Provider for OpenAiCompatProvider {
             .map_err(|error| transport_error("OpenAI", error))?;
         let response = ensure_success(response, "OpenAI").await?;
 
-        let mut buffer = String::new();
         // Tool-call echo filter shared between the body and the end-of-stream
         // flush: it suppresses any content that mirrors a native tool call
-        // (see `ToolCallEchoFilter`) before it becomes a `TextDelta`.
+        // (see `ToolCallEchoFilter`) before it becomes a `TextDelta`. SSE byte
+        // reassembly (incl. multi-byte UTF-8 split across chunks) is handled
+        // by `sse::data_payloads`; each payload is then parsed into the OpenAI
+        // event shape and fed through the echo filter.
         let echo_filter = Arc::new(Mutex::new(ToolCallEchoFilter::new()));
         let filter_for_body = Arc::clone(&echo_filter);
-        let body = response.bytes_stream().map(move |item| {
-            let bytes = item.map_err(|error| transport_error("OpenAI", error))?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-            let mut parsed = Vec::new();
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer.drain(..pos + 1);
-                if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
-                    if data != "[DONE]" {
-                        parsed.extend(parse_openai_stream_data(data));
-                    }
-                }
-            }
+        let body = crate::sse::data_payloads(response, "OpenAI").map(move |item| {
+            let data = item?;
+            let parsed = parse_openai_stream_data(&data);
             // Recover from a poisoned mutex: a prior panic in this critical
             // section must not take down subsequent stream chunks.
             let mut filter = filter_for_body

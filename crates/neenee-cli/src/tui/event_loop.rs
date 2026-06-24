@@ -17,8 +17,8 @@ use ratatui::{backend::Backend, Terminal};
 use tokio::sync::mpsc;
 
 use neenee_core::{
-    AgentRequest, HarnessSnapshot, PermissionDecision, PermissionRequest, PlanProgress,
-    ProviderPickerSnapshot, Role, SessionOverview, TodoList, UserQuestionRequest,
+    AgentRequest, HarnessSnapshot, PermissionDecision, PermissionRequest, ProviderPickerSnapshot,
+    Role, SessionOverview, TodoList, UserQuestionRequest,
 };
 
 use crate::tui::clipboard;
@@ -60,14 +60,9 @@ pub(super) struct UiRuntime {
     /// the first `QuerySessionContext` round-trip completes. The modal renders
     /// a lightweight placeholder while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
-    /// Live plan progress snapshot, mirrored from
-    /// `AgentResponse::PlanProgressUpdated`. The render loop copies it into
-    /// `App::plan_progress` each frame so the sticky panel above the input
-    /// box stays in sync with the agent's state.
-    pub plan_progress: Arc<Mutex<Option<PlanProgress>>>,
     /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. The
-    /// render loop copies it into `App::todos` each frame so the sticky panel
-    /// above the input box stays in sync with the agent's state.
+    /// render loop copies it into `App::todos` each frame so the Activity
+    /// modal stays in sync with the agent's state.
     pub todos: Arc<Mutex<Option<TodoList>>>,
     /// Live harness turn counter, mirrored from the harness snapshot so the
     /// plan panel can compute "not updated for N turns" without an extra
@@ -140,7 +135,6 @@ pub(super) async fn run_app_loop<B: Backend>(
             app.auto_approve = harness.auto_approve;
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
-            app.plan_progress = runtime.plan_progress.lock().await.clone();
             app.todos = runtime.todos.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
@@ -336,7 +330,7 @@ pub(super) async fn run_app_loop<B: Backend>(
             // - "Hide" group: the footer collapses to zero height so the
             //   modal owns the whole surface. Used for full-screen entry
             //   flows that carry their own input UI or want a clean slate
-            //   (Sessions / Provider / ModelEditor / Question).
+            //   (Sessions / Provider / ModelEditor).
             // - "Blur" group: the footer keeps its height so the backdrop
             //   layout is stable across modal open/close (Help / ToolStepDetail
             //   / Session / PlanPreview / Activity). The composer stays in its
@@ -346,12 +340,14 @@ pub(super) async fn run_app_loop<B: Backend>(
             //   activity bar and hint bar sitting beside it. The caret is still
             //   suppressed (see `show_caret` below) since the modal owns the
             //   keyboard.
+            // Question floats on top without hiding or dimming the chrome — it
+            // is a lightweight overlay, not a full takeover.
             // HistorySearch borrows the input line and Permission replaces
             // only the composer with its own sheet, so neither hides the
             // rest of the chrome.
             let chrome_hidden = matches!(
                 app.active_modal,
-                Modal::Provider | Modal::ModelEditor | Modal::Sessions | Modal::Question
+                Modal::Provider | Modal::ModelEditor | Modal::Sessions
             );
 
             // When zoomed into a sub-agent, render its child messages and show
@@ -638,7 +634,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     f,
                     render::ActivityModalView {
                         pursuit: app.current_pursuit.as_ref(),
-                        plan: app.plan_progress.as_ref(),
+                        todos: app.todos.as_ref(),
                         turn_count: app.turn_count,
                         current_round: app.current_round,
                         review_alert: &app.review_alert,

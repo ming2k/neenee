@@ -1,6 +1,6 @@
 ---
 source: crates/neenee-cli/src/tui/render/snapshot_tests.rs
-assertion_line: 237
+assertion_line: 236
 expression: "render_grid(&m, 80, 40)"
 ---
   - Run cargo test
@@ -28,4 +28,3 @@ backgrounds:
 8: .2 C76
 9: .2 C76
 10: .2 C76
-11: .2 B76

@@ -11,6 +11,10 @@
 //!   and [`build_provider_for_channel`], which is the single place that knows
 //!   how to turn a [`neenee_core::catalog::Channel`] into a concrete
 //!   `dyn Provider`.
+//! - `sse` — the shared Server-Sent Events byte-stream decoder every streaming
+//!   provider routes through. It reassembles raw bytes across network chunk
+//!   boundaries so a multi-byte UTF-8 character split between chunks is not
+//!   corrupted into `U+FFFD`.
 //!
 //! Shared HTTP helpers (`retry_after_ms`, `ensure_success`, `transport_error`,
 //! `openai_content`) live here so each provider module can stay focused on its
@@ -21,6 +25,7 @@ mod llama;
 mod mock;
 mod openai_compat;
 mod registry;
+mod sse;
 
 pub use gemini::GeminiProvider;
 pub use llama::LlamaServerProvider;

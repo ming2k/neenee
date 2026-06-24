@@ -1,6 +1,6 @@
 # 0007. Plan progress sticky panel
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0020
 - **Date:** 2026-06-21
 
 ## Context

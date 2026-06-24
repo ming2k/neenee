@@ -32,11 +32,10 @@ use neenee_core::{
 use neenee_store::{
     config::Config,
     session::{
-        estimate_chars, run_compaction, CompactionCheckpoint, CompactionDecision, CompactionHooks,
-        CompactionResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
+        estimate_chars, estimate_tokens, run_compaction, CompactionCheckpoint, CompactionDecision,
+        CompactionHooks, CompactionResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
     },
 };
-
 pub struct ProxyProvider {
     pub holder: Arc<RwLock<Arc<dyn Provider>>>,
 }
@@ -102,7 +101,10 @@ impl Provider for ProxyProvider {
 
 #[derive(Clone)]
 pub struct CompactionSettings {
-    pub max_chars: usize,
+    /// Token thresholds resolved against the active model's context window.
+    /// Pressure (estimated in tokens) is compared against these to decide when
+    /// to prune and when to run a full summarizing compaction.
+    pub budget: neenee_core::ContextBudget,
     pub preserve_turns: usize,
     /// Use the active model to produce an anchored structured summary.
     pub summarize: bool,
@@ -117,21 +119,17 @@ impl CompactionSettings {
     /// to avoid pruning churn for negligible gains.
     pub const PRUNE_MIN_RECLAIM_CHARS: usize = 8_000;
 
-    /// Mid-turn relief trigger: prune between tool rounds once context pressure
-    /// crosses this fraction of `max_chars` (`NUM/DEN` = 3/4), before the full
-    /// pre-turn compaction threshold at `max_chars`.
-    pub const MID_TURN_TRIGGER_NUM: usize = 3;
-    pub const MID_TURN_TRIGGER_DEN: usize = 4;
-}
-
-impl From<&Config> for CompactionSettings {
-    fn from(config: &Config) -> Self {
+    /// Resolve settings for the active model's context window. `window_tokens`
+    /// is the live model's context window (tokens); `0` means unknown and the
+    /// policy's fallback window is substituted.
+    pub fn from_config(config: &Config, window_tokens: usize) -> Self {
         Self {
-            max_chars: config.compaction_max_chars,
+            budget: config.compaction.resolve(window_tokens),
             preserve_turns: config.compaction_preserve_turns,
             summarize: config.compaction_summarize,
             prune: config.compaction_prune,
-            prune_protect_chars: config.compaction_prune_protect_chars,
+            prune_protect_chars: config.compaction_prune_protect_tokens
+                * neenee_core::CHARS_PER_TOKEN,
         }
     }
 }
@@ -331,9 +329,9 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         retry_max_ms,
     } = context;
     // Bump the harness turn counter first thing so anything that reads it
-    // during this turn (e.g. `update_plan_progress` stamping
+    // during this turn (e.g. the `todo` / `todo_update` tools stamping
     // `updated_at_turn`) sees the new value. The TUI's stale detector
-    // compares this against `PlanProgress::updated_at_turn`.
+    // compares this against `TodoList::updated_at_turn`.
     agent.bump_turn();
     let _ = tx.send(AgentResponse::Activity("saving request".to_string()));
     let admitted_session_id = session.id().await;
@@ -363,7 +361,7 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
     if compaction.prune {
         prune_and_commit(&mut turn_history, &session, &tx, &compaction).await?;
     }
-    if estimate_chars(&turn_history) > compaction.max_chars {
+    if estimate_tokens(&turn_history) > compaction.budget.compaction_threshold_tokens {
         let hooks = RelayCompactionHooks { tx: tx.clone() };
         if let Some(checkpoint) = compact_turn_history(
             &mut turn_history,
@@ -513,10 +511,10 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
         let _ = tx.send(AgentResponse::Text("Pursuit completed.".to_string()));
     }
 
-    // Sync the agent's plan state to the session so resume restores both the
-    // "you are implementing X" hint and the sticky panel's sections. Each
-    // value is compared against the session's current value to skip the
-    // write on turns where nothing changed (the common case).
+    // Sync the agent's active plan path to the session so resume restores
+    // the "you are implementing X" hint. The value is compared against the
+    // session's current value to skip the write on turns where nothing
+    // changed (the common case).
     let agent_plan = agent.active_plan_path();
     let stored_plan = session.active_plan_path().await;
     if agent_plan != stored_plan {
@@ -524,18 +522,11 @@ pub async fn execute_turn(context: TurnContext, input: TurnInput) -> Result<bool
             tracing::warn!(error = %err, "could not persist active plan path");
         }
     }
-    let agent_progress = agent.plan_progress();
-    let stored_progress = session.plan_progress().await;
-    if agent_progress != stored_progress {
-        if let Err(err) = session.set_plan_progress(agent_progress).await {
-            tracing::warn!(error = %err, "could not persist plan progress");
-        }
-    }
 
-    // Mirror the unified task list so resume restores the sticky panel. As
-    // with plan progress, the value is compared against the session's current
-    // list to skip the write (and avoid an event-log entry) on turns where
-    // nothing changed — the common case.
+    // Mirror the unified task list so resume restores the sticky panel. The
+    // value is compared against the session's current list to skip the write
+    // (and avoid an event-log entry) on turns where nothing changed — the
+    // common case.
     let agent_todos = agent.todos();
     let stored_todos = session.todos().await;
     if agent_todos != stored_todos {
@@ -621,7 +612,6 @@ pub fn relay_agent_event(
         AgentEvent::ToolStream { id, stream } => AgentResponse::ToolStream { id, stream },
         AgentEvent::PursuitUpdated(pursuit) => AgentResponse::PursuitUpdated(pursuit),
         AgentEvent::ModeChanged(mode) => AgentResponse::ModeChanged(mode),
-        AgentEvent::PlanProgressUpdated(progress) => AgentResponse::PlanProgressUpdated(progress),
         AgentEvent::TodosUpdated(todos) => AgentResponse::TodosUpdated(todos),
         AgentEvent::AutoApproveChanged(enabled) => AgentResponse::AutoApproveChanged(enabled),
         AgentEvent::SessionReview { alert } => AgentResponse::SessionReview { alert },
@@ -650,7 +640,7 @@ pub async fn compact_turn_history(
     let provider = if settings.summarize { provider } else { None };
     let Some(result) = run_compaction(
         history,
-        settings.max_chars,
+        settings.budget.target_tokens,
         settings.preserve_turns,
         provider,
         hooks,

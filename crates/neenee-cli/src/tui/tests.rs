@@ -512,7 +512,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         auto_approve: false,
-        plan_progress: None,
         todos: None,
         turn_count: 0,
         current_round: 0,

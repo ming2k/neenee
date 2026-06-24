@@ -396,7 +396,17 @@ pub fn process_event(
                 MouseEventKind::ScrollUp => InputAction::ScrollUp,
                 MouseEventKind::ScrollDown => InputAction::ScrollDown,
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if context.active_modal == super::Modal::None {
+                    // The permission sheet replaces the composer but leaves the
+                    // transcript above fully interactive, so a click there can
+                    // still toggle steps, drag-select text, follow links, etc.
+                    // The sheet itself has no click targets (its buttons are
+                    // keyboard-driven) and covers only the composer/hint slot,
+                    // which has no registered transcript region, so a press
+                    // landing on it resolves to nothing and stays inert.
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) {
                         drag.start(SemanticCursor::new(0, 0, 0));
                         InputAction::SelectionStart { x, y }
                     } else if context.active_modal.dismissable_by_outside_click() {
@@ -412,7 +422,12 @@ pub fn process_event(
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    if drag.active && context.active_modal == super::Modal::None {
+                    if drag.active
+                        && matches!(
+                            context.active_modal,
+                            super::Modal::None | super::Modal::Permission
+                        )
+                    {
                         InputAction::SelectionUpdate { x, y }
                     } else {
                         InputAction::None
@@ -429,7 +444,10 @@ pub fn process_event(
                 // Triple-click detection would need a timer; for now we map
                 // middle click to "select block" as a quick approximation.
                 MouseEventKind::Down(MouseButton::Middle) => {
-                    if context.active_modal == super::Modal::None {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) {
                         InputAction::SelectBlock { x, y }
                     } else {
                         InputAction::None
@@ -449,10 +467,15 @@ pub fn process_event(
                     }
                 }
                 // Mouse motion (reported because `EnableMouseCapture` requests
-                // mode 1003 "all motion"). Only forwarded on the main view so
-                // hover affordances don't fire behind an overlay modal.
+                // mode 1003 "all motion"). Forwarded on the main view and
+                // during a permission prompt so hover affordances keep working
+                // on the still-interactive transcript; blocked behind other
+                // overlay modals.
                 MouseEventKind::Moved => {
-                    if context.active_modal == super::Modal::None {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None | super::Modal::Permission
+                    ) {
                         InputAction::Hover { x, y }
                     } else {
                         InputAction::None

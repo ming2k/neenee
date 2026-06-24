@@ -631,7 +631,7 @@ async fn plan_mode_blocks_tools_unless_explicitly_read_only() {
 #[tokio::test]
 async fn plan_exit_asks_user_and_implements_when_approved() {
     // Write a real plan file so plan_exit can read its content and seed
-    // PlanProgress for the sticky panel.
+    // the task list for the Activity modal.
     let cwd = std::env::current_dir().unwrap();
     let plans_dir = cwd.join(".neenee/plans");
     std::fs::create_dir_all(&plans_dir).unwrap();
@@ -688,12 +688,12 @@ async fn plan_exit_asks_user_and_implements_when_approved() {
         agent.active_plan_path(),
         Some(std::path::PathBuf::from(relative))
     );
-    // Plan progress is seeded from the approved plan's `## Summary` heading.
-    let progress = agent.plan_progress().expect("progress seeded");
+    // The task list is seeded from the approved plan's `## Summary` heading.
+    let todos = agent.todos();
     assert!(
-        progress.sections.iter().any(|s| s.name == "Summary"),
-        "sections parsed from plan: {:?}",
-        progress.sections
+        todos.items.iter().any(|i| i.content == "Summary"),
+        "items parsed from plan: {:?}",
+        todos.items
     );
 }
 
@@ -734,7 +734,7 @@ async fn plan_exit_keeps_planning_when_rejected() {
     assert!(output.contains("User wants to keep planning"), "{}", output);
     assert_eq!(agent.get_mode(), AgentMode::Plan);
     assert_eq!(agent.active_plan_path(), None);
-    assert_eq!(agent.plan_progress(), None);
+    assert!(agent.todos().is_empty());
 }
 
 #[tokio::test]
@@ -747,22 +747,19 @@ async fn manual_mode_switch_to_plan_clears_plan_state() {
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/was-here.md")));
-    agent.set_plan_progress(Some(plan::PlanProgress::from_markdown(
-        std::path::PathBuf::from(".neenee/plans/was-here.md"),
-        "## X\n",
-    )));
+    agent.set_todos(neenee_core::TodoList::from_plan_markdown("## X\n", 100, 1));
     assert!(agent.active_plan_path().is_some());
-    assert!(agent.plan_progress().is_some());
+    assert!(!agent.todos().is_empty());
 
     // Manual /mode plan clears both (mirrors plan_enter's behavior).
     agent.set_mode(AgentMode::Plan);
     assert_eq!(agent.active_plan_path(), None);
-    assert_eq!(agent.plan_progress(), None);
+    assert!(agent.todos().is_empty());
 
     // Switching back to Build does not resurrect them.
     agent.set_mode(AgentMode::Build);
     assert_eq!(agent.active_plan_path(), None);
-    assert_eq!(agent.plan_progress(), None);
+    assert!(agent.todos().is_empty());
 }
 
 #[tokio::test]
@@ -1046,10 +1043,6 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             }
             AgentEvent::PursuitUpdated(_) => "pursuit-updated".to_string(),
             AgentEvent::ModeChanged(mode) => format!("mode-changed {mode:?}"),
-            AgentEvent::PlanProgressUpdated(progress) => format!(
-                "plan-progress {:?}",
-                progress.as_ref().map(|p| p.sections.len())
-            ),
             AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
             AgentEvent::SessionReview { alert } => {
                 format!("session-review alert={alert:?}")

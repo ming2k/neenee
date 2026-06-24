@@ -61,26 +61,28 @@ Implement the plan at .neenee/plans/rewrite-auth.md
 
 ## Track progress
 
-Once the plan is approved a sticky 3-row panel appears above the input
-box showing the section completion ratio and per-section status:
+Once the plan is approved, `plan_exit` seeds the unified **task list** from the
+plan's `##` headings (one item per section, starting `pending`). The list lives
+in the **Activity** modal, showing the done/total ratio and a status glyph per
+step:
 
 ```text
-╭── Plan: rewrite-auth.md · 1/4 done ───────────────╮
-│ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Assump… │
-╰───────────────────────────────────────────────────╯
+Tasks  1/4
+    ✓ Summary   ● Key Changes   ○ Test Plan   ○ Assumptions
 ```
 
-The model marks sections `in_progress` → `done` via the
-`update_plan_progress` tool as it works. Sections it has not touched yet
-show as `○ Pending` — that is honest, not stale: it means "not verified
-yet." If you see the panel stay on `○` for a section the model claims is
-done, ask it to mark the section or to run the verifier.
+The model marks steps `in_progress` → `completed` with the `todo` (full-replace)
+or `todo_update` (mark one step) tools as it works. Steps it has not touched
+yet show as `○ pending` — that is honest, not stale: it means "not verified
+yet." To see the list at any time, open the **Activity** modal by clicking the
+pinned activity bar. If you see a step stay on `○` after the model claims it
+is done, ask it to update the task list or to run the verifier.
 
-The panel disappears when:
+The list is cleared (and the panel empties) when:
 
 - the agent re-enters Plan mode (a new planning cycle starts), or
 - the user runs `/mode plan` manually, or
-- the session is resumed after both were cleared.
+- the session is resumed after the list was cleared.
 
 ## Stay in control
 
