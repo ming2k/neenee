@@ -294,11 +294,11 @@ impl SubagentTool {
         // drain needed).
         sub_agent.set_auto_approve(self.profile.auto_approve);
         // Resolve the bound profile's write grant (ADR-0028) against the
-        // process cwd and set it on the child. For read-only profiles
-        // (EXPLORE/VERIFY: empty `write_paths`) this is `WriteScope::None`,
-        // which is consistent with their admission (no write tools admitted
-        // anyway). A future `PLAN` profile yields `Scoped(.neenee/plans)`,
-        // letting the planner persist its own plan file.
+        // process cwd and set it on the child. All built-in profiles
+        // (EXPLORE/VERIFY/PLAN/REVIEW/TITLE: empty `write_paths`) resolve to
+        // `WriteScope::None`, consistent with their admission (no write tools
+        // admitted anyway). The `INTERACTIVE` role carries an unrestricted
+        // scope via its `Write` ceiling.
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         sub_agent.set_write_scope(self.profile.resolve_write_scope(&cwd));
         // Sub-agents are short-lived and read-only by profile, and session

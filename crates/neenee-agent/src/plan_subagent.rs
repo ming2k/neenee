@@ -1,12 +1,12 @@
 //! `PlanTool` — the main agent's `plan` tool (ADR-0027).
 //!
-//! It delegates planning to a read-only `PLAN` subagent (which writes its own
-//! plan under `.neenee/plans/` via a `WriteScope` grant, ADR-0028). The tool
-//! itself only spawns the subagent; the harness-side `Agent::execute_plan`
-//! wrapper reads the path the subagent reports and gates the result behind
-//! user approval, then seeds the todo list. Splitting it this way mirrors the
-//! legacy `plan_exit` path: interactive approval needs `self.ask_user` + the
-//! event channel, which only the agent (not a tool) can reach.
+//! It delegates planning to a read-only `PLAN` subagent that returns the full
+//! plan markdown in its reply. The tool itself only spawns the subagent; the
+//! harness-side `Agent::execute_plan` wrapper receives the markdown, derives a
+//! slug + path, writes the file, gates the result behind user approval, then
+//! seeds the todo list. Splitting it this way mirrors the legacy `plan_exit`
+//! path: interactive approval needs `self.ask_user` + the event channel,
+//! which only the agent (not a tool) can reach.
 //!
 //! Under the hood it reuses [`SubagentTool`] bound to [`neenee_core::PLAN`], so the
 //! spawn, event-forwarding, and structured `Subagent` result are identical to
@@ -121,7 +121,7 @@ mod tests {
         async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
             Ok(Message::new(
                 Role::Assistant,
-                "Plan written to .neenee/plans/feature.md",
+                "# Plan\n\n## Summary\n- do the thing",
             ))
         }
         async fn stream_chat(
@@ -129,7 +129,7 @@ mod tests {
             _messages: Vec<Message>,
         ) -> Result<BoxStream<'static, Result<String, String>>, String> {
             Ok(Box::pin(stream::once(async {
-                Ok("Plan written to .neenee/plans/feature.md".to_string())
+                Ok("# Plan\n\n## Summary\n- do the thing".to_string())
             })))
         }
     }
@@ -149,16 +149,17 @@ mod tests {
         assert!(translate_request("not json").is_err());
     }
 
-    /// The `plan` tool spawns a `PLAN` subagent and surfaces its final reply
-    /// (which carries the path it wrote). The approval + seeding happen
-    /// harness-side and are not exercised here.
+    /// The `plan` tool spawns a `PLAN` subagent and surfaces its final reply.
+    /// Under the new contract the reply *is* the plan markdown (no path
+    /// signal); the approval + file-write + seeding happen harness-side and
+    /// are not exercised here.
     #[tokio::test]
-    async fn plan_tool_runs_subagent_and_returns_path_signal() {
+    async fn plan_tool_runs_subagent_and_returns_markdown() {
         let tool = PlanTool::new(std::sync::Arc::new(CannedProvider), Vec::new());
         let out = tool
             .call(r#"{"request":"plan the auth feature"}"#)
             .await
             .unwrap();
-        assert!(out.contains(".neenee/plans/feature.md"));
+        assert!(out.contains("## Summary"));
     }
 }

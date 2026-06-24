@@ -310,8 +310,8 @@ impl Agent {
         let todo_context =
             neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
         // `plan` (ADR-0027): delegate planning to a read-only `PLAN` subagent
-        // whose scoped write grant (ADR-0028) lets it persist its own plan.
-        // Built from the same pre-pursuit tool snapshot as the verifier.
+        // that returns the plan markdown; `execute_plan` writes the file after
+        // approval. Built from the same pre-pursuit tool snapshot as the verifier.
         tools.push(Arc::new(crate::plan_subagent::PlanTool::new(
             verify_provider.clone(),
             verify_tools.clone(),
@@ -2206,30 +2206,19 @@ impl Agent {
     }
 
     /// Raise the *Approve* / *Keep planning* prompt for a plan and await the
-    /// user's decision. Shared by `plan_exit` (mode world) and the `plan`
-    /// subagent tool. The prompt wording is mode-neutral ("approve and start
-    /// implementing") so both callers reuse it verbatim.
+    /// user's decision. The prompt shows the plan's target path plus a short
+    /// excerpt of its content so the user can decide without opening the file.
     async fn request_plan_approval(
         &self,
-        plan_path: Option<&str>,
-        excerpt: Option<&str>,
+        path: &str,
+        excerpt: &str,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> PlanApproval {
-        let header = plan_path.unwrap_or("(unsaved)").to_string();
-        let question_text = match (plan_path, excerpt) {
-            (Some(path), Some(snippet)) => format!(
-                "Approve this plan and start implementing?\n\nPath: {}\n\n{}",
-                path, snippet
-            ),
-            (Some(path), None) => format!(
-                "Approve this plan and start implementing?\n\nPath: {}\n\n\
-                 (The plan file could not be read. Open it to review before approving.)",
-                path
-            ),
-            (None, _) => "Approve this plan and start implementing? \
-                          (No plan path was provided.)"
-                .to_string(),
-        };
+        let header = path.to_string();
+        let question_text = format!(
+            "Approve this plan and start implementing?\n\nPath: {}\n\n{}",
+            path, excerpt
+        );
 
         let request = UserQuestionRequest {
             id: format!("plan_approval_{}", uuid::Uuid::new_v4()),
@@ -2281,12 +2270,11 @@ impl Agent {
     }
 
     /// The `plan` tool (ADR-0027): delegate planning to a read-only `PLAN`
-    /// subagent, then gate the result behind user approval. On approval the
-    /// active plan path is recorded and the todo list seeded from the plan's
-    /// headings, exactly as `plan_exit` does — but with no mode involved: the
-    /// main agent never leaves Build. The subagent writes its own plan under
-    /// `.neenee/plans/` via its `WriteScope` grant (ADR-0028) and reports the
-    /// path; this wrapper reads that path for the approval prompt.
+    /// subagent that returns the full plan markdown in its reply, then gate
+    /// the result behind user approval. On approval the main agent writes the
+    /// plan to `.neenee/plans/<slug>.md` (the subagent never touches the
+    /// filesystem), records the active plan path, and seeds the todo list
+    /// from the plan's `##` headings. The main agent never leaves Build.
     async fn execute_plan(
         &self,
         tool: &Arc<dyn Tool>,
@@ -2313,7 +2301,7 @@ impl Agent {
                 &mut on_stream,
             )
             .await;
-        let summary = match sub_output {
+        let plan_markdown = match sub_output {
             Ok(output) => output.to_text(),
             Err(err) => {
                 return ToolOutput::Error {
@@ -2323,33 +2311,43 @@ impl Agent {
             }
         };
 
-        // 2. Extract the plan path the subagent reported writing.
-        let plan_path = extract_plan_path(&summary);
-        let excerpt = plan_path.as_deref().and_then(read_plan_excerpt);
+        // 2. The subagent returns the full plan markdown as its reply. If it
+        //    came back empty, there is nothing to approve.
+        if plan_markdown.trim().is_empty() {
+            return ToolOutput::Text(
+                "The plan subagent returned no plan. Ask the user for any missing \
+                 information, then call plan again with the refined request."
+                    .to_string(),
+            );
+        }
 
-        // 3. If the subagent did not produce a plan path, there is nothing to
-        //    approve — surface its summary so the main agent can react.
-        let path = match &plan_path {
-            Some(p) => p.clone(),
-            None => {
-                return ToolOutput::Text(format!(
-                    "The plan subagent did not report a written plan path. Its reply was:\n\n\
-                     {summary}\n\n\
-                     If it still needs information, ask the user and call plan again; \
-                     otherwise have it write the plan to .neenee/plans/<slug>.md."
-                ))
-            }
-        };
+        // 3. Derive the on-disk path from the request and an excerpt for the
+        //    approval prompt (deterministic: no path-string parsing).
+        let request_text = std::str::from_utf8(call.arguments.as_bytes())
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("request").and_then(|r| r.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        let slug = plan_slug(&request_text);
+        let path = format!(".neenee/plans/{}.md", slug);
+        let excerpt = excerpt_of(&plan_markdown);
 
-        // 4. Approval gate (shared with plan_exit).
+        // 4. Approval gate.
         match self
-            .request_plan_approval(Some(&path), excerpt.as_deref(), event_tx)
+            .request_plan_approval(&path, &excerpt, event_tx)
             .await
         {
             PlanApproval::Approved => {
                 tracing::info!(plan = %path, "plan approved via subagent");
-                // 5. Record the active plan path and seed the todo list from
-                //    the plan's `##` headings, mirroring plan_exit's seeding.
+                // 5. Write the plan to disk, record the active plan path, and
+                //    seed the todo list from the plan's `##` headings — all
+                //    from the in-memory markdown, no disk read-back needed.
+                if let Err(err) = std::fs::write(&path, &plan_markdown) {
+                    return ToolOutput::Error {
+                        message: format!("Could not write plan to {path}: {err}"),
+                        detail: None,
+                    };
+                }
                 if let Ok(mut guard) = self.active_plan_path.lock() {
                     *guard = Some(std::path::PathBuf::from(&path));
                 }
@@ -2358,15 +2356,11 @@ impl Agent {
                     .lock()
                     .map(|g| *g)
                     .unwrap_or(0);
-                let seeded = std::fs::read_to_string(&path)
-                    .map(|body| {
-                        neenee_core::TodoList::from_plan_markdown(
-                            &body,
-                            neenee_core::todos::unix_now(),
-                            turn,
-                        )
-                    })
-                    .unwrap_or_default();
+                let seeded = neenee_core::TodoList::from_plan_markdown(
+                    &plan_markdown,
+                    neenee_core::todos::unix_now(),
+                    turn,
+                );
                 if let Ok(mut guard) = self.todos.lock() {
                     *guard = seeded.clone();
                 }
@@ -2381,8 +2375,7 @@ impl Agent {
             PlanApproval::KeepPlanning => {
                 tracing::info!("plan (subagent) rejected by user");
                 ToolOutput::Text(
-                    "User wants to keep planning. Ask the user (or use the ask_user tool) what \
-                     should change, then call plan again with the refined request."
+                    "User wants to keep planning. Ask the user (or use the ask_user tool) what                      should change, then call plan again with the refined request."
                         .to_string(),
                 )
             }
@@ -2717,66 +2710,37 @@ fn valid_assistant_response(message: &Message) -> bool {
             .is_some_and(|reasoning| !reasoning.is_empty())
 }
 
-/// Extract the plan file path a `PLAN` subagent reports it wrote. The
-/// profile's prompt instructs it to end with "Plan written to <path>"; this
-/// finds that marker (case-insensitive) and takes the path token on the rest
-/// of the line, trimming surrounding punctuation. Returns `None` if the
-/// subagent did not report a path.
-fn extract_plan_path(summary: &str) -> Option<String> {
-    const MARKER: &str = "plan written to ";
-    let lower = summary.to_lowercase();
-    let idx = lower.find(MARKER)?;
-    let rest = &summary[idx + MARKER.len()..];
-    let path = rest.lines().next().unwrap_or(rest);
-    // Strip wrapping quotes/backticks and trailing sentence punctuation, but
-    // preserve leading dots (a plan path begins with `.neenee`).
-    let path = path
-        .trim()
-        .trim_matches(|c: char| matches!(c, '`' | '"' | '\''))
-        .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':'))
-        .trim();
-    if path.is_empty() {
-        None
+/// Build a filesystem-safe slug (kebab-case) from a plan request. Takes the
+/// first few words, lowercases, and keeps only `[a-z0-9-]`, collapsing runs.
+fn plan_slug(request: &str) -> String {
+    let slug: String = request
+        .split_whitespace()
+        .take(6)
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "plan".to_string()
     } else {
-        Some(path.to_string())
+        slug.to_string()
     }
 }
 
-/// Read up to 280 chars of a plan file as an approval-prompt excerpt. Returns
-/// `None` if the file cannot be read.
-fn read_plan_excerpt(path: &str) -> Option<String> {
-    let body = std::fs::read_to_string(path).ok()?;
-    let trimmed = body.trim();
+/// Take up to 280 chars of a plan as an approval-prompt excerpt.
+fn excerpt_of(markdown: &str) -> String {
+    let trimmed = markdown.trim();
     let chars: Vec<char> = trimmed.chars().take(280).collect();
     let mut snippet: String = chars.into_iter().collect();
-    if trimmed.len() > 280 {
-        snippet.push('…');
+    if trimmed.chars().count() > 280 {
+        snippet.push('\u{2026}');
     }
-    Some(snippet)
-}
-
-#[cfg(test)]
-mod plan_path_tests {
-    use super::extract_plan_path;
-
-    #[test]
-    fn extracts_path_from_completion_signal() {
-        assert_eq!(
-            extract_plan_path("Plan written to .neenee/plans/auth.md"),
-            Some(".neenee/plans/auth.md".to_string())
-        );
-        // Case-insensitive marker, trailing punctuation trimmed, mid-text ok.
-        assert_eq!(
-            extract_plan_path("Done. PLAN WRITTEN TO plans/x.md."),
-            Some("plans/x.md".to_string())
-        );
-    }
-
-    #[test]
-    fn returns_none_when_no_path_reported() {
-        assert_eq!(extract_plan_path("I need more info about the auth flow."), None);
-        assert_eq!(extract_plan_path(""), None);
-    }
+    snippet
 }
 
 /// Build the "empty assistant response" error, after logging enough state to

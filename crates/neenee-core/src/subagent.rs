@@ -253,34 +253,34 @@ the title in the same language as the conversation.",
     auto_approve: true,
 };
 
-/// The planning role (ADR-0027). Read-only research like [`EXPLORE`], plus a
-/// scoped write grant to `.neenee/plans/` (ADR-0028) so it can persist its own
-/// plan document — but **no `bash`** (`Execute` is never granted via
-/// `write_paths`). Non-interactive: if it needs user input it returns the
-/// question for the parent agent to relay (ADR-0027 §5), rather than blocking.
+/// The planning role (ADR-0027). Pure read-only research like [`EXPLORE`]:
+/// no `write_paths` grant, no `bash`, non-interactive. Its sole job is to
+/// research the change, design the approach, and **return the full plan
+/// markdown as its final reply**. The main agent writes it to
+/// `.neenee/plans/` after the user approves — the subagent never touches the
+/// filesystem. This replaces the old self-write + path-signal contract
+/// (ADR-0028's scoped-write special case) with a deterministic data flow.
 ///
-/// Spawned by the main agent's `plan` tool. Its job is to research the
-/// request, design the change, and write the plan to
-/// `.neenee/plans/<descriptive-slug>.md` using `## ` section headings (one per
-/// implementation step, since the headings seed the todo list on approval),
-/// then return a one-line completion signal naming the path it wrote.
+/// Spawned by the main agent's `plan` tool. The plan must use `## ` (level-2)
+/// headings — one per implementation step, since the headings seed the todo
+/// list on approval.
 pub const PLAN: SubagentProfile = SubagentProfile {
     name: "plan",
     system_prompt: "\
 You are a planning subagent. Research the assigned change with read-only tools, \
-design a concrete implementation approach, and write the plan to a file under \
-.neenee/plans/ using write_file (the only place you may write). Name the file \
-<descriptive-slug>.md. Structure the plan with a `## ` (level-2) heading per \
-implementation step — each heading becomes a tracked todo on approval, so make \
-them discrete, ordered, actionable steps. Under each, give the files to touch \
-and the approach. You may NOT run commands (no bash) and may NOT ask the user \
-any question; if a decision is genuinely blocking, state the assumption you \
-made and the open question explicitly in the plan. When the plan file is \
-written, reply with a single line: `Plan written to .neenee/plans/<slug>.md`.",
+design a concrete implementation approach, and return the full plan as markdown \
+as your final reply. Do NOT write any file and do NOT run commands. Structure \
+the plan with a `## ` (level-2) heading per implementation step — each heading \
+becomes a tracked todo on approval, so make them discrete, ordered, actionable \
+steps. Under each, give the files to touch and the approach. You may NOT ask \
+the user any question; if a decision is genuinely blocking, state the \
+assumption you made and the open question explicitly in the plan. Your entire \
+final reply is the plan markdown; it will be written to disk and shown to the \
+user for approval.",
     tool_policy: ToolPolicy {
         access: ToolAccess::Read,
         allow_user_interaction: false,
-        write_paths: &[".neenee/plans"],
+        write_paths: &[],
     },
     auto_approve: true,
 };
@@ -498,22 +498,24 @@ mod tests {
         assert_eq!(names, vec!["read_file", "bash"]);
     }
 
-    /// The PLAN shape (ADR-0028): a `Read` ceiling plus a non-empty
-    /// `write_paths` grant admits read tools **and** write tools (scoped at
+    /// The `write_paths` grant mechanism (ADR-0028): a `Read` ceiling plus a
+    /// non-empty `write_paths` admits read tools **and** write tools (scoped at
     /// runtime), but **not** `Execute` (`bash`). It still drops user-interactive
-    /// and recursive tools.
+    /// and recursive tools. (The built-in `PLAN` profile no longer uses this —
+    /// it returns markdown for the parent to write — but the capability remains
+    /// for `INTERACTIVE` and future profiles.)
     #[test]
     fn write_paths_grant_admits_write_below_read_ceiling_but_not_execute() {
-        let plan_policy = ToolPolicy {
+        let scoped_policy = ToolPolicy {
             access: ToolAccess::Read,
             allow_user_interaction: false,
-            write_paths: &[".neenee/plans"],
+            write_paths: &[".scoped"],
         };
-        assert!(plan_policy.admits(&make(ToolAccess::Read, false, false)));
-        assert!(plan_policy.admits(&make(ToolAccess::Write, false, false))); // via the grant
-        assert!(!plan_policy.admits(&make(ToolAccess::Execute, false, false))); // bash excluded
-        assert!(!plan_policy.admits(&make(ToolAccess::Write, true, false))); // user excluded
-        assert!(!plan_policy.admits(&make(ToolAccess::Read, false, true))); // recursion excluded
+        assert!(scoped_policy.admits(&make(ToolAccess::Read, false, false)));
+        assert!(scoped_policy.admits(&make(ToolAccess::Write, false, false))); // via the grant
+        assert!(!scoped_policy.admits(&make(ToolAccess::Execute, false, false))); // bash excluded
+        assert!(!scoped_policy.admits(&make(ToolAccess::Write, true, false))); // user excluded
+        assert!(!scoped_policy.admits(&make(ToolAccess::Read, false, true))); // recursion excluded
     }
 
     /// Regression for every existing profile: an empty `write_paths` leaves a
@@ -529,17 +531,18 @@ mod tests {
         assert!(!read_only.admits(&make(ToolAccess::Write, false, false)));
     }
 
-    /// The built-in `PLAN` profile (ADR-0027/0028): admits read tools and
-    /// write tools (scoped to `.neenee/plans` at runtime), but excludes
-    /// `bash` (Execute), interactive tools, and recursion.
+    /// The built-in `PLAN` profile (ADR-0027): pure read-only research —
+    /// admits read tools but excludes write, `bash` (Execute), interactive
+    /// tools, and recursion. The subagent returns plan markdown for the parent
+    /// agent to write; it has no filesystem-write capability.
     #[test]
-    fn plan_profile_admits_read_and_scoped_write_but_not_bash() {
+    fn plan_profile_is_pure_read_only() {
         use crate::PLAN;
-        // PLAN writes — admission says yes (the runtime WriteScope scopes it).
         assert!(PLAN
             .tool_policy
             .admits(&make(ToolAccess::Read, false, false)));
-        assert!(PLAN
+        // No write (the subagent no longer writes the plan itself).
+        assert!(!PLAN
             .tool_policy
             .admits(&make(ToolAccess::Write, false, false)));
         // No bash, no user-interactive, no recursion.

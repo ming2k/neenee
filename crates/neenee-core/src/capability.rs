@@ -194,8 +194,8 @@ pub trait Tool: Send + Sync {
 ///   (i.e. `Execute` or `Write`): both have side effects the user should
 ///   approve.
 /// - **Write-scope gate** — a per-agent [`WriteScope`] boundary blocks write
-///   tools whose target is outside the agent's granted paths (e.g. a `PLAN`
-///   subagent may write only under `.neenee/plans/`). See ADR-0028.
+///   tools whose target is outside the agent's granted paths (e.g. an
+///   `INTERACTIVE` subagent scoped to the working tree). See ADR-0028.
 /// - **Subagent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
 ///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`, or
 ///   when it is a write tool covered by a `write_paths` grant. `EXPLORE`
