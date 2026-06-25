@@ -9,7 +9,7 @@
 //!
 //! [`ProviderPickerSnapshot`]: neenee_core::ProviderPickerSnapshot
 
-use neenee_core::{resolve_model, ProviderPickerRow};
+use neenee_core::{ProviderPickerRow, resolve_model};
 
 use crate::tui::fuzzy;
 

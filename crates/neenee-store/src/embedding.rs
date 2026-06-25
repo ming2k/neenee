@@ -6,7 +6,7 @@
 //! or a cloud embedding API, and replace the flat index with an HNSW/vector-DB
 //! backend. The interface stays the same.
 
-use neenee_core::{async_trait, Message};
+use neenee_core::{Message, async_trait};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;

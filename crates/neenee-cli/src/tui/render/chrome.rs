@@ -6,22 +6,22 @@
 //! bar and task panel.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block as RtBlock, Clear, Paragraph},
-    Frame,
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::document::{estimate_context_tokens, TranscriptMessage};
+use crate::tui::document::{TranscriptMessage, estimate_context_tokens};
 use crate::tui::input::FocusZone;
 use crate::tui::layout::LayoutMap;
 
+use super::Theme;
 use super::design::{HINT_BAR_GAP_MIN, HINT_BAR_INNER_PADDING, HINT_BAR_SEGMENT_GAP};
 use super::primitives::{contrast_fg, viewport_rect};
-use super::Theme;
 
 /// Number of distinct luminance steps in one breathing cycle. At the 100ms
 /// spinner tick this is ~1.2s per cycle — calm, not frantic.
@@ -597,8 +597,8 @@ mod tests {
     /// below the input without panicking.
     #[test]
     fn hint_bar_renders_model_and_context() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let backend = TestBackend::new(80, 3);
@@ -625,8 +625,8 @@ mod tests {
 
     #[test]
     fn hint_bar_pill_reflects_focus_zone_and_shell_active() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let messages: Vec<TranscriptMessage> = vec![];

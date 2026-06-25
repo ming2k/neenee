@@ -1,7 +1,7 @@
 //! Presenters for orchestration / meta tools that act on session state rather
 //! than the filesystem: `todo`, `subagent`, `use_skill`, `create_project`.
 
-use super::{truncate, ToolPresenter, ToolView};
+use super::{ToolPresenter, ToolView, truncate};
 
 pub struct TodoPresenter;
 

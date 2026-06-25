@@ -2,7 +2,7 @@
 //! drop-in for users who want a key-based hosted backend rather than the
 //! anonymous Exa/Parallel MCP endpoints.
 
-use super::{format_results, SearchProvider, SearchResult};
+use super::{SearchProvider, SearchResult, format_results};
 use async_trait::async_trait;
 
 const TAVILY_URL: &str = "https://api.tavily.com/search";

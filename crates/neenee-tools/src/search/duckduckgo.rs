@@ -8,7 +8,7 @@
 //! retained as an opt-in fallback for users who want keyless search and have a
 //! clean egress IP, but it is no longer the default.
 
-use super::{format_results, SearchProvider, SearchResult, MOZILLA_UA};
+use super::{MOZILLA_UA, SearchProvider, SearchResult, format_results};
 use async_trait::async_trait;
 
 pub(crate) struct DdgProvider;

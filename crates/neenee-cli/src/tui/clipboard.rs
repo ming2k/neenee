@@ -221,6 +221,7 @@ async fn read_image_bytes() -> Option<Vec<u8>> {
 
 /// Capture a command's stdout as bytes, returning `None` if the command is
 /// missing or exits non-zero (e.g. the clipboard holds no image).
+#[cfg(target_os = "linux")]
 async fn read_command_output(command: &str, args: &[&str]) -> Option<Vec<u8>> {
     let output = tokio::process::Command::new(command)
         .args(args)

@@ -8,7 +8,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::selection::{floor_char_boundary, inclusive_end, SelectionState};
+use crate::tui::selection::{SelectionState, floor_char_boundary, inclusive_end};
 
 /// Produce a run of spaces that fills the rest of a full-width line so a
 /// region reads as a solid colored band (the caller attaches the bg style).

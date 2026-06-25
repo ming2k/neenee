@@ -8,15 +8,15 @@
 //! [`super::state`]).
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{summary_text_color, Disclosure, Interaction};
+use super::{Disclosure, Interaction, summary_text_color};
 
 use crate::tui::document::{Block, TranscriptMessage};
 use crate::tui::layout::{BlockRegion, LayoutMap};
@@ -24,15 +24,15 @@ use crate::tui::selection::SelectionState;
 
 use crate::tui::render::message_body::draw_message_body;
 use crate::tui::render::text_layout::{
-    block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
-    WrappedLine,
+    WrappedLine, block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail,
+    wrap_text,
 };
 use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::tui::render::{
-    transcript_band_rect, StickyInfo, SubagentBarInfo, Theme, REASONING_TRACE_BLOCK_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_TOP_GAP_ROWS,
-    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET,
-    TRANSCRIPT_H_INSET,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo,
+    SubagentBarInfo, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
+    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET, Theme,
+    transcript_band_rect,
 };
 
 /// Cursor + environment carried through the tool-step body renderers.

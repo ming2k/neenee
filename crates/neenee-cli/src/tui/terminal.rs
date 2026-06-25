@@ -29,7 +29,7 @@ pub(super) fn restore_terminal() {
 pub(super) fn spawn_signal_guard() {
     #[cfg(unix)]
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut terminate = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(_) => return,

@@ -8,20 +8,20 @@
 //! cancellation slot, so a side turn runs concurrently with the primary turn
 //! without disturbing the primary's token/generation.
 
+use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    start_interactive_turn, CompactionSettings, InteractiveTurnContext, ProxyProvider, TurnInput,
+    CompactionSettings, InteractiveTurnContext, ProxyProvider, TurnInput, start_interactive_turn,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::Agent;
 use neenee_core::{AgentResponse, Message, ParentStatus, Provider, Tool};
 use neenee_store::config::Config;
 use neenee_store::session::SessionStore;
 use std::sync::RwLock;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_setup::active_context_window;

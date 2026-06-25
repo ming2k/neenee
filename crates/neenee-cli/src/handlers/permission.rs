@@ -11,7 +11,7 @@ use neenee_agent::{Agent, SubagentRegistry};
 use neenee_core::{AgentResponse, PermissionDecision};
 use neenee_store::session::SessionStore;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::side::SideSession;

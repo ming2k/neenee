@@ -63,19 +63,17 @@ impl Tool for ReadImageTool {
         // Validate the extension up front so a non-image path fails fast
         // without touching the filesystem, and a missing image fails with a
         // clear "not an image" message rather than a read error.
-        let mime = mime_for_path(path)
-            .ok_or_else(|| format!("Unsupported image format: {}", path))?;
+        let mime =
+            mime_for_path(path).ok_or_else(|| format!("Unsupported image format: {}", path))?;
 
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
 
         // Resize if the image decodes and is larger than the cap; otherwise
         // pass the original bytes through untouched (fast path for already-
         // small images and for formats we can't cheaply re-encode, e.g. the
         // source may already be optimal).
-        let encoded = encode_image(&bytes, &mime, MAX_EDGE_PX).map_err(|e| {
-            format!("Failed to process image '{}': {}", path, e)
-        })?;
+        let encoded = encode_image(&bytes, &mime, MAX_EDGE_PX)
+            .map_err(|e| format!("Failed to process image '{}': {}", path, e))?;
 
         Ok(ToolOutput::Image {
             mime,
@@ -140,7 +138,7 @@ fn encode_image(bytes: &[u8], mime: &str, max_edge: u32) -> Result<String, Strin
 }
 
 fn base64_or_err(bytes: &[u8]) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     Ok(STANDARD.encode(bytes))
 }
 
@@ -195,7 +193,7 @@ mod tests {
                 assert_eq!(mime, "image/png");
                 assert!(!data.is_empty());
                 // Decodes back to valid base64 bytes.
-                use base64::{engine::general_purpose::STANDARD, Engine};
+                use base64::{Engine, engine::general_purpose::STANDARD};
                 let raw = STANDARD.decode(data).unwrap();
                 assert!(raw.starts_with(&[0x89, b'P', b'N', b'G']));
             }

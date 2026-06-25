@@ -40,7 +40,7 @@ impl ToolPresenter for ReadPresenter {
 #[cfg(test)]
 mod tests {
     use super::{ReadPresenter, ToolPresenter, ToolView};
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     fn view(args: Value) -> ToolView<'static> {
         // Leak is acceptable for a unit test's static lifetime.

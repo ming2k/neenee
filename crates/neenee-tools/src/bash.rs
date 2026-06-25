@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use neenee_core::{Tool, ToolAccess};
 use serde_json::json;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use crate::helpers::json_string;
 

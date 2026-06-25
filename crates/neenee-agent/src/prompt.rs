@@ -143,8 +143,7 @@ impl Agent {
                     "[Skill '{}' loaded]\n{}\n[/Skill]",
                     skill.name, skill.content
                 ),
-                InjectionOrigin::new(InjectionKind::ImplicitSkill)
-                    .with_reason(skill.name.clone()),
+                InjectionOrigin::new(InjectionKind::ImplicitSkill).with_reason(skill.name.clone()),
             ));
         }
     }

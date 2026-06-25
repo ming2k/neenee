@@ -118,10 +118,7 @@ pub enum ToolOutput {
     /// model actually sees the pixels — mirroring how opencode lowers images
     /// out of tool results for OpenAI Chat Completions providers. The renderer
     /// draws `data` as an inline preview instead of the placeholder text.
-    Image {
-        mime: String,
-        data: String,
-    },
+    Image { mime: String, data: String },
 }
 
 /// Kind of file change in a [`ToolOutput::Patch`].

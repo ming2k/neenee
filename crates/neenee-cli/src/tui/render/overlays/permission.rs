@@ -1,19 +1,19 @@
 //! Permission sheet (inline) and question modal.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block as RtBlock, Clear, Paragraph, Wrap},
-    Frame,
 };
 
 use neenee_core::{PermissionRequest, UserQuestionRequest};
 
+use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, panel_block, viewport_rect,
 };
-use crate::tui::render::Theme;
 use unicode_width::UnicodeWidthStr;
 
 // The permission sheet renders inline, replacing the composer (input box)
@@ -149,6 +149,7 @@ pub fn draw_question_modal(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_question_option(
     lines: &mut Vec<Line>,
     index: usize,
@@ -160,17 +161,9 @@ fn render_question_option(
     theme: &Theme,
 ) {
     let marker = if multi_select {
-        if is_selected {
-            "[x]"
-        } else {
-            "[ ]"
-        }
+        if is_selected { "[x]" } else { "[ ]" }
     } else {
-        if is_selected {
-            "●"
-        } else {
-            "○"
-        }
+        if is_selected { "●" } else { "○" }
     };
     let number = if index < 9 {
         format!("{}.", index + 1)
@@ -223,7 +216,7 @@ fn render_question_option(
 /// plus its scope (the specific path/command being touched) — followed by a
 /// footer of inline actions. Selecting "Details" expands the body upward to
 /// reveal the full description and arguments without leaving the prompt.
-
+#[allow(clippy::too_many_arguments)]
 pub fn draw_permission_sheet(
     frame: &mut Frame,
     request: &PermissionRequest,

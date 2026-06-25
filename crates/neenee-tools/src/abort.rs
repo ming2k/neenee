@@ -69,7 +69,7 @@ yourself first; only call this if you cannot."
                 "reason": {
                     "type": "string",
                     "description": "Why you are aborting (e.g. 'stuck repeating webfetch', \
-'destructive command requested'). Recorded for the user."
+        'destructive command requested'). Recorded for the user."
                 }
             },
             "required": ["reason"]
@@ -89,10 +89,7 @@ yourself first; only call this if you cannot."
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
-        let reason = args["reason"]
-            .as_str()
-            .ok_or("Missing 'reason'")?
-            .trim();
+        let reason = args["reason"].as_str().ok_or("Missing 'reason'")?.trim();
         let reason = if reason.is_empty() {
             "(no reason given)".to_string()
         } else {

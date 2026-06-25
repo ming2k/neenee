@@ -3,25 +3,25 @@
 //! layout-map recording for semantic selection / copy.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::Style,
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::layout::{BlockRegion, LayoutMap};
 use crate::tui::selection::SelectionState;
 
+use super::Theme;
 use super::design::{
     COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS, COMPOSER_TEXT_ROW_OFFSET,
     COMPOSER_VERTICAL_CHROME_ROWS,
 };
 use super::text_layout::{
-    block_selection_range, line_selection, padded_tail, wrap_text, WrappedLine,
+    WrappedLine, block_selection_range, line_selection, padded_tail, wrap_text,
 };
-use super::Theme;
 
 /// Special message_idx for the live input box in the layout map, so semantic
 /// selection / copy works on input text just like transcript messages.
@@ -267,6 +267,6 @@ pub fn draw_composer(
         let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
         let cursor_x =
             input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16 + cursor_col.min(text_width) as u16;
-        frame.set_cursor(cursor_x, cursor_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }

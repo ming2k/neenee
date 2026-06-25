@@ -11,9 +11,9 @@
 //! channels (with `default_channel` selecting one). Favorites and recency are
 //! layered on top via the provider-usage telemetry.
 
-use neenee_core::catalog::{builtin_provider_metadata, Channel, ProviderEntry, Transport};
+use neenee_core::catalog::{Channel, ProviderEntry, Transport, builtin_provider_metadata};
 use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot};
-use neenee_providers::{OpenAiProviderSpec, NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS};
+use neenee_providers::{NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec};
 use neenee_store::config::{Config, UserChannelConfig, UserProviderConfig, UserTransport};
 use neenee_store::provider_usage::ProviderUsage;
 
@@ -353,7 +353,9 @@ mod tests {
     #[test]
     fn kimi_code_uses_kimi_code_platform() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("MOONSHOT_MODEL");
+        unsafe {
+            std::env::remove_var("MOONSHOT_MODEL");
+        }
         let config = bare_config();
         let entries = build_catalog(&config);
         let entry = entries
@@ -381,7 +383,9 @@ mod tests {
     #[test]
     fn config_model_override_wins_over_default() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GEMINI_MODEL");
+        unsafe {
+            std::env::remove_var("GEMINI_MODEL");
+        }
         let mut config = bare_config();
         config.gemini_model = Some("gemini-2.0-flash".to_string());
         let entries = build_catalog(&config);
@@ -400,7 +404,9 @@ mod tests {
     #[test]
     fn resolved_model_name_returns_default_channel_model() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("DEEPSEEK_PRO_MODEL");
+        unsafe {
+            std::env::remove_var("DEEPSEEK_PRO_MODEL");
+        }
         assert_eq!(
             resolved_model_name(&bare_config(), "deepseek-v4-pro"),
             "deepseek-v4-pro"
@@ -416,8 +422,9 @@ mod tests {
     #[test]
     fn stale_deepseek_ids_fall_back_to_mock() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("DEEPSEEK_FLASH_MODEL");
-        // No alias mapping: stale ids no longer resolve and fall back to mock.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_FLASH_MODEL");
+        } // No alias mapping: stale ids no longer resolve and fall back to mock.
         let provider = build_provider_for(&bare_config(), "deepseek");
         assert_eq!(provider.provider_id(), "mock");
     }
@@ -435,7 +442,9 @@ mod tests {
     #[test]
     fn cloud_providers_report_not_ready_without_key() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("OPENAI_API_KEY");
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
         let entries = build_catalog(&bare_config());
         let openai = entries
             .iter()
@@ -494,7 +503,9 @@ mod tests {
     #[test]
     fn user_channel_resolves_env_key_over_inline() {
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GEMINI_STUDIO_KEY", "env-key");
+        unsafe {
+            std::env::set_var("GEMINI_STUDIO_KEY", "env-key");
+        }
         let entries = build_catalog(&gemini_two_channel_config());
         let entry = entries.iter().find(|e| e.id == "gemini").unwrap();
         // Studio names an env var → the env value wins.
@@ -503,7 +514,9 @@ mod tests {
         // Relay uses an inline key (no env var named) → inline wins.
         let relay = entry.channels.iter().find(|c| c.label == "Relay").unwrap();
         assert_eq!(relay.api_key, "inline-key");
-        std::env::remove_var("GEMINI_STUDIO_KEY");
+        unsafe {
+            std::env::remove_var("GEMINI_STUDIO_KEY");
+        }
     }
 
     #[test]

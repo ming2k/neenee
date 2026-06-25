@@ -4,11 +4,11 @@
 //! and click hit-testing.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -22,10 +22,10 @@ use super::design::{
 };
 use super::markdown_table::{build_table_render, push_table_segment};
 use super::text_layout::{
-    block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail, wrap_text,
-    WrappedLine,
+    WrappedLine, block_selection_range, code_gutter_line, line_selection, line_spans, padded_tail,
+    wrap_text,
 };
-use super::{Theme, TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET};
+use super::{TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, Theme};
 
 fn display_width_u16(s: &str) -> u16 {
     s.width() as u16

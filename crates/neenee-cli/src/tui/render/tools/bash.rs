@@ -1,6 +1,6 @@
 //! Presenter for `bash`.
 
-use super::{truncate, ArgLayout, ResultKind, ToolPresenter, ToolView};
+use super::{ArgLayout, ResultKind, ToolPresenter, ToolView, truncate};
 
 pub struct BashPresenter;
 

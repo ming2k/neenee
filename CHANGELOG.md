@@ -5,6 +5,40 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-25
+
+### Changed
+
+- **Migrated to Rust 2024 edition.** MSRV lowered from 1.88 to 1.85. The 2024
+  edition makes `std::env::set_var`/`remove_var` `unsafe`; all test call sites
+  are now wrapped in `unsafe` blocks. `resolver = "3"` (MSRV-aware dependency
+  resolution) is now implied by the edition.
+- **Major dependency upgrades** to the latest ecosystem:
+  - `ratatui` 0.26 → **0.30** and `crossterm` 0.27 → **0.29** (API migration:
+    `Frame::size()` → `area()`, `set_cursor` → `set_cursor_position`,
+    `Buffer::get` → index syntax, `Rect::inner(&Margin)` → `Rect::inner(Margin)`,
+    `Backend::Error` is now generic).
+  - `reqwest` 0.12 → **0.13** (`query`/`form` are now opt-in features; default
+    TLS backend switched to rustls).
+  - `rusqlite` 0.32 → **0.40**, `toml` 0.8 → **1**, `pulldown-cmark` 0.10 →
+    **0.13** (`Tag::BlockQuote` now carries `Option<BlockQuoteKind>`).
+  - `arboard` 3.4 → **3.6**, `dirs`/`directories` 5 → **6**, `insta` → **1.48**.
+
+### Security
+
+- **Replaced the archived `serde_yaml` 0.9 with `yaml_serde` 0.10** (the
+  YAML organization's maintained fork), resolving the `RUSTSEC-2024-0320`
+  unmaintained-advisory that failed the `security audit` CI job. Applied via
+  Cargo package rename so all `use serde_yaml::` imports are unchanged.
+
+### Fixed
+
+- Fixed two CI compile failures under `-D warnings`: an unused `lines` binding
+  in `neenee-tools` tests and an un-gated `read_command_output` in
+  `neenee-cli` that became dead code on macOS (the function's only callers are
+  `#[cfg(target_os = "linux")]`).
+- Updated the `create_project` rust scaffold template to emit `edition = "2024"`.
+
 ## [0.4.0] - 2026-06-25
 
 ### Added

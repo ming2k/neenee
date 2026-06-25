@@ -18,8 +18,8 @@
 //! TUI) is the harness↔TUI integration step that follows; these tests cover
 //! the substrate it will be built on.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};

@@ -3,20 +3,20 @@
 use std::collections::HashMap;
 
 use ratatui::{
+    Frame,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
 use super::common::{
-    placeholder, relative_time_compact, selectable_row, truncate_ellipsis, McpRow,
+    McpRow, placeholder, relative_time_compact, selectable_row, truncate_ellipsis,
 };
+use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
 };
-use crate::tui::render::Theme;
 
 /// Draw the sessions picker: each row shows the session overview plus its
 /// creation and last-interaction times. Enter opens the selected session.

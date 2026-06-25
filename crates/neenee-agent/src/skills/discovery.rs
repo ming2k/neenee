@@ -1,9 +1,9 @@
 //! Skill discovery across project, user, configured, remote, and system sources.
 
-use super::bundled;
-use super::metadata::{parse_skill_file, Skill, SkillScope};
-use super::remote::fetch_remote_repo;
 use super::SkillsConfig;
+use super::bundled;
+use super::metadata::{Skill, SkillScope, parse_skill_file};
+use super::remote::fetch_remote_repo;
 use neenee_store::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

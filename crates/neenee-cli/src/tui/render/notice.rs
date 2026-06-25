@@ -11,17 +11,17 @@
 //! [`NoticeSeverity`]: crate::tui::document::NoticeSeverity
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 
 use super::text_layout::wrap_text;
-use super::{Theme, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET};
+use super::{TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET, Theme};
 
 /// Severity presentation: the leading glyph and its color.
 ///

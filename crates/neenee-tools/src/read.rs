@@ -62,8 +62,7 @@ impl Tool for ReadFileTool {
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
 
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
 
         let lang = std::path::Path::new(path)
             .extension()
@@ -73,8 +72,8 @@ impl Tool for ReadFileTool {
             return Err(format!("Cannot read binary file: {}", path));
         }
 
-        let content = String::from_utf8(bytes)
-            .map_err(|_| format!("File '{}' is not valid UTF-8", path))?;
+        let content =
+            String::from_utf8(bytes).map_err(|_| format!("File '{}' is not valid UTF-8", path))?;
 
         let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = args["limit"].as_u64().unwrap_or(0) as usize;
@@ -202,14 +201,11 @@ neenee_core::register_tool!(ReadFileFactory => ReadFileTool);
 
 /// Extensions that are always treated as binary and never read as text.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
-    "exe", "dll", "so", "dylib", "o", "a", "lib",
-    "class", "jar", "war",
-    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
-    "bin", "dat", "obj", "wasm", "pyc", "pyo",
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif",
-    "mp3", "mp4", "avi", "mov", "mkv", "flv", "wav", "flac", "ogg",
-    "pdf", "sqlite", "db", "mdb",
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "exe", "dll", "so", "dylib", "o", "a", "lib",
+    "class", "jar", "war", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "bin",
+    "dat", "obj", "wasm", "pyc", "pyo", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff",
+    "tif", "mp3", "mp4", "avi", "mov", "mkv", "flv", "wav", "flac", "ogg", "pdf", "sqlite", "db",
+    "mdb",
 ];
 
 fn is_binary_extension(path: &str) -> bool {

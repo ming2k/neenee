@@ -4,11 +4,11 @@
 
 use crate::tui::app::Recess;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Style},
     text::Line,
     widgets::{Block as RtBlock, Clear, Paragraph},
-    Frame,
 };
 
 use super::Theme;
@@ -23,7 +23,7 @@ pub(super) const VIEWPORT_V_MARGIN: u16 = 1;
 /// and bottom). The full `frame.size()` is only used to paint the app
 /// background and the modal backdrop.
 pub(super) fn viewport_rect(frame: &Frame) -> Rect {
-    frame.size().inner(&ratatui::layout::Margin {
+    frame.area().inner(ratatui::layout::Margin {
         horizontal: VIEWPORT_H_MARGIN,
         vertical: VIEWPORT_V_MARGIN,
     })
@@ -71,7 +71,7 @@ pub fn recess_backdrop(frame: &mut Frame, recess: Recess, theme: &Theme) {
         Recess::None => {}
         Recess::Dim => dim_surface(frame, theme.modal_dim_factor()),
         Recess::Takeover => {
-            let area = frame.size();
+            let area = frame.area();
             frame.render_widget(Clear, area);
             frame.render_widget(
                 RtBlock::default().style(Style::default().bg(theme.backdrop())),
@@ -146,7 +146,7 @@ pub(super) fn modal_frame(
 ) -> ModalFrame {
     frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(Style::default().bg(bg)), area);
-    let inner = area.inner(&Margin {
+    let inner = area.inner(Margin {
         horizontal: 2,
         vertical: 1,
     });

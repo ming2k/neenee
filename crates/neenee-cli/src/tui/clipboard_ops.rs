@@ -3,8 +3,8 @@
 //! can never freeze the TUI's event poll; results flow back through channels
 //! and are applied on the next frame.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;

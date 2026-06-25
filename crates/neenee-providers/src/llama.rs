@@ -6,10 +6,10 @@
 //! inference path.
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use neenee_core::{Message, Provider, Role};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{ensure_success, openai_compat::openai_content, transport_error};
 

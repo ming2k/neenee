@@ -81,6 +81,14 @@ impl Dirs {
         self.config_dir.join("config.toml")
     }
 
+    /// User-supplied ASCII logo for the empty-state hero.
+    /// `$XDG_CONFIG_HOME/neenee/logo.txt`. When present, its lines replace the
+    /// built-in figlet wordmark on the welcome screen (see `empty_state`).
+    /// Optional and best-effort: missing/unreadable → built-in logo.
+    pub fn logo_file(&self) -> PathBuf {
+        self.config_dir.join("logo.txt")
+    }
+
     /// Content-addressed blob store root. Large payloads are stored under
     /// `<root>/<2-char-prefix>/<hash>`.
     pub fn blobs_dir(&self) -> PathBuf {
@@ -474,54 +482,76 @@ mod tests {
     #[test]
     fn resolve_honours_neenee_env_over_xdg_env() {
         env_locked!({
-            std::env::set_var("NEENEE_DATA_DIR", "/tmp/neenee-paths-test-data");
-            std::env::set_var("XDG_DATA_HOME", "/tmp/should-not-be-used");
+            unsafe {
+                std::env::set_var("NEENEE_DATA_DIR", "/tmp/neenee-paths-test-data");
+            }
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", "/tmp/should-not-be-used");
+            }
             let dirs = Dirs::resolve(&PathsOverride::default());
             assert_eq!(
                 dirs.data_dir,
                 PathBuf::from("/tmp/neenee-paths-test-data/neenee")
             );
-            std::env::remove_var("NEENEE_DATA_DIR");
-            std::env::remove_var("XDG_DATA_HOME");
+            unsafe {
+                std::env::remove_var("NEENEE_DATA_DIR");
+            }
+            unsafe {
+                std::env::remove_var("XDG_DATA_HOME");
+            }
         });
     }
 
     #[test]
     fn resolve_cli_override_beats_env() {
         env_locked!({
-            std::env::set_var("NEENEE_DATA_DIR", "/tmp/env-loses");
+            unsafe {
+                std::env::set_var("NEENEE_DATA_DIR", "/tmp/env-loses");
+            }
             let dirs = Dirs::resolve(&PathsOverride {
                 data_dir: Some(PathBuf::from("/tmp/cli-wins")),
                 ..Default::default()
             });
             assert_eq!(dirs.data_dir, PathBuf::from("/tmp/cli-wins/neenee"));
-            std::env::remove_var("NEENEE_DATA_DIR");
+            unsafe {
+                std::env::remove_var("NEENEE_DATA_DIR");
+            }
         });
     }
 
     #[test]
     fn resolve_ignores_relative_xdg_var() {
         env_locked!({
-            std::env::set_var("XDG_CACHE_HOME", "relative/path");
+            unsafe {
+                std::env::set_var("XDG_CACHE_HOME", "relative/path");
+            }
             let dirs = Dirs::resolve(&PathsOverride::default());
             assert!(dirs.cache_dir.is_absolute() || dirs.cache_dir.starts_with("."));
-            std::env::remove_var("XDG_CACHE_HOME");
+            unsafe {
+                std::env::remove_var("XDG_CACHE_HOME");
+            }
         });
     }
 
     #[test]
     fn runtime_dir_only_when_xdg_runtime_dir_set() {
         env_locked!({
-            std::env::remove_var("XDG_RUNTIME_DIR");
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
             let dirs = Dirs::resolve(&PathsOverride::default());
             assert!(dirs.runtime_dir.is_none());
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/12345");
+            unsafe {
+                std::env::set_var("XDG_RUNTIME_DIR", "/run/user/12345");
+            }
             let dirs = Dirs::resolve(&PathsOverride::default());
             assert_eq!(
                 dirs.runtime_dir.as_deref(),
                 Some(std::path::Path::new("/run/user/12345/neenee"))
             );
-            std::env::remove_var("XDG_RUNTIME_DIR");
+            unsafe {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
         });
     }
 

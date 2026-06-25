@@ -222,7 +222,7 @@ fn rust_template(name: &str) -> Template {
         (
             "Cargo.toml".to_string(),
             format!(
-                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
                 crate_name
             ),
         ),
@@ -230,7 +230,10 @@ fn rust_template(name: &str) -> Template {
             "src/main.rs".to_string(),
             "fn main() {\n    println!(\"Hello, world!\");\n}\n".to_string(),
         ),
-        ("README.md".to_string(), format!("# {}\n\nA Rust project.\n", name)),
+        (
+            "README.md".to_string(),
+            format!("# {}\n\nA Rust project.\n", name),
+        ),
         (".gitignore".to_string(), rust_gitignore().to_string()),
     ]
 }
@@ -248,7 +251,10 @@ fn node_template(name: &str) -> Template {
             "index.js".to_string(),
             "console.log(\"Hello, world!\");\n".to_string(),
         ),
-        ("README.md".to_string(), format!("# {}\n\nA Node.js project.\n", name)),
+        (
+            "README.md".to_string(),
+            format!("# {}\n\nA Node.js project.\n", name),
+        ),
         (".gitignore".to_string(), node_gitignore().to_string()),
     ]
 }

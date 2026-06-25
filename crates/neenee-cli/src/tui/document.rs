@@ -1092,7 +1092,7 @@ fn parse_blocks_markdown(text: &str) -> Vec<Block> {
                     };
                     code_content.clear();
                 }
-                Tag::BlockQuote => {
+                Tag::BlockQuote(_) => {
                     quotes.push(String::new());
                 }
                 Tag::List(start) => lists.push(ListState { next: start }),
@@ -1171,7 +1171,7 @@ fn parse_blocks_markdown(text: &str) -> Vec<Block> {
                         },
                     );
                 }
-                TagEnd::BlockQuote => {
+                TagEnd::BlockQuote(_) => {
                     if let Some(content) = quotes.pop() {
                         push_block(
                             &mut blocks,
@@ -1586,9 +1586,11 @@ mod tests {
                 ..
             } if content == "one"
         )));
-        assert!(blocks
-            .iter()
-            .any(|block| matches!(block, Block::Quote { content } if content == "quoted")));
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, Block::Quote { content } if content == "quoted"))
+        );
     }
 
     #[test]

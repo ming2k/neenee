@@ -1,10 +1,10 @@
 //! Google Gemini native provider (REST to `generativelanguage.googleapis.com`).
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use neenee_core::{Message, Provider, Role};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{ensure_success, transport_error};
 

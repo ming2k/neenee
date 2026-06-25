@@ -1,11 +1,11 @@
 //! OpenAI-compatible provider registry and the `Channel` → concrete `Provider`
 //! factory consumed by the orchestration layer.
 
-use neenee_core::catalog::{Channel, Transport};
 use neenee_core::Provider;
+use neenee_core::catalog::{Channel, Transport};
 use std::sync::Arc;
 
-use crate::{GeminiProvider, LlamaServerProvider, OpenAiCompatProvider, NEENEE_USER_AGENT};
+use crate::{GeminiProvider, LlamaServerProvider, NEENEE_USER_AGENT, OpenAiCompatProvider};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // OpenAI-compatible provider wrappers for popular Chinese & global services

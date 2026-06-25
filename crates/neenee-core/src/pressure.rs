@@ -649,8 +649,8 @@ mod tests {
         assert_eq!(budget.prune_threshold_tokens, 130_000); // 65%
         assert_eq!(budget.compaction_threshold_tokens, 170_000); // 85%
         assert_eq!(budget.target_tokens, 50_000); // 25%
-                                                  // Pruning trips before full compaction, and compaction leaves a target
-                                                  // well below its trigger — the escalation ladder the harness relies on.
+        // Pruning trips before full compaction, and compaction leaves a target
+        // well below its trigger — the escalation ladder the harness relies on.
         assert!(budget.prune_threshold_tokens < budget.compaction_threshold_tokens);
         assert!(budget.target_tokens < budget.prune_threshold_tokens);
     }

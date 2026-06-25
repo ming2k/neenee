@@ -4,14 +4,14 @@
 //! `ToolStream` → `ToolResult` / `ToolCancelled`) so the existing render path
 //! picks it up unchanged.
 
-use neenee_agent::orchestration::{send_harness_state, turn};
 use neenee_agent::Agent;
+use neenee_agent::orchestration::{send_harness_state, turn};
 use neenee_core::{AgentResponse, Tool, ToolOutput, ToolStream, TurnEvent};
 use neenee_tools::BashTool;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock as AsyncRwLock;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Execute a `!`-prefixed shell command directly through the `bash` tool,

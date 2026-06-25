@@ -1,8 +1,8 @@
 //! Trivial mock provider used as the default channel and in tests.
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use neenee_core::{Message, Provider, Role};
 
 pub struct MockProvider;

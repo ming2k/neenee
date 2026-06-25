@@ -20,20 +20,18 @@ pub use cron::CronExpr;
 pub mod pursuits;
 pub mod repeat;
 pub use pursuits::{Pursuit, ThreadPursuit, TokenUsage, TurnOutcome, TurnTimer};
-pub use repeat::{RepeatJob, DEFAULT_MAX_AGE_DAYS};
+pub use repeat::{DEFAULT_MAX_AGE_DAYS, RepeatJob};
 
 pub const PURSUIT_COMPLETE_MARKER: &str = "[NEENEE_PURSUIT_COMPLETE]";
 
 pub mod error;
 pub use error::{
-    is_context_overflow, parse_retryable_error, public_error_message, retryable_error,
-    HarnessError, RetryableError,
+    HarnessError, RetryableError, is_context_overflow, parse_retryable_error, public_error_message,
+    retryable_error,
 };
 
 pub mod message;
-pub use message::{
-    ImagePart, InjectionKind, InjectionOrigin, Message, Role, ToolCall, ToolResult,
-};
+pub use message::{ImagePart, InjectionKind, InjectionOrigin, Message, Role, ToolCall, ToolResult};
 
 pub mod tool_output;
 pub use tool_output::{PatchOp, ToolOutput, ToolStream};
@@ -45,7 +43,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod model;
 pub mod todos;
-pub use todos::{TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext, MAX_TODOS};
+pub use todos::{MAX_TODOS, TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext};
 pub mod pressure;
 pub mod session_review;
 pub mod session_title;
@@ -66,15 +64,15 @@ pub use events::{
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
-pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
+pub use model::{KNOWN_MODELS, Model, model_by_id, resolve as resolve_model};
 pub use pressure::{
-    estimate_chars, estimate_tokens, prune_tool_results, CompactionPolicy, ContextBudget,
-    PruneOutcome, CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, PRUNED_TOOL_PLACEHOLDER,
+    CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
+    PruneOutcome, estimate_chars, estimate_tokens, prune_tool_results,
 };
-pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
-pub use session_title::{clean_title, TITLE_MAX_LEN};
+pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};
+pub use session_title::{TITLE_MAX_LEN, clean_title};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, INTERACTIVE, REVIEW, TITLE};
+pub use subagent::{EXPLORE, INTERACTIVE, REVIEW, SubagentProfile, TITLE, ToolPolicy};
 pub use tool_output::truncate_utf8;
-pub use tool_registry::{collect_tools, ToolContext, ToolContextBuilder, ToolFactory};
+pub use tool_registry::{ToolContext, ToolContextBuilder, ToolFactory, collect_tools};
 pub use webconfig::WebSearchConfig;

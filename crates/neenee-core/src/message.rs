@@ -247,11 +247,7 @@ impl Message {
     /// origin. This is the canonical constructor for every harness injection
     /// site — it stamps provenance at construction so it can never drift from
     /// the content. Use [`Message::with_origin`] to stamp an existing message.
-    pub fn injected(
-        role: Role,
-        content: impl Into<String>,
-        origin: InjectionOrigin,
-    ) -> Self {
+    pub fn injected(role: Role, content: impl Into<String>, origin: InjectionOrigin) -> Self {
         let mut message = Self::hidden(role, content);
         message.origin = Some(origin);
         message
@@ -492,10 +488,7 @@ mod tests {
         );
         let restored: Message = serde_json::from_str(&json).unwrap();
         let origin = restored.origin.expect("origin round-trip");
-        assert_eq!(
-            origin.kind,
-            InjectionKind::Hook(HookEventKind::PostToolUse)
-        );
+        assert_eq!(origin.kind, InjectionKind::Hook(HookEventKind::PostToolUse));
         assert_eq!(origin.reason.as_deref(), Some("my_hook.sh"));
     }
 

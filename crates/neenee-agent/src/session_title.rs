@@ -26,7 +26,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use neenee_core::Provider;
-use neenee_core::{clean_title, Message, Role, TITLE};
+use neenee_core::{Message, Role, TITLE, clean_title};
 
 use crate::agent::Agent;
 

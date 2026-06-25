@@ -12,8 +12,8 @@
 //! `\n` line boundaries, so a multi-byte sequence (or a partial SSE frame)
 //! split across chunks is reassembled before any provider ever observes it.
 
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use crate::transport_error;
 

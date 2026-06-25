@@ -5,8 +5,8 @@
 //! match the original loop locals (`config`, `agent`, `provider_for_task`,
 //! `resp_tx`, `provider_usage`) so the body reads exactly as it did inline.
 
-use neenee_agent::catalog;
 use neenee_agent::Agent;
+use neenee_agent::catalog;
 use neenee_core::{AgentResponse, Provider};
 use neenee_providers::MockProvider;
 use neenee_store::{config::Config, provider_usage::ProviderUsage};

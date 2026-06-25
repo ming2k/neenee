@@ -1,7 +1,8 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::*;
-    use neenee_core::{truncate_utf8, Tool, WebSearchConfig};
+    use neenee_core::{Tool, WebSearchConfig, truncate_utf8};
 
     #[test]
     fn html_to_text_handles_multibyte_before_script_tags() {
@@ -159,7 +160,7 @@ mod tests {
         // must continue without overlap or gap (the loop-safety contract).
         const LINES: usize = 6000;
         const PAGE: usize = 5000; // 50_000 / (9 + 1)
-        let (path, lines) = make_fixed_width_file(LINES);
+        let (path, _lines) = make_fixed_width_file(LINES);
         let tool = ReadFileTool;
         let arg = |offset: usize| {
             format!(

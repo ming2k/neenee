@@ -19,35 +19,35 @@
 //! it fires session-start hooks every time `/pursue status` runs. Preserved
 //! verbatim; not this refactor's job to fix.
 
-use neenee_agent::orchestration::{
-    compact_turn_history, emit_pursuit_updated, refresh_agent_pursuit, send_compaction,
-    send_harness_state, start_pursuit, turn, CompactionSettings, PursuitContext, TurnInput,
-};
-use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
-use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
+use neenee_agent::orchestration::{
+    CompactionSettings, PursuitContext, TurnInput, compact_turn_history, emit_pursuit_updated,
+    refresh_agent_pursuit, send_compaction, send_harness_state, start_pursuit, turn,
+};
+use neenee_agent::skills::SkillRegistry;
+use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 use neenee_core::{
     AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, Provider, Pursuit, Tool,
     TurnEvent,
 };
-use neenee_store::{config::Config, embedding, session::SessionStore, RepeatStore};
-use neenee_tools::commands::{expand_command, CustomCommand};
+use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
+use neenee_tools::commands::{CustomCommand, expand_command};
 use neenee_tools::project::init_neenee_config;
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_setup::active_context_window;
 use crate::pursuits::format_pursuit_status;
 use crate::review::format_review_report;
 use crate::session_view::{build_sessions_overview, resume_session, short_session_id};
-use crate::side::{spawn_parent_status_watcher, start_active_turn, SideSession};
-use crate::startup::{split_custom_command, BuiltinCmd, StartupMode};
+use crate::side::{SideSession, spawn_parent_status_watcher, start_active_turn};
+use crate::startup::{BuiltinCmd, StartupMode, split_custom_command};
 
 /// `AgentRequest::SlashCommand` — parse the command, dispatch to the matching
 /// built-in handler, or fall through to the user-defined project-command path.

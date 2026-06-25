@@ -4,9 +4,9 @@
 //! Extracted verbatim from `main.rs` to keep the binary entry-point focused on
 //! wiring rather than presentation shaping.
 
+use neenee_agent::Agent;
 use neenee_agent::catalog;
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::Agent;
 use neenee_core::{
     McpConnectionStatus, McpServerInfo, Message, ModelInfo, SessionContextSnapshot, SessionOverview,
 };

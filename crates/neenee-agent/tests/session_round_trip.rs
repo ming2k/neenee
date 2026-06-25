@@ -16,9 +16,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use neenee_agent::orchestration::{execute_turn, CompactionSettings, TurnContext, TurnInput};
-use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
+use neenee_agent::orchestration::{CompactionSettings, TurnContext, TurnInput, execute_turn};
+use neenee_agent::skills::SkillRegistry;
 use neenee_core::Role;
 use neenee_providers::MockProvider;
 use neenee_store::session::SessionStore;

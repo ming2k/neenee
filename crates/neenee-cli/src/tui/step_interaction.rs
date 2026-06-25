@@ -12,7 +12,7 @@
 //! keeping the interaction vocabulary free of layering cycles and unit-testable
 //! in isolation.
 
-use crate::tui::config::{tool_default_expanded, TuiConfig};
+use crate::tui::config::{TuiConfig, tool_default_expanded};
 use crate::tui::document::ToolStepStatus;
 use crate::tui::layout::{
     InteractiveTarget, SemanticCursor, THINKING_BLOCK_IDX, TOOL_STEP_BLOCK_IDX,

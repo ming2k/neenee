@@ -1,2 +1,2 @@
 # Pin rustfmt's edition so direct `rustfmt` invocations match Cargo's.
-edition = "2021"
+edition = "2024"

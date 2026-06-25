@@ -6,8 +6,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::render::primitives::contrast_fg;
 use crate::tui::render::Theme;
+use crate::tui::render::primitives::contrast_fg;
 /// Compact relative time for space-constrained surfaces (e.g. the sessions
 /// picker's meta column): `now` / `3m` / `2h` / `5d` / `3w` — no "ago" suffix.
 pub(crate) fn relative_time_compact(ts: u64) -> String {
@@ -30,7 +30,6 @@ pub(crate) fn relative_time_compact(ts: u64) -> String {
 }
 
 /// Truncate `s` to fit `max` display columns, appending `…` when it doesn't.
-
 /// Width-aware so CJK/wide glyphs don't break the column budget. Used by table-
 /// like modal rows to cap a long first column and leave room for the rest.
 pub(crate) fn truncate_ellipsis(s: &str, max: usize) -> String {
@@ -75,7 +74,7 @@ pub(crate) fn caret_column(display: &str, cursor_position: usize) -> u16 {
 /// (masked) and model id — with `Tab` cycling focus. The composer input line
 /// is borrowed for the focused field's value; `key_buf` / `model_buf` hold the
 /// other field while it is unfocused. `field` is `0` for key, `1` for model id.
-
+///
 /// One MCP server row, unpacked for rendering. `Connected` carries the
 /// per-server tool names so the MCP pane can list them rather than just a count.
 pub(crate) enum McpRow {

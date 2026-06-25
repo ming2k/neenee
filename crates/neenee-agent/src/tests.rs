@@ -558,12 +558,16 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
         event,
         AgentEvent::ToolCancelled { name, .. } if name == "stream_read"
     )));
-    assert!(!recorded
-        .iter()
-        .any(|event| matches!(event, AgentEvent::ToolResult { .. })));
-    assert!(recorded
-        .iter()
-        .any(|event| matches!(event, AgentEvent::ToolCall { name, .. } if name == "stream_read")));
+    assert!(
+        !recorded
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolResult { .. }))
+    );
+    assert!(
+        recorded.iter().any(
+            |event| matches!(event, AgentEvent::ToolCall { name, .. } if name == "stream_read")
+        )
+    );
 }
 
 #[tokio::test]
@@ -649,12 +653,13 @@ async fn rejected_permission_does_not_execute_tool() {
         event => panic!("unexpected event: {:?}", event),
     };
     assert!(agent.reply_permission(&request.id, PermissionDecision::Reject));
-    assert!(task
-        .await
-        .unwrap()
-        .unwrap()
-        .to_text()
-        .contains("Permission denied"));
+    assert!(
+        task.await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .contains("Permission denied")
+    );
 }
 
 #[tokio::test]
@@ -671,9 +676,11 @@ async fn headless_run_rejects_write_tools_without_hanging() {
     // Permission rejection now terminates the turn instead of letting the
     // model continue, so the final assistant message is empty.
     assert!(outcome.message.content.is_empty());
-    assert!(messages
-        .iter()
-        .any(|message| message.content.contains("Permission denied")));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.contains("Permission denied"))
+    );
 }
 
 // ---- Golden-transcript harness ----------------------------------------
@@ -924,19 +931,19 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
     // The streamed JSON is shown, then discarded once recognised as a tool
     // call, so the UI never leaves raw tool JSON on screen.
     assert_eq!(
-            transcript(&events),
-            vec![
-                "model-request round=0",
-                "assistant-delta start=true \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
-                "assistant-end \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
-                "assistant-discard",
-                "tool-call alpha {\"k\":1}",
-                "tool-result alpha \"A-out\"",
-                "model-request round=1",
-                "assistant-delta start=true \"finished\"",
-                "assistant-end \"finished\"",
-            ]
-        );
+        transcript(&events),
+        vec![
+            "model-request round=0",
+            "assistant-delta start=true \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
+            "assistant-end \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
+            "assistant-discard",
+            "tool-call alpha {\"k\":1}",
+            "tool-result alpha \"A-out\"",
+            "model-request round=1",
+            "assistant-delta start=true \"finished\"",
+            "assistant-end \"finished\"",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -991,12 +998,16 @@ async fn golden_rejected_write_tool_terminates_turn() {
         "rejected write tool must not execute"
     );
     let lines = transcript(&events);
-    assert!(lines
-        .iter()
-        .any(|line| line == "permission-request writer *"));
-    assert!(lines
-        .iter()
-        .any(|line| line.starts_with("tool-result writer") && line.contains("Permission denied")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "permission-request writer *")
+    );
+    assert!(
+        lines.iter().any(
+            |line| line.starts_with("tool-result writer") && line.contains("Permission denied")
+        )
+    );
 }
 
 #[tokio::test]
@@ -1063,9 +1074,11 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
     assert_eq!(outcome.unwrap().message.content, "done");
     let lines = transcript(&events);
     assert!(lines.iter().any(|line| line.starts_with("user-question")));
-    assert!(lines
-        .iter()
-        .any(|line| line.starts_with("tool-result ask_user") && line.contains("thiserror")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("tool-result ask_user") && line.contains("thiserror"))
+    );
 }
 
 // ---- Persistent permissions (cross-session) -------------------------------
@@ -1082,7 +1095,9 @@ async fn always_permission_persists_across_agents_for_same_project() {
     std::fs::create_dir_all(&tmp).expect("create temp data dir");
     // `paths::get()` reads `NEENEE_DATA_DIR` on every call (no caching), so
     // pointing the env var at a tempdir redirects the project bucket there.
-    std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    unsafe {
+        std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    }
     let project_root = std::path::PathBuf::from("/tmp/neenee-perms-fixture-project");
     let perms_path = neenee_store::paths::get().project_permissions(&project_root);
 
@@ -1163,7 +1178,9 @@ async fn always_permission_persists_across_agents_for_same_project() {
         "unrelated project must not inherit another project's rules"
     );
 
-    std::env::remove_var("NEENEE_DATA_DIR");
+    unsafe {
+        std::env::remove_var("NEENEE_DATA_DIR");
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -1172,7 +1189,9 @@ async fn agent_without_project_root_never_writes_permissions_file() {
     let _guard = ENV_GUARD.lock().await;
     let tmp = std::env::temp_dir().join(format!("neenee-perms-noset-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).expect("create temp data dir");
-    std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    unsafe {
+        std::env::set_var("NEENEE_DATA_DIR", &tmp);
+    }
     let project_root = std::path::PathBuf::from("/tmp/neenee-perms-noset-fixture");
     let perms_path = neenee_store::paths::get().project_permissions(&project_root);
 
@@ -1192,7 +1211,9 @@ async fn agent_without_project_root_never_writes_permissions_file() {
         "ephemeral agent must not create a permissions file"
     );
 
-    std::env::remove_var("NEENEE_DATA_DIR");
+    unsafe {
+        std::env::remove_var("NEENEE_DATA_DIR");
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

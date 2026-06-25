@@ -10,10 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-use neenee_core::repeat::{RepeatJob, DEFAULT_MAX_AGE_DAYS};
+use neenee_core::repeat::{DEFAULT_MAX_AGE_DAYS, RepeatJob};
 
 const SCHEMA: &str = r#"
                 CREATE TABLE IF NOT EXISTS repeat_jobs (

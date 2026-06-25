@@ -1,6 +1,6 @@
 //! Presenters for the search/listing family: `grep`, `glob`, `list_dir`.
 
-use super::{truncate, ResultKind, ToolPresenter, ToolView};
+use super::{ResultKind, ToolPresenter, ToolView, truncate};
 
 pub struct GrepPresenter;
 

@@ -16,7 +16,7 @@ pub(crate) mod provider;
 pub(crate) mod session;
 
 // Re-export the public API so `render::overlays::draw_*` callers are unchanged.
-pub use activity::{draw_activity_modal, ActivityModalView};
+pub use activity::{ActivityModalView, draw_activity_modal};
 pub use misc::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
     draw_tool_step_detail_overlay,

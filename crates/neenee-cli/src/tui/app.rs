@@ -9,15 +9,15 @@
 //!
 //! [`crate::tui::completion`]: crate::tui::completion
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, ImagePart, ParentStatus, PermissionRequest,
-    ProviderPickerRow, ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList,
-    UserQuestionRequest,
+    AgentRequest, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
+    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, UserQuestionRequest,
+    mcp::McpConnectionStatus,
 };
 
 use crate::tui::completion::PathScan;
@@ -27,7 +27,7 @@ use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
 use crate::tui::input;
 use crate::tui::layout::{InteractiveTarget, LayoutMap};
-use crate::tui::providers::{providers_filtered_from, PROVIDERS};
+use crate::tui::providers::{PROVIDERS, providers_filtered_from};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 
@@ -462,6 +462,11 @@ pub struct App {
     pub provider_picker: ProviderPickerSnapshot,
     /// Theme.
     pub theme: Theme,
+    /// User-supplied ASCII logo lines loaded at startup from
+    /// `$XDG_CONFIG_HOME/neenee/logo.txt` (clamped to the empty-state bounding
+    /// box). `None` when no user logo is present → built-in wordmark is used.
+    /// Passed into the empty-state hero via `TranscriptView::logo`.
+    pub logo: Option<Vec<String>>,
     /// MCP server statuses loaded at startup. Mirrored into the header as a
     /// compact right-aligned summary.
     pub mcp_statuses: Vec<(String, McpConnectionStatus)>,

@@ -442,7 +442,7 @@ impl SubagentTool {
 mod tests {
     use super::*;
     use futures::stream::{self, BoxStream};
-    use neenee_core::{Message, Provider, Role, EXPLORE};
+    use neenee_core::{EXPLORE, Message, Provider, Role};
 
     struct CannedProvider;
 

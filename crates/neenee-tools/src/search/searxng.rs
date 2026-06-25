@@ -2,7 +2,7 @@
 //! Keyless and fully under the operator's control, making it the recommended
 //! backend for users behind censored networks or who want query privacy.
 
-use super::{format_results, SearchProvider, SearchResult, MOZILLA_UA};
+use super::{MOZILLA_UA, SearchProvider, SearchResult, format_results};
 use async_trait::async_trait;
 
 pub(crate) struct SearxngProvider {

@@ -1,8 +1,8 @@
 use super::*;
 use neenee_core::{Message, Role, ToolCall};
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
@@ -565,6 +565,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         key_status: HashMap::new(),
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
+        logo: None,
         mcp_statuses: Vec::new(),
     };
     (app, tmp)

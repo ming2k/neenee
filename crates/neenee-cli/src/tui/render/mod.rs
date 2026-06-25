@@ -4,6 +4,7 @@
 mod chrome;
 mod composer;
 mod design;
+mod empty_state;
 mod markdown_table;
 mod message_body;
 mod notice;
@@ -22,8 +23,8 @@ pub(crate) mod tools;
 mod snapshot_tests;
 
 pub use chrome::draw_activity_bar;
-pub use chrome::{draw_completion_menu, draw_hint_bar, HintBarView};
-pub use composer::{draw_composer, INPUT_MSG_IDX};
+pub use chrome::{HintBarView, draw_completion_menu, draw_hint_bar};
+pub use composer::{INPUT_MSG_IDX, draw_composer};
 use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
@@ -32,21 +33,24 @@ use design::{
     TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
     TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
 };
+/// Parse a raw logo file into clamped display lines for the empty-state hero.
+/// Re-exported so the startup loader and the renderer share one clamp rule.
+pub(crate) use empty_state::parse_logo;
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
-    draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
-    draw_model_editor, draw_permission_sheet, draw_question_modal, draw_session_modal,
-    draw_sessions_modal, draw_tool_step_detail_overlay, ActivityModalView,
+    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
+    draw_history_modal, draw_model_editor, draw_permission_sheet, draw_question_modal,
+    draw_session_modal, draw_sessions_modal, draw_tool_step_detail_overlay,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
 use step::{
-    draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed, draw_subagent_bar,
-    draw_subagent_inline_step, draw_tool_step, StickyStep,
+    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
+    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
 };
 #[cfg(test)]
 use text_layout::WrappedLine;
@@ -57,11 +61,11 @@ use text_layout::{
 pub use theme::Theme;
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block as RtBlock, Paragraph},
-    Frame,
 };
 
 use crate::tui::document::TranscriptMessage;
@@ -170,6 +174,11 @@ pub struct TranscriptView<'a> {
     /// is ready but no caller sets it yet, hence the targeted allow.
     #[allow(dead_code)]
     pub focused_target: Option<InteractiveTarget>,
+    /// User-supplied ASCII logo lines (from `$XDG_CONFIG_HOME/neenee/logo.txt`)
+    /// that replace the built-in wordmark on the empty-state hero. `None` when
+    /// no user logo is configured; the hero falls back to the built-in art.
+    /// Ignored entirely when the transcript is non-empty.
+    pub logo: Option<&'a [String]>,
     pub theme: &'a Theme,
 }
 
@@ -240,7 +249,7 @@ pub fn draw_transcript(
         theme,
         ..
     } = view;
-    let full = frame.size();
+    let full = frame.area();
     // Components render inside the vertical viewport margins (1 cell top and
     // bottom); only the background fill uses the full terminal rect.
     let viewport = viewport_rect(frame);
@@ -345,121 +354,137 @@ pub fn draw_transcript(
     // repeating the label on every message of a single-model run.
     let mut last_shown_attribution: Option<(String, String)> = None;
 
-    for (mi, msg) in messages.iter().enumerate() {
-        // Model attribution badge: shown above the first assistant-side
-        // message of a turn (reasoning, text, or tool step) and whenever the
-        // producing provider/model changes. Tool results and tool steps share
-        // the turn's model, so a single badge per model-run keeps the
-        // transcript clean while remaining fully traceable.
-        let is_assistant_side =
-            msg.role == neenee_core::Role::Assistant || msg.is_thinking() || msg.is_tool_step();
-        if is_assistant_side {
-            if let Some(attribution) = msg.attribution_label() {
-                if last_shown_attribution.as_ref() != Some(&attribution) {
-                    draw_attribution_badge(
-                        frame,
-                        transcript_area,
-                        &attribution,
-                        &mut skip_rows,
-                        &mut current_y,
-                        &mut content_lines,
-                        theme,
-                    );
-                    last_shown_attribution = Some(attribution);
+    // Empty-state replacement (ADR-0033): when the session has no messages and
+    // no subagent/side view is open, the transcript is replaced by a centered
+    // logo hero rather than rendering an empty stream. This is a component
+    // substitution, not transcript content — the hero never participates in
+    // scroll, selection, or attribution, so the whole message-rendering
+    // pipeline (loop, badges, sticky pinning) is skipped. The footer below
+    // renders exactly as in a live session.
+    let show_empty_state = messages.is_empty() && subagent_bar.is_none() && side_banner.is_none();
+
+    if show_empty_state {
+        empty_state::draw_empty_state(frame, transcript_area, view.logo, theme);
+        // Account for the hero so the app loop does not treat the session as a
+        // zero-height stream (which would mis-pin the scroll position).
+        content_lines = empty_state::empty_state_content_lines(view.logo);
+    } else {
+        for (mi, msg) in messages.iter().enumerate() {
+            // Model attribution badge: shown above the first assistant-side
+            // message of a turn (reasoning, text, or tool step) and whenever the
+            // producing provider/model changes. Tool results and tool steps share
+            // the turn's model, so a single badge per model-run keeps the
+            // transcript clean while remaining fully traceable.
+            let is_assistant_side =
+                msg.role == neenee_core::Role::Assistant || msg.is_thinking() || msg.is_tool_step();
+            if is_assistant_side {
+                if let Some(attribution) = msg.attribution_label() {
+                    if last_shown_attribution.as_ref() != Some(&attribution) {
+                        draw_attribution_badge(
+                            frame,
+                            transcript_area,
+                            &attribution,
+                            &mut skip_rows,
+                            &mut current_y,
+                            &mut content_lines,
+                            theme,
+                        );
+                        last_shown_attribution = Some(attribution);
+                    }
+                }
+            }
+
+            // Render blocks
+            if msg.is_notice() {
+                draw_notice(
+                    frame,
+                    transcript_area,
+                    msg,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    theme,
+                );
+            } else if msg.is_subagent_task() {
+                draw_subagent_inline_step(
+                    frame,
+                    transcript_area,
+                    msg,
+                    mi,
+                    theme,
+                    layout_map,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    hovered_step == Some(mi),
+                );
+            } else if msg.is_tool_step() {
+                draw_tool_step(
+                    frame,
+                    transcript_area,
+                    msg,
+                    mi,
+                    selection,
+                    theme,
+                    layout_map,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    &mut sticky_steps,
+                    hovered_step == Some(mi),
+                );
+            } else if msg.is_thinking() {
+                draw_reasoning_trace(
+                    frame,
+                    transcript_area,
+                    msg,
+                    mi,
+                    selection,
+                    theme,
+                    layout_map,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    &mut sticky_steps,
+                    hovered_step == Some(mi),
+                );
+            } else {
+                draw_message_body(
+                    frame,
+                    transcript_area,
+                    msg,
+                    mi,
+                    selection,
+                    theme,
+                    layout_map,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    true,
+                );
+            }
+
+            // Spacing between messages. A user message's panel already ends with a
+            // bottom transition row (▀) that separates it from the next message, so
+            // the extra blank line is omitted there to keep the gap to a single row
+            // (otherwise the sent message sits two rows above the following body).
+            // The exception is when the next message is a step (thinking or tool
+            // step): a blank row between the user panel's transition and the step
+            // header keeps the two visually distinct. This matches the spacing
+            // produced by live reasoning streams and restored history.
+            let next_is_step = messages.get(mi + 1).is_some_and(|next| {
+                next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
+            });
+            if msg.role != neenee_core::Role::User || next_is_step {
+                content_lines += MESSAGE_GAP_ROWS;
+                if skip_rows > 0 {
+                    skip_rows = skip_rows.saturating_sub(1);
+                } else if current_y < transcript_area.y + transcript_area.height {
+                    current_y += MESSAGE_GAP_ROWS as u16;
                 }
             }
         }
-
-        // Render blocks
-        if msg.is_notice() {
-            draw_notice(
-                frame,
-                transcript_area,
-                msg,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                theme,
-            );
-        } else if msg.is_subagent_task() {
-            draw_subagent_inline_step(
-                frame,
-                transcript_area,
-                msg,
-                mi,
-                theme,
-                layout_map,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                hovered_step == Some(mi),
-            );
-        } else if msg.is_tool_step() {
-            draw_tool_step(
-                frame,
-                transcript_area,
-                msg,
-                mi,
-                selection,
-                theme,
-                layout_map,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                &mut sticky_steps,
-                hovered_step == Some(mi),
-            );
-        } else if msg.is_thinking() {
-            draw_reasoning_trace(
-                frame,
-                transcript_area,
-                msg,
-                mi,
-                selection,
-                theme,
-                layout_map,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                &mut sticky_steps,
-                hovered_step == Some(mi),
-            );
-        } else {
-            draw_message_body(
-                frame,
-                transcript_area,
-                msg,
-                mi,
-                selection,
-                theme,
-                layout_map,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                true,
-            );
-        }
-
-        // Spacing between messages. A user message's panel already ends with a
-        // bottom transition row (▀) that separates it from the next message, so
-        // the extra blank line is omitted there to keep the gap to a single row
-        // (otherwise the sent message sits two rows above the following body).
-        // The exception is when the next message is a step (thinking or tool
-        // step): a blank row between the user panel's transition and the step
-        // header keeps the two visually distinct. This matches the spacing
-        // produced by live reasoning streams and restored history.
-        let next_is_step = messages.get(mi + 1).is_some_and(|next| {
-            next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
-        });
-        if msg.role != neenee_core::Role::User || next_is_step {
-            content_lines += MESSAGE_GAP_ROWS;
-            if skip_rows > 0 {
-                skip_rows = skip_rows.saturating_sub(1);
-            } else if current_y < transcript_area.y + transcript_area.height {
-                current_y += MESSAGE_GAP_ROWS as u16;
-            }
-        }
-    }
+    } // end else (non-empty transcript branch)
 
     // Record the visible transcript content rect so clicks on gap rows
     // (which carry no registered region) still switch keyboard focus to
@@ -469,15 +494,19 @@ pub fn draw_transcript(
     // clamped to the viewport so empty space below the last message stays
     // inert. `current_y` already stops advancing once it reaches the
     // viewport bottom, so this is a faithful bound on visible content.
-    let band = transcript_band_rect(transcript_area);
-    let content_bottom = current_y.min(transcript_area.y + transcript_area.height);
-    if content_bottom > transcript_area.y {
-        layout_map.set_transcript_content_rect(Rect::new(
-            band.x,
-            transcript_area.y,
-            band.width,
-            content_bottom - transcript_area.y,
-        ));
+    // Skipped for the empty-state hero, which owns its own rect and is not
+    // part of the interactive transcript surface.
+    if !show_empty_state {
+        let band = transcript_band_rect(transcript_area);
+        let content_bottom = current_y.min(transcript_area.y + transcript_area.height);
+        if content_bottom > transcript_area.y {
+            layout_map.set_transcript_content_rect(Rect::new(
+                band.x,
+                transcript_area.y,
+                band.width,
+                content_bottom - transcript_area.y,
+            ));
+        }
     }
 
     // Subagent navigation band, drawn across the full transcript width (inside the
@@ -625,8 +654,8 @@ mod tests {
     /// (border math, rect underflows, empty content) without a live terminal.
     #[test]
     fn redesigned_components_render_without_panicking() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let backend = TestBackend::new(80, 30);
@@ -669,6 +698,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -890,8 +920,8 @@ mod tests {
     /// subagent view with its navigation bar, ensuring no layout panics.
     #[test]
     fn subagent_step_and_view_render_without_panicking() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let backend = TestBackend::new(80, 30);
@@ -942,6 +972,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -978,6 +1009,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -1054,24 +1086,26 @@ mod tests {
     fn wrap_avoids_cjk_punctuation_at_line_start() {
         let lines = wrap_text("人生需要坚持，才能前进。", 12);
         assert!(lines.len() > 1);
-        assert!(lines.iter().skip(1).all(|line| line
-            .text
-            .chars()
-            .next()
-            .is_none_or(|ch| !prohibited_line_start(ch))));
-        assert!(lines.iter().all(|line| line
-            .text
-            .chars()
-            .last()
-            .is_none_or(|ch| !prohibited_line_end(ch))));
+        assert!(lines.iter().skip(1).all(|line| {
+            line.text
+                .chars()
+                .next()
+                .is_none_or(|ch| !prohibited_line_start(ch))
+        }));
+        assert!(lines.iter().all(|line| {
+            line.text
+                .chars()
+                .last()
+                .is_none_or(|ch| !prohibited_line_end(ch))
+        }));
     }
 
     /// The input box must reserve only a single content row for a short input
     /// but grow to fit wrapped text when the input is long.
     #[test]
     fn input_box_grows_with_wrapped_content() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let messages: Vec<TranscriptMessage> = Vec::new();
@@ -1103,6 +1137,7 @@ mod tests {
                             turn_started_at: None,
                             hovered_step: None,
                             focused_target: None,
+                            logo: None,
                             theme,
                         },
                     );
@@ -1136,8 +1171,8 @@ mod tests {
     /// `composer_wrapped`.
     #[test]
     fn draw_composer_records_region_for_empty_input() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let backend = TestBackend::new(30, 5);
@@ -1177,8 +1212,8 @@ mod tests {
     /// on the second wrapped line when the cursor sits past the first wrap.
     #[test]
     fn draw_composer_wraps_and_positions_caret() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let backend = TestBackend::new(20, 12);
@@ -1211,8 +1246,8 @@ mod tests {
     /// drop the right-side padding again.
     #[test]
     fn user_message_and_composer_keep_symmetric_panel_padding() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let user_bg = theme.user_surface();
@@ -1256,6 +1291,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -1283,76 +1319,72 @@ mod tests {
         // the text. Scan for the row whose col 4 is 'x' under user_panel_bg.
         let user_row = (0..buffer.area.height)
             .find(|&y| {
-                let c4 = buffer.get(4, y);
+                let c4 = &buffer[(4, y)];
                 c4.symbol() == "x" && c4.bg == user_bg
             })
             .expect("a user message text row should be rendered");
 
         // Left: 2-col app_bg outer gutter, then 2-col user_panel_bg inner pad.
-        assert_eq!(buffer.get(0, user_row).bg, app_bg, "left outer gutter");
-        assert_eq!(buffer.get(1, user_row).bg, app_bg, "left outer gutter");
+        assert_eq!(buffer[(0, user_row)].bg, app_bg, "left outer gutter");
+        assert_eq!(buffer[(1, user_row)].bg, app_bg, "left outer gutter");
         assert_eq!(
-            buffer.get(2, user_row).bg,
+            buffer[(2, user_row)].bg,
             user_bg,
             "left inner padding must be user_panel_bg"
         );
         assert_eq!(
-            buffer.get(3, user_row).bg,
+            buffer[(3, user_row)].bg,
             user_bg,
             "left inner padding is 2 cols, not 1"
         );
-        assert_eq!(
-            buffer.get(4, user_row).symbol(),
-            "x",
-            "text starts at col 4"
-        );
+        assert_eq!(buffer[(4, user_row)].symbol(), "x", "text starts at col 4");
 
         // Right: 2-col user_panel_bg inner pad, then 2-col app_bg outer gutter.
         // user_text_width = (60 - 4) - 4 = 52 -> text fills cols 4..56.
         assert_eq!(
-            buffer.get(56, user_row).symbol(),
+            buffer[(56, user_row)].symbol(),
             " ",
             "right inner padding must stay clear of wrapped text"
         );
-        assert_eq!(buffer.get(56, user_row).bg, user_bg, "right inner padding");
-        assert_eq!(buffer.get(57, user_row).bg, user_bg, "right inner padding");
-        assert_eq!(buffer.get(58, user_row).bg, app_bg, "right outer gutter");
-        assert_eq!(buffer.get(59, user_row).bg, app_bg, "right outer gutter");
+        assert_eq!(buffer[(56, user_row)].bg, user_bg, "right inner padding");
+        assert_eq!(buffer[(57, user_row)].bg, user_bg, "right inner padding");
+        assert_eq!(buffer[(58, user_row)].bg, app_bg, "right outer gutter");
+        assert_eq!(buffer[(59, user_row)].bg, app_bg, "right outer gutter");
 
         // Composer: the input panel starts at x = FOOTER_H_INSET (2). `›` at
         // x=2, text from x=4, and a 2-col right pad in input_bg before the
         // app_bg gutter at the far right.
         let composer_row = (0..buffer.area.height)
             .find(|&y| {
-                let c4 = buffer.get(4, y);
+                let c4 = &buffer[(4, y)];
                 c4.symbol() == "y" && c4.bg == input_bg
             })
             .expect("a composer text row should be rendered");
-        assert_eq!(buffer.get(2, composer_row).symbol(), "›", "composer prompt");
+        assert_eq!(buffer[(2, composer_row)].symbol(), "›", "composer prompt");
         assert_eq!(
-            buffer.get(4, composer_row).symbol(),
+            buffer[(4, composer_row)].symbol(),
             "y",
             "composer text starts at col 4"
         );
         // full_w (composer panel) = 60 - 2*FOOTER_H_INSET = 56, panel spans
         // x=2..58. Right pad at x=56,57 (input_bg), gutter x=58,59 (app_bg).
         assert_eq!(
-            buffer.get(56, composer_row).bg,
+            buffer[(56, composer_row)].bg,
             input_bg,
             "composer right inner padding"
         );
         assert_eq!(
-            buffer.get(57, composer_row).bg,
+            buffer[(57, composer_row)].bg,
             input_bg,
             "composer right inner padding"
         );
         assert_eq!(
-            buffer.get(58, composer_row).bg,
+            buffer[(58, composer_row)].bg,
             app_bg,
             "composer right outer gutter"
         );
         assert_eq!(
-            buffer.get(59, composer_row).bg,
+            buffer[(59, composer_row)].bg,
             app_bg,
             "composer right outer gutter"
         );
@@ -1364,8 +1396,8 @@ mod tests {
     /// can tell their message is pending, not delivered.
     #[test]
     fn queued_user_message_renders_badge_and_dimmer_bg() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let queued_bg = theme.user_surface_queued();
@@ -1402,6 +1434,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -1416,7 +1449,7 @@ mod tests {
         // wrong surface.
         for y in 0..buffer.area.height {
             for x in 2..4 {
-                let bg = buffer.get(x, y).bg;
+                let bg = buffer[(x, y)].bg;
                 assert_ne!(
                     bg, delivered_bg,
                     "queued panels must never carry the delivered bg, found at ({},{})",
@@ -1429,7 +1462,7 @@ mod tests {
         // rows whose inner-padding cells carry the queued bg AND whose
         // first-content cell starts with the pause glyph.
         let badge_count = (0..buffer.area.height)
-            .filter(|&y| buffer.get(2, y).bg == queued_bg && buffer.get(4, y).symbol() == "⏸")
+            .filter(|&y| buffer[(2, y)].bg == queued_bg && buffer[(4, y)].symbol() == "⏸")
             .count();
         assert_eq!(
             badge_count, 2,
@@ -1445,8 +1478,8 @@ mod tests {
     /// extent of drawn content, including the inter-message gap row.
     #[test]
     fn transcript_content_rect_spans_band_and_gap_rows() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let width = 40u16;
@@ -1481,6 +1514,7 @@ mod tests {
                         turn_started_at: None,
                         hovered_step: None,
                         focused_target: None,
+                        logo: None,
                         theme: &theme,
                     },
                 );
@@ -1623,8 +1657,8 @@ mod tests {
     /// only need to prove the renderer consumes each state without exploding.
     #[test]
     fn history_modal_renders_every_query_state() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
         let history = vec![
@@ -1680,5 +1714,180 @@ mod tests {
                 draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);
             })
             .expect("empty-history draw must not panic");
+    }
+
+    /// With no messages, `draw_transcript` renders the empty-state hero in
+    /// place of the stream: `content_lines` is non-zero (so the app loop does
+    /// not treat it as a zero-height stream) and the call does not panic.
+    #[test]
+    fn empty_session_renders_empty_state_with_nonzero_height() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let messages: Vec<TranscriptMessage> = Vec::new();
+
+        let mut render_opt: Option<TranscriptRender> = None;
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                render_opt = Some(draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "idle",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
+                        review_alert: String::new(),
+                        turn_started_at: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        logo: None,
+                        theme: &theme,
+                    },
+                ));
+            })
+            .expect("empty-session draw must not panic");
+        let render = render_opt.expect("draw_transcript must return a render");
+
+        // The empty-state hero replaces the transcript; it occupies the logo
+        // rows plus a gap, never zero, so scroll-follow logic stays honest.
+        assert!(
+            render.content_lines > 0,
+            "empty state should report non-zero content_lines"
+        );
+        assert!(render.sticky.is_none(), "no sticky header on empty state");
+        assert!(
+            render.view_height > 0,
+            "view_height should reflect the viewport, not be zero"
+        );
+    }
+
+    /// A non-empty session skips the empty-state branch entirely — the hero
+    /// never competes with real content.
+    #[test]
+    fn nonempty_session_does_not_render_empty_state() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let messages = vec![TranscriptMessage::new(neenee_core::Role::User, "hello")];
+
+        let mut render_opt: Option<TranscriptRender> = None;
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                render_opt = Some(draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "idle",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
+                        review_alert: String::new(),
+                        turn_started_at: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        logo: None,
+                        theme: &theme,
+                    },
+                ));
+            })
+            .expect("non-empty draw must not panic");
+        let render = render_opt.expect("draw_transcript must return a render");
+
+        // With a real message the stream is rendered normally — content_lines
+        // reflects at least one rendered message rather than the fixed
+        // empty-state height.
+        assert!(
+            render.content_lines > 0,
+            "non-empty session should render its messages"
+        );
+    }
+
+    /// A user-supplied logo (from `logo.txt`) replaces the built-in wordmark
+    /// on the empty state, and `content_lines` tracks its (clamped) height so
+    /// scroll accounting stays honest. A four-line user logo yields six
+    /// reported lines (4 + blank gap + tagline), distinct from the built-in
+    /// wordmark's height.
+    #[test]
+    fn empty_session_uses_user_logo_and_reports_its_height() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::default();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let messages: Vec<TranscriptMessage> = Vec::new();
+        // Four lines → reported content is 4 + 2 (gap + tagline) = 6.
+        let logo: Vec<String> = vec![
+            "  N N  ".to_string(),
+            " N N N ".to_string(),
+            "  N N  ".to_string(),
+            "       ".to_string(),
+        ]
+        .into_iter()
+        .chain(std::iter::repeat_n("xxxxx".to_string(), 0))
+        .collect();
+
+        let mut render_opt: Option<TranscriptRender> = None;
+        terminal
+            .draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                render_opt = Some(draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "idle",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
+                        review_alert: String::new(),
+                        turn_started_at: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        logo: Some(&logo),
+                        theme: &theme,
+                    },
+                ));
+            })
+            .expect("user-logo empty-state draw must not panic");
+        let render = render_opt.expect("draw_transcript must return a render");
+
+        // 4 logo lines + 1 blank gap + 1 tagline = 6 content lines.
+        assert_eq!(
+            render.content_lines, 6,
+            "user-logo content_lines must be logo rows + gap + tagline"
+        );
     }
 }

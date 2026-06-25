@@ -20,7 +20,7 @@ impl ToolPresenter for ReadImagePresenter {
 #[cfg(test)]
 mod tests {
     use super::{ReadImagePresenter, ToolPresenter, ToolView};
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     fn view(args: Value) -> ToolView<'static> {
         let owned: Map<String, Value> = match args {
@@ -38,7 +38,10 @@ mod tests {
     #[test]
     fn summary_names_the_image_path() {
         let v = view(json!({"path": "screenshots/bug.png"}));
-        assert_eq!(ReadImagePresenter.summary(&v), "Read image screenshots/bug.png");
+        assert_eq!(
+            ReadImagePresenter.summary(&v),
+            "Read image screenshots/bug.png"
+        );
     }
 
     #[test]

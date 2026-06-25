@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use ratatui::{
+    Frame,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -14,10 +14,10 @@ use crate::tui::layout::LayoutMap;
 use neenee_core::ProviderPickerSnapshot;
 
 use super::common::caret_column;
+use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
 };
-use crate::tui::render::Theme;
 
 /// Draw the provider picker The input line is borrowed as a
 /// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
@@ -159,7 +159,7 @@ pub(crate) fn draw_models_modal(
         let prefix = "Models  ❯ ".width() as u16;
         let cursor_x = h.x + prefix + caret_column(query, cursor_position);
         let cursor_y = h.y;
-        frame.set_cursor(cursor_x, cursor_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
@@ -265,5 +265,5 @@ pub fn draw_model_editor(
     let prefix = format!(" {:<8}", if field == 0 { "API key" } else { "Model id" });
     let cursor_x = body_rect.x + prefix.width() as u16 + caret_column(input, cursor_position);
     let cursor_y = body_rect.y + if field == 0 { 0 } else { 1 };
-    frame.set_cursor(cursor_x, cursor_y);
+    frame.set_cursor_position((cursor_x, cursor_y));
 }

@@ -6,17 +6,17 @@
 //! `history`, `session`, `ctt_clone`, `generation_clone`, `resp_tx`,
 //! `pursuit_service`, `config`, …) so the body reads exactly as it did inline.
 
-use neenee_agent::orchestration::TurnInput;
 use neenee_agent::Agent;
+use neenee_agent::orchestration::TurnInput;
 use neenee_core::{AgentResponse, Message};
 use neenee_store::{config::Config, session::SessionStore};
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::shell::run_shell_command;
-use crate::side::{start_active_turn, SideSession};
+use crate::side::{SideSession, start_active_turn};
 
 /// `AgentRequest::Chat` — start an interactive turn against whichever session
 /// the user is currently composing into (primary or `/btw` side).

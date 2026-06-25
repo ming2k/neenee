@@ -5,12 +5,12 @@
 //! directly — they live here purely so the binary entry-point stays focused
 //! on wiring.
 
+use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    execute_turn, retry_delay_ms, CompactionSettings, ProxyProvider, TurnContext, TurnInput,
+    CompactionSettings, ProxyProvider, TurnContext, TurnInput, execute_turn, retry_delay_ms,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::Agent;
-use neenee_core::{async_trait, AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent};
+use neenee_core::{AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent, async_trait};
 use neenee_providers::MockProvider;
 use neenee_store::session::SessionStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -247,11 +247,13 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
     .unwrap();
 
     assert!(!completed);
-    assert!(history
-        .lock()
-        .await
-        .iter()
-        .any(|message| message.content == "done"));
+    assert!(
+        history
+            .lock()
+            .await
+            .iter()
+            .any(|message| message.content == "done")
+    );
     let responses = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     let activities = responses
         .iter()

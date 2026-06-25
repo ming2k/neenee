@@ -26,7 +26,7 @@ mod transcript;
 pub(crate) use app::{ActivityTab, App, Modal, Recess, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
-    model_display_name, provider_context_window, providers_filtered_from, ProviderPreset, PROVIDERS,
+    PROVIDERS, ProviderPreset, model_display_name, provider_context_window, providers_filtered_from,
 };
 
 use crossterm::{
@@ -35,22 +35,22 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neenee_core::{
-    mcp::McpConnectionStatus, AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus,
-    PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
-    SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
+    AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
+    ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
+    TodoStatus, TurnEvent, UserQuestionRequest, mcp::McpConnectionStatus,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
     io,
-    sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 use crate::tui::layout::LayoutMap;
@@ -832,6 +832,7 @@ pub async fn run_tui(
         key_status: HashMap::new(),
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
+        logo: load_user_logo(),
         mcp_statuses,
     };
 
@@ -960,6 +961,17 @@ fn describe_todos_change(prev: Option<&TodoList>, new: Option<&TodoList>) -> Vec
         out.push(format!("tasks · {done}/{total}"));
     }
     out
+}
+
+/// Load the user-supplied ASCII logo from `$XDG_CONFIG_HOME/neenee/logo.txt`,
+/// clamped to the empty-state bounding box. Best-effort: a missing or unreadable
+/// file returns `None`, leaving the built-in wordmark in place.
+fn load_user_logo() -> Option<Vec<String>> {
+    let path = neenee_store::paths::get().logo_file();
+    let raw = std::fs::read_to_string(&path).ok()?;
+    // Re-use the renderer's parser so the clamp stays defined in one place.
+    // The parser already strips CRLF/trailing blanks and truncates to the box.
+    render::parse_logo(&raw)
 }
 
 #[cfg(test)]

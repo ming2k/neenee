@@ -2194,14 +2194,16 @@ mod tests {
             // is no longer a project-root `session.json`.
             let id_a = store_a.id().await;
             let id_b = store_b.id().await;
-            assert!(dirs
-                .project_sessions_dir(&PathBuf::from("/projects/alpha"))
-                .join(format!("{id_a}.json"))
-                .exists());
-            assert!(dirs
-                .project_sessions_dir(&PathBuf::from("/projects/beta"))
-                .join(format!("{id_b}.json"))
-                .exists());
+            assert!(
+                dirs.project_sessions_dir(&PathBuf::from("/projects/alpha"))
+                    .join(format!("{id_a}.json"))
+                    .exists()
+            );
+            assert!(
+                dirs.project_sessions_dir(&PathBuf::from("/projects/beta"))
+                    .join(format!("{id_b}.json"))
+                    .exists()
+            );
 
             // Reloading alpha starts fresh but the prior session is resumable,
             // and alpha never sees beta's messages.
@@ -2271,27 +2273,37 @@ mod tests {
             let alpha_dir = dirs.project_dir(&PathBuf::from("/projects/alpha"));
             // ADR-0018: the legacy active session is migrated all the way into
             // `sessions/<id>.json`, not left at the project-root `session.json`.
-            assert!(alpha_dir
-                .join("sessions")
-                .join(format!("{alpha_active_id}.json"))
-                .exists());
+            assert!(
+                alpha_dir
+                    .join("sessions")
+                    .join(format!("{alpha_active_id}.json"))
+                    .exists()
+            );
             assert!(!alpha_dir.join("session.json").exists());
-            assert!(alpha_dir
-                .join("sessions")
-                .join(format!("{}.json", alpha_archive.id))
-                .exists());
+            assert!(
+                alpha_dir
+                    .join("sessions")
+                    .join(format!("{}.json", alpha_archive.id))
+                    .exists()
+            );
             let beta_dir = dirs.project_dir(&PathBuf::from("/projects/beta"));
             assert!(!beta_dir.join("session.json").exists());
-            assert!(beta_dir
-                .join("sessions")
-                .join(format!("{}.json", beta_archive.id))
-                .exists());
-            assert!(!legacy_dir
-                .join(format!("{}.json", alpha_archive.id))
-                .exists());
-            assert!(!legacy_dir
-                .join(format!("{}.json", beta_archive.id))
-                .exists());
+            assert!(
+                beta_dir
+                    .join("sessions")
+                    .join(format!("{}.json", beta_archive.id))
+                    .exists()
+            );
+            assert!(
+                !legacy_dir
+                    .join(format!("{}.json", alpha_archive.id))
+                    .exists()
+            );
+            assert!(
+                !legacy_dir
+                    .join(format!("{}.json", beta_archive.id))
+                    .exists()
+            );
             assert!(dirs.data_dir.join(".migrated-v3").exists());
 
             paths::set_test_default(None);
@@ -2322,9 +2334,11 @@ mod tests {
         let sessions = store.list().await.unwrap();
         assert_eq!(sessions.len(), 2);
         assert!(sessions.iter().any(|item| item.id == parent_id));
-        assert!(sessions
-            .iter()
-            .any(|item| item.id == fork_id && item.active));
+        assert!(
+            sessions
+                .iter()
+                .any(|item| item.id == fork_id && item.active)
+        );
 
         store.open(&parent_id[..8]).await.unwrap();
         assert_eq!(store.messages().await[0].content, "parent");
@@ -2716,14 +2730,18 @@ mod tests {
         assert!(result.active[0].hidden);
         assert_eq!(result.active[1].content, "recent question");
         assert_eq!(result.active[2].content, "recent answer");
-        assert!(result
-            .archived
-            .iter()
-            .any(|message| message.content == "old tool result"));
-        assert!(!result
-            .archived
-            .iter()
-            .any(|message| message.role == neenee_core::Role::System));
+        assert!(
+            result
+                .archived
+                .iter()
+                .any(|message| message.content == "old tool result")
+        );
+        assert!(
+            !result
+                .archived
+                .iter()
+                .any(|message| message.role == neenee_core::Role::System)
+        );
     }
 
     #[test]
@@ -2780,10 +2798,12 @@ mod tests {
             Some("prev summary body")
         );
         // The prior checkpoint lands in the archived head, not the tail.
-        assert!(selection
-            .archived
-            .iter()
-            .any(|message| message.content.starts_with("[Conversation checkpoint]")));
+        assert!(
+            selection
+                .archived
+                .iter()
+                .any(|message| message.content.starts_with("[Conversation checkpoint]"))
+        );
         assert_eq!(selection.tail.last().unwrap().content, "a2");
     }
 

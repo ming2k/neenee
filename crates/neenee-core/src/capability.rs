@@ -5,7 +5,7 @@
 
 use crate::{Message, SubagentEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;

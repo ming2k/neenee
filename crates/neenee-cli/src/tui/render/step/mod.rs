@@ -46,7 +46,7 @@ use super::Theme;
 mod renderers;
 mod state;
 pub use renderers::{
-    draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed, draw_subagent_bar,
-    draw_subagent_inline_step, draw_tool_step, StickyStep,
+    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
+    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
 };
-pub use state::{summary_text_color, Disclosure, Interaction};
+pub use state::{Disclosure, Interaction, summary_text_color};

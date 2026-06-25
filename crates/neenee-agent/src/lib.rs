@@ -65,21 +65,21 @@ pub use neenee_store::RepeatStore;
 // the Agent struct expects at the crate root have to be listed here by name.
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
-    estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
-    prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent, AgentOp,
-    AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError, HarnessSnapshot,
-    ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
-    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
-    ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role, SessionOverview,
-    SkillsConfig, SubagentEvent, SubagentProfile, ThreadPursuit, TokenUsage, Tool, ToolAccess,
-    ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
-    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
-    EXPLORE, PRUNED_TOOL_PLACEHOLDER, TITLE,
+    AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextReliefGate, EXPLORE,
+    HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message,
+    PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision, PermissionRequest, Provider,
+    ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome,
+    Pursuit, RetryableError, Role, SessionOverview, SkillsConfig, SubagentEvent, SubagentProfile,
+    TITLE, ThreadPursuit, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy,
+    ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
+    UserQuestionReply, UserQuestionRequest, WebSearchConfig, estimate_chars, estimate_tokens,
+    is_context_overflow, parse_retryable_error, prune_tool_results, public_error_message,
+    retryable_error, truncate_utf8,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
 // `neenee-core`'s lib.rs (`use super::*`).
-use futures::{future::join_all, StreamExt};
+use futures::{StreamExt, future::join_all};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -125,7 +125,7 @@ pub use agent::Agent;
 
 pub mod catalog;
 pub mod hooks;
-pub use hooks::{matcher_matches, HookRegistry, UserPromptVerdict};
+pub use hooks::{HookRegistry, UserPromptVerdict, matcher_matches};
 mod hook_runner;
 pub mod orchestration;
 mod permission_store;
@@ -137,7 +137,7 @@ pub mod skills;
 pub mod subagent_tool;
 pub mod todo_tools;
 
-pub use session_review::{default_reviews, LoopingReview};
+pub use session_review::{LoopingReview, default_reviews};
 pub use subagent_tool::{SubagentRegistry, SubagentTool};
 pub use todo_tools::{TodoUpdateTool, TodoWriteTool};
 

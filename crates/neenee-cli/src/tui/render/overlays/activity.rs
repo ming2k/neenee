@@ -1,15 +1,15 @@
 //! Activity modal: tabbed overview of the current turn, pursuit, and tasks.
 
 use ratatui::{
+    Frame,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 
 use super::common::todo_status_glyph_color;
-use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
 use crate::tui::render::Theme;
+use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
 /// pursuit bar, plan panel, and activity bar used to show, gathered into one

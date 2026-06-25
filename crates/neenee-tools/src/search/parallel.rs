@@ -3,7 +3,7 @@
 //! `Authorization: Bearer <key>` header routes through the caller's own quota.
 //! Like Exa it returns a pre-rendered text blob, passed through verbatim.
 
-use super::{cap_output, mcp_tools_call, SearchProvider};
+use super::{SearchProvider, cap_output, mcp_tools_call};
 use async_trait::async_trait;
 
 const PARALLEL_URL: &str = "https://search.parallel.ai/mcp";

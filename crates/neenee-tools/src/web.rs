@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{truncate_utf8, Tool, ToolAccess, WebSearchConfig};
+use neenee_core::{Tool, ToolAccess, WebSearchConfig, truncate_utf8};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -205,7 +205,7 @@ impl Tool for WebFetchTool {
 fn build_description() -> String {
     let year = chrono::Utc::now().format("%Y");
     format!(
-"Search the web and return results as text. Best for current information, \
+        "Search the web and return results as text. Best for current information, \
 documentation, or examples beyond your knowledge cutoff.
 
 The current year is {year}. Use this year when searching for recent information \

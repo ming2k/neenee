@@ -32,7 +32,7 @@ pub use llama::LlamaServerProvider;
 pub use mock::MockProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use registry::{
-    build_provider_for_channel, openai_provider_spec, OpenAiProviderSpec, OPENAI_PROVIDER_SPECS,
+    OPENAI_PROVIDER_SPECS, OpenAiProviderSpec, build_provider_for_channel, openai_provider_spec,
 };
 
 use neenee_core::retryable_error;

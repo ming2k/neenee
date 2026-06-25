@@ -17,32 +17,32 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::stream::{BoxStream, StreamExt};
 use futures::Stream;
+use futures::stream::{BoxStream, StreamExt};
 use serde::Serialize;
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
-    InjectionKind, InjectionOrigin, Message, Provider, ProviderStreamEvent, Pursuit, Role,
-    TurnEvent, PURSUIT_COMPLETE_MARKER,
+    InjectionKind, InjectionOrigin, Message, PURSUIT_COMPLETE_MARKER, Provider,
+    ProviderStreamEvent, Pursuit, Role, TurnEvent,
 };
 use neenee_store::{
+    RepeatStore,
     config::Config,
     session::{
-        estimate_chars, estimate_tokens, run_compaction, ContextReliefCheckpoint,
-        ContextReliefResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
+        ContextReliefCheckpoint, ContextReliefResult, PursuitCheckpoint, SessionStore,
+        UNCAPPED_ITERATIONS, estimate_chars, estimate_tokens, run_compaction,
     },
-    RepeatStore,
 };
 
 /// Wrap a session-scoped [`TurnEvent`] in the [`AgentResponse::Turn`]

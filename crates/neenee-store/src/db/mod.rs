@@ -12,8 +12,8 @@
 //! tables the native pragma is sufficient and keeps the dependency surface
 //! minimal (see ADR-0024).
 
-use rusqlite::params;
 use rusqlite::Connection;
+use rusqlite::params;
 
 /// Returns `true` if a table named `name` exists in `conn`'s schema.
 ///

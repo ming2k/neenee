@@ -333,33 +333,41 @@ mod tests {
 
     #[test]
     fn explore_policy_admits_plain_read_tool() {
-        assert!(EXPLORE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, false)));
+        assert!(
+            EXPLORE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, false, false))
+        );
     }
 
     #[test]
     fn explore_policy_rejects_write_tool() {
-        assert!(!EXPLORE
-            .tool_policy
-            .admits(&make(ToolAccess::Write, false, false)));
+        assert!(
+            !EXPLORE
+                .tool_policy
+                .admits(&make(ToolAccess::Write, false, false))
+        );
     }
 
     #[test]
     fn explore_policy_rejects_execute_tool() {
         // bash shape: Execute. EXPLORE's Read ceiling excludes it — a research
         // explorer must not run commands.
-        assert!(!EXPLORE
-            .tool_policy
-            .admits(&make(ToolAccess::Execute, false, false)));
+        assert!(
+            !EXPLORE
+                .tool_policy
+                .admits(&make(ToolAccess::Execute, false, false))
+        );
     }
 
     #[test]
     fn explore_policy_rejects_user_interaction_tool() {
         // ask_user shape: Read + requires_user.
-        assert!(!EXPLORE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, true, false)));
+        assert!(
+            !EXPLORE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, true, false))
+        );
     }
 
     #[test]
@@ -367,9 +375,11 @@ mod tests {
         // task shape: Read + spawns_subagent. Even though it is Read, the
         // recursion guard excludes it — this is the case the old name-based
         // self-exclusion filter hardcoded.
-        assert!(!EXPLORE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, true)));
+        assert!(
+            !EXPLORE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, false, true))
+        );
     }
 
     #[test]
@@ -461,24 +471,34 @@ mod tests {
     #[test]
     fn interactive_profile_admits_execute_and_user_but_not_recursion() {
         use crate::INTERACTIVE;
-        assert!(INTERACTIVE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, false)));
-        assert!(INTERACTIVE
-            .tool_policy
-            .admits(&make(ToolAccess::Execute, false, false)));
-        assert!(INTERACTIVE
-            .tool_policy
-            .admits(&make(ToolAccess::Write, false, false)));
+        assert!(
+            INTERACTIVE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, false, false))
+        );
+        assert!(
+            INTERACTIVE
+                .tool_policy
+                .admits(&make(ToolAccess::Execute, false, false))
+        );
+        assert!(
+            INTERACTIVE
+                .tool_policy
+                .admits(&make(ToolAccess::Write, false, false))
+        );
         // ask_user shape (Read + requires_user) is admitted — the only built-in
         // role that lets a subagent reach the user directly.
-        assert!(INTERACTIVE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, true, false)));
+        assert!(
+            INTERACTIVE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, true, false))
+        );
         // Recursion is still absolute.
-        assert!(!INTERACTIVE
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, true)));
+        assert!(
+            !INTERACTIVE
+                .tool_policy
+                .admits(&make(ToolAccess::Read, false, true))
+        );
         // The duplex "on" switch is `auto_approve: false` on INTERACTIVE —
         // left asserted at runtime by the duplex end-to-end test
         // (`subagent_tool_registry_routes_reply_into_live_subagent`), which

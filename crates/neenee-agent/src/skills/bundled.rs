@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use include_dir::{Dir, DirEntry};
 
-use super::metadata::{parse_skill_from_str, Skill, SkillScope};
+use super::metadata::{Skill, SkillScope, parse_skill_from_str};
 
 /// The embedded tree, rooted at `crates/neenee-agent/skills/bundled/`.
 static BUNDLED: Dir<'static> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/skills/bundled");

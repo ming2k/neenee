@@ -4,7 +4,7 @@
 //! through the caller's own quota. Returns a pre-rendered, model-optimized text
 //! blob, which we pass through largely verbatim. This is the default backend.
 
-use super::{cap_output, mcp_tools_call, SearchProvider};
+use super::{SearchProvider, cap_output, mcp_tools_call};
 use async_trait::async_trait;
 
 const EXA_URL: &str = "https://mcp.exa.ai/mcp";

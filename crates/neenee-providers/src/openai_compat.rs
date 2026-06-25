@@ -2,14 +2,14 @@
 //! and a streaming filter that strips tool-call "echo" text (GLM/Qwen style).
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use neenee_core::{Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::{ensure_success, transport_error, NEENEE_USER_AGENT};
+use crate::{NEENEE_USER_AGENT, ensure_success, transport_error};
 
 pub struct OpenAiCompatProvider {
     pub api_key: String,
@@ -82,16 +82,18 @@ impl OpenAiCompatProvider {
             })
             .collect();
         let tool_specs = tools.as_ref().map(|specs| {
-            json!(specs
-                .iter()
-                .map(|spec| {
-                    let mut spec = spec.clone();
-                    if let Some(obj) = spec.as_object_mut() {
-                        obj.insert("type".to_string(), Value::String("function".to_string()));
-                    }
-                    spec
-                })
-                .collect::<Vec<_>>())
+            json!(
+                specs
+                    .iter()
+                    .map(|spec| {
+                        let mut spec = spec.clone();
+                        if let Some(obj) = spec.as_object_mut() {
+                            obj.insert("type".to_string(), Value::String("function".to_string()));
+                        }
+                        spec
+                    })
+                    .collect::<Vec<_>>()
+            )
         });
 
         let mut body = json!({
@@ -161,16 +163,18 @@ fn openai_message(m: Message) -> Value {
         "content": openai_content(&m),
     });
     if let Some(tool_calls) = m.tool_calls {
-        map["tool_calls"] = json!(tool_calls
-            .into_iter()
-            .map(|tc| {
-                json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": tc.arguments}
+        map["tool_calls"] = json!(
+            tool_calls
+                .into_iter()
+                .map(|tc| {
+                    json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": tc.arguments}
+                    })
                 })
-            })
-            .collect::<Vec<_>>());
+                .collect::<Vec<_>>()
+        );
     }
     if let Some(tool_call_id) = m.tool_call_id {
         map["tool_call_id"] = json!(tool_call_id);

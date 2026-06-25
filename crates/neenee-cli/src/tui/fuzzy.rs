@@ -179,15 +179,10 @@ pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<FuzzyMatch> {
         if i == 0 {
             break;
         }
-        match back[i][j] {
-            Some(prev_j) => {
-                j = prev_j;
-                i -= 1;
-            }
-            // The DP filled back[i][j] whenever dp[i][j] was set above NEG, so
-            // a None here would be an internal inconsistency — treat as no
-            // match rather than panicking.
-            None => return None,
+        {
+            let prev_j = back[i][j]?;
+            j = prev_j;
+            i -= 1;
         }
     }
     positions.reverse();

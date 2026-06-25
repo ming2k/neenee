@@ -1,18 +1,18 @@
 use crate::tui::start_tui;
 use neenee_agent::catalog;
 use neenee_agent::orchestration::{
-    refresh_agent_pursuit, start_repeat_scheduler, turn, MidTurnPruneGate, ProxyProvider,
+    MidTurnPruneGate, ProxyProvider, refresh_agent_pursuit, start_repeat_scheduler, turn,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentTool};
-use neenee_core::{AgentRequest, AgentResponse, Provider, TurnEvent, CHARS_PER_TOKEN, EXPLORE};
+use neenee_core::{AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent};
 use neenee_store::{
+    RepeatStore,
     config::Config,
     embedding, lock, paths, provider_usage,
     session::{self, SessionStore},
-    RepeatStore,
 };
-use neenee_tools::commands::{discover_commands, CustomCommand};
+use neenee_tools::commands::{CustomCommand, discover_commands};
 use neenee_tools::mcp::load_mcp_tools;
 mod hooks;
 mod tui;
@@ -29,15 +29,15 @@ mod shell;
 mod side;
 
 use pursuits::load_legacy_pursuit_from_config;
-use startup::{init_tracing, parse_args, BuiltinCmd, StartupMode};
+use startup::{BuiltinCmd, StartupMode, init_tracing, parse_args};
 
 use agent_setup::reseed_prune_threshold;
 use side::SideSession;
 
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::sync::{atomic::AtomicU64, Arc};
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use std::sync::{Arc, atomic::AtomicU64};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]

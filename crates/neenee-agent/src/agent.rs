@@ -644,9 +644,10 @@ impl Agent {
         while let Ok(op) = rx.try_recv() {
             match op {
                 AgentOp::InjectUserMessage(text) => {
-                    messages.push(Message::new(Role::User, text).with_origin(
-                        InjectionOrigin::new(InjectionKind::SubagentSteer),
-                    ));
+                    messages.push(
+                        Message::new(Role::User, text)
+                            .with_origin(InjectionOrigin::new(InjectionKind::SubagentSteer)),
+                    );
                 }
                 AgentOp::InterAgentMessage { msg } => {
                     messages.push(Message::injected(
@@ -902,7 +903,11 @@ impl Agent {
             // round instead of ending the turn.
             if let Some((prompt, kind)) = self.stop_gate(&response).await {
                 self.pursuit_state.bump_iterations();
-                messages.push(Message::injected(Role::User, prompt, InjectionOrigin::new(kind)));
+                messages.push(Message::injected(
+                    Role::User,
+                    prompt,
+                    InjectionOrigin::new(kind),
+                ));
                 continue;
             }
 
@@ -1132,7 +1137,11 @@ impl Agent {
             // re-inject the condition and force another round.
             if let Some((prompt, kind)) = self.stop_gate(&response).await {
                 self.pursuit_state.bump_iterations();
-                messages.push(Message::injected(Role::User, prompt, InjectionOrigin::new(kind)));
+                messages.push(Message::injected(
+                    Role::User,
+                    prompt,
+                    InjectionOrigin::new(kind),
+                ));
                 continue;
             }
 
@@ -1615,7 +1624,7 @@ impl Agent {
                 return ToolOutput::Error {
                     message: format!("Tool '{}' not found", call.name),
                     detail: None,
-                }
+                };
             }
         };
 

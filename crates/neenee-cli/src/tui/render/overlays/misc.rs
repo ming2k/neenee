@@ -1,19 +1,19 @@
 //! History search, tool-step detail, help, plan preview, and toast modals.
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block as RtBlock, Borders, Clear, Paragraph},
-    Frame,
 };
 
 use super::common::caret_column;
 use crate::tui::layout::LayoutMap;
+use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
 };
-use crate::tui::render::Theme;
 use unicode_width::UnicodeWidthStr;
 
 /// Draw the history search modal.
@@ -149,12 +149,12 @@ pub fn draw_history_modal(
         let prefix = "Input History  ❯ ".width() as u16;
         let cursor_x = h.x + prefix + caret_column(query, cursor_position);
         let cursor_y = h.y;
-        frame.set_cursor(cursor_x, cursor_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
 pub fn draw_armed_toast(frame: &mut Frame, message: &str, theme: &Theme) {
-    let size = frame.size();
+    let size = frame.area();
     toast(frame, theme, message, theme.warn(), size.width);
 }
 
@@ -163,7 +163,6 @@ pub fn draw_armed_toast(frame: &mut Frame, message: &str, theme: &Theme) {
 /// the step's complete output in a centered, scrollable panel so a long result
 /// can be inspected without scrolling the whole transcript. Shell output is
 /// broken into `$ command`, stdout, stderr (in `error_fg`), and an exit footer
-
 pub fn draw_tool_step_detail_overlay(
     frame: &mut Frame,
     msg: &crate::tui::document::TranscriptMessage,
@@ -355,7 +354,7 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
 }
 
 pub fn draw_copy_toast(frame: &mut Frame, message: &str, failed: bool, theme: &Theme) {
-    let size = frame.size();
+    let size = frame.area();
     let color = if failed { theme.err() } else { theme.ok() };
     toast(frame, theme, message, color, size.width);
 }

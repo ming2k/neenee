@@ -77,7 +77,7 @@ jobs:
       - run: cargo test --all --locked --no-fail-fast
 
   msrv:
-    name: MSRV (1.88)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -86,10 +86,10 @@ jobs:
       # in lockstep when raising rust-version.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88.0"
+          toolchain: "1.85.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.88
+          key: msrv-1.85
       # `--locked` guarantees the Cargo.lock resolves under this toolchain.
       - run: cargo check --all-targets --locked
 

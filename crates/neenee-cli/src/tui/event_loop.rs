@@ -9,11 +9,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crossterm::event;
-use ratatui::{backend::Backend, Terminal};
+use ratatui::{Terminal, backend::Backend};
 use tokio::sync::mpsc;
 
 use neenee_core::{
@@ -30,10 +30,10 @@ use crate::tui::input::{self};
 use crate::tui::layout::{InteractiveTarget, InteractiveTargetKind, LayoutMap};
 use crate::tui::render;
 use crate::tui::selection::{
-    floor_char_boundary, get_selected_text, inclusive_end, SelectionState,
+    SelectionState, floor_char_boundary, get_selected_text, inclusive_end,
 };
 use crate::tui::step_interaction;
-use crate::tui::{ActivityTab, App, Modal, Recess, SessionTab, PROVIDERS};
+use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
 
 use tokio::sync::Mutex;
 
@@ -119,7 +119,10 @@ pub(super) async fn run_app_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     runtime: UiRuntime,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    io::Error: From<<B as Backend>::Error>,
+{
     let mut _copy_toast_timer: u8 = 0;
     // Clipboard copies run in background tasks so a slow/hanging system
     // clipboard (arboard/wl-copy) can never freeze the event loop.
@@ -413,6 +416,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     turn_started_at: app.turn_started_at,
                     hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
+                    logo: app.logo.as_deref(),
                     theme: &app.theme,
                 },
             );

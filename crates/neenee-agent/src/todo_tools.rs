@@ -12,10 +12,9 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use serde_json::json;
 
-use neenee_core::{TodoStatus, TodoToolContext, Tool, ToolAccess, MAX_TODOS};
+use neenee_core::{MAX_TODOS, TodoStatus, TodoToolContext, Tool, ToolAccess};
 
-const TODO_DESCRIPTION: &str =
-    "Maintain the task list for the current work. Replace the whole list each call with the current \
+const TODO_DESCRIPTION: &str = "Maintain the task list for the current work. Replace the whole list each call with the current \
      set of concrete steps, in the order you intend to tackle them. At most one item may be \
      in_progress. This list is the single source of truth shown in the activity bar and task \
      panel and persisted across restarts, so keep it honest: add an item when you commit to a step, \
@@ -179,8 +178,7 @@ impl Tool for TodoWriteTool {
     }
 }
 
-const TODO_UPDATE_DESCRIPTION: &str =
-    "Surgically update the status of one or more existing todo items without re-sending the whole \
+const TODO_UPDATE_DESCRIPTION: &str = "Surgically update the status of one or more existing todo items without re-sending the whole \
      list. `key` is either a 1-based position as shown by the `todo` tool (\"1\", \"3\") or, when \
      not a valid position, a case-insensitive substring of the item content (all matches update). \
      Prefer this over `todo` when you only want to mark progress on a single step.";

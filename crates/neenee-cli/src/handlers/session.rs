@@ -5,13 +5,13 @@
 //! match the original loop locals (`session`, `agent`, `resp_tx`, `side`,
 //! `active_view_side`, …) so the body reads exactly as it did inline.
 
-use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
+use neenee_agent::skills::SkillRegistry;
 use neenee_core::{AgentResponse, McpConnectionStatus};
 use neenee_store::{config::Config, session::SessionStore};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock as AsyncRwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 
 use crate::session_view::{build_session_context, build_sessions_overview};
 use crate::side::SideSession;

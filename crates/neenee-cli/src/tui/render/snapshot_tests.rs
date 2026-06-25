@@ -13,14 +13,14 @@
 
 #![cfg(test)]
 
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
 use crate::tui::document::{MessageKind, TranscriptMessage};
 use crate::tui::layout::LayoutMap;
 use crate::tui::selection::SelectionState;
 
-use super::step::draw_tool_step;
 use super::Theme;
+use super::step::draw_tool_step;
 
 /// Build a finished tool-step message with optional output and expand state.
 fn tool_step(
@@ -87,7 +87,7 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
         .draw(|f| {
-            let area: Rect = f.size();
+            let area: Rect = f.area();
             let mut layout_map = LayoutMap::default();
             let selection = SelectionState::default();
             let theme = Theme::default();
@@ -346,7 +346,7 @@ fn bash_running_streams_live_preview() {
 
 #[test]
 fn tool_step_detail_overlay_renders_full_shell_output() {
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     let m = tool_step_structured(
         "bash",
         r#"{"command":"cargo test"}"#,

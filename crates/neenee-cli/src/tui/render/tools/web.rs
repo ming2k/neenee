@@ -1,6 +1,6 @@
 //! Presenters for `webfetch` and `websearch`.
 
-use super::{truncate, ToolPresenter, ToolView};
+use super::{ToolPresenter, ToolView, truncate};
 
 pub struct WebFetchPresenter;
 
