@@ -159,6 +159,7 @@ impl Provider for GeminiProvider {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         })
     }
 

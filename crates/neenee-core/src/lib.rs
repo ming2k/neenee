@@ -31,7 +31,9 @@ pub use error::{
 };
 
 pub mod message;
-pub use message::{ImagePart, Message, Role, ToolCall, ToolResult};
+pub use message::{
+    ImagePart, InjectionKind, InjectionOrigin, Message, Role, ToolCall, ToolResult,
+};
 
 pub mod tool_output;
 pub use tool_output::{PatchOp, ToolOutput, ToolStream};

@@ -97,22 +97,6 @@ use tokio_util::sync::CancellationToken;
 /// the user explicitly armed — see ADR-0015.
 const MAX_PURSUIT_ITERATIONS: u32 = 50;
 
-/// Consecutive all-read-only rounds after which the in-loop semantic review
-/// fires automatically (ADR-0030). A weak trigger only — the verdict still
-/// comes from `LoopingReview`. Micro-adjusted re-reads (which bypass the
-/// equality guard because their arguments never compare equal) show up here,
-/// because every micro-read round is read-only. Tuned below the point a
-/// genuinely stuck model wastes many rounds but above where legitimate
-/// methodical exploration would trip it.
-const LOOP_REVIEW_ROUNDS: u32 = 6;
-
-/// Repeated-call count at which the in-loop semantic review fires automatically
-/// (ADR-0030), independent of the read-only-round trigger. Catches tight loops
-/// that interleave a non-read call. This is the primary soft intervention for
-/// repeated calls — the hard equality-guard abort was removed in favour of
-/// relying on this review plus context compaction and user interrupt (`Esc`).
-const LOOP_REVIEW_REPEATED: usize = 2;
-
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
 /// deltas) before the stream is considered stalled. All LLM providers use
 /// `reqwest::Client::new()` which sets no read timeout, so without this guard a
@@ -150,7 +134,6 @@ mod pursuit_state;
 pub mod session_review;
 pub mod session_title;
 pub mod skills;
-mod steering;
 pub mod subagent_tool;
 pub mod todo_tools;
 

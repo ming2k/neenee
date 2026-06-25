@@ -24,6 +24,7 @@ impl Provider for MockProvider {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         })
     }
 

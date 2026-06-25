@@ -20,11 +20,16 @@ impl Tool for ReadFileTool {
          HOW TO USE:\n\
          - First read of an unknown file: call with just `path` (offset \
          defaults to 1) to discover its structure.\n\
+         - Call this tool in parallel ONLY when you want to read several \
+         DIFFERENT files at once. Never issue multiple reads of the same file \
+         in one round — the page boundary is line-based and you cannot \
+         predict it, so parallel reads of one file overlap.\n\
+         - To page through a single file, read sequentially: each result ends \
+         with `offset=<next>`; call again with exactly that offset. Do not \
+         guess or reuse an offset you have already read.\n\
          - Looking for specific content in a large file: use `grep` FIRST — \
          it returns `path:line:content` matches with exact line numbers, \
          which you can then target with this tool's `offset` parameter.\n\
-         - To continue a paginated read: advance to the exact `offset=<next>` \
-         shown in the suffix — never re-read the same range.\n\
          - Avoid tiny repeated slices (e.g. 30-line chunks). If you need more \
          context, read a larger window with a bigger `limit`.\n\
          - An empty range means you are past EOF.\n\

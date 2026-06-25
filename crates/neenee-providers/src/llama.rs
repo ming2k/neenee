@@ -94,6 +94,7 @@ impl Provider for LlamaServerProvider {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         })
     }
 

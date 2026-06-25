@@ -32,11 +32,10 @@ pub const THINKING_KEY: &str = "thinking";
 /// # turn cap; the loop otherwise runs until the model stops, the user
 /// # interrupts, or context compaction cannot relieve pressure (ADR-0009).
 /// # hard_stop_rounds = 0
-/// # In-loop semantic review + anti-anchoring nudge (ADR-0030). When true the
-/// # harness fires `/review` once per turn on a read-only-round streak or a
-/// # repeated-call count, injecting a steering nudge on a `Stuck` verdict so a
-/// # micro-adjusted re-read loop is corrected instead of running to the
-/// # equality guard's hard abort. Always off on sub-agents.
+/// # loop_review_enabled is accepted for backwards compatibility but is now a
+/// # no-op: the automatic in-loop review and anti-anchoring nudge were removed
+/// # (they could reinforce the very read-loop they targeted). On-demand
+/// # `/review` remains available.
 /// loop_review_enabled = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,12 +44,15 @@ pub struct AgentConfig {
     /// Opt-in hard-stop budget: abort a turn after this many total tool
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
     /// `Agent::set_hard_stop_rounds`.
+    /// Opt-in hard-stop budget: abort a turn after this many total tool
+    /// rounds. `0` (the default) means uncapped. Mutated at runtime via
+    /// `Agent::set_hard_stop_rounds`.
     pub hard_stop_rounds: usize,
-    /// Whether the in-loop semantic review and anti-anchoring nudge are active
-    /// (ADR-0030). When `true` the harness fires `review_now` once per turn on
-    /// a read-only-round streak or a repeated-call count, injecting a steering
-    /// nudge on a `Stuck` verdict. Mutated at runtime via
-    /// `Agent::set_loop_review_enabled`. Always `false` on sub-agents.
+    /// Deprecated no-op, kept for backwards compatibility with existing config
+    /// files. The automatic in-loop semantic review and anti-anchoring nudge
+    /// were removed (they could reinforce the read-loop they targeted);
+    /// `set_loop_review_enabled` is now a no-op stub. On-demand `/review` is
+    /// unaffected.
     pub loop_review_enabled: bool,
 }
 

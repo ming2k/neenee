@@ -49,6 +49,7 @@ impl Provider for PermissionTestProvider {
                 hidden: false,
                 children: None,
                 subagent_meta: None,
+                origin: None,
             })
         } else {
             Ok(Message::new(Role::Assistant, "done"))
@@ -563,34 +564,6 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
     assert!(recorded
         .iter()
         .any(|event| matches!(event, AgentEvent::ToolCall { name, .. } if name == "stream_read")));
-}
-
-#[test]
-fn repeated_tool_calls_are_counted_without_aborting() {
-    let agent = agent();
-    let call = ToolCall {
-        id: "call".to_string(),
-        name: "read_file".to_string(),
-        arguments: "{\"path\":\"README.md\"}".to_string(),
-    };
-    let mut previous = None;
-    let mut repeats = 0;
-
-    // The guard counts repeats for the loop-review trigger but no longer
-    // hard-aborts — the model is free to re-issue calls and the soft
-    // intervention (maybe_run_loop_review) steers it instead.
-    for i in 0..10 {
-        agent.guard_repeated_call(&call, &mut previous, &mut repeats);
-        assert_eq!(repeats, i + 1);
-    }
-    // A different call resets the counter.
-    let other = ToolCall {
-        id: "call2".to_string(),
-        name: "read_file".to_string(),
-        arguments: "{\"path\":\"other.rs\"}".to_string(),
-    };
-    agent.guard_repeated_call(&other, &mut previous, &mut repeats);
-    assert_eq!(repeats, 1);
 }
 
 #[tokio::test]
@@ -1437,19 +1410,6 @@ fn agent_config_defaults_match_runtime_constants() {
     // The agent seeds the same hard-stop budget by default (uncapped).
     let agent = agent();
     assert_eq!(agent.get_hard_stop_rounds(), 0);
-}
-
-#[test]
-fn loop_review_getter_round_trips_setter() {
-    // ADR-0030: the in-loop review toggle defaults on and round-trips, mirroring
-    // the verify-nudge contract. Sub-agents and the guard-abort golden test flip
-    // it off.
-    let agent = agent();
-    assert!(agent.get_loop_review_enabled());
-    agent.set_loop_review_enabled(false);
-    assert!(!agent.get_loop_review_enabled());
-    agent.set_loop_review_enabled(true);
-    assert!(agent.get_loop_review_enabled());
 }
 
 // ── /debug network capture ────────────────────────────────────────────

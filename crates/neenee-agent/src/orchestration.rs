@@ -33,7 +33,8 @@ use tokio_util::sync::CancellationToken;
 use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
-    Message, Provider, ProviderStreamEvent, Pursuit, Role, TurnEvent, PURSUIT_COMPLETE_MARKER,
+    InjectionKind, InjectionOrigin, Message, Provider, ProviderStreamEvent, Pursuit, Role,
+    TurnEvent, PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
@@ -590,7 +591,11 @@ pub async fn execute_turn(
     let mut turn_history = {
         let mut history = history.lock().await;
         history.push(if input.hidden {
-            Message::hidden(Role::User, input.prompt)
+            Message::injected(
+                Role::User,
+                input.prompt,
+                InjectionOrigin::new(InjectionKind::HiddenTurnInput),
+            )
         } else {
             let message = Message::new(Role::User, input.prompt);
             let message = match input.display_prompt {

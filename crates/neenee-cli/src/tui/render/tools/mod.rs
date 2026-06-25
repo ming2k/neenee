@@ -135,6 +135,13 @@ impl ToolView<'_> {
     pub fn str(&self, key: &str) -> Option<&str> {
         self.args.get(key).and_then(Value::as_str)
     }
+
+    /// Fetch a non-negative integer argument, or `None` when absent /
+    /// non-numeric. Used by presenters that surface numeric params such as
+    /// `read_file`'s `offset` / `limit` in their collapsed header.
+    pub fn u64(&self, key: &str) -> Option<u64> {
+        self.args.get(key).and_then(Value::as_u64)
+    }
 }
 
 /// How a single tool renders in the transcript. Stateless: implementors are

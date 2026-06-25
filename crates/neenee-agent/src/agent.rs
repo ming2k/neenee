@@ -47,11 +47,6 @@ pub struct Agent {
     /// subagent (`/review`). Defaults to [`crate::default_reviews`] (looping);
     /// empty on sub-agents (which have no `/review` path).
     reviews: Vec<Arc<dyn SessionReview>>,
-    /// Whether the in-loop semantic review and anti-anchoring nudge are active
-    /// (ADR-0030). Seeded to `true`; sub-agents (which have no `/review` path
-    /// and must not recurse into a reviewer) and tests that want the pure
-    /// guard-abort behaviour flip it via [`Self::set_loop_review_enabled`].
-    loop_review_enabled: Arc<std::sync::Mutex<bool>>,
     /// Runtime filesystem-write boundary for this agent (ADR-0028). The main
     /// agent is [`neenee_core::WriteScope::Unrestricted`]; a subagent carries
     /// the scope resolved from its profile's `write_paths` grant. Enforced at
@@ -151,23 +146,11 @@ impl SubagentHandle {
 #[derive(Default)]
 pub(crate) struct TurnState {
     token_usage: TokenUsage,
-    /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
-    previous_call: Option<(String, String)>,
-    repeated_calls: usize,
-    /// Consecutive rounds whose tool calls were all `Read`-tier. A weak
-    /// trigger for the in-loop semantic review (ADR-0030): a read-only streak
-    /// is not itself a verdict — `LoopingReview` decides whether the turn is
-    /// actually stuck. Reset to 0 by any round containing an `Execute`/`Write`
-    /// call.
+    /// Consecutive rounds whose tool calls were all `Read`-tier. Surfaced to
+    /// user-configured round hooks (`HookEvent::Round { consecutive_readonly }`)
+    /// so a hook can act on "exploration without progress". Reset to 0 by any
+    /// round containing an `Execute`/`Write` call.
     pub(crate) consecutive_readonly_rounds: u32,
-    /// One-shot latch so the automatic loop review fires at most once per turn
-    /// (ADR-0030). Without it a stuck turn would pay for a reviewer inference
-    /// every round.
-    pub(crate) loop_review_fired: bool,
-    /// The `Stuck` verdict detail captured the one time the loop review fired,
-    /// fed to [`crate::steering::LoopingNudge`] to build its prompt. `None`
-    /// until a review returns `Stuck`.
-    pub(crate) loop_signal: Option<String>,
 }
 
 impl Agent {
@@ -210,7 +193,6 @@ impl Agent {
             context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
-            loop_review_enabled: Arc::new(std::sync::Mutex::new(true)),
             write_scope: std::sync::Mutex::new(neenee_core::WriteScope::default()),
             hooks: crate::hook_runner::HookRunner::new(),
             inbox_tx: std::sync::Mutex::new(None),
@@ -264,20 +246,7 @@ impl Agent {
     /// active (ADR-0030). Mirrors `[agent] loop_review_enabled` in
     /// `config.toml`; flipped to `false` on sub-agents (no recursion) and in
     /// tests that exercise the pure equality-guard abort path.
-    pub fn set_loop_review_enabled(&self, enabled: bool) {
-        *self
-            .loop_review_enabled
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = enabled;
-    }
-
-    /// Whether the in-loop semantic review / anti-anchoring nudge is active.
-    pub fn get_loop_review_enabled(&self) -> bool {
-        *self
-            .loop_review_enabled
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    pub fn set_loop_review_enabled(&self, _enabled: bool) {}
 
     /// Install (or clear with `None`) the mid-turn context-relief gate.
     pub fn set_context_relief_gate(&self, gate: Option<Arc<dyn ContextReliefGate>>) {
@@ -524,9 +493,13 @@ impl Agent {
     /// turn end — i.e. both the pursuit gate and every Stop hook must agree to
     /// stop. The pursuit gate is queried first so its safety-cap disarm side
     /// effect is preserved.
-    async fn stop_gate(&self, response: &Message) -> Option<String> {
+    ///
+    /// Returns the prompt together with the [`InjectionKind`] that produced it,
+    /// so the push site stamps the correct provenance (pursuit continuation vs
+    /// a `Stop` hook inject) instead of guessing from the text.
+    async fn stop_gate(&self, response: &Message) -> Option<(String, InjectionKind)> {
         if let Some(prompt) = self.pursuit_continuation(response) {
-            return Some(prompt);
+            return Some((prompt, InjectionKind::PursuitContinuation));
         }
         self.hooks()
             .check_stop(
@@ -535,6 +508,7 @@ impl Agent {
                 self.hook_cwd().as_deref(),
             )
             .await
+            .map(|prompt| (prompt, InjectionKind::Hook(HookEventKind::Stop)))
     }
 
     pub fn thread_id(&self) -> Option<String> {
@@ -670,10 +644,16 @@ impl Agent {
         while let Ok(op) = rx.try_recv() {
             match op {
                 AgentOp::InjectUserMessage(text) => {
-                    messages.push(Message::new(Role::User, text));
+                    messages.push(Message::new(Role::User, text).with_origin(
+                        InjectionOrigin::new(InjectionKind::SubagentSteer),
+                    ));
                 }
                 AgentOp::InterAgentMessage { msg } => {
-                    messages.push(Message::hidden(Role::User, msg));
+                    messages.push(Message::injected(
+                        Role::User,
+                        msg,
+                        InjectionOrigin::new(InjectionKind::InterAgent),
+                    ));
                 }
                 AgentOp::Interrupt | AgentOp::Shutdown => {
                     interrupted = true;
@@ -914,16 +894,15 @@ impl Agent {
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 self.run_round_hooks(messages, &state, tool_rounds).await;
-                self.maybe_run_loop_review(messages, &mut state).await;
                 continue;
             }
 
             // Pursuit stop-gate: if a pursuit is armed and the model has not
             // signalled completion, re-inject the condition and force another
             // round instead of ending the turn.
-            if let Some(prompt) = self.stop_gate(&response).await {
+            if let Some((prompt, kind)) = self.stop_gate(&response).await {
                 self.pursuit_state.bump_iterations();
-                messages.push(Message::hidden(Role::User, prompt));
+                messages.push(Message::injected(Role::User, prompt, InjectionOrigin::new(kind)));
                 continue;
             }
 
@@ -1118,6 +1097,7 @@ impl Agent {
                 hidden: false,
                 children: None,
                 subagent_meta: None,
+                origin: None,
             };
             if !valid_assistant_response(&response) {
                 return Err(empty_response_error(&response));
@@ -1144,16 +1124,15 @@ impl Agent {
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 self.run_round_hooks(messages, &state, tool_rounds).await;
-                self.maybe_run_loop_review(messages, &mut state).await;
                 continue;
             }
 
             // Pursuit stop-gate (mirror of the non-streaming path): if a
             // pursuit is armed and the model has not signalled completion,
             // re-inject the condition and force another round.
-            if let Some(prompt) = self.stop_gate(&response).await {
+            if let Some((prompt, kind)) = self.stop_gate(&response).await {
                 self.pursuit_state.bump_iterations();
-                messages.push(Message::hidden(Role::User, prompt));
+                messages.push(Message::injected(Role::User, prompt, InjectionOrigin::new(kind)));
                 continue;
             }
 
@@ -1199,13 +1178,9 @@ impl Agent {
             .as_ref()
             .filter(|calls| !calls.is_empty())
         {
-            for call in tool_calls {
-                self.guard_repeated_call(call, &mut state.previous_call, &mut state.repeated_calls);
-            }
-            // ADR-0030: classify this round for the loop-review trigger. An
-            // all-Read round extends the consecutive read-only streak; any
-            // Execute/Write call resets it. This is a trigger only — the
-            // verdict still comes from LoopingReview (ADR-0016).
+            // Classify this round for the round-hook axis: an all-Read round
+            // extends the consecutive read-only streak (surfaced to hooks);
+            // any Execute/Write call resets it.
             if tool_calls
                 .iter()
                 .all(|c| self.tool_access(&c.name) == ToolAccess::Read)
@@ -1265,7 +1240,6 @@ impl Agent {
             if streamed_text {
                 on_event(AgentEvent::AssistantDiscard);
             }
-            self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls);
             tracing::debug!(tool = %call.name, "tool call (text fallback)");
             tool_call::attach_fallback_tool_call(messages, &call);
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
@@ -1385,7 +1359,8 @@ impl Agent {
         let summary = result.to_text();
         let session_id = self.hook_session_id();
         let cwd = self.hook_cwd();
-        let injected = if result.is_error() {
+        let is_error = result.is_error();
+        let injected = if is_error {
             registry
                 .run_post_tool_use_failure(
                     call.name.as_str(),
@@ -1405,37 +1380,23 @@ impl Agent {
                 )
                 .await
         };
-        for context in injected {
-            messages.push(Message::hidden(Role::User, context));
-        }
-    }
-
-    /// Track repeated tool calls for the loop-review trigger (ADR-0030).
-    /// Counts consecutive identical calls (same name + same arguments) so
-    /// [`maybe_run_loop_review`](Self::maybe_run_loop_review) can fire a soft
-    /// semantic review when the count reaches [`LOOP_REVIEW_REPEATED`]. No
-    /// longer hard-aborts — the model is free to re-issue calls and the soft
-    /// intervention steers it instead.
-    pub(crate) fn guard_repeated_call(
-        &self,
-        call: &ToolCall,
-        previous_call: &mut Option<(String, String)>,
-        repeated_calls: &mut usize,
-    ) {
-        let signature = (call.name.clone(), call.arguments.clone());
-        if previous_call.as_ref() == Some(&signature) {
-            *repeated_calls += 1;
+        let kind = if is_error {
+            InjectionKind::Hook(HookEventKind::PostToolUseFailure)
         } else {
-            *previous_call = Some(signature);
-            *repeated_calls = 1;
+            InjectionKind::Hook(HookEventKind::PostToolUse)
+        };
+        for context in injected {
+            messages.push(Message::injected(
+                Role::User,
+                context,
+                InjectionOrigin::new(kind),
+            ));
         }
     }
 
-    /// Look up a tool's [`ToolAccess`] by name (ADR-0030). Used to classify a
-    /// round as read-only for the loop-review trigger. An unknown name (a
-    /// disabled or not-yet-registered tool) reads as `Read`: such a call would
-    /// fail before executing, so misclassifying it can only over-trigger a
-    /// review the reviewer then clears — never silence a real loop.
+    /// Look up a tool's [`ToolAccess`] by name. Used to classify a round as
+    /// read-only for the round-hook streak counter. An unknown name (a
+    /// disabled or not-yet-registered tool) reads as `Read`.
     fn tool_access(&self, name: &str) -> ToolAccess {
         self.tools
             .iter()
@@ -1444,37 +1405,9 @@ impl Agent {
             .unwrap_or(ToolAccess::Read)
     }
 
-    /// ADR-0030 early loop intervention. Called once per tool round from both
-    /// the streaming and non-streaming loops. On a weak signal — a read-only
-    /// round streak ([`LOOP_REVIEW_ROUNDS`]) or a repeated-call count
-    /// ([`LOOP_REVIEW_REPEATED`]) — it fires [`Self::review_now`] exactly once
-    /// per turn (one-shot via [`TurnState::loop_review_fired`]). A `Stuck`
-    /// verdict injects the anti-anchoring nudge instead of aborting.
-    /// Non-terminating: the hard backstop stays user `Esc` + the opt-in
-    /// `hard_stop_rounds` (ADR-0016).
-    async fn maybe_run_loop_review(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
-        if !self.get_loop_review_enabled()
-            || state.loop_review_fired
-            || !(state.consecutive_readonly_rounds >= LOOP_REVIEW_ROUNDS
-                || state.repeated_calls >= LOOP_REVIEW_REPEATED)
-        {
-            return;
-        }
-        state.loop_review_fired = true;
-        let verdicts = self.review_now(messages).await;
-        if let Some(detail) = crate::steering::stuck_detail(&verdicts) {
-            state.loop_signal = Some(detail);
-            messages.push(Message::hidden(
-                Role::User,
-                crate::steering::LoopingNudge::prompt(state),
-            ));
-        }
-    }
-
-    /// ADR-0030: fire user-configured `Round` hooks at the round boundary and
-    /// fold any `Inject` context into hidden user messages. `Deny` is already
-    /// discarded by [`HookRegistry::run_round`], so a round hook cannot abort
-    /// the turn.
+    /// Fire user-configured `Round` hooks at the round boundary and fold any
+    /// `Inject` context into hidden user messages. `Deny` is already discarded
+    /// by [`HookRegistry::run_round`], so a round hook cannot abort the turn.
     async fn run_round_hooks(&self, messages: &mut Vec<Message>, state: &TurnState, round: usize) {
         let registry = self.hooks();
         if registry.is_empty() {
@@ -1489,7 +1422,11 @@ impl Agent {
             )
             .await;
         for context in injected {
-            messages.push(Message::hidden(Role::User, context));
+            messages.push(Message::injected(
+                Role::User,
+                context,
+                InjectionOrigin::new(InjectionKind::Hook(HookEventKind::Round)),
+            ));
         }
     }
 

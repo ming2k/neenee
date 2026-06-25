@@ -5,7 +5,7 @@
 //! auto-loads skills whose names are mentioned in the latest user turn.
 
 use crate::skills;
-use crate::{Agent, Message, Role};
+use crate::{Agent, InjectionKind, InjectionOrigin, Message, Role};
 
 impl Agent {
     /// Build the system-role message that frames every turn.
@@ -94,6 +94,7 @@ impl Agent {
         }
 
         Message::new(Role::System, parts.join("\n"))
+            .with_origin(InjectionOrigin::new(InjectionKind::SystemPrompt))
     }
 
     /// Place the freshly built system message at the head of the conversation,
@@ -136,12 +137,14 @@ impl Agent {
             if already_loaded.contains(&skill.name) {
                 continue;
             }
-            messages.push(Message::hidden(
+            messages.push(Message::injected(
                 Role::User,
                 format!(
                     "[Skill '{}' loaded]\n{}\n[/Skill]",
                     skill.name, skill.content
                 ),
+                InjectionOrigin::new(InjectionKind::ImplicitSkill)
+                    .with_reason(skill.name.clone()),
             ));
         }
     }

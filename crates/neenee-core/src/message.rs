@@ -1,5 +1,6 @@
 //! Conversation message types shared across the harness, providers, and UI.
 
+use crate::hooks::HookEventKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,6 +9,94 @@ pub enum Role {
     Assistant,
     System,
     Tool,
+}
+
+/// Provenance of a message that was inserted by the harness rather than
+/// produced by the model or typed by the user. Stamped at every injection
+/// site so a persisted transcript can answer "what was injected, where did
+/// it come from, and why" — exactly reconstructing the live turn without
+/// fragile string-sniffing.
+///
+/// `origin: None` is the default for every genuine message: real user input,
+/// assistant replies, and tool results. Only harness-injected messages carry
+/// an origin.
+///
+/// Kept as `Option<InjectionOrigin>` on [`Message`] with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]` so the wire
+/// shape of a default message is unchanged and legacy snapshots / event-log
+/// lines load as `origin: None` with no migration (per ADR-0017 / ADR-0022
+/// backward-compat contract).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectionOrigin {
+    /// Structured source classifier.
+    pub kind: InjectionKind,
+    /// Free-form reason — e.g. the hook name, the steering cause, the skill
+    /// that fired. `None` when the kind alone is self-describing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl InjectionOrigin {
+    pub fn new(kind: InjectionKind) -> Self {
+        Self { kind, reason: None }
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+}
+
+/// Closed classifier for every harness injection path. Adding a variant
+/// requires stamping it at the corresponding call site; the enum exhaustiveness
+/// is the design lever that forces every injection to be traceable.
+///
+/// Each variant maps 1:1 to a concrete injection site in the harness; the
+/// doc-link in each arm is the single source of truth for "where does this
+/// come from".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionKind {
+    /// A user-configured hook returned `HookOutcome::Inject`. Carries the
+    /// lifecycle event so "which hook axis injected this" is recoverable.
+    /// Sites: `HookRegistry::{session_start, run_post_tool_use,
+    /// run_post_tool_use_failure, check_stop, run_round}`.
+    Hook(HookEventKind),
+    /// Pursuit stop-gate re-applied the continuation prompt to keep the model
+    /// on-task mid-turn. Site: `PursuitState::inject_continuation` and the
+    /// `stop_gate` continuation arm.
+    PursuitContinuation,
+    /// The active pursuit's objective was changed mid-flight. Site:
+    /// `PursuitState::inject_objective_updated`.
+    PursuitObjectiveUpdated,
+    /// Inter-agent steering note (`AgentOp::InterAgentMessage`, codex
+    /// `InterAgentCommunication` analogue). Site: `Agent::drain_inbox`.
+    InterAgent,
+    /// Visible parent→child steering payload (`AgentOp::InjectUserMessage`,
+    /// codex `inject_if_running` analogue). Site: `Agent::drain_inbox`.
+    /// Lands as a *visible* user message, hence distinct from `InterAgent`.
+    SubagentSteer,
+    /// Implicit skill auto-load: the latest user turn mentioned a skill name,
+    /// so the skill body was injected in-context. Site:
+    /// `Agent::inject_implicit_skills`.
+    ImplicitSkill,
+    /// System-prompt assembly: the harness rebuilt the head system message
+    /// from the live pursuit, tool list, and skills index. Site:
+    /// `Agent::{build_system_message, ensure_system_prompt}`.
+    SystemPrompt,
+    /// Built-in anti-anchoring nudge fired by the in-loop semantic review
+    /// (ADR-0030 Stage 1) when the model is stuck in a read-only / repeated-
+    /// call loop. This is a harness-internal steering injection, distinct from
+    /// the user-configurable `Hook(Round)` axis. Site:
+    /// `Agent::maybe_run_loop_review` (`LoopingNudge::prompt`).
+    LoopReviewNudge,
+    /// Context-compaction checkpoint: an LLM summary of archived turns wrapped
+    /// under the stable checkpoint header. Site: `checkpoint_message`.
+    CompactionCheckpoint,
+    /// A harness-internal prompt admitted as a hidden user turn (resume/replay,
+    /// subagent tasking, `/review` re-runs). Site: `orchestrate_turn`
+    /// `input.hidden` branch.
+    HiddenTurnInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +160,14 @@ pub struct Message {
     /// harness fills in best-effort defaults on read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_meta: Option<SubagentMeta>,
+    /// Provenance of a harness-injected message (`None` for genuine user input,
+    /// assistant replies, and tool results). See [`InjectionOrigin`] / the
+    /// closed [`InjectionKind`] classifier. `#[serde(default,
+    /// skip_serializing_if = "Option::is_none")]` keeps the wire shape of a
+    /// default message unchanged so legacy snapshots and event-log lines load
+    /// as `origin: None` without migration (ADR-0017 / ADR-0022).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<InjectionOrigin>,
 }
 
 /// Sidecar metadata for a subagent run. Lives next to
@@ -136,6 +233,7 @@ impl Message {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         }
     }
 
@@ -143,6 +241,28 @@ impl Message {
         let mut message = Self::new(role, content);
         message.hidden = true;
         message
+    }
+
+    /// Construct a hidden user/system message with an explicit injection
+    /// origin. This is the canonical constructor for every harness injection
+    /// site — it stamps provenance at construction so it can never drift from
+    /// the content. Use [`Message::with_origin`] to stamp an existing message.
+    pub fn injected(
+        role: Role,
+        content: impl Into<String>,
+        origin: InjectionOrigin,
+    ) -> Self {
+        let mut message = Self::hidden(role, content);
+        message.origin = Some(origin);
+        message
+    }
+
+    /// Stamp / overwrite the injection origin on this message. Builder-style
+    /// companion to [`Message::injected`] for sites that build a message via
+    /// another constructor first (e.g. `Message::hidden(...).with_origin(...)`).
+    pub fn with_origin(mut self, origin: InjectionOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     pub fn with_display_content(mut self, content: impl Into<String>) -> Self {
@@ -186,6 +306,7 @@ impl Message {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         }
     }
 
@@ -281,6 +402,7 @@ mod tests {
                 hidden: false,
                 children: None,
                 subagent_meta: None,
+                origin: None,
             },
             inner_child,
         ];
@@ -316,6 +438,125 @@ mod tests {
         assert!(
             m.children.is_none(),
             "empty children should collapse to None"
+        );
+    }
+
+    #[test]
+    fn default_message_omits_origin_key() {
+        // A genuine message (user input / assistant / tool result) must
+        // serialise WITHOUT an `origin` key, so the wire shape is unchanged
+        // and legacy consumers / snapshot matchers keep working. Mirrors the
+        // `children` compat contract.
+        let m = Message::new(Role::User, "hi");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("origin"),
+            "default message must omit origin: {json}"
+        );
+        assert!(
+            !json.contains("injection"),
+            "default message must omit injection fields: {json}"
+        );
+    }
+
+    #[test]
+    fn legacy_json_without_origin_loads_as_none() {
+        // A pre-C4 snapshot / event-log line has no `origin` key and must
+        // deserialise to `origin: None`. This is the load-side of the
+        // backward-compat contract.
+        let json = r#"{"role":"User","content":"hi","hidden":false}"#;
+        let m: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(m.content, "hi");
+        assert!(m.origin.is_none());
+    }
+
+    #[test]
+    fn injection_origin_round_trips() {
+        // A stamped origin must survive a serialise → deserialise round trip
+        // with its kind, reason, and the nested HookEventKind intact. This is
+        // the contract that makes the persisted transcript faithfully
+        // reconstruct injection provenance.
+        use crate::hooks::HookEventKind;
+        let msg = Message::injected(
+            Role::User,
+            "remember X",
+            InjectionOrigin::new(InjectionKind::Hook(HookEventKind::PostToolUse))
+                .with_reason("my_hook.sh"),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        // The origin object is present in the wire form.
+        assert!(json.contains("\"origin\""), "origin must serialise: {json}");
+        assert!(
+            json.contains("\"reason\":\"my_hook.sh\""),
+            "reason must serialise: {json}"
+        );
+        let restored: Message = serde_json::from_str(&json).unwrap();
+        let origin = restored.origin.expect("origin round-trip");
+        assert_eq!(
+            origin.kind,
+            InjectionKind::Hook(HookEventKind::PostToolUse)
+        );
+        assert_eq!(origin.reason.as_deref(), Some("my_hook.sh"));
+    }
+
+    #[test]
+    fn every_injection_kind_serialises_distinctly() {
+        // The closed classifier must serialise to distinct wire forms so a
+        // persisted transcript can discriminate injection sources without
+        // ambiguity. Regression guard: adding a variant without a distinct
+        // serde tag would silently collapse provenance. We compare the full
+        // serialised `kind` (not just a prefix) because `Hook(HookEventKind)`
+        // serialises as a map `{"hook":"session_start"}` while unit variants
+        // serialise as a bare string.
+        use crate::hooks::HookEventKind;
+        let cases: Vec<InjectionKind> = vec![
+            InjectionKind::Hook(HookEventKind::SessionStart),
+            InjectionKind::Hook(HookEventKind::PostToolUse),
+            InjectionKind::Hook(HookEventKind::Stop),
+            InjectionKind::Hook(HookEventKind::Round),
+            InjectionKind::PursuitContinuation,
+            InjectionKind::PursuitObjectiveUpdated,
+            InjectionKind::InterAgent,
+            InjectionKind::SubagentSteer,
+            InjectionKind::ImplicitSkill,
+            InjectionKind::SystemPrompt,
+            InjectionKind::CompactionCheckpoint,
+            InjectionKind::HiddenTurnInput,
+            InjectionKind::LoopReviewNudge,
+        ];
+        let mut forms = Vec::new();
+        for kind in cases {
+            // Round-trip each kind in isolation.
+            let json = serde_json::to_string(&kind).unwrap();
+            let restored: InjectionKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, kind, "kind {kind:?} must round-trip");
+            forms.push(json);
+        }
+        let mut sorted = forms.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            forms.len(),
+            "injection kinds must serialise to distinct wire forms: {forms:?}"
+        );
+    }
+
+    #[test]
+    fn injected_constructor_stamps_origin_and_hidden() {
+        // `Message::injected` must set BOTH hidden=true (display contract) and
+        // origin=Some (provenance contract). The two are orthogonal: hidden
+        // governs visibility, origin governs "why is this here".
+        let m = Message::injected(
+            Role::User,
+            "nudge",
+            InjectionOrigin::new(InjectionKind::LoopReviewNudge),
+        );
+        assert!(m.hidden, "injected message must be hidden");
+        assert!(m.origin.is_some(), "injected message must carry origin");
+        assert_eq!(
+            m.origin.as_ref().unwrap().kind,
+            InjectionKind::LoopReviewNudge
         );
     }
 }

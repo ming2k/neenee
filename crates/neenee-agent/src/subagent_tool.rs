@@ -257,10 +257,10 @@ impl SubagentTool {
             sub_tools,
             SkillRegistry::empty(),
         ));
-        // ADR-0016/0030: a `task` sub-agent has no `/review` path and must not
-        // pay for (or recurse into) an in-loop review. An `EXPLORE` profile is
-        // read-only by design, so the read-only-round trigger would fire on it
-        // almost immediately — disable the in-loop review on sub-agents.
+        // A `task` sub-agent has no `/review` path and registers no review
+        // dimensions. (The in-loop review that used to need disabling here was
+        // removed; `set_loop_review_enabled` is now a no-op, kept only so this
+        // call site stays compilable.)
         sub_agent.set_loop_review_enabled(false);
         // Full-duplex (ADR-0029): install the child's steering inbox and lodge
         // its handle in the registry keyed by the parent tool-call id. Now any

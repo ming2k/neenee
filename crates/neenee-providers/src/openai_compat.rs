@@ -513,6 +513,7 @@ impl Provider for OpenAiCompatProvider {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         })
     }
 
@@ -834,6 +835,7 @@ mod tests {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         };
         let good_result = Message {
             role: Role::Tool,
@@ -849,6 +851,7 @@ mod tests {
             hidden: false,
             children: None,
             subagent_meta: None,
+            origin: None,
         };
         let orphan_result = Message {
             tool_call_id: Some("call_orphan".to_string()),

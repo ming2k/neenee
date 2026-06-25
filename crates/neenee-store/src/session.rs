@@ -13,7 +13,7 @@ use crate::blobs::BlobStore;
 use crate::events::{EventLog, SessionEvent};
 use crate::fsutil;
 use crate::paths;
-use neenee_core::{Message, Provider, Pursuit, Role};
+use neenee_core::{InjectionKind, InjectionOrigin, Message, Provider, Pursuit, Role};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,9 +26,11 @@ use tokio::sync::Mutex;
 pub use neenee_core::{estimate_chars, estimate_tokens};
 
 /// C2 (ADR-0022): added `title` and `title_manual`. C3 (ADR-0032): added
-/// `pursuit`. Both are structural no-ops for legacy snapshots, which load with
-/// the new fields at their `#[serde(default)]` values (`None` / `false`).
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+/// `pursuit`. C4 (ADR-0034): added `Message::origin` (`Option<InjectionOrigin>`)
+/// for structured injection provenance. All three are structural no-ops for
+/// legacy snapshots, which load with the new fields at their `#[serde(default)]`
+/// values (`None` / `false`).
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Sentinel value for `PursuitCheckpoint::max_iterations` indicating an uncapped
 /// run. `/pursue` runs until the model emits the completion marker, the user
@@ -150,6 +152,12 @@ fn migrate_session_data(mut data: SessionData) -> SessionData {
     // C3 (ADR-0032): `pursuit` was added with `#[serde(default)]`, so a legacy
     // snapshot already loads with `pursuit = None`; no payload transformation
     // is needed, only the version bump.
+    // C4 (ADR-0034): `Message::origin` (`Option<InjectionOrigin>`) was added
+    // with `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a
+    // legacy snapshot and event-log lines already load with `origin = None`
+    // for every message; no payload transformation is needed, only the version
+    // bump. Provenance is henceforth stamped at each injection site going
+    // forward — pre-C4 messages are simply unattributed.
     data.schema_version = CURRENT_SCHEMA_VERSION;
     data
 }
@@ -1241,7 +1249,11 @@ fn label_for(role: Role) -> Option<&'static str> {
 
 /// Build a checkpoint message wrapping `summary` with the durable header.
 pub fn checkpoint_message(summary: &str) -> Message {
-    Message::hidden(Role::User, format!("{CHECKPOINT_HEADER}{summary}"))
+    Message::injected(
+        Role::User,
+        format!("{CHECKPOINT_HEADER}{summary}"),
+        InjectionOrigin::new(InjectionKind::CompactionCheckpoint),
+    )
 }
 
 /// Assemble the final [`ContextReliefResult`] from a selection and a summary.
@@ -2590,6 +2602,99 @@ mod tests {
             messages[0].content_blob.is_none(),
             "memory uses inline content"
         );
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn injection_origin_survives_persist_and_reload() {
+        // A harness-injected message's provenance must round-trip through the
+        // snapshot cache AND the event-log replay path — the contract that lets
+        // a resumed session faithfully reconstruct what was injected and why.
+        // This is the end-to-end (store-layer) companion to the message-level
+        // round-trip test in neenee-core.
+        use neenee_core::{HookEventKind, InjectionKind, InjectionOrigin};
+        let directory =
+            std::env::temp_dir().join(format!("neenee-origin-session-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        let injected = Message::injected(
+            neenee_core::Role::User,
+            "setup context",
+            InjectionOrigin::new(InjectionKind::Hook(HookEventKind::SessionStart))
+                .with_reason("onstart.sh"),
+        );
+        store.replace_messages(vec![injected]).await.unwrap();
+
+        // The snapshot file carries the origin object.
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"origin\""),
+            "snapshot must persist origin: {raw}"
+        );
+        // HookEventKind serialises in PascalCase (no rename_all), so the wire
+        // tag is "SessionStart". Pretty-printed with a space after the colon.
+        assert!(
+            raw.contains("\"hook\": \"SessionStart\""),
+            "snapshot must persist the hook kind: {raw}"
+        );
+
+        // Reload via the event-log path (authoritative) rehydrates it intact.
+        let reloaded = SessionStore::for_path(path.clone());
+        let messages = reloaded.messages().await;
+        assert_eq!(messages.len(), 1);
+        let origin = messages[0].origin.as_ref().expect("origin reloaded");
+        assert_eq!(
+            origin.kind,
+            InjectionKind::Hook(HookEventKind::SessionStart)
+        );
+        assert_eq!(origin.reason.as_deref(), Some("onstart.sh"));
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn legacy_snapshot_without_origin_loads_as_none() {
+        // A pre-C4 snapshot file (no `origin` key on any message) must load
+        // with `origin: None` for every message — the store-layer side of the
+        // backward-compat contract. Provenance is simply absent for old data.
+        let directory =
+            std::env::temp_dir().join(format!("neenee-legacy-origin-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("session.json");
+        // Minimal pre-C4 snapshot: no origin key, schema_version 3.
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "parent_id": null,
+            "created_at": 1u64,
+            "updated_at": 1u64,
+            "messages": [
+                {"role":"User","content":"old user input","hidden":false},
+                {"role":"Assistant","content":"old reply","hidden":false}
+            ],
+            "archived_messages": [],
+            "loop_checkpoint": null,
+            "last_relief": null,
+            "project_root": ".",
+            "todos": [],
+            "schema_version": 3,
+            "checksum": null,
+            "title": null,
+            "title_manual": false,
+            "pursuit": null
+        });
+        fs::write(&path, legacy.to_string()).unwrap();
+
+        let store = SessionStore::for_path(path.clone());
+        let messages = store.messages().await;
+        assert_eq!(messages.len(), 2);
+        for (i, m) in messages.iter().enumerate() {
+            assert!(
+                m.origin.is_none(),
+                "legacy message {i} must load with origin None, got {:?}",
+                m.origin
+            );
+        }
 
         let _ = fs::remove_dir_all(directory);
     }

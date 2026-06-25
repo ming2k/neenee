@@ -91,11 +91,11 @@ impl Agent {
         let sub_tools = REVIEW.select_tools(&self.tools);
         let reviewer = Agent::new(self.provider.clone(), sub_tools, SkillRegistry::empty());
         // The reviewer must not run its own reviews (recursion) and is bounded
-        // by a tight hard stop so it cannot loop.
+        // by a tight hard stop so it cannot loop. It registers no review
+        // dimensions of its own.
         reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);
-        // ADR-0030: the reviewer is itself a sub-agent — its every round is
-        // read-only, so the loop-review trigger would fire on it by design and
-        // recurse. Disable the in-loop review on the reviewer outright.
+        // The in-loop review was removed; `set_loop_review_enabled` is now a
+        // no-op, kept only so this call site stays compilable.
         reviewer.set_loop_review_enabled(false);
 
         let system = build_reviewer_system_prompt(&dimensions);

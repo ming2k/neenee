@@ -2,7 +2,7 @@
 source: crates/neenee-cli/src/tui/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 40)"
 ---
-  - Read src/lib.rs · 0ms
+  - Read src/lib.rs :100,$ · 0ms
 
      100 fn a() {}
      101 fn b() {}
