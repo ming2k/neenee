@@ -408,9 +408,7 @@ impl App {
     /// access. Mirrors opencode's per-directory picker cache: one
     /// [`scan_project_files`] call per App session, then pure filtering.
     fn path_scan(&mut self) -> &PathScan {
-        if self.path_scan_cache.is_none() {
-            self.path_scan_cache = Some(scan_project_files(&self.cwd));
-        }
-        self.path_scan_cache.as_ref().unwrap()
+        self.path_scan_cache
+            .get_or_insert_with(|| scan_project_files(&self.cwd))
     }
 }

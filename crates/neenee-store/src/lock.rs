@@ -63,6 +63,7 @@ impl ProcessLock {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn second_process_cannot_acquire_same_lock() {
         let dir = std::env::temp_dir().join(format!("neenee-lock-test-{}", uuid::Uuid::new_v4()));
