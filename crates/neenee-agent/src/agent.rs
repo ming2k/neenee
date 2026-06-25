@@ -10,6 +10,11 @@ struct AskUserState {
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Dynamically refreshable MCP tools, held behind a shared `RwLock` so the
+    /// background [`McpCatalog`](crate::dynamic::McpCatalog) refresh loop can
+    /// replace them (reconnect, re-discover) without rebuilding the agent.
+    /// [`visible_tools`] / dispatch / snapshot merge this with `tools`.
+    mcp_tools: Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>,
     /// Session-level disabled-tool mask. Names here are hidden from the model
     /// (their schemas are dropped before `prepare_tools`) and rejected at
     /// dispatch, but the tool stays installed so it can be re-enabled without
@@ -43,6 +48,12 @@ pub struct Agent {
     /// `set_hard_stop_rounds`. This is the sole execution cap; session review
     /// is on-demand (`/review`) and never aborts a turn.
     hard_stop_rounds: Arc<std::sync::Mutex<usize>>,
+    /// Whether the deterministic read-loop guard ([`crate::loop_guard`]) may
+    /// inject its anti-anchoring nudge. Default `true`; seeded from
+    /// `[agent] loop_review_enabled` and flipped off for sub-agents and the
+    /// review diagnostic via `set_loop_review_enabled`. Lock-free so the round
+    /// boundary reads it without contention.
+    loop_guard_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Registered review dimensions evaluated by the on-demand diagnostic
     /// subagent (`/review`). Defaults to [`crate::default_reviews`] (looping);
     /// empty on sub-agents (which have no `/review` path).
@@ -151,6 +162,12 @@ pub(crate) struct TurnState {
     /// so a hook can act on "exploration without progress". Reset to 0 by any
     /// round containing an `Execute`/`Write` call.
     pub(crate) consecutive_readonly_rounds: u32,
+    /// Classification of the round just dispatched, fed to [`loop_guard`] at the
+    /// round boundary. Set in `dispatch_tool_calls`; consumed once per round.
+    pub(crate) pending_round: crate::loop_guard::RoundClass,
+    /// Deterministic read-loop detector (see [`crate::loop_guard`]). Per-turn:
+    /// lives and dies with this `TurnState` so loop state never crosses turns.
+    pub(crate) loop_guard: crate::loop_guard::ReadLoopGuard,
 }
 
 impl Agent {
@@ -181,6 +198,7 @@ impl Agent {
         Self {
             provider,
             tools,
+            mcp_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
             todos,
             turn_counter,
@@ -192,6 +210,7 @@ impl Agent {
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
+            loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reviews: crate::default_reviews(),
             write_scope: std::sync::Mutex::new(neenee_core::WriteScope::default()),
             hooks: crate::hook_runner::HookRunner::new(),
@@ -242,11 +261,16 @@ impl Agent {
         }
     }
 
-    /// Override whether the in-loop semantic review / anti-anchoring nudge is
-    /// active (ADR-0030). Mirrors `[agent] loop_review_enabled` in
-    /// `config.toml`; flipped to `false` on sub-agents (no recursion) and in
-    /// tests that exercise the pure equality-guard abort path.
-    pub fn set_loop_review_enabled(&self, _enabled: bool) {}
+    /// Enable or disable the deterministic read-loop guard's anti-anchoring
+    /// nudge ([`crate::loop_guard`]). Mirrors `[agent] loop_review_enabled` in
+    /// `config.toml`; flipped to `false` on sub-agents and the review diagnostic
+    /// so they run unobstructed. Detection is pure bookkeeping with no model
+    /// call, so unlike the removed ADR-0030 review this carries no recursion
+    /// risk — the flag is an off-switch, not a safety requirement.
+    pub fn set_loop_review_enabled(&self, enabled: bool) {
+        self.loop_guard_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
 
     /// Install (or clear with `None`) the mid-turn context-relief gate.
     pub fn set_context_relief_gate(&self, gate: Option<Arc<dyn ContextReliefGate>>) {
@@ -684,6 +708,32 @@ impl Agent {
         self.permissions.set_project_root(root);
     }
 
+    /// Seed declarative permission rules from `[permissions]` config. Delegates
+    /// to [`PermissionStore::seed_from_config`].
+    pub fn seed_permissions_from_config(
+        &self,
+        rules: &[neenee_store::config::PermissionRuleConfig],
+    ) {
+        self.permissions.seed_from_config(rules);
+    }
+
+    /// Replace the entire set of dynamically-refreshable MCP tools. Called by
+    /// the [`McpCatalog`](crate::dynamic::McpCatalog) background refresh loop
+    /// after reconnecting servers and re-discovering their tools. The built-in
+    /// tools in `self.tools` are untouched.
+    pub fn replace_mcp_tools(&self, tools: Vec<Arc<dyn Tool>>) {
+        if let Ok(mut guard) = self.mcp_tools.write() {
+            *guard = tools;
+        }
+    }
+
+    /// A clone of the shared MCP-tools holder, for passing to a
+    /// [`McpCatalog`](crate::dynamic::McpCatalog) so its background refresh can
+    /// update the live tool list.
+    pub fn mcp_tools_holder(&self) -> Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>> {
+        Arc::clone(&self.mcp_tools)
+    }
+
     /// Set the session-level enabled flag for a tool. No-op when the name is
     /// unknown (so a stale toggle from the modal cannot poison the dispatch
     /// table). Returns whether the flag actually changed.
@@ -726,11 +776,18 @@ impl Agent {
             .disabled_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.tools
+        let is_visible = |t: &Arc<dyn Tool>| !disabled.contains(t.name());
+        let mut tools: Vec<Arc<dyn Tool>> = self
+            .tools
             .iter()
-            .filter(|t| !disabled.contains(t.name()))
+            .filter(|t| is_visible(t))
             .cloned()
-            .collect()
+            .collect();
+        // Merge dynamically-refreshable MCP tools.
+        if let Ok(mcp) = self.mcp_tools.read() {
+            tools.extend(mcp.iter().filter(|t| is_visible(t)).cloned());
+        }
+        tools
     }
 
     /// Structured view of every installed tool, for the session modal's Tools
@@ -742,8 +799,13 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let subagent = ["subagent"];
-        let mut infos: Vec<neenee_core::ToolInfo> = self
-            .tools
+        // Merge built-in tools and dynamically-refreshable MCP tools.
+        let mcp_guard = self.mcp_tools.read().ok();
+        let mut all_tools: Vec<&Arc<dyn Tool>> = self.tools.iter().collect();
+        if let Some(guard) = &mcp_guard {
+            all_tools.extend(guard.iter());
+        }
+        let mut infos: Vec<neenee_core::ToolInfo> = all_tools
             .iter()
             .map(|t| {
                 let name = t.name();
@@ -894,6 +956,7 @@ impl Agent {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                self.maybe_inject_loop_nudge(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1128,6 +1191,7 @@ impl Agent {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                self.maybe_inject_loop_nudge(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1180,6 +1244,11 @@ impl Agent {
     where
         F: FnMut(AgentEvent) + Send,
     {
+        // Default this round to "progress" so a stale Read signature from a prior
+        // round never leaks into a text-fallback round; the native all-read arm
+        // below overrides it when applicable.
+        state.pending_round = crate::loop_guard::RoundClass::Progress;
+
         // Native tool calls (OpenAI-style function calling). An empty list is
         // treated as "no tool calls" so we fall through to the text fallback.
         if let Some(tool_calls) = response
@@ -1187,17 +1256,26 @@ impl Agent {
             .as_ref()
             .filter(|calls| !calls.is_empty())
         {
-            // Classify this round for the round-hook axis: an all-Read round
-            // extends the consecutive read-only streak (surfaced to hooks);
-            // any Execute/Write call resets it.
-            if tool_calls
+            // Classify this round once, for two consumers: the round-hook axis
+            // (consecutive read-only streak, surfaced to user hooks) and the
+            // deterministic read-loop guard (a canonical signature of an all-read
+            // round, checked at the round boundary). Any Execute/Write call makes
+            // the round "progress", resetting both.
+            let all_read = tool_calls
                 .iter()
-                .all(|c| self.tool_access(&c.name) == ToolAccess::Read)
-            {
+                .all(|c| self.tool_access(&c.name) == ToolAccess::Read);
+            if all_read {
                 state.consecutive_readonly_rounds =
                     state.consecutive_readonly_rounds.saturating_add(1);
+                let signature = crate::loop_guard::read_signature(
+                    tool_calls
+                        .iter()
+                        .map(|c| (c.name.as_str(), c.arguments.as_str())),
+                );
+                state.pending_round = crate::loop_guard::RoundClass::Read(signature);
             } else {
                 state.consecutive_readonly_rounds = 0;
+                state.pending_round = crate::loop_guard::RoundClass::Progress;
             }
             // Emit all ToolCall events up front.
             let call_ids: Vec<String> = tool_calls
@@ -1455,6 +1533,30 @@ impl Agent {
         }
     }
 
+    /// Consult the deterministic read-loop guard for the round just dispatched
+    /// (classified into [`TurnState::pending_round`]) and, when it has tipped
+    /// into a repeated-read loop, append the anti-anchoring nudge as a hidden
+    /// user message. Non-terminating by design (ADR-0009): it steers the model
+    /// off the loop without capping the turn — `Esc`, `hard_stop_rounds`, and
+    /// `abort` remain the hard backstops. Mirrored at both loop boundaries.
+    fn maybe_inject_loop_nudge(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
+        let round = std::mem::take(&mut state.pending_round);
+        if !self
+            .loop_guard_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if let Some(nudge) = state.loop_guard.observe(round) {
+            tracing::debug!("read-loop guard tripped; injecting anti-anchoring nudge");
+            messages.push(Message::injected(
+                Role::User,
+                nudge,
+                InjectionOrigin::new(InjectionKind::LoopReviewNudge),
+            ));
+        }
+    }
+
     /// The opt-in hard-stop gate (ADR-0018). Called once per tool round with
     /// the count of rounds that have already run this turn. Returns
     /// `ControlFlow::Break` only when a finite `hard_stop_rounds` budget was
@@ -1618,7 +1720,17 @@ impl Agent {
         call_id: &str,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> ToolOutput {
-        let tool = match self.tools.iter().find(|t| t.name() == call.name) {
+        let tool: Arc<dyn Tool> = match self
+            .tools
+            .iter()
+            .find(|t| t.name() == call.name)
+            .cloned()
+            .or_else(|| {
+                self.mcp_tools
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.iter().find(|t| t.name() == call.name).cloned())
+            }) {
             Some(t) => t,
             None => {
                 return ToolOutput::Error {

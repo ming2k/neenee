@@ -17,6 +17,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod layout;
 pub mod providers;
+pub mod question_model;
 pub mod render;
 pub mod selection;
 pub mod step_interaction;
@@ -794,10 +795,7 @@ pub async fn run_tui(
         activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
         pending_permission: None,
-        pending_question: None,
-        question_selected: Vec::new(),
-        question_other_text: Vec::new(),
-        question_current: 0,
+        question: None,
         sessions_overview: Vec::new(),
         permission_confirm_always: false,
         permission_show_details: false,
@@ -829,6 +827,7 @@ pub async fn run_tui(
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
+        model_picker_provider: None,
         key_status: HashMap::new(),
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),

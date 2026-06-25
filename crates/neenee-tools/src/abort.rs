@@ -11,10 +11,12 @@
 //!
 //! ## Why this exists
 //!
-//! The harness has no in-loop guard against repeated identical tool calls (the
-//! old equality guard and the ADR-0030 loop-review nudge were both removed),
-//! so a model that gets stuck can spin indefinitely until the user notices and
-//! interrupts. This tool gives the model an *active* way out: rather than
+//! The harness keeps no hard equality-guard *abort* (the old guard was removed).
+//! The deterministic read-loop guard (ADR-0034) breaks repeated-*read* loops
+//! automatically, but only by nudging — it never stops the program, and it does
+//! not cover every stuck state (a dangerous irreversible operation, a non-read
+//! dead end). For those a stuck model could otherwise spin until the user
+//! notices and interrupts. This tool gives it an *active* way out: rather than
 //! waiting to be rescued, it can bail on its own judgement.
 //!
 //! ## Capability axis

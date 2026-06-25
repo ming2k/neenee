@@ -161,6 +161,30 @@ impl PermissionStore {
 
     // ── persistence ─────────────────────────────────────────────────────
 
+    /// Seed the allowlist from declarative `[permissions]` config rules. Called
+    /// at startup after `set_project_root` (so persistent rules are already
+    /// loaded). Config rules are **not** persisted to `permissions.json` — they
+    /// are re-applied on every start from `config.toml`, keeping them
+    /// declarative and version-controllable. Rules already present (from disk)
+    /// are not duplicated.
+    pub fn seed_from_config(&self, rules: &[neenee_store::config::PermissionRuleConfig]) {
+        let mut state = lock(&self.state);
+        let mut added = 0;
+        for rule in rules {
+            let permission_rule = PermissionRule {
+                tool: rule.tool.clone(),
+                scope: rule.scope.clone(),
+            };
+            if state.always.insert(permission_rule) {
+                added += 1;
+            }
+        }
+        drop(state);
+        if added > 0 {
+            tracing::info!(added, "seeded {} permission rules from config", added);
+        }
+    }
+
     /// The persisted project root, if any.
     pub fn project_root(&self) -> Option<std::path::PathBuf> {
         lock(&self.project_root).clone()
@@ -239,5 +263,48 @@ impl PermissionStore {
 impl Default for PermissionStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neenee_store::config::PermissionRuleConfig;
+
+    #[test]
+    fn seed_from_config_adds_rules_to_allowlist() {
+        let store = PermissionStore::new();
+        // No project root → no persistence, so seeding is purely in-memory.
+        let rules = vec![
+            PermissionRuleConfig {
+                tool: "bash".to_string(),
+                scope: "*".to_string(),
+            },
+            PermissionRuleConfig {
+                tool: "read_file".to_string(),
+                scope: "*".to_string(),
+            },
+        ];
+        store.seed_from_config(&rules);
+        assert!(store.is_always_allowed(&PermissionRule {
+            tool: "bash".to_string(),
+            scope: "*".to_string(),
+        }));
+        assert!(store.is_always_allowed(&PermissionRule {
+            tool: "read_file".to_string(),
+            scope: "*".to_string(),
+        }));
+    }
+
+    #[test]
+    fn seed_from_config_does_not_duplicate_existing_rules() {
+        let store = PermissionStore::new();
+        let rule = PermissionRuleConfig {
+            tool: "bash".to_string(),
+            scope: "*".to_string(),
+        };
+        store.seed_from_config(std::slice::from_ref(&rule));
+        store.seed_from_config(std::slice::from_ref(&rule)); // idempotent
+        assert_eq!(store.allowed_tools().len(), 1);
     }
 }

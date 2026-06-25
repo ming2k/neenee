@@ -94,8 +94,8 @@ impl Agent {
         // by a tight hard stop so it cannot loop. It registers no review
         // dimensions of its own.
         reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);
-        // The in-loop review was removed; `set_loop_review_enabled` is now a
-        // no-op, kept only so this call site stays compilable.
+        // The reviewer reads a transcript excerpt; disable the deterministic
+        // read-loop guard's nudge (ADR-0034) so its own reads are never steered.
         reviewer.set_loop_review_enabled(false);
 
         let system = build_reviewer_system_prompt(&dimensions);

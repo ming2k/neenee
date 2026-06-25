@@ -47,9 +47,11 @@ non-filesystem axes.
 
 ## Why it exists
 
-The harness has no automatic intervention against a model that repeats
-identical tool calls — the ADR-0009 equality guard and the ADR-0030 loop-review
-nudge were both removed (they could reinforce the loops they targeted). `abort`
-restores an escape hatch, but as a **model-initiated** action rather than a
-harness-enforced hard stop. The opt-in `hard_stop_rounds` total-round cap and
-user `Esc` remain as backstops.
+The harness deliberately keeps **no hard equality-guard abort** (the ADR-0009
+equality guard was removed). The deterministic read-loop guard (ADR-0034) does
+break *read* loops automatically — but only by injecting a non-terminating
+nudge, and only for repeated reads; it does not stop the program, and it does
+not cover every stuck state (a dangerous irreversible operation, a non-read dead
+end). `abort` complements it as the **model-initiated** escape hatch for the
+cases steering cannot resolve. The opt-in `hard_stop_rounds` total-round cap and
+user `Esc` remain as the hard backstops.

@@ -38,6 +38,7 @@ pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 pub mod capability;
 pub mod catalog;
+pub mod dynamic;
 pub mod events;
 pub mod hooks;
 pub mod mcp;
@@ -56,6 +57,7 @@ pub use capability::{
     ContextReliefGate, Provider, ProviderStreamEvent, Tool, ToolAccess, WriteScope,
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
+pub use dynamic::DynamicCatalog;
 pub use events::{
     AgentEvent, AgentOp, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
     ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
@@ -64,7 +66,7 @@ pub use events::{
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
-pub use model::{KNOWN_MODELS, Model, model_by_id, resolve as resolve_model};
+pub use model::{KNOWN_MODELS, Model, WireFormat, model_by_id, resolve as resolve_model};
 pub use pressure::{
     CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
     PruneOutcome, estimate_chars, estimate_tokens, prune_tool_results,

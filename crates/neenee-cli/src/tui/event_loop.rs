@@ -170,7 +170,6 @@ where
             app.review_alert = runtime.review_alert.lock().await.clone();
             app.turn_started_at = *runtime.turn_started_at.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
-            app.pending_question = runtime.pending_question.lock().await.front().cloned();
             app.key_status = runtime.key_status.lock().await.clone();
             app.provider_picker = runtime.provider_picker.lock().await.clone();
             if app.pending_permission.is_some() && app.active_modal == Modal::None {
@@ -189,27 +188,33 @@ where
                 app.permission_max_scroll = 0;
                 app.permission_show_details = false;
             }
-            if app.pending_question.is_some() && app.active_modal == Modal::None {
-                app.active_modal = Modal::Question;
-                app.modal_index = 0;
-                app.question_current = 0;
-                // Default selection: empty for multi-select, first option for single-select.
-                if let Some(ref request) = app.pending_question {
-                    app.question_selected = request
-                        .questions
-                        .iter()
-                        .map(|q| if q.multi_select { Vec::new() } else { vec![0] })
-                        .collect();
-                    app.question_other_text =
-                        request.questions.iter().map(|_| String::new()).collect();
+            // Question modal: mirror the pending-request queue front into the
+            // App-level model. A new front (arriving request) opens a fresh
+            // QuestionModel with default selections; an emptied front (after a
+            // submit/cancel drained the queue) clears the model and closes the
+            // modal. The model is the single source of truth for the modal's
+            // interaction state once open.
+            {
+                let front = runtime.pending_question.lock().await.front().cloned();
+                let model_matches_front = match (&app.question, &front) {
+                    (Some(m), Some(req)) => m.request().id == req.id,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !model_matches_front {
+                    if let Some(req) = front {
+                        app.question = Some(crate::tui::question_model::QuestionModel::open(req));
+                        app.active_modal = Modal::Question;
+                        app.modal_index = 0;
+                        app.focus_zone = input::FocusZone::Compose;
+                    } else {
+                        app.question = None;
+                        if app.active_modal == Modal::Question {
+                            app.active_modal = Modal::None;
+                            app.modal_index = 0;
+                        }
+                    }
                 }
-                app.focus_zone = input::FocusZone::Compose;
-            } else if app.pending_question.is_none() && app.active_modal == Modal::Question {
-                app.active_modal = Modal::None;
-                app.modal_index = 0;
-                app.question_current = 0;
-                app.question_selected.clear();
-                app.question_other_text.clear();
             }
             // Sessions picker: refresh rows and open the modal on request.
             app.sessions_overview = runtime.sessions_overview.lock().await.clone();
@@ -583,6 +588,23 @@ where
                         &app.theme,
                     );
                 }
+                Modal::ModelPicker => {
+                    // Second-stage model picker: list the staged multi-model
+                    // provider's models. The provider index lives in
+                    // `model_picker_provider`.
+                    if let Some(sol_idx) = app.model_picker_provider {
+                        if let Some(solution) = PROVIDERS.get(sol_idx) {
+                            render::draw_model_picker(
+                                f,
+                                &mut layout_map,
+                                solution,
+                                &app.current_model,
+                                app.modal_index,
+                                &app.theme,
+                            );
+                        }
+                    }
+                }
                 Modal::HistorySearch => {
                     let ranked = app.history_filtered();
                     render::draw_history_modal(
@@ -598,14 +620,14 @@ where
                 }
                 Modal::Permission => {}
                 Modal::Question => {
-                    if let Some(ref request) = app.pending_question {
+                    if let Some(ref qmodel) = app.question {
                         render::draw_question_modal(
                             f,
-                            request,
-                            app.question_current,
-                            &app.question_selected,
-                            &app.question_other_text,
-                            app.modal_index,
+                            qmodel.request(),
+                            qmodel.current(),
+                            qmodel.selected(),
+                            qmodel.other_text(),
+                            qmodel.highlight(),
                             &app.theme,
                         );
                     }
@@ -1003,17 +1025,33 @@ where
                             {
                                 let solution = PROVIDERS[sol_idx];
                                 if app.key_status.get(solution.id).copied().unwrap_or(true) {
-                                    let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                        provider_type: solution.id.to_string(),
-                                        model: solution.model.to_string(),
-                                        api_key: None,
-                                        base_url: None,
-                                    });
-                                    // The input box was borrowed as the filter;
-                                    // restore the stashed draft and close.
-                                    app.input = std::mem::take(&mut app.stashed_input);
-                                    app.cursor_position = app.input.chars().count();
-                                    app.active_modal = Modal::None;
+                                    // A multi-model provider (opencode-go) opens
+                                    // the second-stage model picker instead of
+                                    // activating its default model directly, so
+                                    // the user picks which of the provider's
+                                    // models — and thus which wire format — to
+                                    // use. Single-model presets activate at once.
+                                    if !solution.models.is_empty() {
+                                        app.model_picker_provider = Some(sol_idx);
+                                        app.modal_index = 0;
+                                        app.input.clear();
+                                        app.cursor_position = 0;
+                                        // Keep the stashed draft stashed; the
+                                        // model picker reuses modal_index only.
+                                        app.active_modal = Modal::ModelPicker;
+                                    } else {
+                                        let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                            provider_type: solution.id.to_string(),
+                                            model: solution.model.to_string(),
+                                            api_key: None,
+                                            base_url: None,
+                                        });
+                                        // The input box was borrowed as the filter;
+                                        // restore the stashed draft and close.
+                                        app.input = std::mem::take(&mut app.stashed_input);
+                                        app.cursor_position = app.input.chars().count();
+                                        app.active_modal = Modal::None;
+                                    }
                                 } else {
                                     // No key configured: open the unified
                                     // editor so the user can enter a key (and
@@ -1033,6 +1071,32 @@ where
                                     app.cursor_position = 0;
                                     app.active_modal = Modal::ModelEditor;
                                 }
+                            }
+                        }
+                    } else if app.active_modal == Modal::ModelPicker {
+                        // Enter in the second-stage model picker: activate the
+                        // highlighted model under the multi-model provider. The
+                        // backend's SwitchProvider routes it through
+                        // build_provider_for_model so the per-model transport
+                        // (OpenAI vs Anthropic /messages) is selected correctly.
+                        if let Some(sol_idx) = app.model_picker_provider {
+                            if let Some(solution) = PROVIDERS.get(sol_idx) {
+                                let model = solution
+                                    .models
+                                    .get(app.modal_index)
+                                    .or_else(|| solution.models.first())
+                                    .copied()
+                                    .unwrap_or(solution.model);
+                                let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                    provider_type: solution.id.to_string(),
+                                    model: model.to_string(),
+                                    api_key: None,
+                                    base_url: None,
+                                });
+                                app.model_picker_provider = None;
+                                app.input = std::mem::take(&mut app.stashed_input);
+                                app.cursor_position = app.input.chars().count();
+                                app.active_modal = Modal::None;
                             }
                         }
                     }
@@ -1290,6 +1354,10 @@ where
                     }
                 }
                 input::InputAction::CloseModal => {
+                    // Most modals close straight to chat. The model editor and
+                    // the second-stage model picker instead step back to the
+                    // provider picker, so a nested pick is recoverable with Esc.
+                    let mut return_to_picker = false;
                     if app.active_modal == Modal::HistorySearch {
                         // The input box was borrowed as the fuzzy query; hand
                         // the in-progress draft back so Esc is a true cancel.
@@ -1314,13 +1382,33 @@ where
                         app.editor_target = None;
                         app.input.clear();
                         app.cursor_position = 0;
-                        app.active_modal = Modal::Provider;
+                        return_to_picker = true;
+                    } else if app.active_modal == Modal::ModelPicker {
+                        // Esc in the second-stage model picker returns to the
+                        // provider list (not straight to chat) so the user can
+                        // pick a different provider. Restore the picker cursor
+                        // to the multi-model provider they came from.
+                        if let Some(sol_idx) = app.model_picker_provider {
+                            let filtered = app.providers_filtered();
+                            app.modal_index = filtered
+                                .iter()
+                                .position(|(i, _)| *i == sol_idx)
+                                .unwrap_or(0);
+                        }
+                        app.model_picker_provider = None;
+                        app.input.clear();
+                        app.cursor_position = 0;
+                        return_to_picker = true;
                     }
                     if app.active_modal == Modal::ToolStepDetail {
                         app.tool_detail_message_idx = None;
                         app.tool_detail_scroll = 0;
                     }
-                    app.active_modal = Modal::None;
+                    app.active_modal = if return_to_picker {
+                        Modal::Provider
+                    } else {
+                        Modal::None
+                    };
                 }
                 input::InputAction::ScrollUp => {
                     if app.active_modal == Modal::ToolStepDetail {
@@ -1694,6 +1782,16 @@ where
                             app.modal_index - 1
                         };
                     }
+                    Modal::ModelPicker => {
+                        let count = model_picker_count(app);
+                        app.modal_index = if count == 0 {
+                            0
+                        } else if app.modal_index == 0 {
+                            count - 1
+                        } else {
+                            app.modal_index - 1
+                        };
+                    }
                     Modal::HistorySearch => {
                         // Up/Down walk the fuzzy-filtered list, not the raw
                         // history, so the cursor never lands on an entry the
@@ -1738,6 +1836,11 @@ where
                         let count = app.providers_filtered().len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
+                    Modal::ModelPicker => {
+                        // Walk the active multi-model provider's model list.
+                        let count = model_picker_count(app).max(1);
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
                     Modal::HistorySearch => {
                         let count = app.history_filtered().len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
@@ -1760,181 +1863,84 @@ where
                 },
                 input::InputAction::QuestionUp => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let current = app.question_current;
-                            let options_count = request.questions[current].options.len() + 1;
-                            app.modal_index = if app.modal_index == 0 {
-                                options_count - 1
-                            } else {
-                                app.modal_index - 1
-                            };
+                        if let Some(qm) = app.question.take() {
+                            app.question =
+                                Some(qm.update(crate::tui::question_model::QuestionAction::Up).0);
                         }
                     }
                 }
                 input::InputAction::QuestionDown => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let current = app.question_current;
-                            let options_count =
-                                (request.questions[current].options.len() + 1).max(1);
-                            app.modal_index = (app.modal_index + 1) % options_count;
+                        if let Some(qm) = app.question.take() {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::Down)
+                                    .0,
+                            );
                         }
                     }
                 }
                 input::InputAction::QuestionToggle => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let q = app.question_current;
-                            let i = app.modal_index;
-                            let multi = request.questions[q].multi_select;
-                            let selected = &mut app.question_selected[q];
-                            if multi {
-                                if let Some(pos) = selected.iter().position(|&x| x == i) {
-                                    selected.remove(pos);
-                                } else {
-                                    selected.push(i);
-                                    selected.sort();
-                                }
-                            } else {
-                                selected.clear();
-                                selected.push(i);
-                            }
+                        if let Some(qm) = app.question.take() {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::Toggle)
+                                    .0,
+                            );
                         }
                     }
                 }
                 input::InputAction::QuestionSelect(n) => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let q = app.question_current;
-                            let total_options = request.questions[q].options.len() + 1;
-                            if n > 0 && n <= total_options {
-                                app.modal_index = n - 1;
-                                let multi = request.questions[q].multi_select;
-                                let selected = &mut app.question_selected[q];
-                                if multi {
-                                    if let Some(pos) = selected.iter().position(|&x| x == n - 1) {
-                                        selected.remove(pos);
-                                    } else {
-                                        selected.push(n - 1);
-                                        selected.sort();
-                                    }
-                                } else {
-                                    selected.clear();
-                                    selected.push(n - 1);
-                                }
-                            }
+                        if let Some(qm) = app.question.take() {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::Select(n))
+                                    .0,
+                            );
                         }
                     }
                 }
                 input::InputAction::QuestionSubmit => {
                     if app.active_modal == Modal::Question {
-                        if let Some(request) = app.pending_question.take() {
-                            let request_id = request.id.clone();
-                            let answers: Vec<Vec<String>> = request
-                                .questions
-                                .iter()
-                                .enumerate()
-                                .map(|(q_idx, q)| {
-                                    let other_index = q.options.len();
-                                    let other_text = app
-                                        .question_other_text
-                                        .get(q_idx)
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    app.question_selected
-                                        .get(q_idx)
-                                        .map(|sel| {
-                                            sel.iter()
-                                                .map(|&opt_idx| {
-                                                    if opt_idx == other_index {
-                                                        if other_text.is_empty() {
-                                                            "Other".to_string()
-                                                        } else {
-                                                            other_text.clone()
-                                                        }
-                                                    } else {
-                                                        q.options
-                                                            .get(opt_idx)
-                                                            .map(|o| o.label.clone())
-                                                            .unwrap_or_default()
-                                                    }
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default()
-                                })
-                                .collect();
-                            let parent_call_id = runtime
-                                .subagent_question_parent
-                                .lock()
-                                .await
-                                .remove(&request_id);
-                            let _ = app.tx.send(AgentRequest::UserQuestionReply {
-                                request_id: request_id.clone(),
-                                answers,
-                                parent_call_id,
-                            });
-                            let mut queue = runtime.pending_question.lock().await;
-                            queue.retain(|r| r.id != request_id);
-                            app.pending_question = queue.front().cloned();
-                            if app.pending_question.is_none() {
-                                app.active_modal = Modal::None;
-                            }
-                            app.modal_index = 0;
-                            app.question_current = 0;
-                            app.question_selected.clear();
-                            app.question_other_text.clear();
+                        if let Some(qm) = app.question.take() {
+                            let (qm, effects) =
+                                qm.update(crate::tui::question_model::QuestionAction::Submit);
+                            // Keep the model until the per-frame queue sync clears
+                            // it; the Closed effect drives the channel reply + drain.
+                            app.question = Some(qm);
+                            question_effects::apply(&effects, app, &runtime).await;
                         }
                     }
                 }
                 input::InputAction::QuestionCancel => {
                     if app.active_modal == Modal::Question {
-                        if let Some(request) = app.pending_question.take() {
-                            let request_id = request.id;
-                            let parent_call_id = runtime
-                                .subagent_question_parent
-                                .lock()
-                                .await
-                                .remove(&request_id);
-                            let _ = app.tx.send(AgentRequest::UserQuestionReply {
-                                request_id: request_id.clone(),
-                                answers: Vec::new(),
-                                parent_call_id,
-                            });
-                            let mut queue = runtime.pending_question.lock().await;
-                            queue.retain(|r| r.id != request_id);
-                            app.pending_question = queue.front().cloned();
-                            app.active_modal = Modal::None;
-                            app.modal_index = 0;
-                            app.question_current = 0;
-                            app.question_selected.clear();
-                            app.question_other_text.clear();
+                        if let Some(qm) = app.question.take() {
+                            let (_qm, effects) =
+                                qm.update(crate::tui::question_model::QuestionAction::Cancel);
+                            // Cancel discards the model immediately; the Closed
+                            // effect drives the (empty-answers) reply + drain.
+                            question_effects::apply(&effects, app, &runtime).await;
                         }
                     }
                 }
                 input::InputAction::QuestionInsertChar(c) => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let q = app.question_current;
-                            let other_index = request.questions[q].options.len();
-                            if app.modal_index == other_index {
-                                if let Some(text) = app.question_other_text.get_mut(q) {
-                                    text.push(c);
-                                }
-                            }
+                        if let Some(qm) = app.question.take() {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::InsertChar(
+                                    c,
+                                ))
+                                .0,
+                            );
                         }
                     }
                 }
                 input::InputAction::QuestionBackspace => {
                     if app.active_modal == Modal::Question {
-                        if let Some(ref request) = app.pending_question {
-                            let q = app.question_current;
-                            let other_index = request.questions[q].options.len();
-                            if app.modal_index == other_index {
-                                if let Some(text) = app.question_other_text.get_mut(q) {
-                                    text.pop();
-                                }
-                            }
+                        if let Some(qm) = app.question.take() {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::Backspace)
+                                    .0,
+                            );
                         }
                     }
                 }
@@ -2386,6 +2392,16 @@ fn initial_editor_model(
     solution.model.to_string()
 }
 
+/// Number of models the active second-stage model picker is listing. Zero when
+/// no provider is staged (defensive — the picker is only opened for a staged
+/// multi-model provider).
+fn model_picker_count(app: &App) -> usize {
+    app.model_picker_provider
+        .and_then(|idx| PROVIDERS.get(idx))
+        .map(|solution| solution.models.len())
+        .unwrap_or(0)
+}
+
 pub(super) fn display_status(
     loop_status: &str,
     activity: &str,
@@ -2409,5 +2425,61 @@ pub(super) fn display_status(
         ("running", activity) => activity.to_string(),
         (loop_status, "") => loop_status.to_string(),
         (loop_status, activity) => format!("{} · {}", loop_status, activity),
+    }
+}
+
+/// Execute the side effects that the pure [`QuestionModel::update`] described.
+///
+/// This is the effect interpreter — the *only* place the question modal touches
+/// the agent channel, the pending-request queue, or the modal/queue sync. The
+/// `Reply` effect looks up the subagent parent routing key (so a subagent's
+/// answer routes back down to it), sends the reply, and removes the request
+/// from the queue; `Closed` does the same minus the reply (empty answers). In
+/// both cases the per-frame queue sync (above) picks up the new queue front on
+/// the next iteration and opens the next queued question or closes the modal.
+mod question_effects {
+    use super::{AgentRequest, App, Modal, UiRuntime};
+
+    pub(super) async fn apply(
+        effects: &[crate::tui::question_model::QuestionEffect],
+        app: &mut App,
+        runtime: &UiRuntime,
+    ) {
+        for effect in effects {
+            match effect {
+                crate::tui::question_model::QuestionEffect::Reply {
+                    request_id,
+                    answers,
+                } => {
+                    let parent_call_id = runtime
+                        .subagent_question_parent
+                        .lock()
+                        .await
+                        .remove(request_id);
+                    let _ = app.tx.send(AgentRequest::UserQuestionReply {
+                        request_id: request_id.clone(),
+                        answers: answers.clone(),
+                        parent_call_id,
+                    });
+                }
+                // Draining the queue + settling the modal is shared by both
+                // Close-causing effects (Submit → Reply+Closed, Cancel → Closed).
+                // The per-frame sync re-derives the model from the queue front,
+                // so here we only need to drop the answered/cancelled request
+                // and clear the stale modal state.
+                crate::tui::question_model::QuestionEffect::Closed { request_id } => {
+                    let mut queue = runtime.pending_question.lock().await;
+                    queue.retain(|r| r.id != *request_id);
+                    // If the queue is now empty the modal closes; the sync block
+                    // will also clear `app.question`, but clearing it here keeps
+                    // the very next render (same frame) consistent.
+                    if queue.is_empty() {
+                        app.question = None;
+                        app.active_modal = Modal::None;
+                        app.modal_index = 0;
+                    }
+                }
+            }
+        }
     }
 }

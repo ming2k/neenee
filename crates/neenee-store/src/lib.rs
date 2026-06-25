@@ -25,6 +25,7 @@
 //! a GUI reachable tomorrow.
 
 pub mod blobs;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod embedding;

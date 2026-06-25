@@ -84,11 +84,14 @@ pub enum InjectionKind {
     /// from the live pursuit, tool list, and skills index. Site:
     /// `Agent::{build_system_message, ensure_system_prompt}`.
     SystemPrompt,
-    /// Built-in anti-anchoring nudge fired by the in-loop semantic review
-    /// (ADR-0030 Stage 1) when the model is stuck in a read-only / repeated-
-    /// call loop. This is a harness-internal steering injection, distinct from
-    /// the user-configurable `Hook(Round)` axis. Site:
-    /// `Agent::maybe_run_loop_review` (`LoopingNudge::prompt`).
+    /// Built-in anti-anchoring nudge fired by the deterministic read-loop guard
+    /// when the model repeats the same read (a single page or a two-page thrash)
+    /// without progress. Detection is pure signature bookkeeping — no model call
+    /// — and the nudge is non-terminating: it steers off the loop, the hard
+    /// backstops (`hard_stop_rounds`, `abort`, `Esc`) still cap. This is a
+    /// harness-internal steering injection, distinct from the user-configurable
+    /// `Hook(Round)` axis. Site: `Agent::maybe_inject_loop_nudge`
+    /// (`crate::loop_guard`).
     LoopReviewNudge,
     /// Context-compaction checkpoint: an LLM summary of archived turns wrapped
     /// under the stable checkpoint header. Site: `checkpoint_message`.

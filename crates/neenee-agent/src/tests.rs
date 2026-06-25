@@ -975,6 +975,73 @@ async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
     let _ = outcome.unwrap();
 }
 
+/// Wiring test: three identical reads must trip the deterministic loop guard and
+/// land exactly one hidden anti-anchoring nudge in the turn history. Complements
+/// the unit tests in `loop_guard`, which cover the detector in isolation.
+#[tokio::test]
+async fn read_loop_guard_injects_one_nudge_after_repeated_reads() {
+    let read = || tool_round(&[("c", "reader", r#"{"path":"big.rs"}"#)]);
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(vec![
+            read(),
+            read(),
+            read(),
+            text_round("done"),
+        ])),
+        vec![Arc::new(RecordingTool::read("reader", "R-out"))],
+        crate::skills::SkillRegistry::empty(),
+    );
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+    assert_eq!(outcome.unwrap().message.content, "done");
+
+    let nudges: Vec<&Message> = messages
+        .iter()
+        .filter(|m| m.origin.as_ref().map(|o| &o.kind) == Some(&InjectionKind::LoopReviewNudge))
+        .collect();
+    assert_eq!(nudges.len(), 1, "exactly one nudge for one loop streak");
+    assert!(
+        nudges[0].content.contains("reader big.rs"),
+        "nudge names the repeated read: {}",
+        nudges[0].content
+    );
+    assert!(nudges[0].hidden, "nudge is a hidden steering injection");
+}
+
+/// The guard is gated by `set_loop_review_enabled`: disabled, the same looping
+/// transcript injects no nudge (sub-agents and the review diagnostic rely on
+/// this).
+#[tokio::test]
+async fn read_loop_guard_suppressed_when_disabled() {
+    let read = || tool_round(&[("c", "reader", r#"{"path":"big.rs"}"#)]);
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider::new(vec![
+            read(),
+            read(),
+            read(),
+            text_round("done"),
+        ])),
+        vec![Arc::new(RecordingTool::read("reader", "R-out"))],
+        crate::skills::SkillRegistry::empty(),
+    );
+    agent.set_loop_review_enabled(false);
+
+    let mut messages = vec![Message::new(Role::User, "go")];
+    let _ = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await;
+
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.origin.as_ref().map(|o| &o.kind) != Some(&InjectionKind::LoopReviewNudge)),
+        "disabled guard must not inject"
+    );
+}
+
 #[tokio::test]
 async fn golden_rejected_write_tool_terminates_turn() {
     let tool = RecordingTool::write("writer", "WROTE");

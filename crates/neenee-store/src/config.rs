@@ -48,11 +48,13 @@ pub struct AgentConfig {
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
     /// `Agent::set_hard_stop_rounds`.
     pub hard_stop_rounds: usize,
-    /// Deprecated no-op, kept for backwards compatibility with existing config
-    /// files. The automatic in-loop semantic review and anti-anchoring nudge
-    /// were removed (they could reinforce the read-loop they targeted);
-    /// `set_loop_review_enabled` is now a no-op stub. On-demand `/review` is
-    /// unaffected.
+    /// Whether the deterministic read-loop guard may inject its anti-anchoring
+    /// nudge when the model repeats the same read without progress (see
+    /// `neenee_agent::loop_guard`). Default `true`; wired through
+    /// `Agent::set_loop_review_enabled`, and flipped off for sub-agents and the
+    /// `/review` diagnostic. Detection is pure signature bookkeeping (no model
+    /// call) and the nudge is non-terminating — distinct from the removed
+    /// ADR-0030 semantic review, and unrelated to on-demand `/review`.
     pub loop_review_enabled: bool,
 }
 
@@ -88,7 +90,45 @@ pub struct TuiConfig {
     pub default_expanded: HashMap<String, bool>,
 }
 
-/// Transport kind for a user-defined channel Selects which
+/// Declarative permission configuration — the `[permissions]` table. Lets users
+/// pre-declare "always allow" rules in `config.toml` so default policies are
+/// data-driven, not purely interactive:
+///
+/// ```toml
+/// [[permissions.allow]]
+/// tool = "bash"
+/// scope = "*"
+///
+/// [[permissions.allow]]
+/// tool = "read_file"
+/// scope = "*"
+/// ```
+///
+/// These seed the allowlist at startup; runtime "Always" decisions still write
+/// to the persisted `permissions.json`. A config rule with scope `"*"` allows
+/// every call to that tool without prompting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermissionConfig {
+    /// Rules to pre-seed the "always allow" allowlist at startup.
+    pub allow: Vec<PermissionRuleConfig>,
+}
+
+/// One declarative permission rule from `[permissions]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRuleConfig {
+    /// Tool name (e.g. `"bash"`, `"read_file"`, `"mcp__fs__read"`).
+    pub tool: String,
+    /// Permission scope. `"*"` matches every call to the tool; a specific scope
+    /// (e.g. a path prefix) allows only matching calls.
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+fn default_scope() -> String {
+    "*".to_string()
+}
+
 /// `Provider` implementation the catalog builds. Mirrors the built-in
 /// `neenee_core::catalog::Transport` variants but stays a plain serializable
 /// enum so it round-trips through TOML.
@@ -96,6 +136,9 @@ pub struct TuiConfig {
 pub enum UserTransport {
     #[default]
     OpenAiCompat,
+    /// Anthropic-compatible `/messages` endpoint. Used by opencode-go's
+    /// MiniMax/Qwen models and any Anthropic-format relay.
+    Anthropic,
     GeminiNative,
     Llama,
 }
@@ -189,6 +232,17 @@ pub struct Config {
     // config field so the z.ai endpoint can be keyed independently.
     pub zai_api_key: Option<String>,
     pub zai_model: Option<String>,
+    // OpenCode Go (opencode.ai relay). One provider hosting many models
+    // (GLM/Kimi/DeepSeek/MiMo via OpenAI format, MiniMax/Qwen via Anthropic
+    // /messages); a single OPENCODE_API_KEY authenticates all of them. The
+    // chosen model id lives in `default_model`.
+    pub opencode_go_api_key: Option<String>,
+    /// The model id to use within the active provider. For single-model
+    /// providers this mirrors the provider's pinned model; for multi-model
+    /// providers (opencode-go) it selects which of the provider's models is
+    /// active. `None` falls back to the provider's default model.
+    #[serde(default)]
+    pub default_model: Option<String>,
     /// Favorite provider ids for quick access in the picker. Stored as a flat
     /// list of canonical provider ids.
     #[serde(default)]
@@ -201,6 +255,13 @@ pub struct Config {
     /// Skill configuration (`[skills]` table).
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Declarative permission rules (`[permissions]` table). Each entry is a
+    /// `[[permissions.allow]]` rule (`tool` + `scope`) pre-seeded into the
+    /// allowlist at startup, so default policies are data-driven rather than
+    /// only interactive. Runtime "Always" decisions still add to the persisted
+    /// `permissions.json`; these config rules are re-applied on every start.
+    #[serde(default)]
+    pub permissions: PermissionConfig,
     /// Web tool configuration (`[websearch]` table): search backend, proxy, timeout.
     #[serde(default)]
     pub websearch: WebSearchConfig,
@@ -269,9 +330,12 @@ impl Default for Config {
             deepseek_pro_model: Some("deepseek-v4-pro".to_string()),
             zai_api_key: None,
             zai_model: Some("glm-5.2".to_string()),
+            opencode_go_api_key: None,
+            default_model: None,
             favorites: Vec::new(),
             providers: Vec::new(),
             skills: SkillsConfig::default(),
+            permissions: PermissionConfig::default(),
             websearch: WebSearchConfig::default(),
             tui: TuiConfig::default(),
             agent: AgentConfig::default(),

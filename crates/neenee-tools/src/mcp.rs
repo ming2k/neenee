@@ -25,6 +25,9 @@ const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct McpLoadResult {
     pub tools: Vec<Arc<dyn Tool>>,
     pub statuses: Vec<(String, McpConnectionStatus)>,
+    /// The reconnect-capable server handles, one per connected server. The
+    /// background refresh loop uses these to reconnect/re-discover tools.
+    pub servers: Vec<Arc<McpServer>>,
 }
 
 struct McpTransport {
@@ -129,55 +132,6 @@ impl McpClient {
         let mut transport = self.transport.lock().await;
         write_message(&mut transport.stdin, &payload).await
     }
-
-    async fn list_tools(
-        self: &Arc<Self>,
-        server: &str,
-        read_only: bool,
-    ) -> Result<Vec<Arc<dyn Tool>>, String> {
-        let result = self.request("tools/list", json!({})).await?;
-        let definitions = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "MCP tools/list response has no tools array".to_string())?;
-
-        definitions
-            .iter()
-            .map(|definition| {
-                let original_name = definition
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "MCP tool has no name".to_string())?
-                    .to_string();
-                let public_name = format!(
-                    "mcp__{}__{}",
-                    sanitize_name(server),
-                    sanitize_name(&original_name)
-                );
-                let description = definition
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("MCP tool")
-                    .to_string();
-                let parameters = definition
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type": "object"}));
-                Ok(Arc::new(McpTool {
-                    public_name,
-                    original_name,
-                    description,
-                    parameters,
-                    access: if read_only {
-                        ToolAccess::Read
-                    } else {
-                        ToolAccess::Write
-                    },
-                    client: self.clone(),
-                }) as Arc<dyn Tool>)
-            })
-            .collect()
-    }
 }
 
 struct McpTool {
@@ -186,7 +140,59 @@ struct McpTool {
     description: String,
     parameters: Value,
     access: ToolAccess,
-    client: Arc<McpClient>,
+    /// The reconnect-capable server handle. When a tool call fails with a
+    /// connection error, [`call`](Tool::call) resets the connection and retries
+    /// once — transparent crash recovery without waiting for the next refresh.
+    server: Arc<McpServer>,
+}
+
+/// A reconnect-capable MCP server connection. Wraps [`McpClient`] with the
+/// original config so a crashed server (stdout closed mid-session) can be
+/// transparently restarted. Used by [`McpTool::call`] to retry on connection
+/// failure.
+pub struct McpServer {
+    config: McpServerConfig,
+    server_name: String,
+    read_only: bool,
+    client: tokio::sync::Mutex<Option<Arc<McpClient>>>,
+}
+
+impl McpServer {
+    pub fn new(config: McpServerConfig, server_name: String, read_only: bool) -> Self {
+        Self {
+            config,
+            server_name,
+            read_only,
+            client: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Connect (or reconnect) and return the live client. If a client is
+    /// already held, it is reused; otherwise a fresh connection is established.
+    async fn ensure_connected(&self) -> Result<Arc<McpClient>, String> {
+        let mut guard = self.client.lock().await;
+        if let Some(c) = guard.as_ref() {
+            return Ok(c.clone());
+        }
+        let client = McpClient::connect(&self.config).await?;
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Drop the current connection so the next [`ensure_connected`] reconnects.
+    /// Called when a request fails with a connection error.
+    pub async fn reset(&self) {
+        *self.client.lock().await = None;
+    }
+
+    /// The server's display name (for logging/diagnostics).
+    pub fn name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
 }
 
 #[async_trait]
@@ -210,23 +216,36 @@ impl Tool for McpTool {
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let arguments: Value = serde_json::from_str(arguments)
             .map_err(|error| format!("invalid MCP tool arguments: {}", error))?;
-        let result = self
-            .client
-            .request(
-                "tools/call",
-                json!({
-                    "name": self.original_name,
-                    "arguments": arguments,
-                }),
-            )
-            .await?;
-        Ok(render_tool_result(&result))
+        let payload = json!({
+            "name": self.original_name,
+            "arguments": arguments,
+        });
+        // Try with the current (possibly cached) connection. If it fails — the
+        // server may have crashed since the last call — reset the connection,
+        // reconnect, and retry once.
+        let client = self.server.ensure_connected().await?;
+        match client.request("tools/call", payload.clone()).await {
+            Ok(result) => Ok(render_tool_result(&result)),
+            Err(error) => {
+                tracing::warn!(
+                    server = %self.server.name(),
+                    tool = %self.original_name,
+                    %error,
+                    "MCP tool call failed, reconnecting and retrying"
+                );
+                self.server.reset().await;
+                let client = self.server.ensure_connected().await?;
+                let result = client.request("tools/call", payload).await?;
+                Ok(render_tool_result(&result))
+            }
+        }
     }
 }
 
 pub async fn load_mcp_tools(configs: &HashMap<String, McpServerConfig>) -> McpLoadResult {
     let mut tools = Vec::new();
     let mut statuses = Vec::new();
+    let mut servers = Vec::new();
     let mut names = configs.keys().cloned().collect::<Vec<_>>();
     names.sort();
 
@@ -238,16 +257,22 @@ pub async fn load_mcp_tools(configs: &HashMap<String, McpServerConfig>) -> McpLo
         }
 
         let loaded = timeout(MCP_CONNECT_TIMEOUT, async {
-            let client = McpClient::connect(config).await?;
-            client.list_tools(&name, config.read_only).await
+            let server = Arc::new(McpServer::new(
+                config.clone(),
+                name.clone(),
+                config.read_only,
+            ));
+            let server_tools = build_tools_from_server(&server).await?;
+            Ok::<_, String>((server, server_tools))
         })
         .await;
 
         match loaded {
-            Ok(Ok(server_tools)) => {
+            Ok(Ok((server, server_tools))) => {
                 let count = server_tools.len();
                 tools.extend(server_tools);
                 statuses.push((name, McpConnectionStatus::Connected { tools: count }));
+                servers.push(server);
             }
             Ok(Err(error)) => statuses.push((name, McpConnectionStatus::Failed(error))),
             Err(_) => statuses.push((
@@ -257,7 +282,101 @@ pub async fn load_mcp_tools(configs: &HashMap<String, McpServerConfig>) -> McpLo
         }
     }
 
-    McpLoadResult { tools, statuses }
+    McpLoadResult {
+        tools,
+        statuses,
+        servers,
+    }
+}
+
+/// Reconnect to each server and re-discover its tools. Returns the refreshed
+/// tool list and statuses (same shape as [`load_mcp_tools`], but reusing
+/// existing server handles). Called by the background refresh loop.
+pub async fn refresh_mcp_tools(
+    servers: &[Arc<McpServer>],
+) -> (Vec<Arc<dyn Tool>>, Vec<(String, McpConnectionStatus)>) {
+    let mut tools = Vec::new();
+    let mut statuses = Vec::new();
+
+    for server in servers {
+        // Reset the connection so ensure_connected opens a fresh one.
+        server.reset().await;
+        match timeout(MCP_CONNECT_TIMEOUT, async {
+            build_tools_from_server(server).await
+        })
+        .await
+        {
+            Ok(Ok(server_tools)) => {
+                let count = server_tools.len();
+                tools.extend(server_tools);
+                statuses.push((
+                    server.name().to_string(),
+                    McpConnectionStatus::Connected { tools: count },
+                ));
+            }
+            Ok(Err(error)) => {
+                statuses.push((
+                    server.name().to_string(),
+                    McpConnectionStatus::Failed(error),
+                ));
+            }
+            Err(_) => statuses.push((
+                server.name().to_string(),
+                McpConnectionStatus::Failed("connection timed out".to_string()),
+            )),
+        }
+    }
+
+    (tools, statuses)
+}
+
+/// Build [`McpTool`] adapters from a connected server's `tools/list` response.
+/// Each tool holds the [`McpServer`] handle so it can auto-reconnect on
+/// failure.
+async fn build_tools_from_server(server: &Arc<McpServer>) -> Result<Vec<Arc<dyn Tool>>, String> {
+    let client = server.ensure_connected().await?;
+    let result = client.request("tools/list", json!({})).await?;
+    let definitions = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "MCP tools/list response has no tools array".to_string())?;
+
+    definitions
+        .iter()
+        .map(|definition| {
+            let original_name = definition
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "MCP tool has no name".to_string())?
+                .to_string();
+            let public_name = format!(
+                "mcp__{}__{}",
+                sanitize_name(server.name()),
+                sanitize_name(&original_name)
+            );
+            let description = definition
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("MCP tool")
+                .to_string();
+            let parameters = definition
+                .get("inputSchema")
+                .cloned()
+                .unwrap_or_else(|| json!({"type":"object"}));
+            Ok(Arc::new(McpTool {
+                public_name,
+                original_name,
+                description,
+                parameters,
+                access: if server.read_only() {
+                    ToolAccess::Read
+                } else {
+                    ToolAccess::Write
+                },
+                server: Arc::clone(server),
+            }) as Arc<dyn Tool>)
+        })
+        .collect()
 }
 
 async fn write_message(stdin: &mut ChildStdin, message: &Value) -> Result<(), String> {

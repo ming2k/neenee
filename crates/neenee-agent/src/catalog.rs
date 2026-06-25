@@ -12,10 +12,12 @@
 //! layered on top via the provider-usage telemetry.
 
 use neenee_core::catalog::{Channel, ProviderEntry, Transport, builtin_provider_metadata};
-use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot};
+use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot, WireFormat};
 use neenee_providers::{NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec};
 use neenee_store::config::{Config, UserChannelConfig, UserProviderConfig, UserTransport};
 use neenee_store::provider_usage::ProviderUsage;
+
+use crate::modelsdev::{self, ModelsDevProvider};
 
 /// The effective default provider id from `config.default_provider`.
 pub fn default_provider_id(config: &Config) -> &str {
@@ -42,6 +44,16 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        },
+        UserTransport::Anthropic => Transport::Anthropic {
+            base_url: uc
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:8080/v1/messages".to_string()),
+            user_agent: uc
+                .user_agent
+                .clone()
+                .unwrap_or_else(|| NEENEE_USER_AGENT.to_string()),
         },
         UserTransport::OpenAiCompat => Transport::OpenAiCompat {
             base_url: uc
@@ -114,6 +126,7 @@ fn config_key_for(config: &Config, id: &str) -> Option<String> {
         "kimi-code" => config.moonshot_api_key.clone(),
         "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key.clone(),
         "zai-code" => config.zai_api_key.clone(),
+        "opencode-go" => config.opencode_go_api_key.clone(),
         _ => None,
     }
 }
@@ -129,6 +142,9 @@ fn config_model_for(config: &Config, id: &str) -> Option<String> {
         "deepseek-v4-flash" => config.deepseek_flash_model.clone(),
         "deepseek-v4-pro" => config.deepseek_pro_model.clone(),
         "zai-code" => config.zai_model.clone(),
+        // opencode-go is multi-model: the active model lives in the shared
+        // `default_model` field, not a per-provider slot.
+        "opencode-go" => config.default_model.clone(),
         _ => None,
     }
 }
@@ -181,6 +197,156 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
         model,
     };
     entry_with_metadata(spec.id, vec![channel], true)
+}
+
+/// The models.dev provider ids neenee treats as "catalog-driven": their model
+/// lists, wire formats, and endpoints come entirely from the models.dev
+/// mirror, so adding a model there appears here with zero code changes. Any
+/// provider id in this set whose models.dev entry exists and whose API key
+/// resolves gets a catalog entry built from the directory.
+const CATALOG_DRIVEN_PROVIDERS: &[&str] = &["opencode-go"];
+
+/// Build a catalog entry for a models.dev-driven provider. Every model the
+/// directory lists becomes a channel; the transport (OpenAI `/chat/completions`
+/// vs Anthropic `/messages`) is derived from the model's wire format, which is
+/// itself derived from the model's `provider.npm` override or the provider's
+/// `npm`. The API key resolves from the provider's `env` field or the
+/// per-provider config slot.
+///
+/// This is the opencode-style "zero hardcoding" path: models.dev is the source
+/// of truth for what models exist and how to reach them. When the cache is
+/// absent (first run, offline), the caller falls back to the compiled-in
+/// `KNOWN_MODELS` registry via [`fallback_catalog_driven_entry`].
+fn catalog_driven_entry(config: &Config, provider: &ModelsDevProvider) -> ProviderEntry {
+    let api_key = provider
+        .env
+        .first()
+        .and_then(|env_var| env_or_config(Some(env_var), config_key_for(config, &provider.id)))
+        .unwrap_or_default();
+    let user_agent = NEENEE_USER_AGENT.to_string();
+    let base = if provider.api.is_empty() {
+        String::new()
+    } else {
+        provider.api.clone()
+    };
+    // Stable display order: sort by model id so the picker list is predictable.
+    let mut models: Vec<_> = provider.models.values().collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    let channels: Vec<Channel> = models
+        .iter()
+        .map(|m| {
+            let format = modelsdev::model_wire_format(provider, m);
+            let suffix = modelsdev::endpoint_suffix(format);
+            let full_url = if base.is_empty() {
+                String::new()
+            } else {
+                format!("{base}{suffix}")
+            };
+            let transport = match format {
+                WireFormat::Anthropic => Transport::Anthropic {
+                    base_url: full_url,
+                    user_agent: user_agent.clone(),
+                },
+                WireFormat::Gemini => Transport::GeminiNative,
+                _ => Transport::OpenAiCompat {
+                    base_url: full_url,
+                    user_agent: user_agent.clone(),
+                },
+            };
+            Channel {
+                id: m.id.clone(),
+                label: m.name.clone(),
+                transport,
+                api_key: api_key.clone(),
+                model: m.id.clone(),
+            }
+        })
+        .collect();
+    let default_channel = config
+        .default_model
+        .as_deref()
+        .and_then(|m| channels.iter().position(|c| c.model == m))
+        .unwrap_or(0);
+    let (name, description) = builtin_provider_metadata(&provider.id)
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .unwrap_or_else(|| (provider.name.clone(), String::new()));
+    ProviderEntry {
+        id: provider.id.clone(),
+        name,
+        description,
+        channels,
+        default_channel,
+        builtin: true,
+    }
+}
+
+/// A compiled-in fallback for a catalog-driven provider when the models.dev
+/// cache is absent (first run, offline). Uses the `KNOWN_MODELS` registry to
+/// produce a best-effort entry so the provider is still selectable. Once the
+/// cache is refreshed the dynamic entry replaces this on the next catalog
+/// rebuild.
+fn fallback_catalog_driven_entry(config: &Config, provider_id: &str) -> ProviderEntry {
+    let api_key = env_or_config(Some("OPENCODE_API_KEY"), config.opencode_go_api_key.clone())
+        .unwrap_or_default();
+    let user_agent = NEENEE_USER_AGENT.to_string();
+    // Derive the endpoint root from the known provider id. This is the only
+    // hardcoding left, and only on the offline fallback path.
+    let base = match provider_id {
+        "opencode-go" => "https://opencode.ai/zen/go/v1",
+        _ => "",
+    };
+    // Every known model whose format resolves to a served model gets a channel.
+    // This is a subset (only models in KNOWN_MODELS), but it keeps the provider
+    // usable offline.
+    let channels: Vec<Channel> = neenee_core::KNOWN_MODELS
+        .iter()
+        .filter(|m| {
+            // Only include models relevant to this provider. opencode-go serves
+            // the open coding models; a precise filter isn't possible offline,
+            // so include models that are commonly served by relays.
+            matches!(
+                m.family,
+                "glm" | "kimi" | "deepseek" | "mimo" | "minimax" | "qwen"
+            )
+        })
+        .map(|m| {
+            let suffix = modelsdev::endpoint_suffix(m.format);
+            let full_url = format!("{base}{suffix}");
+            let transport = match m.format {
+                WireFormat::Anthropic => Transport::Anthropic {
+                    base_url: full_url,
+                    user_agent: user_agent.clone(),
+                },
+                _ => Transport::OpenAiCompat {
+                    base_url: full_url,
+                    user_agent: user_agent.clone(),
+                },
+            };
+            Channel {
+                id: m.id.to_string(),
+                label: m.name.to_string(),
+                transport,
+                api_key: api_key.clone(),
+                model: m.id.to_string(),
+            }
+        })
+        .collect();
+    let default_channel = config
+        .default_model
+        .as_deref()
+        .and_then(|m| channels.iter().position(|c| c.model == m))
+        .unwrap_or(0);
+    let (name, description) = builtin_provider_metadata(provider_id)
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .unwrap_or_else(|| (provider_id.to_string(), String::new()));
+    ProviderEntry {
+        id: provider_id.to_string(),
+        name,
+        description,
+        channels,
+        default_channel,
+        builtin: true,
+    }
 }
 
 /// Build the catalog by materializing every known provider from `config`.
@@ -253,6 +419,20 @@ pub fn build_catalog(config: &Config) -> Vec<ProviderEntry> {
         true,
     ));
 
+    // Catalog-driven providers (opencode-go): model lists, wire formats, and
+    // endpoints come from the models.dev mirror — zero hardcoding. When the
+    // cache is present each provider gets a dynamic entry built from the
+    // directory; when absent (first run, offline) a compiled-in fallback keeps
+    // the provider selectable.
+    let models_dev = modelsdev::load();
+    for &pid in CATALOG_DRIVEN_PROVIDERS {
+        let entry = match models_dev.as_ref().and_then(|c| c.get(pid)) {
+            Some(provider) => catalog_driven_entry(config, provider),
+            None => fallback_catalog_driven_entry(config, pid),
+        };
+        entries.push(entry);
+    }
+
     // User-defined models: override built-ins by id, or
     // append new models. A user entry may carry several channels, finally
     // enabling multi-channel delivery (e.g. Gemini via Studio and Vertex).
@@ -267,32 +447,74 @@ pub fn build_catalog(config: &Config) -> Vec<ProviderEntry> {
     entries
 }
 
-/// Resolve the active provider for a given model id from `config`. Returns the
-/// mock provider when the id is unknown or the entry has no default channel, so
-/// callers never have to branch on absence. This is the single replacement for
-/// the resolution logic that used to be duplicated at startup and in the
-/// `SwitchProvider` handler.
+/// Resolve the active provider for a given provider id from `config`. Returns
+/// the mock provider when the id is unknown or the entry has no usable channel,
+/// so callers never have to branch on absence.
+///
+/// Channel selection honors `config.default_model`: for a multi-model provider
+/// like opencode-go, the channel carrying that model (and thus the matching
+/// transport) is chosen; otherwise the entry's default channel is used. This is
+/// the single replacement for the resolution logic that used to be duplicated
+/// at startup and in the `SwitchProvider` handler.
 pub fn build_provider_for(config: &Config, id: &str) -> std::sync::Arc<dyn neenee_core::Provider> {
+    build_provider_for_model(config, id, config.default_model.as_deref())
+}
+
+/// Resolve the provider for `provider_id`, selecting the channel that carries
+/// `model_id` when given (falling back to `config.default_model`, then the
+/// entry's default channel). Runtime switches that carry an explicit model
+/// (e.g. selecting `minimax-m3` under opencode-go) route through here so the
+/// per-model transport is picked correctly.
+pub fn build_provider_for_model(
+    config: &Config,
+    provider_id: &str,
+    model_id: Option<&str>,
+) -> std::sync::Arc<dyn neenee_core::Provider> {
     let entries = build_catalog(config);
-    match entries.iter().find(|e| e.id == id) {
-        Some(entry) => match entry.default_channel() {
-            Some(channel) => neenee_providers::build_provider_for_channel(channel, &entry.id),
-            None => std::sync::Arc::new(neenee_providers::MockProvider),
-        },
+    let Some(entry) = entries.iter().find(|e| e.id == provider_id) else {
+        return std::sync::Arc::new(neenee_providers::MockProvider);
+    };
+    let wanted = model_id.or(config.default_model.as_deref());
+    let channel = wanted
+        .and_then(|m| entry.channel_for_model(m))
+        .or_else(|| entry.default_channel());
+    match channel {
+        Some(channel) => neenee_providers::build_provider_for_channel(channel, &entry.id),
         None => std::sync::Arc::new(neenee_providers::MockProvider),
     }
 }
 
-/// The display model name for a given model id, as resolved from `config`.
+/// The display model name for a given provider id, as resolved from `config`.
 /// Falls back to `"mock-model"` when the id is unknown. Replaces the former
 /// `initial_m_name` block in `main.rs`.
+///
+/// For multi-model providers, the active model is `config.default_model` when
+/// set (and served by the provider); otherwise the entry's default-channel
+/// model.
 pub fn resolved_model_name(config: &Config, id: &str) -> String {
     build_catalog(config)
         .iter()
         .find(|e| e.id == id)
-        .and_then(|entry| entry.default_channel())
-        .map(|channel| channel.model.clone())
+        .and_then(|entry| {
+            config
+                .default_model
+                .as_deref()
+                .filter(|m| entry.offers_model(m))
+                .map(|m| m.to_string())
+                .or_else(|| entry.default_channel().map(|channel| channel.model.clone()))
+        })
         .unwrap_or_else(|| "mock-model".to_string())
+}
+
+/// The model ids a provider serves, in catalog order. Used by the picker to
+/// render the second-stage model list for multi-model providers (opencode-go).
+/// Empty for providers with no channels.
+pub fn models_for_provider(config: &Config, provider_id: &str) -> Vec<String> {
+    build_catalog(config)
+        .iter()
+        .find(|e| e.id == provider_id)
+        .map(|entry| entry.channels.iter().map(|c| c.model.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// Build the full model-picker snapshot: the canonical default id plus one row
@@ -340,6 +562,7 @@ mod tests {
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"gemini"));
         assert!(ids.contains(&"llama"));
+        assert!(ids.contains(&"opencode-go"), "missing opencode-go: {ids:?}");
         // Every registry preset is present.
         for spec in OPENAI_PROVIDER_SPECS {
             assert!(
@@ -348,6 +571,63 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    #[test]
+    fn opencode_go_hosts_both_wire_formats() {
+        let entries = build_catalog(&bare_config());
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "opencode-go")
+            .expect("opencode-go entry");
+        // Every served model has its own channel.
+        assert!(!entry.channels.is_empty());
+        // An OpenAI-format model routes through the OpenAiCompat transport.
+        let glm = entry
+            .channel_for_model("glm-5.2")
+            .expect("glm-5.2 served by opencode-go");
+        assert!(
+            matches!(
+                glm.transport,
+                neenee_core::catalog::Transport::OpenAiCompat { .. }
+            ),
+            "glm-5.2 must use OpenAiCompat"
+        );
+        // An Anthropic-format model routes through the Anthropic transport —
+        // the load-bearing detail: one provider, two wire formats.
+        let mm = entry
+            .channel_for_model("minimax-m3")
+            .expect("minimax-m3 served by opencode-go");
+        assert!(
+            matches!(
+                mm.transport,
+                neenee_core::catalog::Transport::Anthropic { .. }
+            ),
+            "minimax-m3 must use Anthropic /messages"
+        );
+    }
+
+    #[test]
+    fn opencode_go_default_model_selects_its_channel() {
+        let mut config = bare_config();
+        config.default_model = Some("minimax-m3".to_string());
+        // resolved_model_name honors default_model when the provider serves it.
+        assert_eq!(resolved_model_name(&config, "opencode-go"), "minimax-m3");
+        // models_for_provider lists every served model for the picker.
+        let models = models_for_provider(&config, "opencode-go");
+        assert!(models.contains(&"glm-5.2".to_string()));
+        assert!(models.contains(&"minimax-m3".to_string()));
+    }
+
+    #[test]
+    fn build_provider_for_model_picks_anthropic_transport_for_minimax() {
+        // Selecting minimax-m3 under opencode-go must build a provider whose
+        // model id is minimax-m3 (the Anthropic /messages path), proving the
+        // per-model transport routing reaches construction.
+        let config = bare_config();
+        let provider = build_provider_for_model(&config, "opencode-go", Some("minimax-m3"));
+        assert_eq!(provider.model(), "minimax-m3");
+        assert_eq!(provider.provider_id(), "opencode-go");
     }
 
     #[test]

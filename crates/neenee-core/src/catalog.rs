@@ -30,6 +30,14 @@ pub enum Transport {
         base_url: String,
         user_agent: String,
     },
+    /// Anthropic-compatible `/messages` endpoint at `base_url` (the full URL).
+    /// Auth uses the `x-api-key` header plus `anthropic-version`. Models served
+    /// in this format (e.g. MiniMax/Qwen behind opencode-go's `/v1/messages`)
+    /// speak the Anthropic Messages wire protocol, not OpenAI chat-completions.
+    Anthropic {
+        base_url: String,
+        user_agent: String,
+    },
     /// Google Gemini native API (`generativelanguage.googleapis.com`). The model
     /// id and API key are read from the owning [`Channel`].
     GeminiNative,
@@ -43,7 +51,9 @@ impl Transport {
     pub fn needs_api_key(&self) -> bool {
         match self {
             Transport::Llama { .. } => false,
-            Transport::OpenAiCompat { .. } | Transport::GeminiNative => true,
+            Transport::OpenAiCompat { .. }
+            | Transport::Anthropic { .. }
+            | Transport::GeminiNative => true,
         }
     }
 }
@@ -125,6 +135,20 @@ impl ProviderEntry {
             .map(|ch| crate::model::resolve(&ch.model).context_window)
             .unwrap_or(0)
     }
+
+    /// The channel carrying `model_id`, if any. A multi-model provider (e.g.
+    /// `opencode-go`) exposes one channel per model — each with the transport
+    /// matching that model's [`crate::model::WireFormat`] — so selecting a
+    /// model is selecting a channel. Returns `None` when the entry does not
+    /// serve that model id.
+    pub fn channel_for_model(&self, model_id: &str) -> Option<&Channel> {
+        self.channels.iter().find(|ch| ch.model == model_id)
+    }
+
+    /// Whether this entry serves `model_id` on any of its channels.
+    pub fn offers_model(&self, model_id: &str) -> bool {
+        self.channel_for_model(model_id).is_some()
+    }
 }
 
 /// Display metadata for a built-in provider preset. Returns `(name,
@@ -140,6 +164,12 @@ pub fn builtin_provider_metadata(id: &str) -> Option<(&'static str, &'static str
         "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash"),
         "deepseek-v4-pro" => ("DeepSeek V4 Pro", "DeepSeek V4 Pro"),
         "zai-code" => ("ZAI Code", "Z.AI coding plan (GLM-5.2)"),
+        // OpenCode Go — opencode.ai's low-cost relay. One provider id hosts many
+        // models (GLM/Kimi/DeepSeek/MiMo via OpenAI format, MiniMax/Qwen via
+        // Anthropic /messages format); the per-model [`WireFormat`] in the model
+        // registry selects the transport. Both formats share one
+        // `OPENCODE_API_KEY`.
+        "opencode-go" => ("OpenCode Go", "opencode.ai relay (multi-model)"),
         "llama" => ("Llama", "Local Llama server"),
         _ => return None,
     };
@@ -213,6 +243,78 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_transport_needs_a_key() {
+        // The Anthropic /messages transport is a cloud transport: it must
+        // report needing a key, and an empty key must not be "ready".
+        let needs_key = Transport::Anthropic {
+            base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
+            user_agent: "agent".to_string(),
+        }
+        .needs_api_key();
+        assert!(needs_key, "Anthropic transport must require an API key");
+
+        let channel = Channel {
+            id: "default".to_string(),
+            label: "OpenCode Go (Messages)".to_string(),
+            transport: Transport::Anthropic {
+                base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
+                user_agent: "agent".to_string(),
+            },
+            api_key: "  ".to_string(),
+            model: "minimax-m3".to_string(),
+        };
+        assert!(!channel.key_ready(), "empty key must not be ready");
+    }
+
+    #[test]
+    fn multi_model_entry_resolves_channel_by_model_id() {
+        // A provider like opencode-go hosts one channel per model, each with the
+        // transport matching that model's wire format. Selecting a model is
+        // selecting a channel.
+        let entry = ProviderEntry {
+            id: "opencode-go".to_string(),
+            name: "OpenCode Go".to_string(),
+            description: String::new(),
+            channels: vec![
+                Channel {
+                    id: "glm-5.2".to_string(),
+                    label: "GLM-5.2".to_string(),
+                    transport: Transport::OpenAiCompat {
+                        base_url: "https://opencode.ai/zen/go/v1/chat/completions".to_string(),
+                        user_agent: "agent".to_string(),
+                    },
+                    api_key: "k".to_string(),
+                    model: "glm-5.2".to_string(),
+                },
+                Channel {
+                    id: "minimax-m3".to_string(),
+                    label: "MiniMax M3".to_string(),
+                    transport: Transport::Anthropic {
+                        base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
+                        user_agent: "agent".to_string(),
+                    },
+                    api_key: "k".to_string(),
+                    model: "minimax-m3".to_string(),
+                },
+            ],
+            default_channel: 0,
+            builtin: true,
+        };
+        // OpenAI-format model resolves to the OpenAiCompat channel.
+        let glm = entry.channel_for_model("glm-5.2").expect("glm-5.2 channel");
+        assert!(matches!(glm.transport, Transport::OpenAiCompat { .. }));
+        // Anthropic-format model resolves to the Anthropic channel.
+        let mm = entry
+            .channel_for_model("minimax-m3")
+            .expect("minimax-m3 channel");
+        assert!(matches!(mm.transport, Transport::Anthropic { .. }));
+        // An unknown model id resolves to nothing.
+        assert!(entry.channel_for_model("nope").is_none());
+        assert!(!entry.offers_model("nope"));
+        assert!(entry.offers_model("glm-5.2"));
+    }
+
+    #[test]
     fn builtin_provider_metadata_covers_every_preset() {
         for id in [
             "kimi-code",
@@ -221,6 +323,7 @@ mod tests {
             "deepseek-v4-flash",
             "deepseek-v4-pro",
             "zai-code",
+            "opencode-go",
             "llama",
         ] {
             let (name, _) = builtin_provider_metadata(id)

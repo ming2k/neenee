@@ -5,12 +5,15 @@
 //! - `mock` — trivial in-memory provider used as the default channel.
 //! - `openai_compat` — OpenAI-compatible chat completions with native tool
 //!   calls and a streaming filter that strips tool-call "echo" text.
+//! - `anthropic_compat` — Anthropic-compatible `/messages` (used by
+//!   opencode-go's MiniMax/Qwen models and any Anthropic-format relay).
 //! - `gemini` — Google Gemini native REST surface.
-//! - `llama` — local llama.cpp / llama-server HTTP provider.
 //! - `registry` — `OpenAiProviderSpec` table of OpenAI-compatible endpoints
 //!   and [`build_provider_for_channel`], which is the single place that knows
 //!   how to turn a [`neenee_core::catalog::Channel`] into a concrete
-//!   `dyn Provider`.
+//!   `dyn Provider`. A local `llama-server --jinja` reaches the same
+//!   `OpenAiCompatProvider` as a cloud endpoint (keyless), so there is no
+//!   separate local provider module.
 //! - `sse` — the shared Server-Sent Events byte-stream decoder every streaming
 //!   provider routes through. It reassembles raw bytes across network chunk
 //!   boundaries so a multi-byte UTF-8 character split between chunks is not
@@ -20,15 +23,15 @@
 //! `openai_content`) live here so each provider module can stay focused on its
 //! wire format.
 
+mod anthropic_compat;
 mod gemini;
-mod llama;
 mod mock;
 mod openai_compat;
 mod registry;
 mod sse;
 
+pub use anthropic_compat::AnthropicMessagesProvider;
 pub use gemini::GeminiProvider;
-pub use llama::LlamaServerProvider;
 pub use mock::MockProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use registry::{

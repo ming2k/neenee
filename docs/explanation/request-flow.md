@@ -144,10 +144,9 @@ flowchart TD
     D --> E["accumulate text / reasoning / tool_calls"]
     E --> F["push assistant message"]
     F --> G{"response has<br/>tool_calls?"}
-    G -- yes --> H["guard_repeated_call<br/>(rejects 4th identical call)"]
-    H --> I["execute_tool — local, no HTTP"]
+    G -- yes --> I["execute_tool — local, no HTTP"]
     I --> J["push tool result"]
-    J --> K["session review + relieve pressure<br/>tool_rounds += 1"]
+    J --> K["relieve pressure + read-loop guard<br/>+ round hooks; tool_rounds += 1"]
     K --> C
     G -- no --> L{"fallback JSON<br/>parses?"}
     L -- yes --> M["attach_fallback_tool_call"]
@@ -159,7 +158,9 @@ flowchart TD
 The loop has **no per-round cap**. The earlier `MAX_TOOL_ROUNDS = 32`
 hard limit was removed in [ADR-0009](../adr/0009-uncapped-agentic-loop.md);
 the loop now runs until the model emits a final assistant message with no
-tool call, with the repeated-call guard, periodic session review
+tool call, with the deterministic read-loop guard
+([ADR-0034](../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md)),
+on-demand session review
 ([ADR-0016](../adr/0016-session-review-over-round-counting.md)), and
 context compaction as backstops.
 

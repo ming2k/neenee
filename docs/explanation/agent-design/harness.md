@@ -159,6 +159,20 @@ context window; the user can interrupt at any time with `Esc` or
 rounds per turn, 50 autonomous iterations per `/loop`) that this decision
 removed.
 
+### Read-loop guard (ADR-0034)
+
+The cheapest stuck state to detect is the *repeated read*: the model re-issuing
+the same `read_file` (one page, or thrashing between two pages) without progress.
+Identical read arguments return identical bytes, so this is a *provable* waste
+that needs no model judgement. A per-turn guard
+(`neenee-agent/src/loop_guard.rs`) keeps a sliding window of recent read-round
+signatures and, when one recurs past a threshold, injects a hidden anti-anchoring
+nudge (`InjectionKind::LoopReviewNudge`) naming the repeated read and demanding a
+different action. Detection is pure bookkeeping (no inference, no false positives
+on genuine paging, which reads distinct ranges); the nudge is **non-terminating**
+— `Esc`, `hard_stop_rounds`, and `abort` stay the hard backstops. Gated by
+`[agent] loop_review_enabled` (default on; off for sub-agents and `/review`).
+
 ### Session review (ADR-0016)
 
 Because an uncapped loop can still *appear* stuck (distinct-but-unproductive

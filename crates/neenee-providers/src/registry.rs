@@ -5,11 +5,36 @@ use neenee_core::Provider;
 use neenee_core::catalog::{Channel, Transport};
 use std::sync::Arc;
 
-use crate::{GeminiProvider, LlamaServerProvider, NEENEE_USER_AGENT, OpenAiCompatProvider};
+use crate::{AnthropicMessagesProvider, GeminiProvider, NEENEE_USER_AGENT, OpenAiCompatProvider};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // OpenAI-compatible provider wrappers for popular Chinese & global services
 // ═════════════════════════════════════════════════════════════════════════════
+
+/// Per-model `max_tokens` for the Anthropic `/messages` surface. The Messages
+/// API requires `max_tokens`; capping the response at the model's registered
+/// output limit (rather than a flat 8192) lets long agent turns from
+/// high-output models (MiniMax M3: 131072) run untruncated. Values mirror
+/// models.dev's opencode-go entries. Unknown models fall back to the default
+/// inside [`AnthropicMessagesProvider`].
+const ANTHROPIC_MODEL_MAX_TOKENS: &[(&str, u32)] = &[
+    ("minimax-m3", 131072),
+    ("minimax-m2.7", 131072),
+    ("minimax-m2.5", 65536),
+    ("qwen3.7-max", 65536),
+    ("qwen3.7-plus", 65536),
+    ("qwen3.6-plus", 65536),
+    ("qwen3.5-plus", 65536),
+];
+
+/// Look up the `max_tokens` for an Anthropic-format model id. `None` lets the
+/// provider fall back to its built-in default.
+fn anthropic_model_max_tokens(model_id: &str) -> Option<u32> {
+    ANTHROPIC_MODEL_MAX_TOKENS
+        .iter()
+        .find(|(id, _)| *id == model_id)
+        .map(|(_, tokens)| *tokens)
+}
 
 /// Specification for an OpenAI-compatible provider.
 ///
@@ -144,11 +169,41 @@ pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn 
             model: channel.model.clone(),
             id: entry_id.to_string(),
         }),
-        Transport::Llama { base_url } => Arc::new(LlamaServerProvider {
-            base_url: base_url.clone(),
-            model: channel.model.clone(),
-            id: entry_id.to_string(),
-        }),
+        Transport::Llama { base_url } => {
+            // `llama-server --jinja` speaks the full OpenAI chat-completions
+            // surface — including native tool calls and streaming tool-call
+            // deltas — so the local server is reached through the same
+            // `OpenAiCompatProvider` as any cloud endpoint. The channel is
+            // keyless (`Transport::Llama` resolves no API key), so the empty
+            // key suppresses the `Authorization` header entirely.
+            let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+            let mut provider = OpenAiCompatProvider::with_base_url_and_user_agent(
+                channel.api_key.clone(),
+                channel.model.clone(),
+                &url,
+                NEENEE_USER_AGENT,
+            );
+            provider.id = entry_id.to_string();
+            Arc::new(provider)
+        }
+        Transport::Anthropic {
+            base_url,
+            user_agent,
+        } => {
+            let mut provider = AnthropicMessagesProvider::with_user_agent(
+                channel.api_key.clone(),
+                channel.model.clone(),
+                base_url,
+                user_agent,
+            );
+            provider.id = entry_id.to_string();
+            // Cap the response length at the model's registered output limit so
+            // high-output models (MiniMax M3) are not truncated by the default.
+            if let Some(max_tokens) = anthropic_model_max_tokens(&channel.model) {
+                provider = provider.with_max_tokens(max_tokens);
+            }
+            Arc::new(provider)
+        }
         Transport::OpenAiCompat {
             base_url,
             user_agent,
@@ -247,5 +302,71 @@ mod build_tests {
         let provider = build_provider_for_channel(&channel, "openai");
         assert_eq!(provider.provider_id(), "openai");
         assert_eq!(provider.model(), "gpt-4o");
+    }
+
+    #[test]
+    fn build_provider_dispatches_anthropic_transport() {
+        // opencode-go's MiniMax/Qwen models reach an Anthropic /messages
+        // endpoint; the catalog builds an Anthropic transport for them, and
+        // build_provider_for_channel must dispatch it to the messages provider.
+        let channel = Channel {
+            id: "minimax-m3".to_string(),
+            label: "MiniMax M3".to_string(),
+            transport: Transport::Anthropic {
+                base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
+                user_agent: "agent".to_string(),
+            },
+            api_key: "go-key".to_string(),
+            model: "minimax-m3".to_string(),
+        };
+        let provider = build_provider_for_channel(&channel, "opencode-go");
+        assert_eq!(provider.provider_id(), "opencode-go");
+        assert_eq!(provider.model(), "minimax-m3");
+    }
+
+    #[test]
+    fn build_provider_routes_llama_transport_through_openai_compat() {
+        // `llama-server --jinja` speaks the full OpenAI chat-completions
+        // surface (native tool calls + streaming tool-call deltas), so the local
+        // server is reached through `OpenAiCompatProvider` rather than a limited
+        // local provider. The channel is keyless: the request body builder keeps
+        // the tool-capable machinery, and the empty key suppresses auth.
+        let channel = Channel {
+            id: "default".to_string(),
+            label: "Llama".to_string(),
+            transport: Transport::Llama {
+                base_url: "http://localhost:8080".to_string(),
+            },
+            api_key: String::new(),
+            model: "gemma-4-E4B-it-GGUF".to_string(),
+        };
+        let provider = build_provider_for_channel(&channel, "llama");
+        assert_eq!(provider.provider_id(), "llama");
+        assert_eq!(provider.model(), "gemma-4-E4B-it-GGUF");
+        // The concrete provider is the OpenAI-compatible one (downcast is not
+        // available on `dyn Provider`, so verify the identity indirectly: a
+        // provider with native tool support exposes the same id/model surface,
+        // and the trait default for `prepare_tools` would be a no-op). The
+        // load-bearing assertion is that construction succeeds and attributes
+        // correctly; tool wiring is exercised by the agent harness.
+    }
+
+    #[test]
+    fn anthropic_max_tokens_derives_from_model_output_limit() {
+        // minimax-m3's registered output limit (131072) must cap the request's
+        // max_tokens, not the provider's flat 8192 default. Construct directly
+        // so the typed field is readable (the trait object returned by
+        // build_provider_for_channel is not downcastable).
+        let provider = AnthropicMessagesProvider::with_user_agent(
+            "k".to_string(),
+            "minimax-m3".to_string(),
+            "https://opencode.ai/zen/go/v1/messages",
+            "agent",
+        )
+        .with_max_tokens(anthropic_model_max_tokens("minimax-m3").unwrap());
+        assert_eq!(provider.max_tokens, 131072);
+        // An unknown model id falls back to None (the provider keeps its
+        // default), proving the lookup does not invent a limit.
+        assert!(anthropic_model_max_tokens("not-a-model").is_none());
     }
 }

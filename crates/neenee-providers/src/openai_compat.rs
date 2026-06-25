@@ -49,6 +49,20 @@ impl OpenAiCompatProvider {
         }
     }
 
+    /// Attach the `Authorization: Bearer <key>` header only when a key is
+    /// configured. Keyless OpenAI-compatible servers (a local `llama-server`
+    /// started without `--api-key`) must not receive an empty bearer token:
+    /// some reject a malformed header even when they would otherwise ignore
+    /// the key. `Transport::Llama` channels carry an empty key, so they pass
+    /// through with no auth header at all.
+    fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.api_key.trim().is_empty() {
+            req
+        } else {
+            req.header("Authorization", format!("Bearer {}", self.api_key))
+        }
+    }
+
     pub(crate) fn request_body(&self, messages: Vec<Message>, stream: bool) -> Value {
         // Recover from a poisoned mutex: a previous panic in the critical
         // section should not take down this request too.
@@ -440,11 +454,13 @@ impl Provider for OpenAiCompatProvider {
 
         let body = self.request_body(messages, false);
 
-        let response = client
-            .post(&self.base_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
-            .json(&body)
+        let response = self
+            .with_auth(
+                client
+                    .post(&self.base_url)
+                    .header(reqwest::header::USER_AGENT, &self.user_agent)
+                    .json(&body),
+            )
             .send()
             .await
             .map_err(|error| transport_error("OpenAI", error))?;
@@ -529,11 +545,13 @@ impl Provider for OpenAiCompatProvider {
 
         let body = self.request_body(messages, true);
 
-        let response = client
-            .post(&self.base_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
-            .json(&body)
+        let response = self
+            .with_auth(
+                client
+                    .post(&self.base_url)
+                    .header(reqwest::header::USER_AGENT, &self.user_agent)
+                    .json(&body),
+            )
             .send()
             .await
             .map_err(|error| transport_error("OpenAI", error))?;
@@ -560,11 +578,13 @@ impl Provider for OpenAiCompatProvider {
         &self,
         messages: Vec<Message>,
     ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        let response = reqwest::Client::new()
-            .post(&self.base_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
-            .json(&self.request_body(messages, true))
+        let response = self
+            .with_auth(
+                reqwest::Client::new()
+                    .post(&self.base_url)
+                    .header(reqwest::header::USER_AGENT, &self.user_agent)
+                    .json(&self.request_body(messages, true)),
+            )
             .send()
             .await
             .map_err(|error| transport_error("OpenAI", error))?;

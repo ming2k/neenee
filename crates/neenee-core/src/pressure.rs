@@ -190,9 +190,12 @@ pub struct PruneOutcome {
 ///   tool output verbatim — that is what is usually still relevant.
 /// - **Keep-alive** spares a fresh result whose file target is mentioned in the
 ///   last few non-tool messages (likely still in play).
-/// - **Staleness / dedup** clears a result outright when a *later* tool touched
-///   the same file (an earlier `read` superseded by a re-`read` or `edit` is
-///   stale — and keeping stale content is worse than clearing it).
+/// - **Staleness / dedup** clears a result outright when a *later* tool
+///   supersedes it on the same file: a mutation (`write`/`edit`), or a `read`
+///   that fully re-covers its line range. Reads of *different* pages of one file
+///   are complementary, not superseding, so paging never self-evicts — keeping
+///   genuinely stale content is worse than clearing it, but evicting a live page
+///   just makes the model re-read it.
 /// - **Tiered degradation** truncates a large, fresh result to head + tail first
 ///   (a gentler tier that keeps its shape) and only fully clears it on a later,
 ///   higher-pressure pass — or immediately when it is already small.
@@ -229,6 +232,47 @@ struct PrunePlan {
 struct ToolMeta {
     label: String,
     file_key: Option<String>,
+    /// For a *read*, the 1-based line range `[start, end)` it covered. `end` is
+    /// `usize::MAX` for an open-ended read (no `limit`, i.e. to EOF). `None` for
+    /// non-read file touches (write/edit). This is what makes staleness
+    /// range-aware: two reads of *different pages* of one file no longer evict
+    /// each other — only a later read that fully re-covers an earlier one (or a
+    /// mutation) supersedes it.
+    read_range: Option<(usize, usize)>,
+    /// True when the call mutated the file (write/edit). A mutation invalidates
+    /// every prior read of the same path regardless of range.
+    mutates: bool,
+}
+
+impl ToolMeta {
+    /// Does this (later) same-file result supersede an `earlier` one, making the
+    /// earlier one stale? The caller guarantees both touched the same file.
+    ///
+    /// - A mutation supersedes any prior read (its content is now outdated).
+    /// - A read supersedes an earlier read only when it fully **covers** the
+    ///   earlier read's line range (a strict re-read / superset), so paging
+    ///   through complementary regions of one file never self-evicts.
+    /// - A non-read earlier result (`read_range == None`, e.g. a write
+    ///   confirmation) keeps the legacy "any later same-file touch supersedes
+    ///   it" behaviour — such results are tiny and outdated once re-touched.
+    fn supersedes(&self, earlier: &ToolMeta) -> bool {
+        match earlier.read_range {
+            None => true,
+            Some(earlier_range) => {
+                self.mutates
+                    || self
+                        .read_range
+                        .is_some_and(|later| range_covers(later, earlier_range))
+            }
+        }
+    }
+}
+
+/// Whether `outer` fully contains `inner` (`outer.start <= inner.start` and
+/// `inner.end <= outer.end`). Used to decide when a later read makes an earlier
+/// read redundant.
+fn range_covers(outer: (usize, usize), inner: (usize, usize)) -> bool {
+    outer.0 <= inner.0 && inner.1 <= outer.1
 }
 
 /// Plan (without mutating) which tool results to degrade and how. Returns an
@@ -256,25 +300,25 @@ fn plan_prune(messages: &[Message], protect_recent_chars: usize) -> Vec<PrunePla
         protected.insert(i);
     }
 
-    // Staleness: the last tool result for a given file is live; earlier ones
-    // touching the same file are stale once it is re-touched.
-    let mut last_for_file: HashMap<&str, usize> = HashMap::new();
-    for &i in &tools {
-        if let Some(fk) = meta.get(&i).and_then(|m| m.file_key.as_deref()) {
-            last_for_file.insert(fk, i);
-        }
-    }
+    // Staleness: a read is stale only when a *later* same-file result supersedes
+    // it — a mutation of the file, or a read that fully re-covers its line range
+    // (see `ToolMeta::supersedes`). Reads of different pages are complementary,
+    // not superseding, so paging through one large file never self-evicts —
+    // closing the read/re-read oscillation that file-level (path-only) staleness
+    // caused once the prune gate engaged.
     let mut plan = Vec::new();
-    for &i in &tools {
+    for (pos, &i) in tools.iter().enumerate() {
         if protected.contains(&i) {
             continue;
         }
         let meta_i = meta.get(&i).cloned().unwrap_or_default();
-        let stale = meta_i
-            .file_key
-            .as_deref()
-            .and_then(|fk| last_for_file.get(fk))
-            .is_some_and(|&last| last > i);
+        let stale = meta_i.file_key.as_deref().is_some_and(|fk| {
+            tools[pos + 1..].iter().any(|j| {
+                meta.get(j).is_some_and(|meta_j| {
+                    meta_j.file_key.as_deref() == Some(fk) && meta_j.supersedes(&meta_i)
+                })
+            })
+        });
         // Keep-alive spares a *fresh* result whose file target is still in play.
         // A stale result is cleared even if mentioned, because its content is
         // outdated. "In play" means referenced *after* this result was produced
@@ -362,9 +406,22 @@ fn collect_tool_meta(messages: &[Message]) -> HashMap<usize, ToolMeta> {
             .tool_call_id
             .as_deref()
             .and_then(|id| by_id.get(id))
-            .map(|(name, args)| ToolMeta {
-                label: tool_label(name, args),
-                file_key: file_key(name, args),
+            .map(|(name, args)| {
+                let file_key = file_key(name, args);
+                // Range/mutation classification only matters for file-addressed
+                // calls (staleness is keyed on a shared file). Non-file tools
+                // (bash, grep without a path) never enter the same-file scan.
+                let (read_range, mutates) = if file_key.is_some() {
+                    classify_file_touch(args)
+                } else {
+                    (None, false)
+                };
+                ToolMeta {
+                    label: tool_label(name, args),
+                    file_key,
+                    read_range,
+                    mutates,
+                }
             })
             .unwrap_or_default();
         out.insert(i, meta);
@@ -455,6 +512,40 @@ fn tool_label(name: &str, arguments: &str) -> String {
 fn file_key(_name: &str, arguments: &str) -> Option<String> {
     let args = parsed_args(arguments);
     arg_str(&args, &["path", "file_path", "file", "filename"]).map(|s| s.to_string())
+}
+
+/// Classify a file-addressed tool call for staleness: `(read_range, mutates)`.
+///
+/// A call is a *mutation* when it carries write-shaped arguments (`content` for
+/// `write`, `old_string`/`new_string` for `edit`) — keyed on arg shape, not tool
+/// name, so it survives tool renames the same way [`file_key`] does. Otherwise it
+/// is treated as a *read* covering the 1-based line range `[offset, offset+limit)`
+/// — a missing/`0` `limit` means open-ended (to EOF), encoded as `usize::MAX`. A
+/// read with neither field (`offset` defaults to 1) covers the whole file
+/// `[1, MAX)`, which still supersedes/dedups other full reads exactly as before.
+fn classify_file_touch(arguments: &str) -> (Option<(usize, usize)>, bool) {
+    let args = parsed_args(arguments);
+    let mutates = args.get("content").is_some()
+        || args.get("new_string").is_some()
+        || args.get("old_string").is_some();
+    if mutates {
+        return (None, true);
+    }
+    let offset = args
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let end = if limit == 0 {
+        usize::MAX
+    } else {
+        offset.saturating_add(limit)
+    };
+    (Some((offset, end)), false)
 }
 
 /// Informative cleared-placeholder carrying the tool label and the size that was
@@ -601,6 +692,90 @@ mod tests {
         // because a later op touched the same file.
         assert!(is_cleared(&messages[1].content));
         assert!(messages[1].content.contains("read config.rs"));
+    }
+
+    #[test]
+    fn paging_different_ranges_of_one_file_do_not_evict_each_other() {
+        // The regression this fix targets: under prune pressure, reading two
+        // *different* pages of one large file used to mark the earlier page
+        // stale (path-only staleness), so the model lost it and re-read — an
+        // oscillation. Different ranges are complementary, so neither is stale.
+        let page1 = "A".repeat(3_000);
+        let page2 = "B".repeat(3_000);
+        let mut messages = vec![
+            assistant_with_call(
+                "c1",
+                "read_file",
+                r#"{"path":"big.rs","offset":1,"limit":800}"#,
+            ),
+            Message::tool_result(
+                &call(
+                    "c1",
+                    "read_file",
+                    r#"{"path":"big.rs","offset":1,"limit":800}"#,
+                ),
+                page1,
+            ),
+            assistant_with_call(
+                "c2",
+                "read_file",
+                r#"{"path":"big.rs","offset":900,"limit":800}"#,
+            ),
+            Message::tool_result(
+                &call(
+                    "c2",
+                    "read_file",
+                    r#"{"path":"big.rs","offset":900,"limit":800}"#,
+                ),
+                page2,
+            ),
+        ];
+
+        // Zero recency protection so nothing is spared by recency: the only thing
+        // keeping page 1 alive is that page 2 does not supersede it. Both pages
+        // are large and fresh, so the worst that happens is a gentle truncate —
+        // never a full clear of a still-live page.
+        let out = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert!(
+            !is_cleared(&messages[1].content),
+            "page 1 must not be cleared by a read of a different page"
+        );
+        // Both are merely truncated (head/tail kept), not evicted.
+        assert!(is_truncated(&messages[1].content) || messages[1].content.len() >= 3_000);
+        assert!(out.cleared_count >= 1);
+    }
+
+    #[test]
+    fn full_reread_covering_an_earlier_page_clears_it() {
+        // A later read whose range fully covers an earlier read *does* supersede
+        // it (a genuine re-read), so dedup still works for overlapping reads.
+        let page = "A".repeat(3_000);
+        let whole = "W".repeat(3_000);
+        let mut messages = vec![
+            assistant_with_call(
+                "c1",
+                "read_file",
+                r#"{"path":"big.rs","offset":10,"limit":50}"#,
+            ),
+            Message::tool_result(
+                &call(
+                    "c1",
+                    "read_file",
+                    r#"{"path":"big.rs","offset":10,"limit":50}"#,
+                ),
+                page,
+            ),
+            // Open-ended read from line 1 covers [10,60) -> earlier page is stale.
+            assistant_with_call("c2", "read_file", r#"{"path":"big.rs"}"#),
+            Message::tool_result(&call("c2", "read_file", r#"{"path":"big.rs"}"#), whole),
+        ];
+
+        let out = prune_tool_results(&mut messages, 0, 1).unwrap();
+        assert!(
+            is_cleared(&messages[1].content),
+            "the earlier page is fully re-covered, so it is stale and cleared"
+        );
+        assert!(out.cleared_count >= 1);
     }
 
     #[test]

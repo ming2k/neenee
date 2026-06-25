@@ -87,6 +87,11 @@ pub enum StartupMode {
     Resume(Option<String>),
     Picker,
     Doctor,
+    /// Render a single UI component in isolation for interactive development
+    /// (`neenee showcase <component>`). No agent, no session, no network —
+    /// just the component's model + renderer wired to a real terminal so you
+    /// can see and interact with it standalone.
+    Showcase(String),
 }
 
 pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, bool) {
@@ -114,9 +119,10 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, boo
         [cmd] if cmd == "resume" => StartupMode::Picker,
         [cmd, id] if cmd == "resume" => StartupMode::Resume(Some(id.clone())),
         [cmd, ..] if cmd == "doctor" => StartupMode::Doctor,
+        [cmd, component] if cmd == "showcase" => StartupMode::Showcase(component.clone()),
         [cmd, ..] => {
             eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee              start a fresh session\n  neenee resume [id]  resume a session (picker when no id)\n  neenee doctor       verify stored session integrity\n\nOptions:\n  --project <path>    operate on the project at <path>\n  --auto-approve      bypass write-tool permission prompts for this session\n  --single-instance   require exclusive per-project lock (pre-ADR-0018 default)",
+                "Unknown command '{}'. Usage:\n  neenee                  start a fresh session\n  neenee resume [id]      resume a session (picker when no id)\n  neenee doctor           verify stored session integrity\n  neenee showcase <name>  render a single UI component standalone\n\nOptions:\n  --project <path>        operate on the project at <path>\n  --auto-approve          bypass write-tool permission prompts for this session\n  --single-instance       require exclusive per-project lock (pre-ADR-0018 default)",
                 cmd
             );
             std::process::exit(2);

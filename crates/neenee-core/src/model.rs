@@ -1,10 +1,37 @@
 //! Canonical model registry — the single source of truth for a model's
-//! intrinsic, provider-independent properties (context window, capabilities).
+//! intrinsic, provider-independent properties (context window, capabilities,
+//! wire format).
 //!
 //! A [`ProviderEntry`](crate::catalog::ProviderEntry) references a model by its
 //! wire id (e.g. `"glm-5.2"`); this module resolves that id to the definitive
 //! metadata. This avoids duplicating per-model facts across every provider that
 //! serves the same model (official endpoint, relay, local proxy, …).
+//!
+//! The [`WireFormat`] on each model records the wire protocol a provider uses to
+//! reach it. Most models speak OpenAI chat-completions everywhere they are
+//! served; a relay like opencode-go, however, serves MiniMax/Qwen behind an
+//! Anthropic `/messages` surface, so those models carry [`WireFormat::Anthropic`].
+//! The catalog consults this when building the [`crate::catalog::Transport`] so
+//! one provider (`opencode-go`) can host models of mixed formats.
+
+/// The wire protocol a provider uses to reach a model. Determined per model
+/// (not per provider): the same model id is served the same way everywhere in
+/// practice, and opencode-go's mixed-format catalogue is the reason this field
+/// exists. The catalog maps a format to a [`crate::catalog::Transport`] variant
+/// and the endpoint suffix (`/chat/completions` vs `/messages`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireFormat {
+    /// OpenAI chat-completions (`/v1/chat/completions`). The common case.
+    #[default]
+    OpenAiCompat,
+    /// Anthropic Messages (`/v1/messages`). Used by opencode-go for
+    /// MiniMax/Qwen, and by any Anthropic-compatible relay.
+    Anthropic,
+    /// Google Gemini native (`generativelanguage.googleapis.com`).
+    Gemini,
+    /// A local llama.cpp / compatible server.
+    Llama,
+}
 
 /// A canonical model definition with its intrinsic properties.
 ///
@@ -25,13 +52,15 @@ pub struct Model {
     pub reasoning: bool,
     /// Whether the model supports native tool/function calling.
     pub tool_call: bool,
+    /// Wire protocol used to reach this model. See [`WireFormat`].
+    pub format: WireFormat,
 }
 
 /// The canonical registry of known models. Add a model here when it is
 /// referenced by any built-in provider preset; user-defined models that are not
 /// in this list fall back to [`fallback_model`] at resolution time.
 pub const KNOWN_MODELS: &[Model] = &[
-    // ── GLM family (Zhipu / Z.AI) ──────────────────────────────────────────
+    // ── GLM family (Zhipu / Z.AI / opencode-go) ───────────────────────────
     Model {
         id: "glm-5.2",
         name: "GLM-5.2",
@@ -39,6 +68,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     Model {
         id: "glm-5.1",
@@ -47,6 +77,16 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 200_000,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "glm-5",
+        name: "GLM-5",
+        family: "glm",
+        context_window: 200_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     Model {
         id: "glm-4.7",
@@ -55,8 +95,9 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 200_000,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
-    // ── Kimi (Moonshot) ────────────────────────────────────────────────────
+    // ── Kimi (Moonshot / opencode-go) ─────────────────────────────────────
     Model {
         id: "kimi-k2.7-code",
         name: "Kimi K2.7 Code",
@@ -64,6 +105,25 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "kimi-k2.6",
+        name: "Kimi K2.6",
+        family: "kimi",
+        context_window: 262_144,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "kimi-k2.5",
+        name: "Kimi K2.5",
+        family: "kimi",
+        context_window: 262_144,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
@@ -73,6 +133,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 128_000,
         reasoning: false,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     Model {
         id: "gpt-4o-mini",
@@ -81,6 +142,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 128_000,
         reasoning: false,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     // ── Gemini (Google) ────────────────────────────────────────────────────
     Model {
@@ -90,6 +152,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: false,
         tool_call: true,
+        format: WireFormat::Gemini,
     },
     Model {
         id: "gemini-2.0-flash",
@@ -98,8 +161,9 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: false,
         tool_call: true,
+        format: WireFormat::Gemini,
     },
-    // ── DeepSeek ───────────────────────────────────────────────────────────
+    // ── DeepSeek (opencode-go / direct) ────────────────────────────────────
     Model {
         id: "deepseek-v4-flash",
         name: "DeepSeek V4 Flash",
@@ -107,6 +171,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
     Model {
         id: "deepseek-v4-pro",
@@ -115,6 +180,112 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    // ── MiMo (Xiaomi / opencode-go, OpenAI format) ─────────────────────────
+    Model {
+        id: "mimo-v2.5",
+        name: "MiMo V2.5",
+        family: "mimo",
+        context_window: 1_000_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "mimo-v2.5-pro",
+        name: "MiMo V2.5 Pro",
+        family: "mimo",
+        context_window: 1_048_576,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "mimo-v2-pro",
+        name: "MiMo V2 Pro",
+        family: "mimo",
+        context_window: 1_048_576,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "mimo-v2-omni",
+        name: "MiMo V2 Omni",
+        family: "mimo",
+        context_window: 262_144,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    // ── MiniMax (opencode-go, Anthropic /messages format) ──────────────────
+    Model {
+        id: "minimax-m3",
+        name: "MiniMax M3",
+        family: "minimax",
+        context_window: 512_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::Anthropic,
+    },
+    Model {
+        id: "minimax-m2.7",
+        name: "MiniMax M2.7",
+        family: "minimax",
+        context_window: 204_800,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::Anthropic,
+    },
+    Model {
+        id: "minimax-m2.5",
+        name: "MiniMax M2.5",
+        family: "minimax",
+        context_window: 204_800,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::Anthropic,
+    },
+    // ── Qwen (opencode-go, OpenAI /chat/completions format) ────────────────
+    // models.dev records qwen3.* as `@ai-sdk/openai-compatible` under
+    // opencode-go; the KNOWN_MODELS fallback mirrors that so the offline
+    // fallback path matches the live catalog.
+    Model {
+        id: "qwen3.7-max",
+        name: "Qwen3.7 Max",
+        family: "qwen",
+        context_window: 1_000_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "qwen3.7-plus",
+        name: "Qwen3.7 Plus",
+        family: "qwen",
+        context_window: 1_000_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "qwen3.6-plus",
+        name: "Qwen3.6 Plus",
+        family: "qwen",
+        context_window: 1_000_000,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
+    },
+    Model {
+        id: "qwen3.5-plus",
+        name: "Qwen3.5 Plus",
+        family: "qwen",
+        context_window: 262_144,
+        reasoning: true,
+        tool_call: true,
+        format: WireFormat::OpenAiCompat,
     },
 ];
 
@@ -135,6 +306,7 @@ pub fn fallback_model(_id: &str) -> Model {
         context_window: 0,
         reasoning: false,
         tool_call: true,
+        format: WireFormat::OpenAiCompat,
     }
 }
 
@@ -178,5 +350,26 @@ mod tests {
         assert!(!m.reasoning);
         // The harness depends on tool calling, so even the fallback assumes it.
         assert!(m.tool_call);
+    }
+
+    #[test]
+    fn opencode_go_models_carry_their_wire_format() {
+        // OpenAI-format models served by opencode-go.
+        assert_eq!(resolve("glm-5.2").format, WireFormat::OpenAiCompat);
+        assert_eq!(resolve("kimi-k2.6").format, WireFormat::OpenAiCompat);
+        assert_eq!(
+            resolve("deepseek-v4-flash").format,
+            WireFormat::OpenAiCompat
+        );
+        assert_eq!(resolve("mimo-v2.5-pro").format, WireFormat::OpenAiCompat);
+        // Anthropic-/messages-format models served by opencode-go.
+        assert_eq!(resolve("minimax-m3").format, WireFormat::Anthropic);
+        // models.dev records qwen3.* as openai-compatible under opencode-go.
+        assert_eq!(resolve("qwen3.7-max").format, WireFormat::OpenAiCompat);
+    }
+
+    #[test]
+    fn fallback_format_is_openai_compat() {
+        assert_eq!(fallback_model("anything").format, WireFormat::OpenAiCompat);
     }
 }

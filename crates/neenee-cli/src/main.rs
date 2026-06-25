@@ -5,7 +5,9 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentTool};
-use neenee_core::{AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent};
+use neenee_core::{
+    AgentRequest, AgentResponse, CHARS_PER_TOKEN, DynamicCatalog, EXPLORE, Provider, TurnEvent,
+};
 use neenee_store::{
     RepeatStore,
     config::Config,
@@ -15,6 +17,8 @@ use neenee_store::{
 use neenee_tools::commands::{CustomCommand, discover_commands};
 use neenee_tools::mcp::load_mcp_tools;
 mod hooks;
+mod mcp_catalog;
+mod showcase;
 mod tui;
 
 mod pursuits;
@@ -88,6 +92,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // catalog (`build_provider_for`), the single source of truth for the
     // env-var-then-config resolution rules shared with runtime switching. See
     // `docs/adr/0002-model-channel-abstraction.md`.
+    //
+    // Refresh the models.dev catalog first so the catalog-driven providers
+    // (opencode-go) read a fresh model list and wire-format mapping. Best
+    // effort: a failed fetch is logged and the catalog falls back to the
+    // compiled-in registry, so this never blocks startup.
+    let models_dev_catalog = neenee_agent::modelsdev::ModelsDevCatalog;
+    if let Err(error) = models_dev_catalog.refresh().await {
+        tracing::warn!(%error, "could not refresh models.dev catalog; using fallback");
+    }
+    neenee_agent::dynamic::spawn_refresh(models_dev_catalog);
+
     let initial_provider: Arc<dyn Provider> =
         catalog::build_provider_for(&config, catalog::default_provider_id(&config));
 
@@ -96,8 +111,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent_provider = Arc::new(ProxyProvider::new(provider_holder));
 
-    // Shared skills registry for the skill tools.
+    // Shared skills registry for the skill tools. The background refresh loop
+    // re-scans all sources (local dirs, remote repos, bundled) every hour so
+    // new/updated skills appear without a restart; failed remote fetches fall
+    // back to the cached copy.
     let skills_registry = Arc::new(SkillRegistry::load(&config.skills).await);
+    neenee_agent::dynamic::spawn_refresh(neenee_agent::dynamic::SkillCatalog::new(
+        (*skills_registry).clone(),
+    ));
 
     let mcp = load_mcp_tools(&config.mcp).await;
     let mcp_statuses = mcp.statuses;
@@ -129,6 +150,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Showcase: render a single UI component standalone. No agent, session, or
+    // network — just the component's model + renderer on a live terminal. Early
+    // return so none of the agent/session plumbing below runs.
+    if let StartupMode::Showcase(component) = &startup {
+        return showcase::run(component);
+    }
+
     // Session loading honors the startup mode. Under ADR-0018
     // `load_for_project` pins a fresh `sessions/<id>.{json,jsonl}`, so a bare
     // `neenee` always starts a new session; prior sessions stay on disk and
@@ -145,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             false
         }
         StartupMode::Doctor => unreachable!("doctor returns before this match"),
+        StartupMode::Showcase(_) => unreachable!("showcase returns before this match"),
     };
 
     // C12: lightweight semantic-search index for this project. The provider is
@@ -180,7 +209,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.build()
     };
     let mut tools: Vec<Arc<dyn neenee_core::Tool>> = neenee_core::collect_tools(&tool_ctx);
-    tools.extend(mcp.tools);
+    // MCP tools are NOT layered into `tools` here; they go into the agent's
+    // dynamically-refreshable `mcp_tools` holder after Agent::new, so the
+    // background McpCatalog can reconnect/re-discover them at runtime.
     // Snapshot of the shared toolset (built-in + MCP) before the `SubagentTool` is
     // layered on. A `/btw` side session (ADR-0017) rebuilds its `Agent` from
     // this same snapshot — minus its own `SubagentTool`, mirroring the subagent
@@ -210,6 +241,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // approvals survive across sessions in this project. Best-effort: a
     // missing or unreadable permissions.json just means we re-prompt.
     agent.set_project_root(Some(project_root.clone()));
+    // Seed declarative permission rules from `[permissions]` config so default
+    // policies are data-driven. Runtime "Always" decisions still write to
+    // permissions.json; these config rules re-apply on every start.
+    agent.seed_permissions_from_config(&config.permissions.allow);
+    // Seed MCP tools into the dynamically-refreshable holder and start the
+    // background reconnect/re-discover loop. Individual tool calls also
+    // auto-reconnect on failure (McpTool::call).
+    agent.replace_mcp_tools(mcp.tools);
+    if !mcp.servers.is_empty() {
+        neenee_agent::dynamic::spawn_refresh(crate::mcp_catalog::McpCatalog::new(
+            mcp.servers,
+            agent.mcp_tools_holder(),
+        ));
+    }
     if auto_approve_at_start {
         agent.set_auto_approve(true);
         let _ = resp_tx.send(turn(

@@ -141,6 +141,15 @@ impl Dirs {
         self.cache_dir.join("skills").join("remote")
     }
 
+    /// Cached models.dev catalog (`$XDG_CACHE_HOME/neenee/models-dev.json`).
+    /// A mirror of `https://models.dev/api.json` fetched at startup and every
+    /// 60 minutes; safe to delete — it is repopulated on next refresh. When
+    /// absent or stale the catalog falls back to the compiled-in model
+    /// registry, so a missing cache never blocks startup.
+    pub fn models_dev_cache(&self) -> PathBuf {
+        self.cache_dir.join("models-dev.json")
+    }
+
     /// User-global slash commands (`$XDG_DATA_HOME/neenee/commands`). Project
     /// commands still live under `.neenee/commands/` in the working directory.
     pub fn user_commands_dir(&self) -> PathBuf {

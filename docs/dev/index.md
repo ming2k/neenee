@@ -3,6 +3,7 @@
 | Page | Purpose |
 |------|---------|
 | [Documentation governance](documentation/index.md) | Rules for organizing, writing, and reviewing docs |
+| [TUI component showcase](showcase.md) | Interactive playground for rendering and testing individual TUI modals in isolation |
 
 ## Architecture
 

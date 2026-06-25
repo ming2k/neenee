@@ -185,4 +185,5 @@ influence what the model summarizes), and `PostCompact` observes the result.
   design rejected along the way
 - [ADR-0030](../../adr/0030-early-loop-intervention-and-round-hook.md) — the
   `Deny`-forbidden `Round` event that partially supersedes ADR-0025's exclusion
-  of round-count, plus the in-loop review + anti-anchoring nudge
+  of round-count (the in-loop review nudge it also added was later reworked into
+  the deterministic guard of [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md))

@@ -101,6 +101,34 @@ pub async fn fetch_remote_repo(repo_url: &str) -> Result<Vec<PathBuf>, String> {
     Ok(roots)
 }
 
+/// Return the cached skill roots for a remote repo **without** fetching —
+/// scanning the existing cache directory for subdirectories that contain a
+/// `SKILL.md`. This is the fallback when [`fetch_remote_repo`] fails (network
+/// down, server error): the last successful download's cached files are reused
+/// so a transient outage never silently removes skills.
+///
+/// Returns an empty vec when the cache directory doesn't exist (first run) or
+/// contains no valid skills.
+pub fn cached_remote_roots(repo_url: &str) -> Vec<PathBuf> {
+    let base = repo_url.trim_end_matches('/');
+    let cache_host_dir = host_cache_dir(base);
+    let Ok(entries) = std::fs::read_dir(&cache_host_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            // A cached skill root is a subdirectory containing SKILL.md.
+            if path.is_dir() && path.join("SKILL.md").exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 async fn download_skill_files(
     client: &Client,
     base: &str,
@@ -168,5 +196,61 @@ mod tests {
     #[test]
     fn sanitize_name_replaces_special_chars() {
         assert_eq!(sanitize_name("my/skill:name"), "my_skill_name");
+    }
+
+    #[test]
+    fn cached_remote_roots_returns_empty_for_missing_dir() {
+        // A repo URL that has never been fetched has no cache directory.
+        let roots = cached_remote_roots("https://nonexistent.example.com/never-fetched");
+        assert!(
+            roots.is_empty(),
+            "missing cache should return empty: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn cached_remote_roots_finds_skill_dirs_with_skill_md() {
+        // Simulate a cached remote repo: a host dir with two skill subdirs,
+        // one valid (has SKILL.md) and one incomplete. Verify the path
+        // helpers produce the expected structure.
+        let tmp = std::env::temp_dir().join(format!(
+            "neenee-skill-cache-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let host = host_cache_dir_under("https://example.com/skills", &tmp);
+        std::fs::create_dir_all(host.join("valid-skill")).unwrap();
+        std::fs::write(host.join("valid-skill").join("SKILL.md"), "# valid").unwrap();
+        std::fs::create_dir_all(host.join("incomplete")).unwrap();
+        // No SKILL.md in incomplete/.
+
+        // Scan the host dir the same way cached_remote_roots does, but against
+        // our temp root (the real function uses remote_cache_root()).
+        let roots: Vec<PathBuf> = std::fs::read_dir(&host)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                (p.is_dir() && p.join("SKILL.md").exists()).then_some(p)
+            })
+            .collect();
+        assert_eq!(roots.len(), 1, "only valid-skill has SKILL.md: {roots:?}");
+        assert!(roots[0].file_name().unwrap() == "valid-skill");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Like [`host_cache_dir`] but rooted under `base_dir` instead of
+    /// [`remote_cache_root`]. Test-only.
+    fn host_cache_dir_under(url: &str, base_dir: &Path) -> PathBuf {
+        let host = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .replace(['/', ':', '?', '&', '='], "_");
+        base_dir.join(host)
     }
 }

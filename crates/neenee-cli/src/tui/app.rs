@@ -16,8 +16,7 @@ use tokio::sync::mpsc;
 
 use neenee_core::{
     AgentRequest, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
-    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, UserQuestionRequest,
-    mcp::McpConnectionStatus,
+    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, mcp::McpConnectionStatus,
 };
 
 use crate::tui::completion::PathScan;
@@ -73,6 +72,12 @@ pub enum Modal {
     /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
     /// ModelName modal chain.
     ModelEditor,
+    /// Second-stage model picker for a multi-model provider (opencode-go).
+    /// Reached by activating a provider whose preset carries more than one
+    /// model. Lists the provider's models; selecting one switches to it with
+    /// the per-model transport. [`App::model_picker_provider`] holds the
+    /// `PROVIDERS` index whose models are shown.
+    ModelPicker,
     Help,
     Sessions,
     /// Full-output detail overlay for a focused tool step. The step is
@@ -362,14 +367,11 @@ pub struct App {
     /// opens; clamped each frame by the modal's body renderer.
     pub activity_scroll: usize,
     pub pending_permission: Option<PermissionRequest>,
-    pub pending_question: Option<UserQuestionRequest>,
-    /// Selected option indices per question. Outer vec parallels
-    /// `pending_question.questions`; inner vec holds selected option indices.
-    pub question_selected: Vec<Vec<usize>>,
-    /// Free-text input per question when the "Other" option is highlighted.
-    pub question_other_text: Vec<String>,
-    /// Keyboard focus within the question modal: which question is active.
-    pub question_current: usize,
+    /// The open question (ask_user) modal's self-contained MVU state, or
+    /// `None` when no question modal is open. Replaces the four separate
+    /// `question_*` fields that previously scattered the modal's state across
+    /// `App`; all interaction now flows through [`QuestionModel::update`].
+    pub question: Option<crate::tui::question_model::QuestionModel>,
     /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
     pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
@@ -454,6 +456,9 @@ pub struct App {
     pub editor_key: String,
     /// Model-id buffer for the editor.
     pub editor_model: String,
+    /// `PROVIDERS` index whose models the second-stage [`Modal::ModelPicker`]
+    /// is listing. `None` when the model picker is not open.
+    pub model_picker_provider: Option<usize>,
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
     /// Live model-picker snapshot (default id + per-model favorite / key-ready

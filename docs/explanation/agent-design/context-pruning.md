@@ -46,9 +46,13 @@ Selection is **not** FIFO-by-age. For each older tool result it decides both
    `protect_recent_chars` of tool output verbatim — that is what is usually
    still relevant.
 2. **Staleness / dedup.** Correlate each result back to its originating call via
-   `tool_call_id` (name + arguments). When a *later* tool touched the same file,
-   an earlier result for that file is stale and is cleared outright — keeping
-   superseded content is worse than clearing it.
+   `tool_call_id` (name + arguments). An earlier read is stale only when a
+   *later* same-file result **supersedes** it: a mutation (`write`/`edit`), or a
+   read that **fully covers** its line range (a genuine re-read). Reads of
+   *different* pages of one file are complementary, not superseding, so paging
+   never self-evicts (ADR-0034). A truly superseded result is cleared outright —
+   keeping stale content is worse than clearing it, but evicting a live page just
+   makes the model re-read it.
 3. **Keep-alive.** A fresh result whose file target is referenced *after* it was
    produced — by later natural language or a later tool call on the same file —
    is left intact, since it is likely still in play. Looking forward from each

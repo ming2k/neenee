@@ -1,0 +1,155 @@
+//! Shared showcase helpers: terminal lifecycle + a generic key-loop runner.
+//!
+//! Every showcase boils down to the same shape — own some state, pump real
+//! keypresses into a closure that updates it, redraw via a render closure.
+//! [`run_showcase`] captures that shape so each showcase file is just its
+//! fixture data + two small closures (update + render).
+
+use std::io::{self, Stdout, Write};
+use std::time::Duration;
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{execute, queue};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+
+pub type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Set up a raw-mode alternate screen and return a ready terminal. Stripped
+/// down from the real app's lifecycle (no mouse capture / bracketed paste /
+/// Kitty protocol) — the showcase needs only keyboard input.
+pub fn setup_terminal() -> io::Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    queue!(stdout, EnterAlternateScreen)?;
+    stdout.flush()?;
+    let backend = CrosstermBackend::new(stdout);
+    Terminal::new(backend)
+}
+
+/// Restore the terminal (disable raw mode, leave alternate screen, show cursor).
+pub fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// A decoded key event the showcase closures consume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowKey {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+/// The decision a per-key handler returns: keep looping, or stop.
+pub enum ShowAction {
+    /// Continue the loop (state may have changed; will redraw).
+    Continue,
+    /// Stop the loop and exit the showcase cleanly.
+    Exit,
+}
+
+/// Run a showcase event loop. `render` is called every frame with shared
+/// state; `on_key` is called for each real keypress and decides whether to
+/// continue or exit. `Ctrl+C` and bare `q` always exit (the global kill
+/// switch) so a showcase can never trap you in a raw-mode terminal.
+///
+/// The shared `state` is passed by `&mut` to *both* closures so they don't
+/// each capture overlapping borrows of the surrounding locals (which would
+/// fight the borrow checker). Each showcase declares a small state struct
+/// holding its mutable bits.
+pub fn run_showcase<S, R, H>(state: &mut S, mut render: R, mut on_key: H) -> io::Result<()>
+where
+    R: FnMut(&mut ratatui::Frame, &S),
+    H: FnMut(&mut S, ShowKey) -> ShowAction,
+{
+    let mut terminal = setup_terminal()?;
+
+    loop {
+        terminal.draw(|f| render(f, state))?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind,
+            ..
+        }) = event::read()?
+        else {
+            continue;
+        };
+        if kind == KeyEventKind::Release {
+            continue;
+        }
+
+        // Global exits: Ctrl+C and bare 'q' always work.
+        if (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+            || (code == KeyCode::Char('q') && modifiers.is_empty())
+        {
+            break;
+        }
+
+        if matches!(on_key(state, ShowKey { code, modifiers }), ShowAction::Exit) {
+            break;
+        }
+    }
+
+    restore_terminal(&mut terminal)?;
+    Ok(())
+}
+
+/// Helper to draw a fixed 3-row chrome around a centered modal: a title header
+/// (top), the modal body (flex), and a hint footer (bottom). Showcases call
+/// this so they all share the same framing — only the inner renderer differs.
+pub fn draw_with_chrome<F>(
+    f: &mut ratatui::Frame,
+    title: &str,
+    hint: &str,
+    theme: &crate::tui::render::Theme,
+    draw_modal: F,
+) where
+    F: FnOnce(&mut ratatui::Frame),
+{
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let header = Block::default().borders(Borders::BOTTOM);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        )))
+        .block(header),
+        chunks[0],
+    );
+
+    draw_modal(f);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(theme.muted()),
+        ))),
+        chunks[2],
+    );
+}

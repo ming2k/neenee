@@ -8,7 +8,6 @@
 use neenee_agent::Agent;
 use neenee_agent::catalog;
 use neenee_core::{AgentResponse, Provider};
-use neenee_providers::MockProvider;
 use neenee_store::{config::Config, provider_usage::ProviderUsage};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -41,6 +40,7 @@ pub(crate) async fn switch(
             "kimi-code" => config.moonshot_api_key = Some(key),
             "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key = Some(key),
             "zai-code" => config.zai_api_key = Some(key),
+            "opencode-go" => config.opencode_go_api_key = Some(key),
             _ => {}
         }
     }
@@ -53,36 +53,38 @@ pub(crate) async fn switch(
     // building so the catalog reads them back. The key/url writes
     // above already landed in `config`.
     config.default_provider = provider_type.clone();
-    match provider_type.as_str() {
-        "openai" => config.openai_model = Some(model.clone()),
-        "gemini" => config.gemini_model = Some(model.clone()),
-        "kimi-code" => config.moonshot_model = Some(model.clone()),
-        "llama" => config.llama_model = Some(model.clone()),
-        "deepseek-v4-flash" => config.deepseek_flash_model = Some(model.clone()),
-        "deepseek-v4-pro" => config.deepseek_pro_model = Some(model.clone()),
-        "zai-code" => config.zai_model = Some(model.clone()),
-        _ => {}
+    // opencode-go is multi-model: the active model lives in the shared
+    // `default_model` field (every channel shares one API key, and each
+    // model's transport is derived from its WireFormat). Single-model
+    // providers keep their per-provider model slot as before.
+    if provider_type.as_str() == "opencode-go" {
+        config.default_model = Some(model.clone());
+    } else {
+        config.default_model = None;
+        match provider_type.as_str() {
+            "openai" => config.openai_model = Some(model.clone()),
+            "gemini" => config.gemini_model = Some(model.clone()),
+            "kimi-code" => config.moonshot_model = Some(model.clone()),
+            "llama" => config.llama_model = Some(model.clone()),
+            "deepseek-v4-flash" => config.deepseek_flash_model = Some(model.clone()),
+            "deepseek-v4-pro" => config.deepseek_pro_model = Some(model.clone()),
+            "zai-code" => config.zai_model = Some(model.clone()),
+            _ => {}
+        }
     }
     let _ = config.save();
 
     // Build through the catalog so api-key / user-agent / base-url
-    // resolution is shared with startup. The TUI-supplied model
-    // still wins over any ambient env var, preserving the
-    // pre-catalog switch semantics.
-    let new_p: Arc<dyn Provider> = match catalog::build_catalog(config)
-        .iter()
-        .find(|e| e.id == provider_type)
-    {
-        Some(entry) => match entry.default_channel() {
-            Some(channel) => {
-                let mut channel = channel.clone();
-                channel.model = model.clone();
-                neenee_providers::build_provider_for_channel(&channel, &entry.id)
-            }
-            None => Arc::new(MockProvider),
-        },
-        None => Arc::new(MockProvider),
-    };
+    // resolution is shared with startup. For multi-model providers the
+    // explicit model selects the channel (and thus the per-model transport);
+    // build_provider_for_model reads `default_model` set above as a fallback.
+    let new_p: Arc<dyn Provider> =
+        match catalog::build_provider_for_model(config, &provider_type, Some(&model)) {
+            provider if provider.provider_id() != "mock" => provider,
+            // Fall back to the catalog default if explicit-model resolution hit
+            // the mock sentinel (e.g. an unknown model id).
+            _ => catalog::build_provider_for(config, &provider_type),
+        };
     *provider_for_task
         .write()
         .unwrap_or_else(|error| error.into_inner()) = new_p;

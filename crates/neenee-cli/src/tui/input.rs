@@ -610,6 +610,9 @@ pub fn process_event(
                 }
                 KeyCode::Enter => match context.active_modal {
                     super::Modal::Provider => InputAction::ProviderPickerActivate,
+                    // Enter in the second-stage model picker activates the
+                    // highlighted model (same action as the provider picker).
+                    super::Modal::ModelPicker => InputAction::ProviderPickerActivate,
                     super::Modal::ModelEditor => InputAction::SubmitModelEditor,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
@@ -1152,6 +1155,7 @@ pub fn process_event(
                 }
                 KeyCode::Up => match context.active_modal {
                     super::Modal::Provider => InputAction::ModalUp,
+                    super::Modal::ModelPicker => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
                     super::Modal::Question => InputAction::QuestionUp,
@@ -1192,6 +1196,7 @@ pub fn process_event(
                 },
                 KeyCode::Down => match context.active_modal {
                     super::Modal::Provider => InputAction::ModalDown,
+                    super::Modal::ModelPicker => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
                     super::Modal::Question => InputAction::QuestionDown,

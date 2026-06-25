@@ -63,7 +63,7 @@ The optional `[agent]` table.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `agent.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
-| `agent.loop_review_enabled` | `true` | Parsed for compatibility but a deprecated no-op: the in-loop semantic review now runs unconditionally via the steering module (ADR-0030). Always off on sub-agents |
+| `agent.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on sub-agents and the `/review` diagnostic |
 
 ```toml
 [agent]

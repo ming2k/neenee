@@ -19,6 +19,11 @@ pub(crate) struct ProviderPreset {
     pub name: &'static str,
     pub model: &'static str,
     pub description: &'static str,
+    /// Every model this provider serves. Empty for single-model presets (the
+    /// one in `model` is the only choice). Non-empty for multi-model providers
+    /// (opencode-go): activating such a provider opens the second-stage model
+    /// picker listing these. The first entry is the default.
+    pub models: &'static [&'static str],
 }
 
 /// Look up the context window (in tokens) for a provider preset id by resolving
@@ -54,42 +59,81 @@ pub(crate) const PROVIDERS: &[ProviderPreset] = &[
         name: "Kimi Code",
         model: "kimi-k2.7-code",
         description: "Moonshot AI coding model",
+        models: &[],
     },
     ProviderPreset {
         id: "openai",
         name: "OpenAI GPT-4o",
         model: "gpt-4o",
         description: "OpenAI API",
+        models: &[],
     },
     ProviderPreset {
         id: "gemini",
         name: "Gemini 2.5 Flash",
         model: "gemini-2.5-flash",
         description: "Google Gemini 2.5 Flash",
+        models: &[],
     },
     ProviderPreset {
         id: "deepseek-v4-flash",
         name: "DeepSeek V4 Flash",
         model: "deepseek-v4-flash",
         description: "DeepSeek V4 Flash",
+        models: &[],
     },
     ProviderPreset {
         id: "deepseek-v4-pro",
         name: "DeepSeek V4 Pro",
         model: "deepseek-v4-pro",
         description: "DeepSeek V4 Pro",
+        models: &[],
     },
     ProviderPreset {
         id: "zai-code",
         name: "ZAI Code",
         model: "glm-5.2",
         description: "Z.AI coding plan (GLM-5.2)",
+        models: &[],
+    },
+    // OpenCode Go — one provider hosting many models. Each model's wire format
+    // (OpenAI /chat/completions vs Anthropic /messages) is resolved by the
+    // catalog from the model registry, so the picker lists model ids only. The
+    // first entry is the default; activating opencode-go opens the second-stage
+    // model picker.
+    ProviderPreset {
+        id: "opencode-go",
+        name: "OpenCode Go",
+        model: "glm-5.2",
+        description: "opencode.ai relay (multi-model)",
+        models: &[
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "mimo-v2.5-pro",
+            "mimo-v2.5",
+            "mimo-v2-pro",
+            "mimo-v2-omni",
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+        ],
     },
     ProviderPreset {
         id: "llama",
         name: "Llama",
         model: "local-model",
         description: "Local Llama server",
+        models: &[],
     },
 ];
 

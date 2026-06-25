@@ -124,9 +124,12 @@ pub mod agent;
 pub use agent::Agent;
 
 pub mod catalog;
+pub mod dynamic;
 pub mod hooks;
+pub mod modelsdev;
 pub use hooks::{HookRegistry, UserPromptVerdict, matcher_matches};
 mod hook_runner;
+pub mod loop_guard;
 pub mod orchestration;
 mod permission_store;
 mod prompt;

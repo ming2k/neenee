@@ -3,7 +3,7 @@
 use super::SkillsConfig;
 use super::bundled;
 use super::metadata::{Skill, SkillScope, parse_skill_file};
-use super::remote::fetch_remote_repo;
+use super::remote::{cached_remote_roots, fetch_remote_repo};
 use neenee_store::paths;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +77,9 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
     let dirs = paths::get();
 
     // 1. Remote skill repositories (priority just above bundled system).
+    //    When a fetch fails (network down, server error), fall back to the
+    //    last successful download's cache so a transient outage never silently
+    //    removes skills — the same cache-as-fallback pattern models.dev uses.
     for url in &config.urls {
         match fetch_remote_repo(url).await {
             Ok(roots) if !roots.is_empty() => {
@@ -84,7 +87,16 @@ async fn skill_sources(config: &SkillsConfig) -> Vec<SkillSource> {
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!("failed to fetch remote skill repo '{}': {}", url, e);
+                tracing::warn!(
+                    "failed to fetch remote skill repo '{}': {}; falling back to cache",
+                    url,
+                    e
+                );
+                let cached = cached_remote_roots(url);
+                if !cached.is_empty() {
+                    tracing::info!("using {} cached skills from '{}'", cached.len(), url);
+                    sources.push(SkillSource::Remote { roots: cached });
+                }
             }
         }
     }

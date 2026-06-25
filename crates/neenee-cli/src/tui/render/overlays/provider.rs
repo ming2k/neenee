@@ -163,6 +163,85 @@ pub(crate) fn draw_models_modal(
     }
 }
 
+/// Draw the second-stage model picker for a multi-model provider (opencode-go).
+/// Lists the provider's models with their display names; the highlighted row is
+/// activated on `Enter`. Esc returns to the provider picker.
+pub(crate) fn draw_model_picker(
+    frame: &mut Frame,
+    _layout_map: &mut LayoutMap,
+    solution: &crate::tui::ProviderPreset,
+    current_model: &str,
+    modal_index: usize,
+    theme: &Theme,
+) {
+    let area = centered_rect(64, 60, viewport_rect(frame));
+    let f = modal_frame(frame, area, theme.panel(), true, true);
+
+    let header_rect = f.header;
+    if let Some(h) = header_rect {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "Models",
+                    Style::default()
+                        .fg(theme.brand())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("❯ ", Style::default().fg(theme.muted())),
+                Span::styled(
+                    format!("{} — pick a model", solution.name),
+                    Style::default().fg(theme.muted()),
+                ),
+            ])),
+            h,
+        );
+    }
+
+    let mut body: Vec<Line> = Vec::new();
+    for (row, &mid) in solution.models.iter().enumerate() {
+        let is_current = mid == current_model;
+        let is_selected = row == modal_index;
+        let row_bg = if is_selected {
+            theme.brand()
+        } else {
+            theme.panel()
+        };
+        let row_fg = if is_selected {
+            contrast_fg(theme.brand())
+        } else {
+            theme.fg()
+        };
+        let base = Style::default().bg(row_bg).fg(row_fg);
+        let dim = if is_selected {
+            Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
+        } else {
+            Style::default().fg(theme.muted())
+        };
+        let dot = if is_current { "● " } else { "  " };
+        let display = crate::tui::providers::model_display_name(mid);
+        body.push(Line::from(vec![
+            Span::styled(dot.to_string(), dim),
+            Span::styled(
+                format!("{:<18} ", display),
+                base.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(mid.to_string(), dim),
+        ]));
+    }
+    render_body(frame, f.body, body, &mut 0, Some(modal_index));
+
+    if let Some(fo) = f.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑↓ navigate · enter activate · esc back",
+                Style::default().fg(theme.muted()),
+            ))),
+            fo,
+        );
+    }
+}
+
 /// Draw the unified provider editor Two fields — API key
 /// (masked) and model id — with `Tab` cycling focus. The composer input line
 /// is borrowed for the focused field's value; `key_buf` / `model_buf` hold the
