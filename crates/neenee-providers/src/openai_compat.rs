@@ -502,10 +502,15 @@ impl Provider for OpenAiCompatProvider {
         // ordinary prose) the harness must see.
         let content = {
             let mut filter = ToolCallEchoFilter::new();
-            let _ = filter.feed(choice["content"].as_str().unwrap_or(""));
+            // `feed` emits the safe-to-show prose prefix as it classifies; only
+            // the held (tool-call-shaped) remainder is resolved by `finish`.
+            // Accumulating both is what makes ordinary prose visible — dropping
+            // `feed`'s return value (as a prior version did) silently lost all
+            // non-tool-call assistant content in the non-streaming path.
+            let mut content = filter.feed(choice["content"].as_str().unwrap_or(""));
             filter.had_native_tool_calls =
                 tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
-            let content = filter.finish();
+            content.push_str(&filter.finish());
             tracing::debug!(
                 target: "neenee_core::provider",
                 provider = %self.id,

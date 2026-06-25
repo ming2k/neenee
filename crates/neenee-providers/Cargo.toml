@@ -15,3 +15,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 httpdate = { workspace = true }
+
+[dev-dependencies]
+# `wire` integration test exercises the full HTTP → SSE → parse path against a
+# localhost mock server, covering behaviour the in-module unit tests (which can
+# only call pure parser functions) cannot reach.
+mockito = "1"
+tokio = { workspace = true }
