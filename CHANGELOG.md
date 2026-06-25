@@ -5,6 +5,70 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-26
+
+### Added
+
+- **Deterministic read-loop guard + range-aware prune staleness (ADR-0034).**
+  A model that re-issues the same `read_file` (one page, or thrashing between
+  two pages) without progress no longer spins unchecked. A per-turn guard keeps
+  a sliding window of recent read-round signatures and, when one recurs past a
+  threshold, injects a hidden anti-anchoring nudge naming the repeated read and
+  demanding a different action. Detection is pure signature bookkeeping (no
+  inference, no false positives on genuine paging) and the nudge is
+  **non-terminating** — `Esc`, `hard_stop_rounds`, and `abort` stay the hard
+  backstops. Gated by `[agent] loop_review_enabled` (default on; off for
+  sub-agents and `/review`). Accompanying it, prune staleness is now
+  range-aware: an earlier read is stale only when a *later* same-file result
+  supersedes it — a mutation, or a read that *fully covers* its line range — so
+  paging through different regions of one large file no longer self-evicts.
+
+- **Anthropic-compatible `/messages` provider + OpenCode Go relay.** A new
+  `Transport::Anthropic` (the `anthropic_compat` provider) speaks the Anthropic
+  Messages surface, used by opencode-go's MiniMax/Qwen models and any
+  Anthropic-format relay. Per-model `max_tokens` is capped at the model's
+  registered output limit (MiniMax M3: 131072) so long agent turns from
+  high-output models run untruncated. One `OPENCODE_API_KEY` authenticates a
+  single provider hosting many models; `default_model` selects the active model
+  id within a multi-model provider.
+
+- **MCP auto-reconnect.** MCP server connections are now wrapped in a
+  reconnect-capable `McpServer` handle: a crashed server (stdout closed
+  mid-session) is transparently restarted, tool calls retry once on connection
+  failure, and a background refresh loop re-discovers tools — no more manual
+  restart after a transient MCP server crash.
+
+- **models.dev catalog cache + dynamic model registry.** The model catalog is
+  now backed by a cached mirror of models.dev
+  (`$XDG_CACHE_HOME/neenee/models-dev.json`), refreshed at startup and every 60
+  minutes, with the compiled-in registry as fallback so a missing cache never
+  blocks startup.
+
+- **Declarative `[permissions]` rules.** Default "always allow" policies can now
+  be pre-declared in `config.toml` (`[[permissions.allow]]` with `tool` +
+  `scope`), seeding the allowlist at startup so common tools (e.g. `bash`,
+  `read_file`) don't prompt on every fresh install. Runtime "Always" decisions
+  still persist to `permissions.json`; config rules are re-applied on every
+  start.
+
+- TUI component showcase for rendering/testing individual modals in isolation;
+  `question_model` picker; `/mcp-catalog` command.
+
+### Changed
+
+- **`[agent] loop_review_enabled` repurposed.** Previously a deprecated no-op
+  (the ADR-0030 semantic review it gated was removed); it now toggles the new
+  deterministic read-loop guard's anti-anchoring nudge.
+
+### Removed
+
+- **`LlamaServerProvider`.** The dedicated local provider module is gone:
+  `llama-server --jinja` speaks the full OpenAI chat-completions surface
+  (native tool calls + streaming tool-call deltas), so local servers are now
+  reached through the same `OpenAiCompatProvider` as any cloud endpoint.
+  Keyless `Transport::Llama` channels suppress the `Authorization` header
+  entirely (an empty bearer token could be rejected by some servers).
+
 ## [0.5.0] - 2026-06-25
 
 ### Changed
@@ -313,7 +377,11 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ming2k/neenee/releases/tag/v0.6.0
+[0.5.0]: https://github.com/ming2k/neenee/releases/tag/v0.5.0
+[0.4.0]: https://github.com/ming2k/neenee/releases/tag/v0.4.0
+[0.3.0]: https://github.com/ming2k/neenee/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ming2k/neenee/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ming2k/neenee/releases/tag/v0.1.0
 [0.0.1]: https://github.com/ming2k/neenee/releases/tag/v0.0.1
