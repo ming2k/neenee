@@ -5,9 +5,41 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-25
 
 ### Added
+
+- **`abort` tool + `Tool::affects_control_flow` axis — the model's
+  self-initiated emergency escape hatch.** A new `abort` tool lets the model
+  stop the program when it detects a stuck state it cannot recover from: a
+  tool loop (repeating the same call with identical arguments), a dangerous or
+  irreversible operation, or a dead end. Calling it cancels the in-flight turn
+  (the same path as `Esc` / `Ctrl+C`) and then triggers a **graceful exit** —
+  the session is saved and `SessionEnd` hooks fire before the process and its
+  background tasks end. No hard `process::exit`, so nothing is lost.
+
+  This fills the gap left by the removed loop guards (the ADR-0009 equality
+  guard and the ADR-0030 loop-review nudge were both deleted), giving the model
+  an *active* way out instead of spinning until the user notices. It is gated
+  by a new **orthogonal capability axis**, `Tool::affects_control_flow`, not by
+  the filesystem-damage ladder (`ToolAccess`): process control is a separate
+  concern from filesystem mutation, so the permission broker is bypassed (an
+  escape hatch that waits for approval is useless) and **sub-agents are
+  excluded from it unconditionally** — a spawned agent must never be able to
+  tear down the whole program. `affects_control_flow` joins `requires_user`
+  and `spawns_subagent` as the third non-filesystem capability axis; the
+  `abort` tool is its first consumer.
+
+- **`read_image` tool + `ToolOutput::Image` — the model can now see images.**
+  A new `read_image` tool reads an image file (PNG, JPEG, GIF, WebP), resizes
+  it to a sensible resolution, and returns it as a structured
+  `ToolOutput::Image`. Because OpenAI Chat Completions tool messages only
+  accept string content, the harness peels the image out of the tool result
+  and injects it into a follow-up user-role message (the same channel paste-up
+  uses) — mirroring how opencode lowers images for OpenAI-Chat providers. This
+  works across kimi / GLM / OpenAI / Gemini; the design was cross-checked
+  against codex's `view_image` and opencode's `read`. `read_file`'s
+  description was also tightened to make its text-only scope unambiguous.
 
 - **In-loop loop detection steers a stuck turn before the hard abort
   (ADR-0030).** A model that repeats the same or near-identical read-only
@@ -42,6 +74,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`None` / `Dim` / `Takeover`) that the footer-collapse flag and the
   per-frame paint both consult, replacing the old opaque `draw_dim_backdrop`
   fill.
+
+### Removed
+
+- **The in-loop loop guards (ADR-0009 equality guard + ADR-0030 loop-review
+  nudge) were removed.** Both could reinforce the very read-loops they
+  targeted, and the equality guard was trivially bypassed by micro-adjusted
+  arguments. This leaves the harness with no automatic intervention against a
+  model that repeats identical tool calls — the new `abort` tool (see Added)
+  restores an escape hatch, but as a **model-initiated** action rather than a
+  harness-enforced hard stop. `Agent::set_loop_review_enabled` is now a no-op
+  stub, and `[agent] loop_review_enabled` is accepted but ignored. The opt-in
+  `hard_stop_rounds` total-round cap and user `Esc` remain as backstops. (The
+  ADR-0030 entries above are retained for history but describe features that no
+  longer ship.)
+
+## [0.3.0] - 2026-06-24
+
+> Note: the v0.3.0 tag was cut but its crate-version bump and CHANGELOG entry
+> were never landed — crates stayed at `0.2.0` at that tag. This section is
+> backfilled at `0.4.0` release time so the history is honest; the crates jump
+> straight `0.2.0 → 0.4.0`.
+
+### Added
+
+- **Lifecycle event hooks** — `pre_tool` / `post_tool` / `turn` / `session`
+  hooks fire at well-defined points in the agent loop, letting user scripts
+  observe or veto behavior. See ADR-0025.
+- **SQLite-backed session migrations** — pragmatic, append-only schema
+  migrations replace ad-hoc storage evolution. See ADR-0024.
+- **Session-tagged turn events (ADR-0017).** Every turn event now flows under
+  `AgentResponse::Turn { session_id, event }`, letting a `/btw` side
+  conversation stream alongside the primary transcript over one channel.
+- **AI session titles (ADR-0022).** A `TITLE` subagent profile generates a
+  title on first turn; `/title` regenerates on demand and titles are
+  lockable. Empty transcripts fall back to the first message.
+- **Relevance-aware, tiered context pruning (ADR-0021 / ADR-0023).** Pre-turn
+  pruning is now gated (not every turn), implicit (no `Compacted` notice), and
+  selects by relevance (staleness / dedup / forward keep-alive) with tiered
+  degradation (truncate → clear) and informative placeholders.
+- **Pursuits store, repeat scheduler, `tool_output` and catalog refinements.**
+
+### Changed
+
+- **Agent-design docs restructured:** consolidated subagents documentation, new
+  hooks page, context-pruning / context-compaction explanation pages.
+- **Model channel abstraction documented (ADR-0002)** and picker recency
+  ordering.
+- **TUI:** `read_file` offset rendering, snapshot test, theme/layout updates.
 
 ## [0.2.0] - 2026-06-24
 

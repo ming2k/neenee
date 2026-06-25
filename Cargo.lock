@@ -252,6 +252,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "compact_str"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,6 +749,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1089,10 +1105,25 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -1355,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-agent"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1383,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-cli"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -1414,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-core"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1438,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-providers"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1453,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-store"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1478,12 +1509,15 @@ dependencies = [
 
 [[package]]
 name = "neenee-tools"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "chrono",
  "dirs",
  "futures",
  "glob",
+ "image",
  "inventory",
  "neenee-core",
  "neenee-store",

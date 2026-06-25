@@ -29,17 +29,25 @@ subagent profiles carry a `Read` ceiling today, so only the main agent runs
 
 ## Capability axes
 
-Beyond `access()`, the `Tool` trait exposes two more capability bits that the
-harness consults for subagent admission rather than for permissions:
+Beyond `access()`, the `Tool` trait exposes more capability bits that the
+harness consults for subagent admission and control-flow gating rather than
+for filesystem permissions:
 
 | Axis | Method | Consulted by | Overrides |
 |------|--------|--------------|-----------|
 | Needs a human | `requires_user()` (default `false`) | Subagent profiles | `ask_user` |
 | Spawns a subagent | `spawns_subagent()` (default `false`) | Subagent profiles | `subagent` |
+| Affects process control | `affects_control_flow()` (default `false`) | Subagent profiles, broker bypass | `abort` |
 
 A `requires_user()` tool is excluded from subagents unless the profile allows
 user interaction; a `spawns_subagent()` tool is excluded in *every* profile to
-prevent recursion. See
+prevent recursion. An `affects_control_flow()` tool exercises control over the
+harness itself (e.g. the `abort` escape hatch) rather than the workspace — it
+is **orthogonal to `access()`**, which classifies *filesystem damage*; this
+axis classifies *process control*. Control tools are excluded from subagents in
+*every* profile (a spawned agent must never be able to tear down the whole
+program) and bypass the filesystem permission broker entirely (an escape hatch
+that waits for approval is useless). See
 [Subagent admission](../../explanation/agent-design/subagents.md#tool-admission).
 
 ## Permission prompt text

@@ -42,6 +42,7 @@ fn registry_collects_all_self_registered_tools() {
     for expected in [
         "bash",
         "read_file",
+        "read_image",
         "write_file",
         "edit_file",
         "grep",

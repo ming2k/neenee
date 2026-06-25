@@ -110,6 +110,18 @@ pub enum ToolOutput {
         usage: crate::TokenUsage,
         failed: bool,
     },
+    /// An image read from disk (by `read_image`). `mime` is the content type
+    /// (e.g. `"image/png"`); `data` is the already-base64-encoded bytes. The
+    /// model-facing text (`to_text()`) is a short placeholder so the tool
+    /// message stays a legal OpenAI-Chat string; the harness *also* injects
+    /// the image into a follow-up user-role message (see `agent.rs`) so the
+    /// model actually sees the pixels — mirroring how opencode lowers images
+    /// out of tool results for OpenAI Chat Completions providers. The renderer
+    /// draws `data` as an inline preview instead of the placeholder text.
+    Image {
+        mime: String,
+        data: String,
+    },
 }
 
 /// Kind of file change in a [`ToolOutput::Patch`].
@@ -195,6 +207,12 @@ impl ToolOutput {
             // structured transcript travels out-of-band via the parent harness
             // attaching `messages` to the Tool-role message's `children`.
             ToolOutput::Subagent { summary, .. } => summary.clone(),
+            // Images are not rendered as text for the model; the harness
+            // injects the real image into a follow-up user message. The tool
+            // message itself only needs a legal string placeholder.
+            ToolOutput::Image { mime, .. } => {
+                format!("[image: {}]", mime)
+            }
         }
     }
 
@@ -212,7 +230,8 @@ impl ToolOutput {
             | ToolOutput::Code { .. }
             | ToolOutput::Listing { .. }
             | ToolOutput::Matches { .. }
-            | ToolOutput::Patch { .. } => false,
+            | ToolOutput::Patch { .. }
+            | ToolOutput::Image { .. } => false,
         }
     }
 

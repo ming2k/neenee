@@ -73,6 +73,12 @@ impl ToolPolicy {
         if tool.spawns_subagent() {
             return false;
         }
+        // Control-flow tools (e.g. the abort/exit escape hatch) are
+        // unconditionally forbidden in sub-agents — a spawned agent must never
+        // be able to tear down the whole program. Orthogonal to `access()`.
+        if tool.affects_control_flow() {
+            return false;
+        }
         // Tools that block on a human are gated by the profile.
         if tool.requires_user() && !self.allow_user_interaction {
             return false;
@@ -271,6 +277,7 @@ mod tests {
         access: ToolAccess,
         requires_user: bool,
         spawns_subagent: bool,
+        affects_control_flow: bool,
     }
 
     #[async_trait]
@@ -293,6 +300,9 @@ mod tests {
         fn spawns_subagent(&self) -> bool {
             self.spawns_subagent
         }
+        fn affects_control_flow(&self) -> bool {
+            self.affects_control_flow
+        }
         async fn call(&self, _arguments: &str) -> Result<String, String> {
             Ok("stub".to_string())
         }
@@ -304,6 +314,20 @@ mod tests {
             access,
             requires_user,
             spawns_subagent,
+            affects_control_flow: false,
+        }
+    }
+
+    /// A control-flow tool shape (the `abort` tool's shape): Read access but
+    /// `affects_control_flow` set. Used to prove profiles exclude control
+    /// tools by the control-flow axis, not by the filesystem access ladder.
+    fn make_control() -> Stub {
+        Stub {
+            name: "stub",
+            access: ToolAccess::Read,
+            requires_user: false,
+            spawns_subagent: false,
+            affects_control_flow: true,
         }
     }
 
@@ -349,6 +373,15 @@ mod tests {
     }
 
     #[test]
+    fn explore_policy_rejects_control_flow_tool() {
+        // abort shape: Read + affects_control_flow. A control-flow tool (the
+        // model's escape hatch) is excluded from sub-agents by the
+        // orthogonal control-flow axis, not the filesystem access ladder — a
+        // spawned agent must never be able to tear down the whole program.
+        assert!(!EXPLORE.tool_policy.admits(&make_control()));
+    }
+
+    #[test]
     fn recursion_is_rejected_even_by_a_permissive_write_policy() {
         let permissive = ToolPolicy {
             access: ToolAccess::Write,
@@ -358,6 +391,20 @@ mod tests {
         // A Write+interactive policy still never admits recursion.
         assert!(!permissive.admits(&make(ToolAccess::Read, false, true)));
         assert!(permissive.admits(&make(ToolAccess::Write, true, false)));
+    }
+
+    #[test]
+    fn control_flow_is_rejected_even_by_a_permissive_write_policy() {
+        // Like recursion, a control-flow tool is never admitted to a
+        // sub-agent — even the maximally permissive INTERACTIVE profile
+        // (Write ceiling + user interaction) excludes it. The escape hatch
+        // belongs to the primary agent only.
+        let permissive = ToolPolicy {
+            access: ToolAccess::Write,
+            allow_user_interaction: true,
+            write_paths: &[],
+        };
+        assert!(!permissive.admits(&make_control()));
     }
 
     #[test]

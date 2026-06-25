@@ -1339,6 +1339,22 @@ impl Agent {
             None => Message::tool_result(call, format!("[{} result]:\n{}", call.name, text)),
         };
         messages.push(tool_message);
+
+        // Image peel-out (mirrors opencode's OpenAI-Chat lowering). The tool
+        // message only carries text (OpenAI Chat Completions requires tool
+        // content to be a string), so the actual image is injected as a
+        // follow-up user-role message with the image attached — the same
+        // channel paste-up uses. The provider serialises it to `image_url`
+        // (OpenAI-compat) / `inline_data` (Gemini), letting the model see the
+        // pixels. A short textual link ties the two messages together.
+        if let ToolOutput::Image { mime, data } = result {
+            let image_msg = Message::new(Role::User, format!("Image from {}", call.name))
+                .with_images(vec![ImagePart {
+                    mime: mime.clone(),
+                    data: data.clone(),
+                }]);
+            messages.push(image_msg);
+        }
     }
 
     /// Fire PostToolUse (success) or PostToolUseFailure (error) hooks and append

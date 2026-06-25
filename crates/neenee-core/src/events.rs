@@ -89,6 +89,15 @@ pub enum AgentRequest {
     /// `/sessions`), and emits [`AgentResponse::SideViewClosed`]. Sent by
     /// the TUI when the user presses `Esc` / `Ctrl+C` inside the side view.
     ExitSideView,
+    /// Abort the current operation and exit the program gracefully. Sent by
+    /// the model-facing `abort` tool when it detects a stuck state — a loop,
+    /// a dangerous operation, or a dead end it cannot recover from. The
+    /// harness cancels any in-flight turn (same path as [`Interrupt`]) and
+    /// replies [`AgentResponse::Exit`], so the normal graceful-exit path runs
+    /// (session save + `SessionEnd` hooks) before the process ends and its
+    /// background tasks die with it. This is the model's self-initiated
+    /// emergency escape hatch, not a user action.
+    Abort,
 }
 
 #[derive(Debug)]

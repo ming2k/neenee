@@ -125,6 +125,19 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this tool exercises control over the harness itself (e.g. the
+    /// abort/exit escape hatch), as opposed to the workspace/filesystem. This
+    /// is an orthogonal capability axis to [`Tool::access`]: `access()` classifies
+    /// *filesystem damage*, while this classifies *process control*. Subagent
+    /// profiles exclude control tools unconditionally — a spawned agent must
+    /// never be able to tear down the whole program. A control tool bypasses
+    /// the filesystem permission broker entirely (it is gated by this flag,
+    /// not by `access()`), so it should override `access()` to [`ToolAccess::Read`]
+    /// purely so the broker does not prompt for it.
+    fn affects_control_flow(&self) -> bool {
+        false
+    }
+
     fn permission_scope(&self, _arguments: &str) -> String {
         "*".to_string()
     }

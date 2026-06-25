@@ -2257,7 +2257,7 @@ pub(super) async fn run_app_loop<B: Backend>(
 
 pub(super) fn tool_activity_status(name: &str) -> &'static str {
     match name {
-        "read_file" | "list_dir" | "use_skill" => "exploring",
+        "read_file" | "read_image" | "list_dir" | "use_skill" => "exploring",
         "grep" => "searching codebase",
         "write_file" | "edit_file" => "making edits",
         "bash" => "running command",

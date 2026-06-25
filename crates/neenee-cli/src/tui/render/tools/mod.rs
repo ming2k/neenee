@@ -22,6 +22,7 @@ mod fallback;
 mod grep;
 mod meta;
 mod read;
+mod read_image;
 mod web;
 
 pub(crate) use diff::{collapse_context_runs, line_diff};
@@ -176,6 +177,7 @@ pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
     match name {
         "ask_user" => &ask_user::AskUserPresenter,
         "read_file" => &read::ReadPresenter,
+        "read_image" => &read_image::ReadImagePresenter,
         "edit_file" => &edit::EditPresenter,
         "write_file" => &edit::WritePresenter,
         "bash" => &bash::BashPresenter,

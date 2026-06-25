@@ -24,7 +24,9 @@ own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 | Tool | Access | Permission scope | Reference page |
 |------|--------|------------------|----------------|
 | `bash` | `Execute` | `command` argument | [bash](bash.md) |
+| `abort` | `Read` (control-flow) | `*` | [abort](abort.md) |
 | `read_file` | `Read` | `*` | [filesystem](filesystem.md) |
+| `read_image` | `Read` | `*` | [filesystem](filesystem.md) |
 | `write_file` | `Write` | `path` argument | [filesystem](filesystem.md) |
 | `edit_file` | `Write` | `path` argument | [filesystem](filesystem.md) |
 | `grep` | `Read` | `*` | [filesystem](filesystem.md) |

@@ -11,11 +11,16 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a file as text. Each line is prefixed with its file line number \
-         (e.g. `17: ...`) so you can reference exact lines later. Supports \
-         `offset` (1-based start line) and `limit` (max lines). Output is \
-         paginated (~50 KB per page); a large read returns the first chunk \
-         plus a concrete `offset=<next>` to continue.\n\
+        "Read a **text** file (UTF-8). Each line is prefixed with its file \
+         line number (e.g. `17: ...`) so you can reference exact lines \
+         later. Supports `offset` (1-based start line) and `limit` (max \
+         lines). Output is paginated (~50 KB per page); a large read \
+         returns the first chunk plus a concrete `offset=<next>` to \
+         continue.\n\
+         \n\
+         This tool is for source code, config, docs and other plain text \
+         only. Images and other binary files (archives, executables, \
+         media, office docs) are NOT supported here — they are rejected.\n\
          \n\
          HOW TO USE:\n\
          - First read of an unknown file: call with just `path` (offset \
@@ -32,8 +37,7 @@ impl Tool for ReadFileTool {
          which you can then target with this tool's `offset` parameter.\n\
          - Avoid tiny repeated slices (e.g. 30-line chunks). If you need more \
          context, read a larger window with a bigger `limit`.\n\
-         - An empty range means you are past EOF.\n\
-         - Binary files (images, archives, executables) are rejected."
+         - An empty range means you are past EOF."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

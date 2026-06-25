@@ -1,8 +1,8 @@
 # Filesystem tools
 
-Read and mutate files and directory listings. `read_file` / `grep` / `glob` /
-`list_dir` are `Read`; `write_file` / `edit_file` are `Write`. Source:
-`crates/neenee-tools/src/lib.rs`.
+Read and mutate files and directory listings. `read_file` / `read_image` /
+`grep` / `glob` / `list_dir` are `Read`; `write_file` / `edit_file` are
+`Write`. Source: `crates/neenee-tools/src/lib.rs`.
 
 ### `read_file`
 
@@ -11,6 +11,23 @@ Read and mutate files and directory listings. `read_file` / `grep` / `glob` /
 | `path` | string | yes | — | File path |
 | `offset` | integer | no | — | 1-based start line |
 | `limit` | integer | no | — | Max lines |
+
+### `read_image`
+
+| Parameter | Type | Required | Default | Notes |
+|-----------|------|----------|---------|-------|
+| `path` | string | yes | — | Image file path |
+
+Reads an image file (PNG, JPEG, GIF, WebP) and delivers it inline so a
+vision-capable model can see it. Large images are auto-resized to a sensible
+resolution before sending. For plain-text files use `read_file` instead.
+
+The image is returned as a structured `ToolOutput::Image` and delivered to the
+model out-of-band: the tool result message carries a short text placeholder,
+and the harness injects the actual image into a follow-up user-role message.
+This mirrors how opencode lowers images out of tool results for OpenAI Chat
+Completions providers (whose tool messages only accept string content), so it
+works across kimi / GLM / OpenAI / Gemini.
 
 ### `write_file`
 

@@ -200,10 +200,45 @@ impl Tool for WebFetchTool {
 /// HTTP client (proxy/timeout), and delegates to the provider chain. All
 /// backend-specific logic lives behind the `SearchProvider` trait so new
 /// backends can be added without touching this tool.
+/// Build the model-facing description once at construction time. The current
+/// year is injected so the model biases time-sensitive queries correctly.
+fn build_description() -> String {
+    let year = chrono::Utc::now().format("%Y");
+    format!(
+"Search the web and return results as text. Best for current information, \
+documentation, or examples beyond your knowledge cutoff.
+
+The current year is {year}. Use this year when searching for recent information \
+or current events (e.g. search \"AI news {year}\", not last year).
+
+WHEN TO SEARCH — bias toward searching when in doubt:
+- Time-sensitive information that may have changed: news, prices, laws, \
+schedules, release notes, software/library versions, exchange rates.
+- The user wants recommendations involving time or money (products, travel, \
+restaurants) or precise source attribution.
+- Niche or emerging topics, or you suspect even a small (>10%) chance of \
+misremembering a fact.
+- High-stakes accuracy (medical, legal, financial) — search by default.
+- A specific page, paper, or dataset is referenced and you lack its contents.
+- The user explicitly asks to search, verify, or look something up.
+
+Cite sources with Markdown links to the supporting page — link directly to the \
+source, not to a search-result page. Place each citation near the claim it \
+supports. Prefer primary and authoritative sources.
+
+The backend is configurable via the `[websearch]` table in config.toml: `exa` \
+(default; hosted, anonymous, reliable), `parallel` (hosted), `duckduckgo` \
+(keyless scraping, frequently blocked), `searxng` (self-hosted, keyless), or \
+`tavily` (hosted, needs key). A `fallback` backend is tried automatically if \
+the primary fails."
+    )
+}
+
 pub struct WebSearchTool {
     config: Arc<WebSearchConfig>,
     primary: Box<dyn SearchProvider>,
     fallback: Option<Box<dyn SearchProvider>>,
+    description: String,
 }
 
 impl WebSearchTool {
@@ -223,6 +258,7 @@ impl WebSearchTool {
             config: Arc::new(config),
             primary,
             fallback,
+            description: build_description(),
         }
     }
 }
@@ -239,12 +275,7 @@ impl Tool for WebSearchTool {
         "websearch"
     }
     fn description(&self) -> &str {
-        "Search the web and return results as text. The backend is configurable via the \
-         `[websearch]` table in config.toml: `exa` (default; hosted, anonymous, reliable), \
-         `parallel` (hosted), `duckduckgo` (keyless scraping, frequently blocked), `searxng` \
-         (self-hosted, keyless), or `tavily` (hosted, needs key). A `fallback` backend is \
-         tried automatically if the primary fails. Best for current information, \
-         documentation, or examples."
+        &self.description
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

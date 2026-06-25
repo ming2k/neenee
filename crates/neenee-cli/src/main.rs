@@ -173,6 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.provide(skills_registry.clone());
         builder.provide(embedding_store.clone());
         builder.provide(session.clone());
+        // The abort tool needs a handle to signal the harness (request
+        // channel). Provided by type so `neenee-tools` stays free of a CLI
+        // dependency. See `abort.rs`.
+        builder.provide(req_tx.clone());
         builder.build()
     };
     let mut tools: Vec<Arc<dyn neenee_core::Tool>> = neenee_core::collect_tools(&tool_ctx);
