@@ -15,7 +15,7 @@ neenee-store = { path = "../neenee-store" }
 neenee-providers = { path = "../neenee-providers" }
 neenee-tools = { path = "../neenee-tools" }
 neenee-agent = { path = "../neenee-agent" }
-ratatui = "0.26"
+ratatui = "0.30"
 crossterm = { version = "0.27", features = ["event-stream"] }
 arboard = "3.4"
 dirs = { workspace = true }
