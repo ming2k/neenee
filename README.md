@@ -1,8 +1,16 @@
-# neenee
+<p align="center">
+  <img src="./assets/neenee-v2.png" alt="neenee logo" width="256">
+</p>
 
-English | [简体中文](./README.zh-CN.md)
+<h1 align="center">neenee</h1>
 
-A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, and bounded autonomous pursuits.
+<p align="center">
+  English | <a href="./README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, and bounded autonomous pursuits.
+</p>
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>

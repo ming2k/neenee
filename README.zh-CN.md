@@ -1,8 +1,16 @@
-# 妮妮
+<p align="center">
+  <img src="./assets/neenee-v2.png" alt="neenee logo" width="256">
+</p>
 
-[English](./README.md) | 简体中文
+<h1 align="center">妮妮</h1>
 
-一个基于 Rust 的 AI 编码助手，提供语义化终端界面、工具调用、按需技能和有界自治追踪。
+<p align="center">
+  <a href="./README.md">English</a> | 简体中文
+</p>
+
+<p align="center">
+  一个基于 Rust 的 AI 编码助手，提供语义化终端界面、工具调用、按需技能和有界自治追踪。
+</p>
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
