@@ -109,6 +109,37 @@ jobs:
       # Build docs for the whole workspace; catches hard rustdoc failures.
       - run: cargo doc --all --no-deps --document-private-items --locked
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Coverage is informational; never gate merges on it. Build without
+    # `-D warnings` so a stray warning in the coverage build (which uses
+    # different rustc flags) can't turn the report red.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Generate an lcov report and print a textual summary to the log.
+      - run: cargo llvm-cov --all --locked --lcov --output-path lcov.info
+      - run: cargo llvm-cov --all --locked --summary-only
+      # Persist the report as a workflow artifact so it can be downloaded and
+      # viewed locally without wiring up a third-party coverage service.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
