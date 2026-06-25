@@ -67,10 +67,7 @@ pub enum SessionEvent {
     /// The session title changed (ADR-0022). `title = None` clears it. `manual`
     /// marks a user-set title (`/title <text>`) that AI generation must not
     /// overwrite; automatic and on-demand generation always set `manual = false`.
-    TitleSet {
-        title: Option<String>,
-        manual: bool,
-    },
+    TitleSet { title: Option<String>, manual: bool },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and

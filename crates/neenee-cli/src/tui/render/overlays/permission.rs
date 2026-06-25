@@ -13,8 +13,8 @@ use neenee_core::{PermissionRequest, UserQuestionRequest};
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, panel_block, viewport_rect,
 };
-use unicode_width::UnicodeWidthStr;
 use crate::tui::render::Theme;
+use unicode_width::UnicodeWidthStr;
 
 // The permission sheet renders inline, replacing the composer (input box)
 // area. Collapsed it shows a one-line summary plus the action footer;
@@ -148,7 +148,6 @@ pub fn draw_question_modal(
         );
     }
 }
-
 
 fn render_question_option(
     lines: &mut Vec<Line>,
@@ -432,4 +431,3 @@ pub fn draw_permission_sheet(
     );
     max_scroll
 }
-

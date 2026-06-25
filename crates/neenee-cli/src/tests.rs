@@ -185,7 +185,7 @@ impl neenee_core::Tool for RetryReadTool {
 #[tokio::test]
 async fn proxy_provider_does_not_block_the_async_runtime() {
     let holder: Arc<RwLock<Arc<dyn Provider>>> = Arc::new(RwLock::new(Arc::new(MockProvider)));
-    let proxy = ProxyProvider { holder };
+    let proxy = ProxyProvider::new(holder);
 
     proxy.prepare_tools(&[]);
     let response = proxy.chat(Vec::new()).await.unwrap();

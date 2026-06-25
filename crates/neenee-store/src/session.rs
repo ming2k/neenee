@@ -2267,8 +2267,8 @@ mod tests {
         // ADR-0017: a side fork must NOT repoint the primary's active pointer.
         // The primary keeps its id, history, and (by construction) any in-flight
         // turn; only a self-contained sibling file is written.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-session-side-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-session-side-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store

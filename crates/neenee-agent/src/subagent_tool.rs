@@ -147,8 +147,7 @@ impl Tool for SubagentTool {
         true
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
-        self.run_sub_agent(None, arguments, Box::new(|_| {}))
-            .await
+        self.run_sub_agent(None, arguments, Box::new(|_| {})).await
     }
 
     async fn call_with_events<'a>(
@@ -157,8 +156,7 @@ impl Tool for SubagentTool {
         arguments: &str,
         on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
     ) -> Result<String, String> {
-        self.run_sub_agent(Some(call_id), arguments, on_event)
-            .await
+        self.run_sub_agent(Some(call_id), arguments, on_event).await
     }
 
     async fn call_structured_with_events<'a>(
@@ -367,7 +365,9 @@ impl SubagentTool {
         arguments: &str,
         on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
     ) -> Result<String, String> {
-        let outcome = self.run_sub_agent_outcome(call_id, arguments, on_event).await?;
+        let outcome = self
+            .run_sub_agent_outcome(call_id, arguments, on_event)
+            .await?;
         let content = outcome.final_content.trim().to_string();
         if content.is_empty() {
             Ok("(subagent returned no answer)".to_string())

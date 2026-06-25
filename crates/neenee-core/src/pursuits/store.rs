@@ -51,10 +51,7 @@ fn migrations() -> &'static [crate::db::Migration] {
                     // still has the `thread_goals` table; rename it so its
                     // rows survive under the new name.
                     if crate::db::table_exists(conn, "thread_goals") {
-                        conn.execute(
-                            "ALTER TABLE thread_goals RENAME TO thread_pursuits",
-                            [],
-                        )?;
+                        conn.execute("ALTER TABLE thread_goals RENAME TO thread_pursuits", [])?;
                     } else {
                         conn.execute(THREAD_PURSUITS_SCHEMA, [])?;
                     }
@@ -382,7 +379,11 @@ mod tests {
         assert_eq!(user_version(&conn), 2);
         assert!(crate::db::table_exists(&conn, "thread_pursuits"));
         assert!(!crate::db::table_exists(&conn, "thread_goals"));
-        assert!(crate::db::column_exists(&conn, "thread_pursuits", "pursuit_id"));
+        assert!(crate::db::column_exists(
+            &conn,
+            "thread_pursuits",
+            "pursuit_id"
+        ));
         // The legacy row survives the table + column rename.
         let (objective, pursuit_id): (String, String) = conn
             .query_row(

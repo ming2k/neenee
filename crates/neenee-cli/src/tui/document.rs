@@ -502,9 +502,7 @@ impl TranscriptMessage {
     /// Returns `true` if this message is a tool step and the event was stored.
     pub fn push_subagent_event(&mut self, event: &SubagentEvent) -> bool {
         let MessageKind::ToolStep {
-            children,
-            profile,
-            ..
+            children, profile, ..
         } = &mut self.kind
         else {
             return false;
@@ -688,9 +686,7 @@ impl TranscriptMessage {
     /// `plan · write the implementation plan` rather than a bare description.
     pub fn subagent_label(&self) -> String {
         let MessageKind::ToolStep {
-            arguments,
-            profile,
-            ..
+            arguments, profile, ..
         } = &self.kind
         else {
             return "Subagent".to_string();
@@ -962,7 +958,8 @@ impl TranscriptMessage {
             }
             self.blocks = blocks;
         } else {
-            let summary = crate::tui::render::tools::summary_for(name, arguments, profile.as_deref());
+            let summary =
+                crate::tui::render::tools::summary_for(name, arguments, profile.as_deref());
             let suffix = match status {
                 ToolStepStatus::Running => String::new(),
                 ToolStepStatus::Ok => format!(" · {}", duration_text(*duration_ms)),
@@ -1867,9 +1864,7 @@ mod tests {
             r#"{"description":"write the plan","prompt":"..."}"#,
         );
         assert_eq!(task.subagent_label(), "write the plan");
-        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started {
-            profile: "plan",
-        }));
+        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "plan" }));
         assert_eq!(task.subagent_label(), "plan · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.
         let header = task.tool_step_summary().expect("summary");

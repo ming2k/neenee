@@ -62,7 +62,10 @@ fn truncate_title(text: &str) -> String {
     if chars.len() <= TITLE_MAX_LEN {
         return text.to_string();
     }
-    let mut out: String = chars.into_iter().take(TITLE_MAX_LEN.saturating_sub(1)).collect();
+    let mut out: String = chars
+        .into_iter()
+        .take(TITLE_MAX_LEN.saturating_sub(1))
+        .collect();
     out.push('…');
     out
 }
@@ -155,7 +158,10 @@ mod tests {
     #[test]
     fn clean_title_strips_leading_think_block() {
         let raw = "<think>the user wants auth</think>Auth middleware refactor";
-        assert_eq!(clean_title(raw).as_deref(), Some("Auth middleware refactor"));
+        assert_eq!(
+            clean_title(raw).as_deref(),
+            Some("Auth middleware refactor")
+        );
     }
 
     #[test]

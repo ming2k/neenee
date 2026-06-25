@@ -129,7 +129,8 @@ impl Tool for VerifyPlanExecutionTool {
 
         let mut check_results = String::new();
         if test_commands.is_empty() {
-            check_results.push_str("No deterministic test commands found in the Test Plan section.\n");
+            check_results
+                .push_str("No deterministic test commands found in the Test Plan section.\n");
         } else {
             for cmd in test_commands {
                 check_results.push_str(&format!("> {}\n", cmd));
@@ -148,7 +149,8 @@ impl Tool for VerifyPlanExecutionTool {
                                 check_results.push_str(&format!("{}\n", stdout.trim()));
                             }
                         } else {
-                            check_results.push_str(&format!("[FAIL] Exit code: {}\n", output.status));
+                            check_results
+                                .push_str(&format!("[FAIL] Exit code: {}\n", output.status));
                             if !stdout.trim().is_empty() {
                                 check_results.push_str(&format!("STDOUT:\n{}\n", stdout.trim()));
                             }
@@ -191,11 +193,17 @@ impl Tool for VerifyPlanExecutionTool {
         );
 
         let message = Message::new(Role::User, prompt);
-        let result = self.provider.chat(vec![message]).await
+        let result = self
+            .provider
+            .chat(vec![message])
+            .await
             .map_err(|e| format!("LLM review failed: {}", e))?;
 
-        let mut final_output = format!("## Deterministic Checks\n\n{}\n\n## LLM Review\n\n{}", check_results, result.content);
-        
+        let mut final_output = format!(
+            "## Deterministic Checks\n\n{}\n\n## LLM Review\n\n{}",
+            check_results, result.content
+        );
+
         // Ensure the output is not overwhelmingly large if tests spam output
         if final_output.len() > 8000 {
             final_output.truncate(8000);

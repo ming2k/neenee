@@ -71,9 +71,13 @@ pub struct HookContext {
 /// forwarded wholesale; its `to_text()` summary is.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
-    SessionStart { source: SessionSource },
+    SessionStart {
+        source: SessionSource,
+    },
     SessionEnd,
-    UserPromptSubmit { prompt: String },
+    UserPromptSubmit {
+        prompt: String,
+    },
     PreToolUse {
         tool_name: String,
         tool_input: serde_json::Value,
@@ -87,7 +91,9 @@ pub enum HookEvent {
         tool_name: String,
         error: String,
     },
-    Stop { last_message: String },
+    Stop {
+        last_message: String,
+    },
     PreCompact,
     PostCompact,
     /// Fires once per tool round (ADR-0030). `consecutive_readonly` carries the

@@ -61,16 +61,15 @@ pub use neenee_core::*;
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
     estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
-    prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent,
-    AgentOp, AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError,
-    HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp,
-    PermissionDecision, PermissionRequest, Provider, ProviderEntry, ProviderPickerRow,
-    ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService,
-    PursuitStore, RetryableError, Role, SessionOverview, SkillsConfig, SubagentEvent,
-    SubagentProfile, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy, ToolResult,
-    ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
-    UserQuestionReply, UserQuestionRequest, WebSearchConfig, EXPLORE, PRUNED_TOOL_PLACEHOLDER,
-    TITLE, VERIFY,
+    prune_tool_results, public_error_message, retryable_error, truncate_utf8, AgentEvent, AgentOp,
+    AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError, HarnessSnapshot,
+    ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
+    PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
+    ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService, PursuitStore, RetryableError, Role,
+    SessionOverview, SkillsConfig, SubagentEvent, SubagentProfile, TokenUsage, Tool, ToolAccess,
+    ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
+    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
+    EXPLORE, PRUNED_TOOL_PLACEHOLDER, TITLE, VERIFY,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -157,18 +156,21 @@ pub use agent::Agent;
 pub mod catalog;
 pub mod hooks;
 pub use hooks::{matcher_matches, HookRegistry, UserPromptVerdict};
+mod hook_runner;
 pub mod orchestration;
-mod plan_verify;
+mod permission_store;
 pub mod plan_subagent;
+mod plan_verify;
 mod prompt;
-mod steering;
+mod pursuit_state;
 pub mod session_review;
 pub mod session_title;
 pub mod skills;
+mod steering;
 pub mod subagent_tool;
 
-pub use plan_verify::VerifyPlanExecutionTool;
 pub use plan_subagent::PlanTool;
+pub use plan_verify::VerifyPlanExecutionTool;
 pub use session_review::{default_reviews, LoopingReview};
 pub use subagent_tool::{SubagentRegistry, SubagentTool};
 

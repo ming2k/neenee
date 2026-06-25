@@ -18,8 +18,7 @@
 use std::sync::Arc;
 
 use neenee_core::{
-    Message, ReviewStatus, ReviewVerdict, Role, SessionReview,
-    DEFAULT_REVIEWER_HARD_STOP, REVIEW,
+    Message, ReviewStatus, ReviewVerdict, Role, SessionReview, DEFAULT_REVIEWER_HARD_STOP, REVIEW,
 };
 use tokio_util::sync::CancellationToken;
 

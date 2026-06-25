@@ -23,9 +23,9 @@ pub use tool_output::{PatchOp, ToolOutput, ToolStream};
 
 pub mod capability;
 pub mod catalog;
-pub mod hooks;
 pub mod db;
 pub mod events;
+pub mod hooks;
 pub mod mcp;
 pub mod model;
 pub mod todos;
@@ -41,18 +41,17 @@ pub mod subagent;
 pub mod tool_call;
 pub mod tool_registry;
 pub mod webconfig;
-pub use capability::{ContextReliefGate, Provider, ProviderStreamEvent, Tool, ToolAccess, WriteScope};
-pub use hooks::{
-    Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource,
+pub use capability::{
+    ContextReliefGate, Provider, ProviderStreamEvent, Tool, ToolAccess, WriteScope,
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use events::{
     AgentEvent, AgentOp, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
     ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
     ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, SubagentEvent,
-    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply,
-    UserQuestionRequest,
+    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
+pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use model::{model_by_id, resolve as resolve_model, Model, KNOWN_MODELS};
 pub use pressure::{
@@ -62,7 +61,9 @@ pub use pressure::{
 pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
 pub use session_title::{clean_title, TITLE_MAX_LEN};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, INTERACTIVE, PLAN, REVIEW, TITLE, VERIFY};
+pub use subagent::{
+    SubagentProfile, ToolPolicy, EXPLORE, INTERACTIVE, PLAN, REVIEW, TITLE, VERIFY,
+};
 pub use tool_output::truncate_utf8;
 pub use tool_registry::{collect_tools, ToolContext, ToolContextBuilder, ToolFactory};
 pub use webconfig::WebSearchConfig;

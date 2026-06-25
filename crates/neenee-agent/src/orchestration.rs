@@ -14,20 +14,27 @@
 //! All items are `pub` because they are assembled by the binary, which knows
 //! the concrete provider/tool instances and the frontend's request channel.
 
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock,
 };
+use std::task::{Context, Poll};
+use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
+use futures::Stream;
+use serde::Serialize;
 use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
-    Message, Provider, ProviderStreamEvent, Pursuit, PursuitService, RepeatStore, Role,
-    TurnEvent, PURSUIT_COMPLETE_MARKER,
+    Message, Provider, ProviderStreamEvent, Pursuit, PursuitService, RepeatStore, Role, TurnEvent,
+    PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
@@ -50,6 +57,52 @@ pub fn turn(session_id: &str, event: TurnEvent) -> AgentResponse {
 
 pub struct ProxyProvider {
     pub holder: Arc<RwLock<Arc<dyn Provider>>>,
+    /// Whether `/debug network` capture is armed. Read on every call so the
+    /// toggle takes effect for the very next round-trip.
+    debug_enabled: Arc<AtomicBool>,
+    /// Dump directory while capture is on; `None` when off.
+    debug_dir: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    /// Monotonic counter for unique filenames within the same millisecond.
+    debug_seq: AtomicU64,
+}
+
+impl ProxyProvider {
+    pub fn new(holder: Arc<RwLock<Arc<dyn Provider>>>) -> Self {
+        Self {
+            holder,
+            debug_enabled: Arc::new(AtomicBool::new(false)),
+            debug_dir: Arc::new(std::sync::Mutex::new(None)),
+            debug_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// Resolve a capture record for the upcoming call, or `None` when capture
+    /// is off. Clones the request messages once (only when armed) so the call
+    /// can still move the originals into the inner provider.
+    fn begin_capture(
+        &self,
+        provider: &str,
+        model: &str,
+        kind: &'static str,
+        request: &[Message],
+    ) -> Option<PendingCapture> {
+        if !self.debug_enabled.load(Ordering::SeqCst) {
+            return None;
+        }
+        let dir = self
+            .debug_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()?;
+        Some(PendingCapture {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            kind,
+            dir,
+            request: request.to_vec(),
+            seq: self.debug_seq.fetch_add(1, Ordering::SeqCst),
+        })
+    }
 }
 
 #[async_trait]
@@ -78,37 +131,208 @@ impl Provider for ProxyProvider {
             .model()
     }
 
+    fn set_debug_capture(&self, enabled: bool, dir: PathBuf) {
+        self.debug_enabled.store(enabled, Ordering::SeqCst);
+        *self
+            .debug_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = if enabled { Some(dir) } else { None };
+    }
+
+    fn debug_capture_enabled(&self) -> bool {
+        self.debug_enabled.load(Ordering::SeqCst)
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let p = self
             .holder
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        p.chat(messages).await
+        let provider_id = p.provider_id();
+        let model = p.model();
+        let started = Instant::now();
+        let capture = self.begin_capture(&provider_id, &model, "chat", &messages);
+        let result = p.chat(messages).await;
+        if let Some(capture) = capture {
+            let item = match &result {
+                Ok(message) => serde_json::json!({
+                    "status": "ok",
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "message": message,
+                }),
+                Err(error) => serde_json::json!({
+                    "status": "error",
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "error": error,
+                }),
+            };
+            write_capture(&capture, &[item]);
+        }
+        result
     }
     async fn stream_chat(
         &self,
         messages: Vec<Message>,
-    ) -> Result<futures::stream::BoxStream<'static, Result<String, String>>, String> {
+    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
         let p = self
             .holder
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        p.stream_chat(messages).await
+        let provider_id = p.provider_id();
+        let model = p.model();
+        let capture = self.begin_capture(&provider_id, &model, "stream_chat", &messages);
+        let stream = p.stream_chat(messages).await;
+        match (capture, stream) {
+            (Some(capture), Err(error)) => {
+                write_capture(
+                    &capture,
+                    &[serde_json::json!({ "status": "error", "error": error })],
+                );
+                Err(error)
+            }
+            (Some(capture), Ok(stream)) => Ok(CapturedStream {
+                inner: stream,
+                items: Vec::new(),
+                capture,
+            }
+            .boxed()),
+            (None, Ok(stream)) => Ok(stream),
+            (None, Err(error)) => Err(error),
+        }
     }
     async fn stream_chat_events(
         &self,
         messages: Vec<Message>,
-    ) -> Result<futures::stream::BoxStream<'static, Result<ProviderStreamEvent, String>>, String>
-    {
+    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
         let p = self
             .holder
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        p.stream_chat_events(messages).await
+        let provider_id = p.provider_id();
+        let model = p.model();
+        let capture = self.begin_capture(&provider_id, &model, "stream_chat_events", &messages);
+        let stream = p.stream_chat_events(messages).await;
+        match (capture, stream) {
+            (Some(capture), Err(error)) => {
+                write_capture(
+                    &capture,
+                    &[serde_json::json!({ "status": "error", "error": error })],
+                );
+                Err(error)
+            }
+            (Some(capture), Ok(stream)) => Ok(CapturedStream {
+                inner: stream,
+                items: Vec::new(),
+                capture,
+            }
+            .boxed()),
+            (None, Ok(stream)) => Ok(stream),
+            (None, Err(error)) => Err(error),
+        }
     }
+}
+
+// ── /debug network capture ────────────────────────────────────────────
+
+/// A queued capture record awaiting its response. Held across the inner call
+/// (for `chat`) or inside a [`CapturedStream`] (for the streaming paths) and
+/// flushed once the round-trip is complete.
+struct PendingCapture {
+    provider: String,
+    model: String,
+    kind: &'static str,
+    dir: PathBuf,
+    request: Vec<Message>,
+    seq: u64,
+}
+
+/// Stream wrapper that tees every item into a buffer and flushes a single
+/// capture file on drop — so one streaming round-trip yields one complete JSON
+/// file, whether the stream ran to completion, errored, or was cancelled
+/// mid-stream (a cancelled stream simply writes whatever was collected).
+///
+/// The wrapper is `Unpin`: its only pinned field (`inner: BoxStream`) is a
+/// `Pin<Box<…>>`, which is itself `Unpin`, so `Pin::new(&mut self.inner)` is
+/// sound. This keeps `poll_next` free of unsafe.
+struct CapturedStream<S> {
+    inner: S,
+    items: Vec<serde_json::Value>,
+    capture: PendingCapture,
+}
+
+impl<S> Stream for CapturedStream<S>
+where
+    S: Stream + Unpin,
+    S::Item: Serialize,
+{
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                this.items
+                    .push(serde_json::to_value(&item).unwrap_or(serde_json::Value::Null));
+                Poll::Ready(Some(item))
+            }
+            other => other,
+        }
+    }
+}
+
+impl<S> Drop for CapturedStream<S> {
+    fn drop(&mut self) {
+        write_capture(&self.capture, &self.items);
+    }
+}
+
+/// Serialize one capture record and write it atomically to the dump directory.
+/// Failures are logged and swallowed: debug capture must never break a real
+/// turn. Files are owner-only (`0o600`) via `atomic_write_bytes` — request
+/// messages can carry pasted secrets, the same privacy profile as `/export`.
+fn write_capture(capture: &PendingCapture, items: &[serde_json::Value]) {
+    let timestamp = chrono::Utc::now();
+    let record = serde_json::json!({
+        "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "provider": capture.provider,
+        "model": capture.model,
+        "kind": capture.kind,
+        "request": { "messages": capture.request },
+        "response": { "items": items },
+    });
+    let bytes = match serde_json::to_vec_pretty(&record) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "network capture serialize failed");
+            return;
+        }
+    };
+    let provider_slug = slug(&capture.provider);
+    let model_slug = slug(&capture.model);
+    let stamp = timestamp.format("%Y%m%d-%H%M%S%.3f");
+    let file = capture.dir.join(format!(
+        "{stamp}_{seq:04}_{provider_slug}_{model_slug}.json",
+        seq = capture.seq,
+    ));
+    if let Err(error) = neenee_store::fsutil::atomic_write_bytes(&file, &bytes) {
+        tracing::warn!(%error, file = %file.display(), "network capture write failed");
+    }
+}
+
+/// Lowercase alnum/hyphen filename component, empty -> `"anon"`.
+fn slug(value: &str) -> String {
+    let mut out: String = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
+    if out.is_empty() {
+        out.push_str("anon");
+    }
+    out
 }
 
 #[derive(Clone)]
@@ -277,9 +501,10 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
         let _ = context.tx.send(AgentResponse::PermissionsCleared);
         previous.cancel();
     }
-    let _ = context
-        .tx
-        .send(turn(&context.session_id, TurnEvent::Activity("starting request".to_string())));
+    let _ = context.tx.send(turn(
+        &context.session_id,
+        TurnEvent::Activity("starting request".to_string()),
+    ));
 
     tokio::spawn(async move {
         send_harness_state(&context.tx, &context.session_id, &context.agent, "running");
@@ -304,14 +529,16 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
         match result {
             Ok(_) => {}
             Err(HarnessError::Interrupted) if is_current => {
-                let _ = context
-                    .tx
-                    .send(turn(&context.session_id, TurnEvent::Text("... [Interrupted]".to_string())));
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Text("... [Interrupted]".to_string()),
+                ));
             }
             Err(error) if is_current => {
-                let _ = context
-                    .tx
-                    .send(turn(&context.session_id, TurnEvent::Error(error.to_string())));
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Error(error.to_string()),
+                ));
             }
             Err(_) => {}
         }
@@ -323,7 +550,10 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     });
 }
 
-pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<bool, HarnessError> {
+pub async fn execute_turn(
+    context: TurnContext,
+    mut input: TurnInput,
+) -> Result<bool, HarnessError> {
     let TurnContext {
         agent,
         history,
@@ -342,7 +572,10 @@ pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<
     // `updated_at_turn`) sees the new value. The TUI's stale detector
     // compares this against `TodoList::updated_at_turn`.
     agent.bump_turn();
-    let _ = tx.send(turn(&session_id, TurnEvent::Activity("saving request".to_string())));
+    let _ = tx.send(turn(
+        &session_id,
+        TurnEvent::Activity("saving request".to_string()),
+    ));
 
     // UserPromptSubmit hooks (ADR-0025): a hook may deny the prompt or prepend
     // context. Hidden control prompts (pursuit continuation, verify nudge) are
@@ -384,7 +617,10 @@ pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<
         history.clone()
     };
     session.replace_messages(turn_history.clone()).await?;
-    let _ = tx.send(turn(&session_id, TurnEvent::Activity("preparing context".to_string())));
+    let _ = tx.send(turn(
+        &session_id,
+        TurnEvent::Activity("preparing context".to_string()),
+    ));
     // Cheap tool-result pruning to relieve pressure before considering a full
     // compaction. Gated by the model-relative `prune_utilization` threshold
     // (ADR-0019) so it engages only once pressure crosses that fraction of the
@@ -412,7 +648,10 @@ pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<
             send_compaction(&tx, &session_id, &checkpoint);
         }
         agent.fire_post_compact().await;
-        let _ = tx.send(turn(&session_id, TurnEvent::Activity("preparing context".to_string())));
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::Activity("preparing context".to_string()),
+        ));
     }
 
     let tool_activity = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -519,7 +758,10 @@ pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<
     if session.id().await != admitted_session_id {
         return Err(HarnessError::Interrupted);
     }
-    let _ = tx.send(turn(&session_id, TurnEvent::Activity("saving response".to_string())));
+    let _ = tx.send(turn(
+        &session_id,
+        TurnEvent::Activity("saving response".to_string()),
+    ));
     *history.lock().await = turn_history.clone();
     session.replace_messages(turn_history).await?;
     let outcome = result?;
@@ -562,11 +804,16 @@ pub async fn execute_turn(context: TurnContext, mut input: TurnInput) -> Result<
     if requested_completion && !completed {
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Text("Pursuit completion marker ignored: no active pursuit is set.".to_string()),
+            TurnEvent::Text(
+                "Pursuit completion marker ignored: no active pursuit is set.".to_string(),
+            ),
         ));
     }
     if completed {
-        let _ = tx.send(turn(&session_id, TurnEvent::Text("Pursuit completed.".to_string())));
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::Text("Pursuit completed.".to_string()),
+        ));
     }
 
     // Sync the agent's active plan path to the session so resume restores
@@ -620,8 +867,14 @@ pub fn relay_agent_event(
             // `turn N · round M · waiting for model` with the round as a
             // first-class field rather than text-mining it out of the status
             // string. The bare status follows as the `Activity` below.
-            let _ = tx.send(turn(session_id, TurnEvent::RoundStarted { round: tool_round }));
-            turn(session_id, TurnEvent::Activity("waiting for model".to_string()))
+            let _ = tx.send(turn(
+                session_id,
+                TurnEvent::RoundStarted { round: tool_round },
+            ));
+            turn(
+                session_id,
+                TurnEvent::Activity("waiting for model".to_string()),
+            )
         }
         AgentEvent::AssistantDelta { delta, start } => {
             if start {
@@ -689,9 +942,7 @@ pub fn relay_agent_event(
         AgentEvent::AutoApproveChanged(enabled) => {
             turn(session_id, TurnEvent::AutoApproveChanged(enabled))
         }
-        AgentEvent::SessionReview { alert } => {
-            turn(session_id, TurnEvent::SessionReview { alert })
-        }
+        AgentEvent::SessionReview { alert } => turn(session_id, TurnEvent::SessionReview { alert }),
         AgentEvent::PermissionRequest(request) => {
             turn(session_id, TurnEvent::PermissionRequest(request))
         }
@@ -944,9 +1195,10 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                         status: "error".to_string(),
                     }))
                     .await;
-                let _ = context
-                    .tx
-                    .send(turn(&context.session_id, TurnEvent::Error(error.to_string())));
+                let _ = context.tx.send(turn(
+                    &context.session_id,
+                    TurnEvent::Error(error.to_string()),
+                ));
             }
         }
 

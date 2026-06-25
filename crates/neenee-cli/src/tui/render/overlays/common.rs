@@ -58,7 +58,6 @@ pub(crate) fn truncate_ellipsis(s: &str, max: usize) -> String {
     out
 }
 
-
 /// Display column of the caret within a rendered input field, given its char
 /// index. Each modal field renders its own masked/verbatim `display` string,
 /// so mapping through chars (not bytes) keeps wide glyphs and `•` masks right.
@@ -116,7 +115,6 @@ impl McpRow {
         }
     }
 }
-
 
 /// Empty-list placeholder: a muted message, tuned to whether the snapshot has
 /// arrived (`loaded` = true → genuinely empty; false → still loading).
@@ -180,8 +178,11 @@ pub(crate) fn selectable_row(
     Line::from(spans)
 }
 
-
-pub(crate) fn todo_status_glyph_color(status: neenee_core::TodoStatus, theme: &Theme, muted: Color) -> Color {
+pub(crate) fn todo_status_glyph_color(
+    status: neenee_core::TodoStatus,
+    theme: &Theme,
+    muted: Color,
+) -> Color {
     use neenee_core::TodoStatus;
     match status {
         TodoStatus::Completed => theme.ok(),
@@ -189,4 +190,3 @@ pub(crate) fn todo_status_glyph_color(status: neenee_core::TodoStatus, theme: &T
         TodoStatus::Pending | TodoStatus::Cancelled => muted,
     }
 }
-

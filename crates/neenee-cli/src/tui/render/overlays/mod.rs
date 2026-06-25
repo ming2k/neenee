@@ -22,6 +22,6 @@ pub use misc::{
     draw_plan_preview_modal, draw_tool_step_detail_overlay,
 };
 pub use permission::{draw_permission_sheet, draw_question_modal};
-pub(crate) use provider::draw_models_modal;
 pub use provider::draw_model_editor;
+pub(crate) use provider::draw_models_modal;
 pub use session::{draw_session_modal, draw_sessions_modal};

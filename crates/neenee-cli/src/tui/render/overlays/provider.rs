@@ -13,11 +13,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::layout::LayoutMap;
 use neenee_core::ProviderPickerSnapshot;
 
+use super::common::caret_column;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
 };
 use crate::tui::render::Theme;
-use super::common::caret_column;
 
 /// Draw the provider picker The input line is borrowed as a
 /// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
@@ -163,7 +163,6 @@ pub(crate) fn draw_models_modal(
     }
 }
 
-
 /// Draw the unified provider editor Two fields — API key
 /// (masked) and model id — with `Tab` cycling focus. The composer input line
 /// is borrowed for the focused field's value; `key_buf` / `model_buf` hold the
@@ -268,4 +267,3 @@ pub fn draw_model_editor(
     let cursor_y = body_rect.y + if field == 0 { 0 } else { 1 };
     frame.set_cursor(cursor_x, cursor_y);
 }
-

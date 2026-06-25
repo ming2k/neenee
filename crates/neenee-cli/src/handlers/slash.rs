@@ -1066,6 +1066,57 @@ pub(crate) async fn dispatch(
                 }
             }
         }
+        Some(BuiltinCmd::Debug) => {
+            // /debug network on|off — arm/disarm semantic network capture at
+            // the ProxyProvider layer. Each provider round-trip (request
+            // messages + streamed/returned response) is then written as one
+            // JSON file under the per-project `network/` directory. Captures
+            // the `Vec<Message>` exchange — not raw HTTP bytes — so API keys
+            // in headers/query strings never land on disk.
+            match parts.get(1).copied() {
+                Some("network") => {
+                    let next = match parts.get(2).map(|s| s.to_lowercase()).as_deref() {
+                        Some("on") | Some("true") | Some("1") => Some(true),
+                        Some("off") | Some("false") | Some("0") => Some(false),
+                        Some(other) => {
+                            let _ = resp_tx.send(AgentResponse::Error(format!(
+                                "Unknown value '{other}'. Use `/debug network on|off`."
+                            )));
+                            return;
+                        }
+                        None => None,
+                    };
+                    let enabled = next.unwrap_or_else(|| !agent.provider.debug_capture_enabled());
+                    let dir = neenee_store::paths::get().project_network_dir(project_root_for_side);
+                    agent.provider.set_debug_capture(enabled, dir.clone());
+                    let _ = resp_tx.send(turn(
+                        &session.id().await,
+                        TurnEvent::Text(format!(
+                            "Network capture {}: each provider round-trip {} written to\n  {}",
+                            if enabled { "ON" } else { "OFF" },
+                            if enabled { "is" } else { "will no longer be" },
+                            dir.display(),
+                        )),
+                    ));
+                }
+                Some(other) => {
+                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                        "Unknown debug target '{other}'. Available: network. \
+                         Usage: `/debug network on|off`."
+                    )));
+                }
+                None => {
+                    let network_on = agent.provider.debug_capture_enabled();
+                    let _ = resp_tx.send(turn(
+                        &session.id().await,
+                        TurnEvent::Text(format!(
+                            "Debug status:\n- network: {}\n\nUsage: `/debug network on|off`",
+                            if network_on { "ON" } else { "OFF" },
+                        )),
+                    ));
+                }
+            }
+        }
         Some(BuiltinCmd::Help) => {
             let custom_help = if commands_for_task.is_empty() {
                 String::new()

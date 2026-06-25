@@ -15,9 +15,8 @@ impl Agent {
     /// rather than later at insertion — so the role is traceable from where the
     /// text is assembled, not from a separate function.
     pub(crate) fn build_system_message(&self) -> Message {
-        let mut parts = vec![
-            "You are neenee, an expert AI coding assistant with tool access.".to_string(),
-        ];
+        let mut parts =
+            vec!["You are neenee, an expert AI coding assistant with tool access.".to_string()];
 
         parts.push(
             "Tone and output: be concise and direct. Answer the actual question with the \

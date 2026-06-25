@@ -98,9 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider_holder = Arc::new(RwLock::new(initial_provider));
     let provider_for_task = provider_holder.clone();
 
-    let agent_provider = Arc::new(ProxyProvider {
-        holder: provider_holder,
-    });
+    let agent_provider = Arc::new(ProxyProvider::new(provider_holder));
 
     // Shared skills registry for the skill tools.
     let skills_registry = Arc::new(SkillRegistry::load(&config.skills).await);

@@ -8,13 +8,13 @@ use ratatui::{
     Frame,
 };
 
+use super::common::caret_column;
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
 };
-use unicode_width::UnicodeWidthStr;
 use crate::tui::render::Theme;
-use super::common::caret_column;
+use unicode_width::UnicodeWidthStr;
 
 /// Draw the history search modal.
 ///
@@ -354,13 +354,11 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
     }
 }
 
-
 pub fn draw_copy_toast(frame: &mut Frame, message: &str, failed: bool, theme: &Theme) {
     let size = frame.size();
     let color = if failed { theme.err() } else { theme.ok() };
     toast(frame, theme, message, color, size.width);
 }
-
 
 pub(crate) fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Color, width: u16) {
     let text = format!(" {} ", message.trim());
@@ -428,5 +426,3 @@ pub fn draw_plan_preview_modal(frame: &mut Frame, content: &str, scroll: u16, th
         );
     }
 }
-
-

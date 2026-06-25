@@ -426,7 +426,15 @@ fn tool_label(name: &str, arguments: &str) -> String {
     match arg_str(
         &args,
         &[
-            "path", "file_path", "file", "filename", "pattern", "query", "command", "cmd", "url",
+            "path",
+            "file_path",
+            "file",
+            "filename",
+            "pattern",
+            "query",
+            "command",
+            "cmd",
+            "url",
         ],
     ) {
         Some(detail) => {
@@ -553,7 +561,12 @@ mod tests {
         // outright — but still larger than the placeholder, so clearing reclaims
         // real space (a result shorter than its placeholder is correctly left
         // alone: clearing it would *grow* the window).
-        let body = format!("{}\n{}\n{}", "a".repeat(100), "b".repeat(100), "c".repeat(100));
+        let body = format!(
+            "{}\n{}\n{}",
+            "a".repeat(100),
+            "b".repeat(100),
+            "c".repeat(100)
+        );
         let mut messages = vec![
             assistant_with_call("c1", "read", r#"{"path":"src/config.rs"}"#),
             Message::tool_result(&call("c1", "read", r#"{"path":"src/config.rs"}"#), body),
@@ -576,7 +589,10 @@ mod tests {
             Message::tool_result(&call("c1", "read", r#"{"path":"config.rs"}"#), body.clone()),
             // ... superseded by a later edit of the same file (round 2).
             assistant_with_call("c2", "edit", r#"{"path":"config.rs"}"#),
-            Message::tool_result(&call("c2", "edit", r#"{"path":"config.rs"}"#), "ok".to_string()),
+            Message::tool_result(
+                &call("c2", "edit", r#"{"path":"config.rs"}"#),
+                "ok".to_string(),
+            ),
         ];
 
         let out = prune_tool_results(&mut messages, 0, 1).unwrap();

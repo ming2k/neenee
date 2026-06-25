@@ -24,9 +24,9 @@
 
 use std::time::Duration;
 
-use neenee_core::{clean_title, Message, Role, TITLE};
 #[cfg(test)]
 use neenee_core::Provider;
+use neenee_core::{clean_title, Message, Role, TITLE};
 
 use crate::agent::Agent;
 
@@ -76,25 +76,21 @@ impl Agent {
         // may be advertised, but the model is instructed to output only a
         // title and only `content` is read, so any tool call it emits is
         // ignored.
-        let response = match tokio::time::timeout(
-            TITLE_CALL_TIMEOUT,
-            self.provider.chat(messages),
-        )
-        .await
-        {
-            Ok(Ok(message)) => message,
-            Ok(Err(error)) => {
-                tracing::warn!(error = %error, "title subagent provider call failed");
-                return None;
-            }
-            Err(_elapsed) => {
-                tracing::warn!(
-                    timeout_secs = TITLE_CALL_TIMEOUT.as_secs(),
-                    "title subagent call timed out"
-                );
-                return None;
-            }
-        };
+        let response =
+            match tokio::time::timeout(TITLE_CALL_TIMEOUT, self.provider.chat(messages)).await {
+                Ok(Ok(message)) => message,
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "title subagent provider call failed");
+                    return None;
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        timeout_secs = TITLE_CALL_TIMEOUT.as_secs(),
+                        "title subagent call timed out"
+                    );
+                    return None;
+                }
+            };
         clean_title(&response.content)
     }
 }
@@ -227,7 +223,9 @@ mod tests {
     #[tokio::test]
     async fn generate_title_normalizes_wrapped_output() {
         let (agent, _) = agent_with_reply("```json\n\"Refactor auth\"```").await;
-        let title = agent.generate_title(&transcript_of_opening("refactor the auth")).await;
+        let title = agent
+            .generate_title(&transcript_of_opening("refactor the auth"))
+            .await;
         assert_eq!(title.as_deref(), Some("Refactor auth"));
     }
 

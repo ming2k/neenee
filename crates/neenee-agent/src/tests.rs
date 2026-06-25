@@ -598,7 +598,6 @@ fn repeated_tool_calls_are_bounded() {
         .is_err());
 }
 
-
 #[tokio::test]
 async fn write_tool_waits_for_permission_and_always_is_cached() {
     let agent = Arc::new(Agent::new(
@@ -1587,4 +1586,136 @@ fn loop_review_getter_round_trips_setter() {
     assert!(!agent.get_loop_review_enabled());
     agent.set_loop_review_enabled(true);
     assert!(agent.get_loop_review_enabled());
+}
+
+// ── /debug network capture ────────────────────────────────────────────
+
+/// A provider whose `stream_chat_events` emits a fixed two-event sequence, so
+/// the streaming capture path can be exercised deterministically.
+struct TwoEventProvider;
+
+#[async_trait]
+impl Provider for TwoEventProvider {
+    async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
+        Err("chat path not used by this test".to_string())
+    }
+    async fn stream_chat(
+        &self,
+        _messages: Vec<Message>,
+    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
+        Err("stream_chat path not used by this test".to_string())
+    }
+    async fn stream_chat_events(
+        &self,
+        _messages: Vec<Message>,
+    ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
+        Ok(Box::pin(futures::stream::iter([
+            Ok(ProviderStreamEvent::TextDelta("hel".to_string())),
+            Ok(ProviderStreamEvent::TextDelta("lo".to_string())),
+        ])))
+    }
+}
+
+fn capture_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("neenee-capture-{}", uuid::Uuid::new_v4()))
+}
+
+#[tokio::test]
+async fn debug_network_capture_writes_one_file_per_chat() {
+    use crate::orchestration::ProxyProvider;
+    use std::sync::{Arc, RwLock};
+
+    let dir = capture_dir();
+    let holder: Arc<RwLock<Arc<dyn Provider>>> = Arc::new(RwLock::new(Arc::new(TestProvider)));
+    let proxy = ProxyProvider::new(holder);
+
+    // Off by default, and a call while off writes nothing.
+    assert!(!proxy.debug_capture_enabled());
+    proxy
+        .chat(vec![Message::new(Role::User, "hi")])
+        .await
+        .unwrap();
+    let off_count = std::fs::read_dir(&dir).map(|entries| entries.count()).ok();
+    assert_eq!(off_count, None, "no directory created while capture is off");
+
+    // Arming creates exactly one JSON file per round-trip on the chat path.
+    proxy.set_debug_capture(true, dir.clone());
+    assert!(proxy.debug_capture_enabled());
+    proxy
+        .chat(vec![Message::new(Role::User, "hello")])
+        .await
+        .unwrap();
+    proxy
+        .chat(vec![Message::new(Role::User, "again")])
+        .await
+        .unwrap();
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 2, "one file per round-trip");
+    for entry in entries {
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+        assert_eq!(value["kind"], "chat");
+        assert_eq!(value["provider"], "");
+        assert_eq!(value["request"]["messages"][0]["role"], "User");
+        assert_eq!(value["response"]["items"][0]["status"], "ok");
+        assert_eq!(
+            value["response"]["items"][0]["message"]["role"],
+            "Assistant"
+        );
+        assert_eq!(value["response"]["items"][0]["message"]["content"], "done");
+    }
+
+    // Disarming stops further writes.
+    proxy.set_debug_capture(false, dir.clone());
+    assert!(!proxy.debug_capture_enabled());
+    proxy
+        .chat(vec![Message::new(Role::User, "after off")])
+        .await
+        .unwrap();
+    let after: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(after.len(), 2, "no new file after disabling");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn debug_network_capture_aggregates_a_full_stream_into_one_file() {
+    use crate::orchestration::ProxyProvider;
+    use futures::StreamExt;
+    use std::sync::{Arc, RwLock};
+
+    let dir = capture_dir();
+    let holder: Arc<RwLock<Arc<dyn Provider>>> = Arc::new(RwLock::new(Arc::new(TwoEventProvider)));
+    let proxy = ProxyProvider::new(holder);
+    proxy.set_debug_capture(true, dir.clone());
+
+    // Drive the stream fully; on completion the wrapper drops and flushes the
+    // aggregated record.
+    let stream = proxy
+        .stream_chat_events(vec![Message::new(Role::User, "hi")])
+        .await
+        .unwrap();
+    let items: Vec<_> = stream.collect::<Vec<_>>().await;
+    assert_eq!(items.len(), 2);
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "one streaming round-trip -> one file");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entries[0].path()).unwrap()).unwrap();
+    assert_eq!(value["kind"], "stream_chat_events");
+    let captured = value["response"]["items"].as_array().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["Ok"]["TextDelta"], "hel");
+    assert_eq!(captured[1]["Ok"]["TextDelta"], "lo");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

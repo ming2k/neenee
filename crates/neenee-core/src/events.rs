@@ -321,9 +321,7 @@ pub enum SubagentEvent {
     /// (e.g. `"explore"`, `"plan"`, `"verify"`). Lets the TUI label the
     /// subagent by its role rather than a generic "Subagent", so a user can
     /// tell a planning subagent from a research one at a glance.
-    Started {
-        profile: &'static str,
-    },
+    Started { profile: &'static str },
     /// The subagent started a new response stream.
     StreamStart,
     /// New text token from the subagent.

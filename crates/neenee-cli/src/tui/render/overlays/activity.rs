@@ -7,12 +7,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::render::primitives::{
-    centered_rect, modal_frame, render_body, viewport_rect,
-};
-use crate::tui::render::Theme;
 use super::common::todo_status_glyph_color;
-
+use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::Theme;
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
 /// pursuit bar, plan panel, and activity bar used to show, gathered into one
@@ -141,15 +138,10 @@ pub fn draw_activity_modal(
                         .fg(theme.brand())
                         .add_modifier(Modifier::BOLD),
                 )]));
-                for wrap_line in
-                    crate::tui::render::text_layout::wrap_text(prompt, 68)
-                {
+                for wrap_line in crate::tui::render::text_layout::wrap_text(prompt, 68) {
                     lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(
-                            wrap_line.text.clone(),
-                            Style::default().fg(theme.fg()),
-                        ),
+                        Span::styled(wrap_line.text.clone(), Style::default().fg(theme.fg())),
                     ]));
                 }
             }
@@ -169,10 +161,7 @@ pub fn draw_activity_modal(
             if turn_count > 0 {
                 let mut detail: Vec<Span<'static>> = vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(
-                        format!("turn {}", turn_count),
-                        Style::default().fg(muted),
-                    ),
+                    Span::styled(format!("turn {}", turn_count), Style::default().fg(muted)),
                 ];
                 if current_round >= 1 {
                     detail.push(Span::styled(" · ", Style::default().fg(muted)));
@@ -239,24 +228,15 @@ pub fn draw_activity_modal(
                             .fg(theme.brand())
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("  {done}/{total}"),
-                        Style::default().fg(muted),
-                    ),
+                    Span::styled(format!("  {done}/{total}"), Style::default().fg(muted)),
                 ]));
                 for item in &list.items {
                     let glyph_color = todo_status_glyph_color(item.status, theme, muted);
                     lines.push(Line::from(vec![
                         Span::styled("    ", Style::default()),
-                        Span::styled(
-                            item.status.glyph(),
-                            Style::default().fg(glyph_color),
-                        ),
+                        Span::styled(item.status.glyph(), Style::default().fg(glyph_color)),
                         Span::styled(" ", Style::default()),
-                        Span::styled(
-                            item.content.clone(),
-                            Style::default().fg(theme.fg()),
-                        ),
+                        Span::styled(item.content.clone(), Style::default().fg(theme.fg())),
                     ]));
                 }
             } else {

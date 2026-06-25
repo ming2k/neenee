@@ -10,11 +10,13 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use super::common::{
+    placeholder, relative_time_compact, selectable_row, truncate_ellipsis, McpRow,
+};
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
 };
 use crate::tui::render::Theme;
-use super::common::{placeholder, relative_time_compact, selectable_row, truncate_ellipsis, McpRow};
 
 /// Draw the sessions picker: each row shows the session overview plus its
 /// creation and last-interaction times. Enter opens the selected session.
@@ -108,7 +110,6 @@ pub fn draw_sessions_modal(
         );
     }
 }
-
 
 /// Draw the session-context modal: a tabbed overview of the live session.
 ///

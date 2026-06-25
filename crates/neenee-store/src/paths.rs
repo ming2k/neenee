@@ -175,6 +175,14 @@ impl Dirs {
         self.project_dir(project_root).join("sessions")
     }
 
+    /// Per-project `/debug network` capture directory: `projects/<bucket>/network`.
+    /// Each provider round-trip is written here as one owner-only JSON file
+    /// while network capture is armed. Mirror of the `sessions/` layout; the
+    /// directory is created lazily on first write by `atomic_write_bytes`.
+    pub fn project_network_dir(&self, project_root: &Path) -> PathBuf {
+        self.project_dir(project_root).join("network")
+    }
+
     /// One session's snapshot path: `sessions/<id>.json`. The matching event
     /// log lives at `sessions/<id>.jsonl` (derived via `with_extension`).
     pub fn project_session_file(&self, project_root: &Path, id: &str) -> PathBuf {
@@ -399,7 +407,6 @@ fn app_dir_from_root(root: PathBuf) -> PathBuf {
         root.join("neenee")
     }
 }
-
 
 /// Map a project root (cwd) to a stable, ASCII-safe bucket name. Uses the first
 /// 16 hex chars of SHA-256 so the layout is reproducible across processes,

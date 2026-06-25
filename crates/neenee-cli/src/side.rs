@@ -64,9 +64,8 @@ impl SideSession {
         // (ADR-0017 §2). Tools come from the cached base snapshot (built-in +
         // MCP, no `SubagentTool`) so a side chat recurses no further than the
         // primary — mirroring the subagent profile filter in `SubagentTool`.
-        let side_provider: Arc<dyn Provider> = Arc::new(ProxyProvider {
-            holder: provider_holder.clone(),
-        });
+        let side_provider: Arc<dyn Provider> =
+            Arc::new(ProxyProvider::new(provider_holder.clone()));
         let agent = Arc::new(Agent::new(
             side_provider,
             base_tools.to_vec(),

@@ -76,9 +76,7 @@ async fn inject_user_message_lands_in_transcript() {
     ));
     let handle = agent.install_inbox();
 
-    assert!(handle.submit(AgentOp::InjectUserMessage(
-        "STEER-PAYLOAD-9f3a".to_string()
-    )));
+    assert!(handle.submit(AgentOp::InjectUserMessage("STEER-PAYLOAD-9f3a".to_string())));
 
     let mut messages = vec![Message::new(Role::User, "begin")];
     let _ = agent
@@ -173,15 +171,11 @@ async fn handle_reply_permission_unblocks_parked_write_tool() {
     let task = tokio::spawn(async move {
         let mut messages = vec![Message::new(Role::User, "run the write tool")];
         run_agent
-            .run_with_events(
-                &mut messages,
-                &CancellationToken::new(),
-                move |event| {
-                    if let AgentEvent::PermissionRequest(req) = event {
-                        let _ = req_tx.send(req);
-                    }
-                },
-            )
+            .run_with_events(&mut messages, &CancellationToken::new(), move |event| {
+                if let AgentEvent::PermissionRequest(req) = event {
+                    let _ = req_tx.send(req);
+                }
+            })
             .await
     });
 
@@ -204,7 +198,11 @@ async fn handle_reply_permission_unblocks_parked_write_tool() {
         .expect("task join")
         .expect("turn must succeed");
     assert_eq!(outcome.message.content, "done");
-    assert_eq!(ran.load(Ordering::SeqCst), 1, "the gated tool must have run");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the gated tool must have run"
+    );
 }
 
 #[tokio::test]
@@ -364,8 +362,7 @@ async fn subagent_tool_registry_routes_reply_into_live_subagent() {
             request = Some(r);
         }
     }
-    let request =
-        request.expect("subagent permission request must surface up via SubagentEvent");
+    let request = request.expect("subagent permission request must surface up via SubagentEvent");
     assert_eq!(request.tool, "gated_write");
     assert!(!task.is_finished(), "child parked awaiting reply");
 

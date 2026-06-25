@@ -6,9 +6,11 @@
 use crate::{Message, SubagentEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderStreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
@@ -62,6 +64,27 @@ pub trait Provider: Send + Sync {
     /// Companion to [`Provider::provider_id`]; defaults to an empty string.
     fn model(&self) -> String {
         String::new()
+    }
+
+    /// Toggle network capture for debugging. When `enabled` is true, every
+    /// request flowing through this provider is serialized — request messages,
+    /// the streamed/returned response, provider id, model, and a timestamp — to
+    /// one JSON file under `dir` (one file per round-trip). When `enabled` is
+    /// false, capture stops and `dir` is ignored. Default is a no-op; the
+    /// runtime proxy ([`ProxyProvider`]) overrides it so capture survives
+    /// mid-session `/provider` swaps. See the `/debug network` command.
+    ///
+    /// This lives at the semantic layer (`Vec<Message>` in / events out), not
+    /// the HTTP byte layer: request URLs, headers, and transport bytes are not
+    /// captured — by design, to avoid leaking API keys (e.g. providers that put
+    /// the key in the query string) and to stay independent of each provider's
+    /// HTTP client.
+    fn set_debug_capture(&self, _enabled: bool, _dir: PathBuf) {}
+
+    /// Whether network capture is currently armed on this provider. Defaults to
+    /// `false`; the runtime proxy overrides it to report the live toggle state.
+    fn debug_capture_enabled(&self) -> bool {
+        false
     }
 }
 

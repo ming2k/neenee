@@ -83,7 +83,11 @@ pub fn migrate(conn: &mut Connection, migrations: &[Migration]) -> Result<(), ru
         (step.apply)(&tx)?;
         tx.execute_batch(&format!("PRAGMA user_version = {}", step.version))?;
         tx.commit()?;
-        tracing::info!(version = step.version, desc = step.description, "db migrated");
+        tracing::info!(
+            version = step.version,
+            desc = step.description,
+            "db migrated"
+        );
         current = step.version;
     }
     Ok(())

@@ -1,35 +1,6 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct PermissionRule {
-    tool: String,
-    scope: String,
-}
-
-/// On-disk shape of the persisted "always allow" allowlist, versioned for
-/// future schema evolution. Written by [`Agent::persist_always_permissions`]
-/// and read back by [`Agent::load_persistent_permissions`]. Readers reject
-/// unknown future versions rather than guessing, so a downgrade silently
-/// ignores the file (rather than risking unintended approvals).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PersistedPermissions {
-    /// Schema version. Currently `1`; future writers may bump after a
-    /// compatible reader is shipped.
-    version: u32,
-    rules: Vec<PermissionRule>,
-}
-
-impl PersistedPermissions {
-    /// Version this code writes and reads. Future-compatible readers should
-    /// accept any version they understand; unknown versions are ignored.
-    const CURRENT_VERSION: u32 = 1;
-}
-
-#[derive(Default)]
-struct PermissionState {
-    always: HashSet<PermissionRule>,
-    pending: HashMap<String, oneshot::Sender<PermissionDecision>>,
-}
+use crate::permission_store::PermissionRule;
 
 #[derive(Default)]
 struct AskUserState {
@@ -60,31 +31,10 @@ pub struct Agent {
     /// Shared with the plan + todo tools so they can stamp
     /// `updated_at_turn` for the TUI stale detector.
     turn_counter: Arc<std::sync::Mutex<u64>>,
-    /// In-memory runtime view of the active pursuit.
-    pursuit: Arc<std::sync::Mutex<Option<Pursuit>>>,
-    /// Whether a pursuit is armed. When armed, the stop-gate re-injects the
-    /// pursuit condition as a hidden user message and forces another model
-    /// round instead of ending the turn — until the model signals completion
-    /// (emits the completion marker), the safety cap is hit, or the pursuit
-    /// is disarmed. This is the `/pursue` mechanism (Claude-Code-style
-    /// stop-gate), replacing the old `/loop` outer autonomous loop.
-    pursuit_armed: Arc<std::sync::Mutex<bool>>,
-    /// Iterations the stop-gate has driven for the current armed pursuit.
-    /// Reset to 0 by [`Agent::arm_pursuit`].
-    pursuit_iterations: Arc<std::sync::Mutex<u32>>,
-    permissions: std::sync::Mutex<PermissionState>,
-    /// Optional project root. When set, the `always` permission allowlist is
-    /// persisted to `<project_dir>/permissions.json` (see
-    /// [`Agent::set_project_root`]) so subsequent sessions in the same project
-    /// inherit prior `Always` approvals instead of re-prompting. Best-effort:
-    /// I/O failures are logged, never fatal. Sub-agents (SubagentTool) and tests
-    /// leave this `None` and stay ephemeral.
-    project_root: std::sync::Mutex<Option<std::path::PathBuf>>,
-    /// When true, write tools execute without a `PermissionRequest`. Set by
-    /// `--auto-approve` or `/auto-approve on`. Bypasses the per-call prompt
-    /// entirely (the `always` allowlist is also short-circuited because the
-    /// prompt block is skipped wholesale).
-    auto_approve: Arc<std::sync::Mutex<bool>>,
+    /// In-memory pursuit state: the active [`Pursuit`], the stop-gate armed
+    /// flag, and the iteration counter. See [`crate::pursuit_state::PursuitState`].
+    pursuit_state: crate::pursuit_state::PursuitState,
+    permissions: crate::permission_store::PermissionStore,
     ask_user: std::sync::Mutex<AskUserState>,
     pub(crate) skills_registry: skills::SkillRegistry,
     pursuit_service: PursuitService,
@@ -127,7 +77,7 @@ pub struct Agent {
     /// swappable `Arc` behind a `Mutex` so [`Agent::set_hooks`] can replace the
     /// whole registry without the insertion points holding the lock across the
     /// async `fire` — they clone the `Arc` and drop the guard first.
-    hooks: std::sync::Mutex<Arc<crate::hooks::HookRegistry>>,
+    hooks: crate::hook_runner::HookRunner,
     /// Inbound steering inbox — the down-direction of full-duplex (ADR-0029).
     /// `None` for agents that were never given a handle (the top-level agent
     /// driven directly by the harness, legacy tests); lazily created by
@@ -274,7 +224,7 @@ impl Agent {
         let verify_provider = provider.clone();
         let verify_tools: Vec<Arc<dyn Tool>> = tools.clone();
 
-        let pursuit = Arc::new(std::sync::Mutex::new(None));
+        let pursuit_state = crate::pursuit_state::PursuitState::new();
         let thread_id = Arc::new(std::sync::Mutex::new(None));
         let context = pursuits::tools::PursuitToolContext {
             thread_id: Arc::clone(&thread_id),
@@ -333,12 +283,8 @@ impl Agent {
             active_plan_path,
             todos,
             turn_counter,
-            pursuit,
-            pursuit_armed: Arc::new(std::sync::Mutex::new(false)),
-            pursuit_iterations: Arc::new(std::sync::Mutex::new(0)),
-            permissions: std::sync::Mutex::new(PermissionState::default()),
-            project_root: std::sync::Mutex::new(None),
-            auto_approve: Arc::new(std::sync::Mutex::new(false)),
+            pursuit_state,
+            permissions: crate::permission_store::PermissionStore::new(),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
             pursuit_service,
@@ -350,7 +296,7 @@ impl Agent {
             verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
             loop_review_enabled: Arc::new(std::sync::Mutex::new(true)),
             write_scope: std::sync::Mutex::new(neenee_core::WriteScope::default()),
-            hooks: std::sync::Mutex::new(Arc::new(crate::hooks::HookRegistry::empty())),
+            hooks: crate::hook_runner::HookRunner::new(),
             inbox_tx: std::sync::Mutex::new(None),
             inbox_rx: std::sync::Mutex::new(None),
         }
@@ -449,16 +395,13 @@ impl Agent {
     /// registry; intended to be called once at startup after the `[hooks]`
     /// config is parsed. Sub-agents and tests leave the default empty registry.
     pub fn set_hooks(&self, registry: crate::hooks::HookRegistry) {
-        *self.hooks.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(registry);
+        self.hooks.set(registry);
     }
 
     /// Snapshot the hook registry as a cheap `Arc` clone, so insertion points
     /// fire hooks without holding the swap lock across the async `fire`.
     fn hooks(&self) -> Arc<crate::hooks::HookRegistry> {
-        self.hooks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.hooks.get()
     }
 
     /// The session id hooks see (the live thread id, if any).
@@ -468,10 +411,7 @@ impl Agent {
 
     /// The cwd hooks run under (the persisted project root, if any).
     fn hook_cwd(&self) -> Option<std::path::PathBuf> {
-        self.project_root
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.permissions.project_root()
     }
 
     // --- Public hook entry points (ADR-0025) ---------------------------------
@@ -482,10 +422,7 @@ impl Agent {
 
     /// `UserPromptSubmit` gate. Called by `execute_turn` before the prompt
     /// enters the transcript: a `Deny` drops it, a `Prepend` prefixes context.
-    pub async fn fire_user_prompt_submit(
-        &self,
-        prompt: &str,
-    ) -> crate::hooks::UserPromptVerdict {
+    pub async fn fire_user_prompt_submit(&self, prompt: &str) -> crate::hooks::UserPromptVerdict {
         self.hooks()
             .check_user_prompt_submit(prompt, &self.hook_session_id(), self.hook_cwd().as_deref())
             .await
@@ -513,7 +450,12 @@ impl Agent {
         messages: &mut Vec<Message>,
     ) {
         self.hooks()
-            .session_start(source, &self.hook_session_id(), self.hook_cwd().as_deref(), messages)
+            .session_start(
+                source,
+                &self.hook_session_id(),
+                self.hook_cwd().as_deref(),
+                messages,
+            )
             .await
     }
 
@@ -571,7 +513,6 @@ impl Agent {
             *guard = None;
         }
     }
-
 
     /// Path to the plan file most recently approved via `plan_exit`. `None`
     /// when no plan is active (initial state, after re-entering Plan mode).
@@ -640,14 +581,12 @@ impl Agent {
         }
     }
 
-    /// Whether write-tool permission prompts are currently bypassed.
     pub fn get_auto_approve(&self) -> bool {
-        *self.auto_approve.lock().unwrap_or_else(|e| e.into_inner())
+        self.permissions.auto_approve()
     }
 
-    /// Enable or disable auto-approve for this session.
     pub fn set_auto_approve(&self, enabled: bool) {
-        *self.auto_approve.lock().unwrap_or_else(|e| e.into_inner()) = enabled;
+        self.permissions.set_auto_approve(enabled);
     }
 
     /// Set this agent's filesystem-write boundary (ADR-0028). The main agent
@@ -655,10 +594,7 @@ impl Agent {
     /// `SubagentTool` sets the scope resolved from the bound subagent profile on
     /// the child before it runs.
     pub fn set_write_scope(&self, scope: neenee_core::WriteScope) {
-        *self
-            .write_scope
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = scope;
+        *self.write_scope.lock().unwrap_or_else(|e| e.into_inner()) = scope;
     }
 
     /// Snapshot of this agent's write boundary. Used by the `execute_tool`
@@ -671,29 +607,23 @@ impl Agent {
     }
 
     pub fn get_pursuit(&self) -> Option<Pursuit> {
-        self.pursuit
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.pursuit_state.get()
     }
 
     pub fn set_pursuit(&self, pursuit: Pursuit) {
-        *self.pursuit.lock().unwrap_or_else(|e| e.into_inner()) = Some(pursuit);
+        self.pursuit_state.set(pursuit);
     }
 
     pub fn restore_pursuit(&self, pursuit: Pursuit) {
-        *self
-            .pursuit
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(pursuit);
+        self.pursuit_state.restore(pursuit);
     }
 
     pub fn clear_pursuit(&self) {
-        *self.pursuit.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.pursuit_state.clear();
     }
 
     pub fn pursuit_can_complete(&self) -> bool {
-        self.get_pursuit().is_some()
+        self.pursuit_state.can_complete()
     }
 
     pub fn pursuit_service(&self) -> &PursuitService {
@@ -704,61 +634,27 @@ impl Agent {
     // `/pursue <condition>` arms the gate. Each time the model would end the
     // turn, the gate re-injects the condition and forces another round until
     // the model signals completion, the safety cap is hit, or the pursuit is
-    // disarmed. See [`Agent::pursuit_continuation`].
+    // disarmed. See [`PursuitState::continuation`].
 
-    /// Arm the pursuit stop-gate and reset the iteration counter.
     pub fn arm_pursuit(&self) {
-        *self
-            .pursuit_iterations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = 0;
-        *self.pursuit_armed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.pursuit_state.arm();
     }
 
-    /// Disarm the pursuit stop-gate (e.g. `/pursue clear`).
     pub fn disarm_pursuit(&self) {
-        *self.pursuit_armed.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.pursuit_state.disarm();
     }
 
     pub fn is_pursuit_armed(&self) -> bool {
-        *self.pursuit_armed.lock().unwrap_or_else(|e| e.into_inner())
+        self.pursuit_state.is_armed()
     }
 
     pub fn pursuit_iterations(&self) -> u32 {
-        *self
-            .pursuit_iterations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.pursuit_state.iterations()
     }
 
-    /// Returns a continuation prompt to force another model round, or `None`
-    /// to let the turn end. Consulted by both turn loops just before they
-    /// return `TurnOutcome`.
-    ///
-    /// Returns `Some(prompt)` only when: a pursuit is armed, an active
-    /// (incomplete) pursuit exists, the latest response did not signal
-    /// completion (via the marker), and the iteration cap is not exhausted.
-    /// Hitting the cap disarms the pursuit and stops.
     pub(crate) fn pursuit_continuation(&self, response: &Message) -> Option<String> {
-        if !self.is_pursuit_armed() {
-            return None;
-        }
-        let pursuit = self.get_pursuit()?;
-        if pursuit.is_complete {
-            return None;
-        }
-        // The model signals completion by emitting the marker; if present,
-        // let the turn end so orchestration can finalize the pursuit.
-        if response.content.contains(crate::PURSUIT_COMPLETE_MARKER) {
-            return None;
-        }
-        let iterations = self.pursuit_iterations();
-        if iterations >= MAX_PURSUIT_ITERATIONS {
-            // Safety cap: stop driving, disarm so we don't keep re-entering.
-            self.disarm_pursuit();
-            return None;
-        }
-        Some(pursuits::prompts::continuation_prompt(&pursuit))
+        self.pursuit_state
+            .continuation(response, MAX_PURSUIT_ITERATIONS)
     }
 
     /// The turn-end gate (ADR-0025). Combines the `/pursue` stop-gate with any
@@ -787,55 +683,20 @@ impl Agent {
             .clone()
     }
 
-    /// Append a hidden user message that asks the model to continue the active pursuit.
     pub fn inject_pursuit_continuation(&self, messages: &mut Vec<Message>) {
-        if let Some(pursuit) = self.get_pursuit() {
-            if !pursuit.is_complete {
-                messages.push(Message::hidden(
-                    Role::User,
-                    pursuits::prompts::continuation_prompt(&pursuit),
-                ));
-            }
-        }
+        self.pursuit_state.inject_continuation(messages);
     }
 
-    /// Append a hidden user message that informs the model the pursuit objective changed.
     pub fn inject_objective_updated(&self, messages: &mut Vec<Message>) {
-        if let Some(pursuit) = self.get_pursuit() {
-            messages.push(Message::hidden(
-                Role::User,
-                pursuits::prompts::objective_updated_prompt(&pursuit),
-            ));
-        }
+        self.pursuit_state.inject_objective_updated(messages);
     }
 
     pub fn reply_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
-        let mut perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
-        let sender = perms.pending.remove(request_id);
-        let sent = sender.is_some_and(|sender| sender.send(decision).is_ok());
-        // Rejecting one permission aborts the turn, so resolve every other
-        // pending request in the same concurrent batch too. Without this,
-        // their tool futures stay blocked on their reply channels and the
-        // batch's `join_all` deadlocks — the turn would hang forever.
-        if sent && decision == PermissionDecision::Reject {
-            for (_, pending_sender) in perms.pending.drain() {
-                let _ = pending_sender.send(PermissionDecision::Reject);
-            }
-        }
-        sent
+        self.permissions.reply(request_id, decision)
     }
 
     pub fn reject_pending_permissions(&self) {
-        let pending = std::mem::take(
-            &mut self
-                .permissions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending,
-        );
-        for (_, sender) in pending {
-            let _ = sender.send(PermissionDecision::Reject);
-        }
+        self.permissions.reject_pending();
     }
 
     pub fn reply_user_question(&self, request_id: &str, answers: Vec<Vec<String>>) -> bool {
@@ -869,45 +730,18 @@ impl Agent {
     }
 
     pub fn allowed_tools(&self) -> Vec<String> {
-        let mut tools = self
-            .permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .always
-            .iter()
-            .map(|rule| format!("{} {}", rule.tool, rule.scope))
-            .collect::<Vec<_>>();
-        tools.sort();
-        tools
+        self.permissions.allowed_tools()
     }
 
     pub fn clear_allowed_tools(&self) {
-        self.permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .always
-            .clear();
-        self.persist_always_permissions();
+        self.permissions.clear_allowed();
     }
 
     /// Revoke a single cached "always allow" rule. Returns whether a rule was
     /// actually removed (false if the rule was never cached). Powers the
     /// session modal's per-row revoke.
     pub fn revoke_allowed_tool(&self, tool: &str, scope: &str) -> bool {
-        let rule = PermissionRule {
-            tool: tool.to_string(),
-            scope: scope.to_string(),
-        };
-        let removed = self
-            .permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .always
-            .remove(&rule);
-        if removed {
-            self.persist_always_permissions();
-        }
-        removed
+        self.permissions.revoke_allowed(tool, scope)
     }
 
     /// Install (or reuse) the steering inbox and return a [`SubagentHandle`]
@@ -923,20 +757,14 @@ impl Agent {
     /// inbox — its interrupt path is the `CancellationToken` passed to the run,
     /// and its permission/ask_user replies go through the harness directly.
     pub fn install_inbox(self: &Arc<Self>) -> SubagentHandle {
-        let mut tx_guard = self
-            .inbox_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut tx_guard = self.inbox_tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = match tx_guard.clone() {
             Some(existing) => existing,
             None => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 *tx_guard = Some(tx.clone());
                 drop(tx_guard);
-                *self
-                    .inbox_rx
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(rx);
+                *self.inbox_rx.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
                 tx
             }
         };
@@ -999,19 +827,7 @@ impl Agent {
     /// each rule to a single formatted string), this keeps the tool/scope pair
     /// intact so the modal can target an individual rule for revocation.
     pub fn allowed_tools_structured(&self) -> Vec<neenee_core::PermissionRuleInfo> {
-        let mut rules: Vec<neenee_core::PermissionRuleInfo> = self
-            .permissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .always
-            .iter()
-            .map(|rule| neenee_core::PermissionRuleInfo {
-                tool: rule.tool.clone(),
-                scope: rule.scope.clone(),
-            })
-            .collect();
-        rules.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| a.scope.cmp(&b.scope)));
-        rules
+        self.permissions.allowed_tools_structured()
     }
 
     /// Designate the project whose bucket backs the persistent "always"
@@ -1023,80 +839,7 @@ impl Agent {
     /// re-prompts the user. This is the cross-session hook: a fresh session in
     /// the same project inherits prior `Always` approvals without re-asking.
     pub fn set_project_root(&self, root: Option<std::path::PathBuf>) {
-        {
-            let mut guard = self.project_root.lock().unwrap_or_else(|e| e.into_inner());
-            *guard = root.clone();
-        }
-        if let Some(root) = root {
-            self.load_persistent_permissions(&root);
-        }
-    }
-
-    /// Read the persisted allowlist (if any) into the in-memory `always` set.
-    /// Never fatal — corrupt or missing files just yield an empty allowlist.
-    fn load_persistent_permissions(&self, root: &std::path::Path) {
-        let path = neenee_store::paths::get().project_permissions(root);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            // Common case on a brand-new project; not worth a log line.
-            return;
-        };
-        match serde_json::from_str::<PersistedPermissions>(&text) {
-            Ok(persisted) if persisted.version == PersistedPermissions::CURRENT_VERSION => {
-                let mut perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
-                let count = persisted.rules.len();
-                for rule in persisted.rules {
-                    perms.always.insert(rule);
-                }
-                tracing::info!(count, path = %path.display(), "loaded persistent permission rules");
-            }
-            Ok(other) => {
-                tracing::warn!(
-                    version = other.version,
-                    path = %path.display(),
-                    "unsupported persisted permissions version; ignoring file",
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "could not parse persistent permissions file; ignoring",
-                );
-            }
-        }
-    }
-
-    /// Atomically mirror the current `always` allowlist into the project
-    /// bucket. Best-effort: logs on failure and never propagates the error —
-    /// losing a cached approval just means the user gets re-prompted next
-    /// session, which is always the safe fallback.
-    fn persist_always_permissions(&self) {
-        let root = {
-            let guard = self.project_root.lock().unwrap_or_else(|e| e.into_inner());
-            guard.clone()
-        };
-        let Some(root) = root else {
-            return;
-        };
-        let path = neenee_store::paths::get().project_permissions(&root);
-        let snapshot = {
-            let perms = self.permissions.lock().unwrap_or_else(|e| e.into_inner());
-            let mut rules: Vec<PermissionRule> = perms.always.iter().cloned().collect();
-            // Sort for deterministic output — harmless and makes manual
-            // inspection / diffs of the on-disk file stable across runs.
-            rules.sort_by(|a, b| a.tool.cmp(&b.tool).then_with(|| a.scope.cmp(&b.scope)));
-            PersistedPermissions {
-                version: PersistedPermissions::CURRENT_VERSION,
-                rules,
-            }
-        };
-        if let Err(e) = neenee_store::fsutil::atomic_write_json(&path, &snapshot) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "could not persist permission rules",
-            );
-        }
+        self.permissions.set_project_root(root);
     }
 
     /// Set the session-level enabled flag for a tool. No-op when the name is
@@ -1359,10 +1102,7 @@ impl Agent {
             // signalled completion, re-inject the condition and force another
             // round instead of ending the turn.
             if let Some(prompt) = self.stop_gate(&response).await {
-                *self
-                    .pursuit_iterations
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) += 1;
+                self.pursuit_state.bump_iterations();
                 messages.push(Message::hidden(Role::User, prompt));
                 continue;
             }
@@ -1636,10 +1376,7 @@ impl Agent {
             // pursuit is armed and the model has not signalled completion,
             // re-inject the condition and force another round.
             if let Some(prompt) = self.stop_gate(&response).await {
-                *self
-                    .pursuit_iterations
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) += 1;
+                self.pursuit_state.bump_iterations();
                 messages.push(Message::hidden(Role::User, prompt));
                 continue;
             }
@@ -1894,11 +1631,22 @@ impl Agent {
         let cwd = self.hook_cwd();
         let injected = if result.is_error() {
             registry
-                .run_post_tool_use_failure(call.name.as_str(), &summary, &session_id, cwd.as_deref())
+                .run_post_tool_use_failure(
+                    call.name.as_str(),
+                    &summary,
+                    &session_id,
+                    cwd.as_deref(),
+                )
                 .await
         } else {
             registry
-                .run_post_tool_use(call.name.as_str(), &summary, duration_ms, &session_id, cwd.as_deref())
+                .run_post_tool_use(
+                    call.name.as_str(),
+                    &summary,
+                    duration_ms,
+                    &session_id,
+                    cwd.as_deref(),
+                )
                 .await
         };
         for context in injected {
@@ -1950,11 +1698,7 @@ impl Agent {
     /// verdict injects the anti-anchoring nudge instead of aborting.
     /// Non-terminating: the hard backstop stays user `Esc` + the opt-in
     /// `hard_stop_rounds` (ADR-0016).
-    async fn maybe_run_loop_review(
-        &self,
-        messages: &mut Vec<Message>,
-        state: &mut TurnState,
-    ) {
+    async fn maybe_run_loop_review(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
         if !self.get_loop_review_enabled()
             || state.loop_review_fired
             || !(state.consecutive_readonly_rounds >= LOOP_REVIEW_ROUNDS
@@ -1977,12 +1721,7 @@ impl Agent {
     /// fold any `Inject` context into hidden user messages. `Deny` is already
     /// discarded by [`HookRegistry::run_round`], so a round hook cannot abort
     /// the turn.
-    async fn run_round_hooks(
-        &self,
-        messages: &mut Vec<Message>,
-        state: &TurnState,
-        round: usize,
-    ) {
+    async fn run_round_hooks(&self, messages: &mut Vec<Message>, state: &TurnState, round: usize) {
         let registry = self.hooks();
         if registry.is_empty() {
             return;
@@ -2138,10 +1877,7 @@ impl Agent {
     where
         F: FnMut(AgentEvent) + Send,
     {
-        if matches!(
-            call.name.as_str(),
-            "todo" | "todo_update" | "plan"
-        ) {
+        if matches!(call.name.as_str(), "todo" | "todo_update" | "plan") {
             on_event(AgentEvent::TodosUpdated(self.todos()));
         }
     }
@@ -2326,17 +2062,18 @@ impl Agent {
         let request_text = std::str::from_utf8(call.arguments.as_bytes())
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|v| v.get("request").and_then(|r| r.as_str()).map(str::to_string))
+            .and_then(|v| {
+                v.get("request")
+                    .and_then(|r| r.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         let slug = plan_slug(&request_text);
         let path = format!(".neenee/plans/{}.md", slug);
         let excerpt = excerpt_of(&plan_markdown);
 
         // 4. Approval gate.
-        match self
-            .request_plan_approval(&path, &excerpt, event_tx)
-            .await
-        {
+        match self.request_plan_approval(&path, &excerpt, event_tx).await {
             PlanApproval::Approved => {
                 tracing::info!(plan = %path, "plan approved via subagent");
                 // 5. Write the plan to disk, record the active plan path, and
@@ -2351,11 +2088,7 @@ impl Agent {
                 if let Ok(mut guard) = self.active_plan_path.lock() {
                     *guard = Some(std::path::PathBuf::from(&path));
                 }
-                let turn = self
-                    .turn_counter
-                    .lock()
-                    .map(|g| *g)
-                    .unwrap_or(0);
+                let turn = self.turn_counter.lock().map(|g| *g).unwrap_or(0);
                 let seeded = neenee_core::TodoList::from_plan_markdown(
                     &plan_markdown,
                     neenee_core::todos::unix_now(),
@@ -2481,13 +2214,7 @@ impl Agent {
                 scope: scope.clone(),
             };
             let auto_approved = self.get_auto_approve();
-            let always_allowed = auto_approved
-                || self
-                    .permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .always
-                    .contains(&rule);
+            let always_allowed = auto_approved || self.permissions.is_always_allowed(&rule);
             if !always_allowed {
                 let request = PermissionRequest {
                     id: format!("permission_{}", uuid::Uuid::new_v4()),
@@ -2497,12 +2224,7 @@ impl Agent {
                     arguments: call.arguments.clone(),
                     scope,
                 };
-                let (sender, receiver) = oneshot::channel();
-                self.permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pending
-                    .insert(request.id.clone(), sender);
+                let receiver = self.permissions.park_request(request.id.clone());
                 tracing::info!(tool = %request.tool, scope = %request.scope, "permission requested");
                 let _ = event_tx.send(AgentEvent::PermissionRequest(request.clone()));
 
@@ -2512,12 +2234,7 @@ impl Agent {
                     }
                     PermissionDecision::Always => {
                         tracing::info!(tool = %tool.name(), decision = "always", "permission granted");
-                        self.permissions
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .always
-                            .insert(rule);
-                        self.persist_always_permissions();
+                        self.permissions.add_always(rule);
                     }
                     PermissionDecision::Reject => {
                         tracing::warn!(tool = %tool.name(), "permission denied");

@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use neenee_core::{ PLAN, Provider, SubagentEvent, Tool, ToolAccess, ToolOutput, ToolStream};
+use neenee_core::{Provider, SubagentEvent, Tool, ToolAccess, ToolOutput, ToolStream, PLAN};
 use serde_json::json;
 
 use crate::subagent_tool::SubagentTool;
