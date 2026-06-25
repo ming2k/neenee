@@ -302,6 +302,7 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.schema_version = *schema_version;
             }
             SessionEvent::MessagesReplaced { messages } => data.messages = messages.clone(),
+            SessionEvent::MessagesAppended { messages } => data.messages.extend(messages.clone()),
             SessionEvent::CheckpointSet { checkpoint } => data.loop_checkpoint = checkpoint.clone(),
             SessionEvent::ContextReliefCommitted {
                 archived,
@@ -715,6 +716,70 @@ impl SessionStore {
             messages: state.data.messages.clone(),
         })?;
         self.persist_locked(&state)
+    }
+
+    /// Incrementally persist new messages appended since the last durable
+    /// write, without rewriting the full snapshot (ADR-0035).
+    ///
+    /// The caller passes the *current full* turn history. This method diffs it
+    /// against the messages already durable in `data.messages` and appends only
+    /// the tail as a `MessagesAppended` event to the append-only log — O(delta),
+    /// not O(history). The snapshot cache (`session.json`) is intentionally
+    /// **not** rewritten here: it stays at the last turn boundary and is
+    /// refreshed by `replace_messages` at turn end. On resume, `load_or_seed`
+    /// replays the log (authoritative), so the appended tail is recovered.
+    ///
+    /// This is the mid-turn save point: a crash after a side-effecting tool
+    /// call leaves the transcript in sync with the filesystem instead of
+    /// rewinding to the previous turn. If `current` is no longer than the
+    /// durable prefix (e.g. a compaction already replaced messages) this is a
+    /// no-op.
+    pub async fn append_round(&self, current: &[Message]) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        let baseline = state.data.messages.len();
+        // Only the strictly-new tail is the delta. If `current` is shorter or
+        // equal (compaction rewrote the window, or nothing changed), there is
+        // nothing to append.
+        let delta: Vec<Message> = if current.len() > baseline {
+            // Guard against a divergent history: the durable prefix must match
+            // the incoming prefix. A mismatch means the caller and the store
+            // disagree on state (a bug, or a compaction rewrote the window
+            // without going through `replace_messages`); fall back to a full
+            // replace so the log never records a corrupt splice. `Message` has
+            // no `PartialEq`, so we compare the identity-bearing fields.
+            let diverged = current[..baseline]
+                .iter()
+                .zip(state.data.messages[..].iter())
+                .any(|(incoming, durable)| {
+                    incoming.role != durable.role
+                        || incoming.content != durable.content
+                        || incoming.tool_call_id != durable.tool_call_id
+                });
+            if diverged {
+                tracing::warn!(
+                    baseline,
+                    incoming = current.len(),
+                    "append_round: incoming prefix diverged from durable state; full replace"
+                );
+                state.data.messages = current.to_vec();
+                state.data.updated_at = unix_timestamp();
+                ensure_event_log_started(&state.event_log, &state.data)?;
+                state.event_log.append(SessionEvent::MessagesReplaced {
+                    messages: state.data.messages.clone(),
+                })?;
+                return self.persist_locked(&state);
+            }
+            current[baseline..].to_vec()
+        } else {
+            return Ok(());
+        };
+        // Advance the in-memory state and append the delta event. The snapshot
+        // cache is not touched (stays at the turn boundary).
+        state.data.messages.extend(delta.clone());
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state.event_log.append(SessionEvent::MessagesAppended { messages: delta })?;
+        Ok(())
     }
 
     pub async fn set_checkpoint(
@@ -2527,6 +2592,113 @@ mod tests {
         let reloaded = SessionStore::for_path(path.clone());
         assert_eq!(reloaded.id().await, first_id);
         assert_eq!(reloaded.messages().await[0].content, "first");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn append_round_persists_delta_and_survives_reload() {
+        // The mid-turn save point (ADR-0035): `append_round` writes only the
+        // new tail as a `MessagesAppended` event, and a fresh `SessionStore`
+        // at the same path must replay it to recover the full history. This
+        // is the resume-after-crash contract — the whole point of the feature.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-append-round-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+
+        // Turn opens with one user message, durably written.
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "user prompt")])
+            .await
+            .unwrap();
+
+        // Round 1 adds an assistant response + a tool result. The caller
+        // passes the *full* current history; the store appends only the tail.
+        let round1 = vec![
+            Message::new(neenee_core::Role::User, "user prompt"),
+            Message::new(neenee_core::Role::Assistant, "I will run a tool"),
+            Message::new(neenee_core::Role::Tool, "tool output"),
+        ];
+        store.append_round(&round1).await.unwrap();
+
+        // Round 2 adds more. The snapshot cache is still at the turn-open
+        // state (one message); only the event log has grown.
+        let round2 = vec![
+            Message::new(neenee_core::Role::User, "user prompt"),
+            Message::new(neenee_core::Role::Assistant, "I will run a tool"),
+            Message::new(neenee_core::Role::Tool, "tool output"),
+            Message::new(neenee_core::Role::Assistant, "done"),
+        ];
+        store.append_round(&round2).await.unwrap();
+
+        // The live in-memory state reflects all appends.
+        let live = store.messages().await;
+        assert_eq!(live.len(), 4);
+        assert_eq!(live[3].content, "done");
+
+        // A brand-new store replays the event log and recovers everything,
+        // including the appended tail the snapshot never recorded.
+        let reloaded = SessionStore::for_path(path.clone());
+        let recovered = reloaded.messages().await;
+        assert_eq!(recovered.len(), 4, "appended rounds survive reload");
+        assert_eq!(recovered[2].content, "tool output");
+        assert_eq!(recovered[3].content, "done");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn append_round_is_noop_when_nothing_new() {
+        // Passing a history no longer than the durable baseline (e.g. right
+        // after a compaction rewrote the window via `replace_messages`) must
+        // not corrupt anything or write a spurious event.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-append-noop-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        let messages = vec![Message::new(neenee_core::Role::User, "hi")];
+        store.replace_messages(messages.clone()).await.unwrap();
+
+        // Same length, same content → no-op.
+        store.append_round(&messages).await.unwrap();
+        assert_eq!(store.messages().await.len(), 1);
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn append_round_falls_back_to_replace_on_divergent_prefix() {
+        // If the incoming prefix disagrees with the durable state (a bug or a
+        // compaction that bypassed `replace_messages`), `append_round` must
+        // fall back to a full replace rather than splice a corrupt tail.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-append-diverge-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "original")])
+            .await
+            .unwrap();
+
+        // Incoming history where the durable prefix was *rewritten* — the
+        // first message content differs.
+        let divergent = vec![
+            Message::new(neenee_core::Role::User, "rewritten"),
+            Message::new(neenee_core::Role::Assistant, "new"),
+        ];
+        store.append_round(&divergent).await.unwrap();
+
+        // The fallback replaced everything with the incoming history.
+        let live = store.messages().await;
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[0].content, "rewritten");
+        assert_eq!(live[1].content, "new");
+
+        // And a reload recovers the replaced state, not a corrupt splice.
+        let reloaded = SessionStore::for_path(path.clone());
+        let recovered = reloaded.messages().await;
+        assert_eq!(recovered[0].content, "rewritten");
 
         let _ = fs::remove_dir_all(directory);
     }

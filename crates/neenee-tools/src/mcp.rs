@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use neenee_core::mcp::{McpConnectionStatus, McpServerConfig};
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -139,7 +139,6 @@ struct McpTool {
     original_name: String,
     description: String,
     parameters: Value,
-    access: ToolAccess,
     /// The reconnect-capable server handle. When a tool call fails with a
     /// connection error, [`call`](Tool::call) resets the connection and retries
     /// once — transparent crash recovery without waiting for the next refresh.
@@ -207,10 +206,6 @@ impl Tool for McpTool {
 
     fn parameters(&self) -> Value {
         self.parameters.clone()
-    }
-
-    fn access(&self) -> ToolAccess {
-        self.access
     }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
@@ -368,11 +363,6 @@ async fn build_tools_from_server(server: &Arc<McpServer>) -> Result<Vec<Arc<dyn 
                 original_name,
                 description,
                 parameters,
-                access: if server.read_only() {
-                    ToolAccess::Read
-                } else {
-                    ToolAccess::Write
-                },
                 server: Arc::clone(server),
             }) as Arc<dyn Tool>)
         })

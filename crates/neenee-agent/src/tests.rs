@@ -120,6 +120,10 @@ impl Tool for WriteTestTool {
         serde_json::json!({"type": "object"})
     }
 
+    fn scope_target(&self, _arguments: &str) -> neenee_core::ScopeTarget {
+        neenee_core::ScopeTarget::Path(std::path::PathBuf::from("/tmp/test"))
+    }
+
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         Ok("should not run".to_string())
     }
@@ -139,9 +143,6 @@ impl Tool for StreamingReadTool {
         serde_json::json!({"type": "object"})
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         assert_eq!(arguments, "{\"value\":1}");
@@ -155,6 +156,7 @@ fn agent() -> Agent {
         Arc::new(TestProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     )
 }
 
@@ -274,6 +276,7 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "run")];
     let mut events = Vec::new();
@@ -306,10 +309,52 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
     ));
 }
 
+#[tokio::test]
+async fn round_persist_fires_at_each_tool_round_boundary() {
+    // ADR-0035: the mid-turn save point must fire once per completed tool
+    // round, carrying the full history including that round's tool results.
+    // `StreamingToolProvider` does two rounds (round 0 = tool call, round 1 =
+    // terminal text), so exactly one round boundary is crossed and the
+    // callback should see three messages: user prompt + assistant + tool
+    // result. The final round (plain text, no tools) does not cross a
+    // boundary and must not fire the callback.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_lengths: Arc<std::sync::Mutex<Vec<usize>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
+        vec![Arc::new(StreamingReadTool(calls.clone()))],
+        crate::skills::SkillRegistry::empty(),
+        crate::AgentIdentity::default(),
+    );
+    let seen_for_cb = Arc::clone(&seen_lengths);
+    agent.set_round_persist(Arc::new(move |messages: &[Message]| {
+        let len = messages.len();
+        seen_for_cb.lock().unwrap().push(len);
+        // Snapshot the slice for the 'static future (the closure itself does
+        // not borrow; the persistence target is external in production).
+        let _ = messages.to_vec();
+        Box::pin(async { Ok(()) })
+    }));
+
+    let mut messages = vec![Message::new(Role::User, "run")];
+    let outcome = agent
+        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(outcome.message.content, "done");
+
+    // Exactly one boundary crossing (after round 0's tool result). The
+    // callback receives the full live history, which includes the
+    // `ensure_system_prompt` message at index 0: [system, user, assistant,
+    // tool_result] = 4. The final round (plain text, no tools) does not
+    // cross a boundary and must not fire the callback.
+    let recorded = seen_lengths.lock().unwrap().clone();
+    assert_eq!(recorded, vec![4], "round persist fires once with the full history");
+}
+
 /// A provider whose SSE stream never yields and never ends simulates a stalled
 /// connection (server stops sending but keeps the socket open). Without an idle
-/// timeout the turn loop blocks on `stream.next()` forever — the UI spins
-/// "running · responding" and only a user interrupt can break it. The
+/// timeout the turn loop blocks on `stream.next()` forever — the UI spins/// "running · responding" and only a user interrupt can break it. The
 /// `STREAM_IDLE_TIMEOUT` guard surfaces this as a retryable error instead.
 /// `start_paused` makes tokio auto-advance the clock past the 120 s bound so
 /// the test is instantaneous.
@@ -339,6 +384,7 @@ async fn stalled_provider_stream_times_out_as_retryable() {
         Arc::new(StalledStreamProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -386,6 +432,7 @@ async fn stream_request_that_never_resolves_times_out() {
         Arc::new(PendingStreamProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -424,6 +471,7 @@ async fn non_streaming_chat_that_never_resolves_times_out() {
         Arc::new(PendingChatProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -471,6 +519,7 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
         Arc::new(ReasoningOnlyProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -507,9 +556,6 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
         }
-        fn access(&self) -> ToolAccess {
-            ToolAccess::Read
-        }
         async fn call(&self, _arguments: &str) -> Result<String, String> {
             self.started.notify_one();
             let _: () = pending().await;
@@ -525,6 +571,7 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
             started: started.clone(),
         })],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let token = CancellationToken::new();
     let mut messages = vec![Message::new(Role::User, "run")];
@@ -576,6 +623,7 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     ));
     let call = ToolCall {
         id: "call".to_string(),
@@ -611,7 +659,10 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
     assert!(!task.is_finished());
     assert!(agent.reply_permission(&request.id, PermissionDecision::Always));
     assert_eq!(task.await.unwrap().unwrap().to_text(), "should not run");
-    assert_eq!(agent.allowed_tools(), vec!["write_test *".to_string()]);
+    assert_eq!(
+        agent.allowed_tools(),
+        vec!["write_test /tmp/test".to_string()]
+    );
 
     let mut prompted_again = false;
     let output = agent
@@ -632,6 +683,7 @@ async fn rejected_permission_does_not_execute_tool() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     ));
     let call = ToolCall {
         id: "call".to_string(),
@@ -668,6 +720,7 @@ async fn headless_run_rejects_write_tools_without_hanging() {
         Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "write something")];
 
@@ -756,11 +809,13 @@ impl Provider for ScriptedProvider {
 }
 
 /// A tool that records every invocation's arguments and returns canned
-/// output, with a configurable access level for permission tests.
+/// output. The `write` variant declares a [`ScopeTarget::Path`] so the
+/// permission broker fires for it; the `read` variant leaves the default
+/// [`ScopeTarget::Unspecified`] and skips the broker.
 struct RecordingTool {
     name: &'static str,
-    access: ToolAccess,
     output: String,
+    declares_target: bool,
     calls: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -768,15 +823,15 @@ impl RecordingTool {
     fn read(name: &'static str, output: &str) -> Self {
         Self {
             name,
-            access: ToolAccess::Read,
             output: output.to_string(),
+            declares_target: false,
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     fn write(name: &'static str, output: &str) -> Self {
         Self {
-            access: ToolAccess::Write,
+            declares_target: true,
             ..Self::read(name, output)
         }
     }
@@ -797,8 +852,18 @@ impl Tool for RecordingTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    fn access(&self) -> ToolAccess {
-        self.access
+    fn scope_target(&self, arguments: &str) -> neenee_core::ScopeTarget {
+        if self.declares_target {
+            // Pull a path from the args if present, else a fixed sentinel, so
+            // the broker fires for the `write` variant.
+            let path = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "/tmp/recording".to_string());
+            neenee_core::ScopeTarget::Path(std::path::PathBuf::from(path))
+        } else {
+            neenee_core::ScopeTarget::Unspecified
+        }
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.calls
@@ -892,6 +957,7 @@ async fn golden_native_tool_round_then_final_text() {
             Arc::new(RecordingTool::read("beta", "B-out")),
         ],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -923,6 +989,7 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
         ])),
         vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -964,6 +1031,7 @@ async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
         ])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     agent.set_loop_review_enabled(false);
 
@@ -990,6 +1058,7 @@ async fn read_loop_guard_injects_one_nudge_after_repeated_reads() {
         ])),
         vec![Arc::new(RecordingTool::read("reader", "R-out"))],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let mut messages = vec![Message::new(Role::User, "go")];
@@ -1026,6 +1095,7 @@ async fn read_loop_guard_suppressed_when_disabled() {
         ])),
         vec![Arc::new(RecordingTool::read("reader", "R-out"))],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     agent.set_loop_review_enabled(false);
 
@@ -1053,6 +1123,7 @@ async fn golden_rejected_write_tool_terminates_turn() {
         ])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1068,7 +1139,7 @@ async fn golden_rejected_write_tool_terminates_turn() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "permission-request writer *")
+            .any(|line| line == "permission-request writer x")
     );
     assert!(
         lines.iter().any(
@@ -1086,6 +1157,7 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
         ]])),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1125,6 +1197,7 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
         ])),
         vec![Arc::new(neenee_tools::AskUserTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let mut messages = vec![Message::new(Role::User, "choose")];
@@ -1173,6 +1246,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     ));
     agent.set_project_root(Some(project_root.clone()));
     assert!(agent.allowed_tools().is_empty());
@@ -1209,7 +1283,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
     assert_eq!(on_disk["version"].as_u64(), Some(1));
     assert_eq!(on_disk["rules"].as_array().unwrap().len(), 1);
     assert_eq!(on_disk["rules"][0]["tool"], "write_test");
-    assert_eq!(on_disk["rules"][0]["scope"], "*");
+    assert_eq!(on_disk["rules"][0]["scope"], "/tmp/test");
 
     // A brand-new agent in the same project should inherit the rule without
     // ever prompting — that is the whole point of cross-session persistence.
@@ -1217,17 +1291,18 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     ));
     agent2.set_project_root(Some(project_root.clone()));
     assert_eq!(
         agent2.allowed_tools(),
-        vec!["write_test *".to_string()],
+        vec!["write_test /tmp/test".to_string()],
         "fresh agent in the same project should inherit persisted Always rule"
     );
 
     // Revoking on agent2 must remove the rule from disk as well, so the next
     // session doesn't silently resurrect it.
-    assert!(agent2.revoke_allowed_tool("write_test", "*"));
+    assert!(agent2.revoke_allowed_tool("write_test", "/tmp/test"));
     let after_revoke: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&perms_path).unwrap()).unwrap();
     assert_eq!(after_revoke["rules"].as_array().unwrap().len(), 0);
@@ -1238,6 +1313,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     agent3.set_project_root(Some(other_root));
     assert!(
@@ -1268,6 +1344,7 @@ async fn agent_without_project_root_never_writes_permissions_file() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     ));
     // Mutations of the allowlist must be no-ops on disk when no project root
     // is set: no panic, no file created.
@@ -1317,6 +1394,7 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
@@ -1429,6 +1507,7 @@ async fn hard_stop_aborts_when_budget_configured() {
         Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
     agent.set_hard_stop_rounds(3);
 
@@ -1461,6 +1540,7 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
         Arc::new(ScriptedProvider::new(vec![text_round(verdict_json)])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
+    crate::AgentIdentity::default(),
     );
 
     // A transcript with one tool round so the estimate is meaningful.

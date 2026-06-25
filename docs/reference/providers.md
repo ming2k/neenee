@@ -3,7 +3,7 @@
 The agent talks to LLM providers through the `Provider` trait
 (`crates/neenee-core/src/capability.rs`). Every provider implementation lives
 in `crates/neenee-providers/src/`. Provider selection happens at startup and
-on `/provider` (the picker) in `crates/neenee-cli/src/main.rs`.
+on `/provider` (the picker) in `crates/neenee-code/src/main.rs`.
 
 ## Capability matrix
 

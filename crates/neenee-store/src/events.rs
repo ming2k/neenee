@@ -32,6 +32,12 @@ pub enum SessionEvent {
     /// The active message list was replaced (e.g. after a turn, on open, or
     /// after tool-result pruning).
     MessagesReplaced { messages: Vec<Message> },
+    /// Messages were appended to the active list without rewriting the whole
+    /// window. Emitted at tool-round boundaries mid-turn so a crash after a
+    /// side-effecting tool call still leaves the transcript in sync with the
+    /// filesystem. Replayed by appending to `data.messages`; a `MessagesReplaced`
+    /// later in the log supersedes it (snapshot semantics). See ADR-0035.
+    MessagesAppended { messages: Vec<Message> },
     /// The autonomous-loop checkpoint changed.
     CheckpointSet {
         checkpoint: Option<PursuitCheckpoint>,
@@ -232,6 +238,44 @@ mod tests {
         let log = EventLog::new(path);
         let loaded = log.load().unwrap();
         assert_eq!(loaded.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn messages_appended_round_trips_and_replays_after_replace() {
+        // The incremental event (ADR-0035) must serialize under its snake_case
+        // tag and round-trip through the log. A `MessagesReplaced` seeds the
+        // window, then a `MessagesAppended` extends it — the exact interleave
+        // `append_round` produces inside a real turn.
+        let dir = std::env::temp_dir()
+            .join(format!("neenee-events-append-{}", uuid::Uuid::new_v4()));
+        let log = EventLog::new(dir.join("events.jsonl"));
+
+        log.append(SessionEvent::MessagesReplaced {
+            messages: vec![neenee_core::Message::new(neenee_core::Role::User, "seed")],
+        })
+        .unwrap();
+        log.append(SessionEvent::MessagesAppended {
+            messages: vec![
+                neenee_core::Message::new(neenee_core::Role::Assistant, "round 1"),
+                neenee_core::Message::new(neenee_core::Role::Tool, "result 1"),
+            ],
+        })
+        .unwrap();
+
+        let loaded = log.load().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(
+            matches!(&loaded[1].event, SessionEvent::MessagesAppended { messages } if messages.len() == 2),
+            "appended event must deserialize back to MessagesAppended"
+        );
+        // The on-disk tag is snake_case "messages_appended".
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            raw.contains("\"type\":\"messages_appended\""),
+            "incremental event must serialize under messages_appended: {raw}"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

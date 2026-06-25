@@ -4,8 +4,9 @@ members = [
     "crates/neenee-store",
     "crates/neenee-providers",
     "crates/neenee-tools",
+    "crates/neenee-quant",
     "crates/neenee-agent",
-    "crates/neenee-cli",
+    "crates/neenee-code",
 ]
 resolver = "2"
 

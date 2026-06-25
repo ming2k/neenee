@@ -63,5 +63,5 @@ Use `Ctrl+B` to enter Browse zone, then `↑` / `↓` to walk focused steps.
 ## Source
 
 `draw_reasoning_trace` (and `draw_reasoning_trace_header`) in
-`crates/neenee-cli/src/tui/render/turn_artifacts.rs`. Header data from
+`crates/neenee-code/src/tui/render/turn_artifacts.rs`. Header data from
 `thinking_header()` in `document.rs`.

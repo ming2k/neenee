@@ -28,8 +28,8 @@ impl Tool for EditFileTool {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    fn permission_scope(&self, arguments: &str) -> String {
-        json_string(arguments, "path")
+    fn scope_target(&self, arguments: &str) -> neenee_core::ScopeTarget {
+        neenee_core::ScopeTarget::Path(std::path::PathBuf::from(json_string(arguments, "path")))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())

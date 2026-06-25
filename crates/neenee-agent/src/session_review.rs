@@ -89,7 +89,12 @@ impl Agent {
         // open a file to check a looping claim but cannot mutate anything or
         // spawn further agents.
         let sub_tools = REVIEW.select_tools(&self.tools);
-        let reviewer = Agent::new(self.provider.clone(), sub_tools, SkillRegistry::empty());
+        let reviewer = Agent::new(
+            self.provider.clone(),
+            sub_tools,
+            SkillRegistry::empty(),
+            crate::AgentIdentity::default(),
+        );
         // The reviewer must not run its own reviews (recursion) and is bounded
         // by a tight hard stop so it cannot loop. It registers no review
         // dimensions of its own.

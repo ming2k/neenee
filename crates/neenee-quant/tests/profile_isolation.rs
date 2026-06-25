@@ -1,0 +1,59 @@
+//! Integration test: the QUANT profile isolates quant tools from coding tools.
+//!
+//! Built with REAL tool instances (the quant tools from this crate + the real
+//! coding tools from `neenee-tools`), not stubs. This proves the per-role
+//! tool allocation holds end-to-end: a quant sub-agent receives exactly its
+//! read-only quant + inspection set, and never receives a coding write/edit
+//! tool or the live-trading `place_order`. This is the "tools 分配应该不同,
+//! 不要搞混" contract pinned with concrete instances.
+
+#![cfg(test)]
+
+use std::sync::Arc;
+
+use neenee_core::{QUANT, Tool};
+use neenee_quant::{BacktestTool, ListPositionsTool, MarketDataTool, PlaceOrderTool};
+
+#[test]
+fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
+    // A mixed parent toolset: quant tools (read + trade) + coding tools (read
+    // + write). A real assembled quant agent would carry quant tools; here we
+    // also throw in coding tools to prove the profile filters them out.
+    let mixed: Vec<Arc<dyn Tool>> = vec![
+        // Quant domain.
+        Arc::new(MarketDataTool::new()),
+        Arc::new(BacktestTool::new()),
+        Arc::new(ListPositionsTool::new()),
+        Arc::new(PlaceOrderTool::new()),
+        // Coding domain (would come from neenee-tools in a real binary).
+        Arc::new(neenee_tools::ReadFileTool),
+        Arc::new(neenee_tools::WriteFileTool),
+        Arc::new(neenee_tools::EditFileTool),
+        Arc::new(neenee_tools::BashTool),
+    ];
+
+    let selected = QUANT.select_tools(&mixed);
+    let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+
+    // Admitted: read-only quant + read-only inspection.
+    assert!(names.contains(&"market_data"), "got: {names:?}");
+    assert!(names.contains(&"backtest"), "got: {names:?}");
+    assert!(names.contains(&"list_positions"), "got: {names:?}");
+    assert!(names.contains(&"read_file"), "got: {names:?}");
+
+    // Excluded: live trading.
+    assert!(
+        !names.contains(&"place_order"),
+        "quant analyst must not receive place_order, got: {names:?}"
+    );
+    // Excluded: coding write/edit/exec — domain isolation.
+    assert!(
+        !names.contains(&"write_file"),
+        "quant agent must not receive coding write tools, got: {names:?}"
+    );
+    assert!(!names.contains(&"edit_file"), "got: {names:?}");
+    assert!(!names.contains(&"bash"), "got: {names:?}");
+
+    // Exactly four tools admitted — no more, no less.
+    assert_eq!(selected.len(), 4, "got: {names:?}");
+}

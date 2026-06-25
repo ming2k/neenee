@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::json;
 
 /// Read a file from disk.
@@ -37,7 +37,10 @@ impl Tool for ReadFileTool {
          which you can then target with this tool's `offset` parameter.\n\
          - Avoid tiny repeated slices (e.g. 30-line chunks). If you need more \
          context, read a larger window with a bigger `limit`.\n\
-         - An empty range means you are past EOF."
+         - An empty range means you are past EOF.\n\
+         \n\
+         DIRECTORIES are not readable here — pass a directory path to the \
+         `list_dir` tool instead."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -50,9 +53,6 @@ impl Tool for ReadFileTool {
             "required": ["path"]
         })
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }
@@ -61,6 +61,18 @@ impl Tool for ReadFileTool {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
+
+        // Reject directories with an explicit, actionable message instead of
+        // the raw OS "Is a directory (os error 21)". A model that sees the OS
+        // error cannot infer it should switch to `list_dir`, and may re-read
+        // the same directory in a loop. This mirrors the empty/EOF guidance
+        // pattern: a clear reason breaks the loop.
+        if std::path::Path::new(path).is_dir() {
+            return Err(format!(
+                "'{}' is a directory, not a file. Use the `list_dir` tool to see its contents.",
+                path
+            ));
+        }
 
         let bytes = std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
 

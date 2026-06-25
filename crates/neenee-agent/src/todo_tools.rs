@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use serde_json::json;
 
-use neenee_core::{MAX_TODOS, TodoStatus, TodoToolContext, Tool, ToolAccess};
+use neenee_core::{MAX_TODOS, TodoStatus, TodoToolContext, Tool};
 
 const TODO_DESCRIPTION: &str = "Maintain the task list for the current work. Replace the whole list each call with the current \
      set of concrete steps, in the order you intend to tackle them. At most one item may be \
@@ -71,9 +71,6 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
@@ -226,9 +223,6 @@ impl Tool for TodoUpdateTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let value = serde_json::from_str::<serde_json::Value>(arguments)

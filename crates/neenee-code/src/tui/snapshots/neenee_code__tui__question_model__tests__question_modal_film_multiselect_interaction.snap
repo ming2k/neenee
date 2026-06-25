@@ -1,0 +1,113 @@
+---
+source: crates/neenee-code/src/tui/question_model.rs
+expression: film
+---
+=== open ===
+
+
+
+
+
+
+          Question
+
+           Which features?
+
+
+          ❯ 1. [ ] a
+
+            2. [ ] b
+
+            3. [ ] c
+
+            4. [ ] Other
+
+          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+
+=== down → highlight 'b' ===
+
+
+
+
+
+
+          Question
+
+           Which features?
+
+
+            1. [ ] a
+
+          ❯ 2. [ ] b
+
+            3. [ ] c
+
+            4. [ ] Other
+
+          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+
+=== space → toggle 'b' selected ===
+
+
+
+
+
+
+          Question
+
+           Which features?
+
+
+            1. [ ] a
+
+          ❯ 2. [x] b
+
+            3. [ ] c
+
+            4. [ ] Other
+
+          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+
+=== '1' → select 'a' ===
+
+
+
+
+
+
+          Question
+
+           Which features?
+
+
+          ❯ 1. [x] a
+
+            2. [x] b
+
+            3. [ ] c
+
+            4. [ ] Other
+
+          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+
+=== '4' + 'custom' → focus 'Other', type ===
+
+
+
+
+
+
+          Question
+
+           Which features?
+
+
+            1. [x] a
+
+            2. [x] b
+
+            3. [ ] c
+
+          ❯ 4. [x] Other
+
+          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit

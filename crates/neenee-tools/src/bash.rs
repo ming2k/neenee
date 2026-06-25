@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::json;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
@@ -18,9 +18,6 @@ impl Tool for BashTool {
     /// mutation — so it sits in the `Execute` tier between pure reads and
     /// file-writing tools. The broker still gates it (`Execute > Read`). See
     /// ADR-0012.
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Execute
-    }
     fn description(&self) -> &str {
         "Execute a shell command. Use for git, build, test, or any system operation."
     }
@@ -34,8 +31,8 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    fn permission_scope(&self, arguments: &str) -> String {
-        json_string(arguments, "command")
+    fn scope_target(&self, arguments: &str) -> neenee_core::ScopeTarget {
+        neenee_core::ScopeTarget::Command(json_string(arguments, "command"))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())

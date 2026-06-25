@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::json;
 
 /// Fast file pattern matching using globs.
@@ -46,9 +46,6 @@ impl Tool for GlobTool {
             },
             "required": ["pattern"]
         })
-    }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =

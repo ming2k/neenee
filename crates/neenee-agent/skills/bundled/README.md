@@ -1,6 +1,6 @@
 # Bundled skills
 
-This directory tree is embedded into the `neenee` binary at compile time
+This directory tree is embedded into the `neenee-code` binary at compile time
 (via `include_dir!` in `crates/neenee-agent/src/skills/bundled.rs`) and
 surfaced as `SkillScope::System` skills — the lowest-priority source in the
 discovery cascade.

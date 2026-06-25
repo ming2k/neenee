@@ -199,6 +199,7 @@ mod tests {
             provider.clone(),
             Vec::new(),
             crate::skills::SkillRegistry::empty(),
+            crate::AgentIdentity::default(),
         );
         (agent, provider)
     }

@@ -28,7 +28,7 @@ only cells kept as pure `app_bg` on every frame.
 ```
 
 The viewport rect itself comes from `viewport_rect(frame)` in
-`crates/neenee-cli/src/tui/render/primitives.rs`.
+`crates/neenee-code/src/tui/render/primitives.rs`.
 
 ## Root conversation view
 

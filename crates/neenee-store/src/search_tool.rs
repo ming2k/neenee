@@ -1,4 +1,4 @@
-use neenee_core::{Tool, ToolAccess, ToolOutput, async_trait};
+use neenee_core::{Tool, ToolOutput, async_trait};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -46,9 +46,6 @@ impl Tool for SearchHistoryTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =

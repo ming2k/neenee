@@ -14,7 +14,7 @@ three distinct roles — there are no model-facing pursuit tools (ADR-0031):
 
 ## Entry: `/pursue <condition>`
 
-A slash command (`crates/neenee-cli/src/handlers/slash.rs`), not a tool. It
+A slash command (`crates/neenee-code/src/handlers/slash.rs`), not a tool. It
 persists the condition via `SessionStore::set_pursuit`, arms the stop-gate on
 the agent, and drives one turn via `orchestration::start_pursuit`. The model
 cannot start a pursuit on its own — by architecture, not by prompt constraint.

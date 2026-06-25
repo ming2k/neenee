@@ -104,9 +104,6 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Write
-    }
 
     /// Whether executing this tool may block awaiting a live human decision
     /// (e.g. `ask_user`, an approval-gated mode switch). Non-interactive
@@ -127,19 +124,32 @@ pub trait Tool: Send + Sync {
 
     /// Whether this tool exercises control over the harness itself (e.g. the
     /// abort/exit escape hatch), as opposed to the workspace/filesystem. This
-    /// is an orthogonal capability axis to [`Tool::access`]: `access()` classifies
-    /// *filesystem damage*, while this classifies *process control*. Subagent
+    /// is orthogonal to [`Tool::scope_target`]: `scope_target` classifies *what
+    /// the call touches*, while this classifies *process control*. Subagent
     /// profiles exclude control tools unconditionally — a spawned agent must
     /// never be able to tear down the whole program. A control tool bypasses
-    /// the filesystem permission broker entirely (it is gated by this flag,
-    /// not by `access()`), so it should override `access()` to [`ToolAccess::Read`]
-    /// purely so the broker does not prompt for it.
+    /// the permission broker and scope gate entirely: it declares no
+    /// [`ScopeTarget`] (the default [`ScopeTarget::Unspecified`]), so neither
+    /// the scope gate nor the broker fires for it — it is gated solely by this
+    /// flag.
     fn affects_control_flow(&self) -> bool {
         false
     }
 
-    fn permission_scope(&self, _arguments: &str) -> String {
-        "*".to_string()
+    /// The operation target this call acts on, so the operation-scope gate can
+    /// decide whether the call falls inside the agent's granted scope.
+    ///
+    /// Tools return a typed [`ScopeTarget`]: a file path for `write_file`/
+    /// `edit_file`, the command string for `bash`, etc. The scope gate
+    /// dispatches on the variant — `Path` targets are checked against the
+    /// granted directory prefixes, `Command` targets against a command
+    /// allowlist. [`ScopeTarget::Unspecified`] (the default) is admitted
+    /// without a scope check, since the tool declares no locatable target.
+    ///
+    /// Like [`permission_label`](Self::permission_label), this never reaches
+    /// the model.
+    fn scope_target(&self, _arguments: &str) -> ScopeTarget {
+        ScopeTarget::Unspecified
     }
 
     /// Short, human-friendly label shown as the title of the permission
@@ -223,77 +233,132 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// A tool's capability class, ordered `Read < Execute < Write`. Each consumer
-/// of the axis expresses its rule as a threshold rather than a binary, so the
-/// surfaces that consult it compose cleanly:
-///
-/// - **Permission broker** — prompts for any tool with `access() > Read`
-///   (i.e. `Execute` or `Write`): both have side effects the user should
-///   approve.
-/// - **Write-scope gate** — a per-agent [`WriteScope`] boundary blocks write
-///   tools whose target is outside the agent's granted paths (e.g. an
-///   `INTERACTIVE` subagent scoped to the working tree). See ADR-0028.
-/// - **Subagent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
-///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`, or
-///   when it is a write tool covered by a `write_paths` grant. `EXPLORE`
-///   (ceiling `Read`) gets pure read tools; `INTERACTIVE` (ceiling `Write`)
-///   admits the full ladder including scoped writes. See ADR-0012/0028.
-///
-/// Variant order is load-bearing: it defines the ordering used by the derived
-/// `Ord`. Do not reorder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ToolAccess {
-    /// Inspects state with no side effects (e.g. `read_file`, `grep`).
-    Read,
-    /// Runs commands and may have external side effects, but the tool itself
-    /// is not a workspace-mutation primitive (e.g. `bash`). Broker-gated.
-    Execute,
-    /// The tool's purpose is to mutate the workspace (e.g. `write_file`,
-    /// `edit_file`). Broker-gated on the main agent; scoped by [`WriteScope`]
-    /// on sub-agents.
-    Write,
-}
-
-/// Runtime filesystem-write boundary for an agent. A **hard capability limit,
-/// not a prompt**: writes outside the scope are blocked outright. Orthogonal
-/// to [`ToolAccess`], which admits *whether* a tool runs; `WriteScope` scopes
-/// *where* an admitted write tool may land. See ADR-0028.
-///
-/// The main agent carries [`WriteScope::Unrestricted`] (the broker is still
-/// the interactive layer inside it); a subagent carries the scope resolved
-/// from its profile's `write_paths` grant.
+/// What a tool call acts on, so the operation-scope gate can match it against
+/// the agent's granted scope. Tools report this via [`Tool::scope_target`];
+/// each variant corresponds to one dimension an [`OperationScope`] can
+/// constrain. [`ScopeTarget::Unspecified`] is the default for tools with no
+/// locatable target and is admitted without a scope check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteScope {
-    /// No writes permitted (read-only / execute-only agents).
-    None,
-    /// Writes permitted only under these canonicalized directory prefixes.
-    Scoped(Vec<std::path::PathBuf>),
-    /// Writes permitted anywhere — the main agent.
-    Unrestricted,
+pub enum ScopeTarget {
+    /// A filesystem path the tool writes or reads (e.g. `write_file`, `edit_file`).
+    /// Checked against the scope's granted directory prefixes.
+    Path(std::path::PathBuf),
+    /// A shell command string (e.g. `bash`). Checked against the scope's command
+    /// allowlist, when one is set.
+    Command(String),
+    /// The tool declares no locatable target (e.g. `grep`, `list_dir`). Admitted
+    /// by the scope gate without a dimension check.
+    Unspecified,
 }
 
-impl Default for WriteScope {
-    /// The main agent is unrestricted by default; sub-agents override this at
-    /// spawn via [`crate::subagent::SubagentProfile::resolve_write_scope`].
-    fn default() -> Self {
-        WriteScope::Unrestricted
+/// A shell-command allowlist for the [`OperationScope::commands`] dimension.
+///
+/// Patterns are matched against the *command prefix* of the executed command —
+/// the leading program plus any leading env-var assignments (`KEY=val ...`).
+/// Matching is by token prefix: `git` admits `git status` and `git diff`; `git`
+/// does *not* admit `gitk`. An empty allowlist admits nothing. `*` is a literal
+/// pattern meaning "any command" (useful to express "commands unrestricted").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandScope {
+    /// Canonicalized command prefixes that are permitted, e.g. `["git", "cargo", "rg"]`.
+    /// Order is irrelevant; matched by membership.
+    allowed: Vec<String>,
+}
+
+impl CommandScope {
+    /// Build from an explicit list of allowed command prefixes.
+    pub fn new(allowed: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            allowed: allowed.into_iter().collect(),
+        }
+    }
+
+    /// An empty allowlist — admits nothing. Distinct from "no command
+    /// constraint at all" (which is `OperationScope::commands == None`).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Whether `command` is permitted under this allowlist. The first whitespace
+    /// token is the program name; an `A=B` prefix (env-var assignment) is
+    /// skipped so `PYTHONPATH=/x python3 script.py` matches a `python3` grant.
+    /// A literal `"*"` allowlist entry admits any command.
+    pub fn allows(&self, command: &str) -> bool {
+        if self.allowed.iter().any(|p| p == "*") {
+            return true;
+        }
+        let program = leading_program(command);
+        self.allowed.iter().any(|p| *p == program)
     }
 }
 
-impl WriteScope {
-    /// Whether a write to `path_str` (the value a write tool returns from
-    /// [`Tool::permission_scope`]) is permitted under this scope.
-    /// [`WriteScope::Unrestricted`] admits everything; [`WriteScope::None`]
-    /// admits nothing; [`WriteScope::Scoped`] canonicalizes the target's
-    /// parent and re-appends the file name (so a not-yet-existing file still
-    /// resolves) and checks it starts with one of the granted directories.
-    pub fn allows(&self, path_str: &str) -> bool {
-        match self {
-            WriteScope::Unrestricted => true,
-            WriteScope::None => false,
-            WriteScope::Scoped(dirs) => match resolve_for_check(path_str) {
-                Some(target) => dirs.iter().any(|dir| target.starts_with(dir)),
-                None => false,
+/// Extract the leading program name from a command string, skipping any
+/// `KEY=val` env-var assignments that precede it. Returns `""` for empty input.
+fn leading_program(command: &str) -> String {
+    command
+        .split_whitespace()
+        .find(|tok| !tok.contains('='))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Runtime operation boundary for an agent — a **hard capability limit, not a
+/// prompt**: calls whose [`ScopeTarget`] falls outside the granted scope are
+/// blocked outright. `OperationScope` scopes *where* (paths) and *what*
+/// (commands) a tool may touch. A tool with [`ScopeTarget::Unspecified`] (no
+/// locatable target, e.g. `read_file`, `grep`) skips the scope gate and the
+/// permission broker entirely; a tool with a `Path`/`Command` target is checked
+/// against this scope first, then surfaces to the broker for approval. See
+/// ADR-0028.
+///
+/// Each dimension is optional: `None` means "no constraint along this axis"
+/// (admit anything for that dimension), not "admit nothing". A dimension set to
+/// `Some(CommandScope::none())` does mean "admit no command". This lets a scope
+/// say "paths unrestricted but commands limited to git" without coupling the
+/// two axes.
+///
+/// The main agent carries an unconstrained scope (the broker is still the
+/// interactive layer inside it); a subagent carries the scope resolved from its
+/// profile's `write_paths` and `command_allowlist` grants.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationScope {
+    /// Granted write-path prefixes. `None` = paths unconstrained;
+    /// `Some(vec![])` = no paths permitted.
+    pub paths: Option<Vec<std::path::PathBuf>>,
+    /// Granted command prefixes. `None` = commands unconstrained;
+    /// `Some(CommandScope::none())` = no commands permitted.
+    pub commands: Option<CommandScope>,
+}
+
+impl OperationScope {
+    /// No constraints at all — the main agent's default. Every target is admitted.
+    pub fn unrestricted() -> Self {
+        Self::default()
+    }
+
+    /// Whether a call with the given [`ScopeTarget`] is permitted under this
+    /// scope. Dispatches on the target variant:
+    /// - [`ScopeTarget::Path`] → checked against `paths` (prefix-containment,
+    ///   canonicalizing the target's parent so a not-yet-existing file resolves).
+    /// - [`ScopeTarget::Command`] → checked against `commands` (prefix allowlist).
+    /// - [`ScopeTarget::Unspecified`] → admitted (no locatable target to check).
+    ///
+    /// A dimension that is `None` (unset) admits everything along that axis.
+    pub fn allows(&self, target: &ScopeTarget) -> bool {
+        match target {
+            ScopeTarget::Unspecified => true,
+            ScopeTarget::Path(p) => match &self.paths {
+                None => true,
+                Some(dirs) => {
+                    match resolve_for_check(&p.to_string_lossy()) {
+                        Some(target) => dirs.iter().any(|dir| target.starts_with(dir)),
+                        None => false,
+                    }
+                }
+            },
+            ScopeTarget::Command(cmd) => match &self.commands {
+                None => true,
+                Some(scope) => scope.allows(cmd),
             },
         }
     }
@@ -327,27 +392,84 @@ fn resolve_for_check(path: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::WriteScope;
+    use super::{CommandScope, OperationScope, ScopeTarget};
     use std::path::PathBuf;
 
     #[test]
-    fn unrestricted_allows_everything_and_none_allows_nothing() {
-        assert!(WriteScope::Unrestricted.allows("anywhere/x.rs"));
-        assert!(WriteScope::Unrestricted.allows(""));
-        assert!(!WriteScope::None.allows("anywhere/x.rs"));
+    fn unrestricted_allows_everything() {
+        let scope = OperationScope::unrestricted();
+        assert!(scope.allows(&ScopeTarget::Path(PathBuf::from("anywhere/x.rs"))));
+        assert!(scope.allows(&ScopeTarget::Command("rm -rf /".to_string())));
+        assert!(scope.allows(&ScopeTarget::Unspecified));
     }
 
     #[test]
-    fn scoped_allows_under_granted_dir_and_blocks_outside() {
-        // Simulate resolve_write_scope's output: a canonical dir prefix.
+    fn scoped_paths_allows_under_granted_dir_and_blocks_outside() {
+        // Simulate resolve_operation_scope's output: a canonical dir prefix.
         let cwd = std::env::current_dir().unwrap();
         let granted: PathBuf = cwd.join("output");
-        let scope = WriteScope::Scoped(vec![granted.clone()]);
+        let scope = OperationScope {
+            paths: Some(vec![granted.clone()]),
+            commands: None,
+        };
 
         // A new file under the granted dir resolves to granted/file and is allowed,
         // even though neither the dir nor the file exists yet.
-        assert!(scope.allows(&granted.join("result.md").display().to_string()));
+        assert!(scope.allows(&ScopeTarget::Path(granted.join("result.md"))));
         // A path outside the granted dir is blocked.
-        assert!(!scope.allows(&cwd.join("src/main.rs").display().to_string()));
+        assert!(!scope.allows(&ScopeTarget::Path(cwd.join("src/main.rs"))));
+    }
+
+    #[test]
+    fn command_scope_allows_listed_program_and_blocks_others() {
+        let scope = CommandScope::new(["git".to_string(), "cargo".to_string()]);
+        assert!(scope.allows("git status"));
+        assert!(scope.allows("cargo build"));
+        assert!(!scope.allows("rm -rf /"));
+        // gitk must NOT match a `git` grant (token-prefix, not string-prefix).
+        assert!(!scope.allows("gitk"));
+    }
+
+    #[test]
+    fn command_scope_skips_env_var_assignments() {
+        let scope = CommandScope::new(["python3".to_string()]);
+        assert!(scope.allows("PYTHONPATH=/x python3 script.py"));
+        assert!(!scope.allows("PYTHONPATH=/x ruby script.rb"));
+    }
+
+    #[test]
+    fn command_scope_wildcard_admits_anything() {
+        let scope = CommandScope::new(["*".to_string()]);
+        assert!(scope.allows("rm -rf /"));
+        assert!(scope.allows("git status"));
+    }
+
+    #[test]
+    fn operation_scope_paths_none_admits_any_path() {
+        let scope = OperationScope {
+            paths: None,
+            commands: None,
+        };
+        assert!(scope.allows(&ScopeTarget::Path(PathBuf::from("/etc/passwd"))));
+    }
+
+    #[test]
+    fn operation_scope_commands_constrained_but_paths_open() {
+        let scope = OperationScope {
+            paths: None,
+            commands: Some(CommandScope::new(["git".to_string()])),
+        };
+        // Paths open, commands limited to git.
+        assert!(scope.allows(&ScopeTarget::Path(PathBuf::from("/anywhere"))));
+        assert!(scope.allows(&ScopeTarget::Command("git push".to_string())));
+        assert!(!scope.allows(&ScopeTarget::Command("rm -rf /".to_string())));
+    }
+
+    #[test]
+    fn leading_program_handles_empty_and_whitespace() {
+        assert_eq!(super::leading_program(""), "");
+        assert_eq!(super::leading_program("   "), "");
+        assert_eq!(super::leading_program("git"), "git");
+        assert_eq!(super::leading_program("  git   status "), "git");
     }
 }

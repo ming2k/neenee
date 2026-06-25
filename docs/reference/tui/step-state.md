@@ -2,7 +2,7 @@
 
 Every collapsible transcript entry — a [tool step](tool-step.md), a
 [thinking step](thinking-step.md), or a sub-agent task step — is presented
-through one shared state model in `crates/neenee-cli/src/tui/render/step/`.
+through one shared state model in `crates/neenee-code/src/tui/render/step/`.
 This page documents that model: its three orthogonal axes, the two
 presentation channels they reduce to, and the transitions each axis allows.
 Per-tool body content lives on the [tool step](tool-step.md) page; the shared

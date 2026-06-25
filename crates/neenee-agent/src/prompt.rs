@@ -15,19 +15,22 @@ impl Agent {
     /// rather than later at insertion — so the role is traceable from where the
     /// text is assembled, not from a separate function.
     pub(crate) fn build_system_message(&self) -> Message {
-        let mut parts =
-            vec!["You are neenee, an expert AI coding assistant with tool access.".to_string()];
+        let mut parts: Vec<String> = Vec::new();
+
+        // Identity preamble — who this agent is. Composed from the identity's
+        // name/mission/persona by the embedding (the CLI); empty for tests.
+        // When present it opens the prompt.
+        let preamble = self.identity.preamble();
+        if !preamble.is_empty() {
+            parts.push(preamble);
+        }
 
         parts.push(
             "Tone and output: be concise and direct. Answer the actual question with the \
              minimum needed — short replies, one word when that suffices — and skip preamble, \
-             recaps of what you just did, and unsolicited explanations. Do not add code \
-             comments unless asked, and never commit unless explicitly asked. Take the \
-             reasonable action with ordinary tools instead of asking permission; reserve \
-             questions for genuine ambiguity or trade-offs. Prefer the dedicated tools \
-             (read, edit, grep, glob) over shelling out for file work, match existing code \
-             style and conventions, and verify with the project's build, tests, or linter \
-             when the task implies correctness."
+             recaps of what you just did, and unsolicited explanations. Never commit unless \
+             explicitly asked. Take the reasonable action with ordinary tools instead of asking \
+             permission; reserve questions for genuine ambiguity or trade-offs."
                 .to_string(),
         );
 
@@ -53,35 +56,19 @@ impl Agent {
             ));
         }
 
-        // Tool definitions
-        if !self.tools.is_empty() {
-            parts.push("\nAvailable tools:".to_string());
-            for tool in &self.tools {
-                parts.push(format!(
-                    "  {} [{:?}]: {}\n    Parameters: {}",
-                    tool.name(),
-                    tool.access(),
-                    tool.description(),
-                    tool.parameters()
-                ));
-            }
+        // Tools are advertised to the model natively via the function-calling
+        // `tools` field (name/description/parameters); do not duplicate the list
+        // in the prompt. Only inject behavioral guidance the schema can't carry.
+        if self.tools.iter().any(|t| t.name() == "ask_user") {
             parts.push(
-                "\nWhen you need to use a tool, output a JSON object in this exact format:\n\
-                 {\"tool\": \"tool_name\", \"arguments\": {...}}\n\
-                 Do not ask the user for permission before calling ordinary tools — just call them."
+                "\nUse the ask_user tool when you need clarification or a decision from the user: \
+                 vague requirements, ambiguous instructions, trade-offs between approaches, \
+                 or before risky/destructive actions. Provide 2-4 labeled options per question; \
+                 put the recommended option first and suffix its label with '(Recommended)'. \
+                 Do NOT use ask_user to ask 'Is this plan okay?' or 'Should I proceed?' — \
+                 just take the most reasonable action and mention what you did."
                     .to_string(),
             );
-            if self.tools.iter().any(|t| t.name() == "ask_user") {
-                parts.push(
-                    "\nUse the ask_user tool when you need clarification or a decision from the user: \
-                     vague requirements, ambiguous instructions, trade-offs between approaches, \
-                     or before risky/destructive actions. Provide 2-4 labeled options per question; \
-                     put the recommended option first and suffix its label with '(Recommended)'. \
-                     Do NOT use ask_user to ask 'Is this plan okay?' or 'Should I proceed?' — \
-                     just take the most reasonable action and mention what you did."
-                        .to_string(),
-                );
-            }
         }
 
         // Skills index

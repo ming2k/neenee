@@ -48,7 +48,7 @@ Each call removes one limitation of the line-oriented terminal:
 
 A signal guard catches `SIGTERM`, `SIGINT`, `SIGHUP`, and `SIGQUIT`, then
 restores the terminal. Without it, an
-external `pkill neenee` would terminate the process before normal
+external `pkill neenee-code` would terminate the process before normal
 cleanup, leaving the host terminal stranded in raw mode with mouse
 capture on, so every mouse motion would spew SGR escape codes into the
 shell.

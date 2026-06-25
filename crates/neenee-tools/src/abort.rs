@@ -32,7 +32,7 @@
 //! See `Tool::affects_control_flow` in `neenee-core::capability`.
 
 use async_trait::async_trait;
-use neenee_core::{AgentRequest, Tool, ToolAccess};
+use neenee_core::{AgentRequest, Tool};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -80,9 +80,6 @@ yourself first; only call this if you cannot."
     // Meaningless for a control tool, but kept out of the Write-mutation
     // broker ceiling so an EXPLORE-profile agent could in principle reach it
     // (the subagent exclusion is enforced via affects_control_flow, below).
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
     // The orthogonal control-flow axis — this is the flag that actually gates
     // the tool (subagents are excluded by it; the broker is bypassed).
     fn affects_control_flow(&self) -> bool {
@@ -157,7 +154,5 @@ mod tests {
         // The orthogonal control-flow axis — the flag that actually gates this
         // tool (subagent exclusion + broker bypass), not filesystem access.
         assert!(tool.affects_control_flow());
-        // And its access is Read (so the filesystem broker does not prompt).
-        assert_eq!(tool.access(), ToolAccess::Read);
     }
 }

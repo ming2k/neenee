@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess, WebSearchConfig, truncate_utf8};
+use neenee_core::{Tool, WebSearchConfig, truncate_utf8};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -143,9 +143,6 @@ impl Tool for WebFetchTool {
             "required": ["url"]
         })
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -285,9 +282,6 @@ impl Tool for WebSearchTool {
             },
             "required": ["query"]
         })
-    }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =

@@ -1,7 +1,7 @@
 //! Tools for interacting with the skill registry.
 
 use super::SkillRegistry;
-use crate::{Tool, ToolAccess};
+use crate::Tool;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -34,9 +34,6 @@ impl Tool for UseSkillTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -82,9 +79,6 @@ impl Tool for ListSkillsTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         let registry = self.registry.lock();
@@ -116,9 +110,6 @@ impl Tool for ReloadSkillsTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         self.registry.reload().await;

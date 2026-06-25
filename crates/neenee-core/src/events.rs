@@ -2,7 +2,7 @@
 //! responses ([`AgentResponse`]), live turn events ([`AgentEvent`]), and the
 //! small data records they carry.
 
-use crate::{ImagePart, Message, Pursuit, ToolAccess, ToolOutput, ToolStream};
+use crate::{ImagePart, Message, Pursuit, ToolOutput, ToolStream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -205,6 +205,12 @@ pub enum TurnEvent {
     },
     HarnessState(HarnessSnapshot),
     PursuitUpdated(Pursuit),
+    /// The active pursuit was cleared (`/pursue clear`, or a session switch
+    /// that drops it). A non-gated mirror event: unlike [`HarnessState`],
+    /// clearing the pursuit is *not* a turn lifecycle transition, so it must
+    /// not touch the activity bar. The TUI uses it to null out the snapshot's
+    /// `pursuit` field without flushing the live activity cell.
+    PursuitCleared,
     /// The task list changed (full-replace via `todo`, surgical update via
     /// `todo_update`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
     /// means "no active task list" and hides the sticky panel.
@@ -557,7 +563,6 @@ pub struct ModelInfo {
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
-    pub access: ToolAccess,
     pub enabled: bool,
     pub source: String,
 }

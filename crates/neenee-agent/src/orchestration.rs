@@ -611,6 +611,22 @@ pub async fn execute_turn(
         history.clone()
     };
     session.replace_messages(turn_history.clone()).await?;
+
+    // Install the mid-turn save point (ADR-0035) so every tool-round boundary
+    // durably appends its new messages to the session log. This is the fix for
+    // the resume-after-crash gap: without it, a turn that ran side-effecting
+    // tools and then crashed rewinds the transcript to the previous turn,
+    // leaving it out of sync with the filesystem. The closure clones the
+    // session `Arc` and the message slice (the `BoxFuture` is `'static`), then
+    // delegates to `SessionStore::append_round`, which writes only the delta.
+    {
+        let session_for_round = Arc::clone(&session);
+        agent.set_round_persist(Arc::new(move |messages: &[Message]| {
+            let session = Arc::clone(&session_for_round);
+            let snapshot = messages.to_vec();
+            Box::pin(async move { session.append_round(&snapshot).await })
+        }));
+    }
     let _ = tx.send(turn(
         &session_id,
         TurnEvent::Activity("preparing context".to_string()),

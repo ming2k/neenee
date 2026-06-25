@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use neenee_core::{SubagentProfile, Tool, ToolAccess};
+use neenee_core::{SubagentProfile, Tool};
 use serde_json::json;
 
 use crate::agent::{Agent, SubagentHandle};
@@ -135,9 +135,6 @@ impl Tool for SubagentTool {
             "required": ["description", "prompt"]
         })
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     /// `task` spawns a subagent; subagent profiles exclude it to prevent
     /// unbounded recursion.
@@ -252,10 +249,15 @@ impl SubagentTool {
         // admission. See ADR-0011.
         let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
 
+        // The subagent's identity *is* its profile's system prompt — that is the
+        // persona/mission framing for this role (e.g. EXPLORE's research
+        // framing). `from_persona` injects it verbatim as the preamble.
+        let identity = crate::AgentIdentity::from_persona(self.profile.system_prompt);
         let sub_agent = Arc::new(Agent::new(
             self.provider.clone(),
             sub_tools,
             SkillRegistry::empty(),
+            identity,
         ));
         // A `task` sub-agent runs unobstructed: disable the deterministic
         // read-loop guard's nudge (ADR-0034) so a short-lived, parent-supervised
@@ -290,13 +292,16 @@ impl SubagentTool {
         // admitted anyway). The `INTERACTIVE` role carries an unrestricted
         // scope via its `Write` ceiling.
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        sub_agent.set_write_scope(self.profile.resolve_write_scope(&cwd));
+        sub_agent.set_operation_scope(self.profile.resolve_operation_scope(&cwd));
         // Sub-agents are short-lived and read-only by profile, and session
         // review is on-demand (`/review`) with no automatic firing — so a
         // research subagent never pays for a diagnostic and review can never
         // recurse. No setup needed here. ADR-0018.
 
-        let system = format!("{}\n\nTask: {}", self.profile.system_prompt, description);
+        // The subagent's system message carries only the task; the persona
+        // framing comes from its AgentIdentity (set above from
+        // profile.system_prompt), which `ensure_system_prompt` opens with.
+        let system = format!("Task: {}", description);
         let mut messages = vec![
             neenee_core::Message::new(neenee_core::Role::System, system),
             neenee_core::Message::new(neenee_core::Role::User, prompt.to_string()),
@@ -466,16 +471,13 @@ mod tests {
     #[async_trait::async_trait]
     impl Tool for EchoReadTool {
         fn name(&self) -> &str {
-            "echo_read"
+            "read_file"
         }
         fn description(&self) -> &str {
             "test read tool"
         }
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object"})
-        }
-        fn access(&self) -> ToolAccess {
-            ToolAccess::Read
         }
         async fn call(&self, _arguments: &str) -> Result<String, String> {
             Ok("echo".to_string())
@@ -505,8 +507,8 @@ mod tests {
         assert!(tool.call(r#"{"prompt":"x"}"#).await.is_err());
     }
 
-    /// A Write-capable stub, used to prove the explore profile rejects write
-    /// tools by capability rather than by name.
+    /// A non-whitelisted stub, used to prove the explore profile rejects tools
+    /// by name (it is not in READ_ONLY_TOOLS).
     struct StubWriteTool;
 
     #[async_trait::async_trait]
@@ -519,9 +521,6 @@ mod tests {
         }
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object"})
-        }
-        fn access(&self) -> ToolAccess {
-            ToolAccess::Write
         }
         async fn call(&self, _arguments: &str) -> Result<String, String> {
             Ok("write".to_string())
@@ -549,13 +548,13 @@ mod tests {
         let admitted = EXPLORE.select_tools(&tools);
         let admitted_names: Vec<&str> = admitted.iter().map(|t| t.name()).collect();
 
-        assert_eq!(admitted_names, vec!["echo_read"]);
+        assert_eq!(admitted_names, vec!["read_file"]);
     }
 
-    /// Cross-cut regression for ADR-0012: the real `bash` tool is now
-    /// `Execute`, so `EXPLORE` (Read ceiling) excludes it — an explorer must
-    /// not run commands. `EXPLORE` still drops the same dangerous trio
-    /// (`ask_user`, write, recursion).
+    /// Cross-cut regression: `EXPLORE` admits only its whitelisted read tools —
+    /// `ask_user`, the non-whitelisted write stub, and recursion are all
+    /// excluded. The read stub is admitted because it is named `read_file`,
+    /// which is in [`READ_ONLY_TOOLS`].
     #[test]
     fn explore_profile_excludes_bash_writes_user_and_recursion() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
@@ -569,10 +568,10 @@ mod tests {
             std::sync::Arc::new(subagent_tool),
         ];
 
-        // EXPLORE: only the read tool survives (bash's Execute tier is above
-        // the Read ceiling).
+        // EXPLORE: only the whitelisted read tool survives (bash, ask_user,
+        // the write stub, and recursion are all excluded).
         let explore_selected = EXPLORE.select_tools(&tools);
         let explore_names: Vec<&str> = explore_selected.iter().map(|t| t.name()).collect();
-        assert_eq!(explore_names, vec!["echo_read"]);
+        assert_eq!(explore_names, vec!["read_file"]);
     }
 }

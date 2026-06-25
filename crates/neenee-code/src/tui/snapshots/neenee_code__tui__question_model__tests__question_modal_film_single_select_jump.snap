@@ -1,0 +1,31 @@
+---
+source: crates/neenee-code/src/tui/question_model.rs
+expression: film
+---
+=== open (first selected by default) ===
+
+
+
+
+         Question
+
+          Style
+          Which error handling crate?
+
+
+
+         ↑↓ navigate · Space toggle · 1-9 jump · Enter
+
+=== down + space → select 'thiserror' ===
+
+
+
+
+         Question
+
+          Style
+          Which error handling crate?
+
+
+
+         ↑↓ navigate · Space toggle · 1-9 jump · Enter

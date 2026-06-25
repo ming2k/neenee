@@ -11,7 +11,7 @@ live in `neenee-agent`. The `Tool` trait is defined in
 
 ## Registry
 
-Registration order is the literal in `crates/neenee-cli/src/main.rs`.
+Registration order is the literal in `crates/neenee-code/src/main.rs`.
 `Agent::new` (`crates/neenee-agent/src/agent.rs`) appends the `todo` /
 `todo_update` tools so they share the agent's live task-list cell.
 `SubagentTool` is pushed last so it can capture a snapshot of the assembled

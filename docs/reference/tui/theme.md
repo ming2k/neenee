@@ -1,6 +1,6 @@
 # Color palette
 
-All colors are defined in `Theme::default()` (`crates/neenee-cli/src/tui/render/theme.rs`).
+All colors are defined in `Theme::default()` (`crates/neenee-code/src/tui/render/theme.rs`).
 
 ## Backgrounds
 

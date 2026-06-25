@@ -1,0 +1,16 @@
+[package]
+name = "neenee-quant"
+version = "0.6.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+neenee-agent = { path = "../neenee-agent" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+neenee-tools = { path = "../neenee-tools" }

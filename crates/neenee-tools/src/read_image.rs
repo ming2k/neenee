@@ -9,7 +9,7 @@
 //! content — exactly the lowering opencode performs for OpenAI Chat.
 
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess, ToolOutput};
+use neenee_core::{Tool, ToolOutput};
 use serde_json::json;
 
 /// Read an image file so the model can see it.
@@ -47,9 +47,6 @@ impl Tool for ReadImageTool {
             },
             "required": ["path"]
         })
-    }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())

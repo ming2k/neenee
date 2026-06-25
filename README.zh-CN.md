@@ -60,10 +60,10 @@ cargo run --release
 
 ## 架构
 
-六个 crate 组成的严格分层工作区：
+七个 crate 组成的严格分层工作区：
 
 ```
-neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  neenee-cli
+neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  {neenee-code, neenee-quant}
 ```
 
 详细架构、指南和参考文档见 [docs/](docs/)。

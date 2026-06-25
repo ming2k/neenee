@@ -19,7 +19,7 @@ expressed in one of three ways:
 ## Shared chrome
 
 Every centered modal goes through the same primitives in
-`crates/neenee-cli/src/tui/render/primitives.rs`:
+`crates/neenee-code/src/tui/render/primitives.rs`:
 
 - `recess_backdrop(frame, modal.recess(), theme)` is called once per frame by
   the event loop *after* the transcript and chrome are drawn and *before* the
@@ -389,8 +389,8 @@ left+right borders colored by variant.
 
 ## Source
 
-All modals live in `crates/neenee-cli/src/tui/render/overlays.rs`. Shared
+All modals live in `crates/neenee-code/src/tui/render/overlays.rs`. Shared
 primitives (`recess_backdrop`, `centered_rect`, `modal_frame`,
-`panel_block`, `toast`) are in `crates/neenee-cli/src/tui/render/primitives.rs`.
+`panel_block`, `toast`) are in `crates/neenee-code/src/tui/render/primitives.rs`.
 The chrome-hiding flag is read by `draw_transcript` in
-`crates/neenee-cli/src/tui/render/mod.rs`.
+`crates/neenee-code/src/tui/render/mod.rs`.

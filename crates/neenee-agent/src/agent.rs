@@ -1,6 +1,90 @@
 use super::*;
 
 use crate::permission_store::PermissionRule;
+use futures::future::BoxFuture;
+
+/// Mid-turn save-point closure installed by orchestration (ADR-0035).
+///
+/// Invoked at each tool-round boundary with the *current full* turn history.
+/// The implementation diffs against its own durable baseline and appends only
+/// the new tail to the session event log (see `SessionStore::append_round`).
+/// Errors are surfaced back to the ReAct loop, which treats a persist failure
+/// as a turn-ending error (better to stop than to keep mutating state that may
+/// not be recoverable).
+pub(crate) type RoundPersistFn =
+    Arc<dyn Fn(&[Message]) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+
+/// Who an [`Agent`] is and what it is for. This crate is identity-agnostic: it
+/// does not hardcode "neenee" or "coding". The embedding (the CLI, a future
+/// frontend) supplies the fields so the same engine can be repurposed as a
+/// different persona or for a different mission (research, ops, writing) by
+/// passing different values. Everything else in the system prompt (tone,
+/// todo/ask_user guidance) is mission-neutral and stays here.
+///
+/// The three fields compose the opening line:
+/// - [`AgentIdentity::name`] — what the agent is called ("neenee" for this
+///   project; swap to repurpose the engine under a different product).
+/// - [`AgentIdentity::mission`] — what the agent is for ("an expert AI coding
+///   assistant…" for this CLI; swap for research/ops/etc.).
+/// - [`AgentIdentity::persona`] — optional full-text override of the opening.
+///   When set, [`AgentIdentity::preamble`] returns it verbatim and ignores
+///   `name`/`mission`. Subagents use this to inject their role's full system
+///   prompt as the identity.
+///
+/// [`AgentIdentity::default`] yields empty fields (no preamble — the system
+/// prompt opens straight at the tone line); tests use it.
+#[derive(Debug, Clone, Default)]
+pub struct AgentIdentity {
+    /// What this agent is called, e.g. `"neenee"`. Empty means "unnamed".
+    pub name: String,
+    /// What this agent is for, e.g. `"an expert AI coding assistant with tool
+    /// access"`. Empty means "no mission framing".
+    pub mission: String,
+    /// Optional full-text identity override. When non-empty, [`preamble`]
+    /// returns this verbatim (used by subagents whose identity *is* their
+    /// role's full system prompt). None/empty → compose from name + mission.
+    pub persona: Option<String>,
+}
+
+impl AgentIdentity {
+    /// Build a structured identity from a name and a mission.
+    pub fn new(name: impl Into<String>, mission: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            mission: mission.into(),
+            persona: None,
+        }
+    }
+
+    /// Build an identity whose preamble is a full persona string, ignoring
+    /// name/mission composition. Used by subagents: their identity is the
+    /// role's complete system prompt.
+    pub fn from_persona(persona: impl Into<String>) -> Self {
+        Self {
+            name: String::new(),
+            mission: String::new(),
+            persona: Some(persona.into()),
+        }
+    }
+
+    /// Render the opening system-prompt sentence. A `persona` override returns
+    /// it verbatim; otherwise `"You are {name}, {mission}."` when both are set,
+    /// `"You are {name}."` / `"You are {mission}."` when one is set, and the
+    /// empty string when neither is (tests / identity-less agents).
+    pub fn preamble(&self) -> String {
+        if let Some(persona) = &self.persona {
+            if !persona.is_empty() {
+                return persona.clone();
+            }
+        }
+        match (self.name.is_empty(), self.mission.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("You are {}.", self.name),
+            (true, false) => format!("You are {}.", self.mission),
+            (false, false) => format!("You are {}, {}.", self.name, self.mission),
+        }
+    }
+}
 
 #[derive(Default)]
 struct AskUserState {
@@ -58,12 +142,14 @@ pub struct Agent {
     /// subagent (`/review`). Defaults to [`crate::default_reviews`] (looping);
     /// empty on sub-agents (which have no `/review` path).
     reviews: Vec<Arc<dyn SessionReview>>,
-    /// Runtime filesystem-write boundary for this agent (ADR-0028). The main
-    /// agent is [`neenee_core::WriteScope::Unrestricted`]; a subagent carries
-    /// the scope resolved from its profile's `write_paths` grant. Enforced at
-    /// the `execute_tool` funnel for write tools, before the permission
-    /// broker — a hard boundary, not a prompt.
-    write_scope: std::sync::Mutex<neenee_core::WriteScope>,
+    /// Runtime operation boundary for this agent (ADR-0028). The main agent is
+    /// unrestricted ([`neenee_core::OperationScope::unrestricted`]); a subagent
+    /// carries the scope resolved from its profile's `write_paths` and
+    /// `command_allowlist` grants. Enforced at the `execute_tool` funnel for
+    /// every admitted tool whose [`neenee_core::ScopeTarget`] falls outside the
+    /// granted scope, before the permission broker — a hard boundary, not a
+    /// prompt.
+    operation_scope: std::sync::Mutex<neenee_core::OperationScope>,
     /// Lifecycle event hooks (ADR-0025). Installed once at startup from the
     /// `[hooks]` config by the CLI; empty by default (sub-agents, tests). Read
     /// at the PreToolUse / PostToolUse / Stop insertion points. Held as a
@@ -84,6 +170,19 @@ pub struct Agent {
     /// reply must unblock a tool parked mid-turn and cannot wait for the loop.
     inbox_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<AgentOp>>>,
     inbox_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<AgentOp>>>,
+    /// Who this agent is and what it is for. The single string the system
+    /// prompt opens with — supplied by the *embedding* (e.g. the CLI), so this
+    /// crate stays identity-agnostic and can be reused by frontends that are
+    /// not "neenee". See [`AgentIdentity`].
+    pub(crate) identity: AgentIdentity,
+    /// Optional mid-turn save point invoked at every tool-round boundary
+    /// (ADR-0035). The embedding (orchestration) installs a closure that
+    /// durably appends the round's new messages to the session log so a crash
+    /// after a side-effecting tool call leaves the transcript in sync with the
+    /// filesystem instead of rewinding to the previous turn. `None` for
+    /// sub-agents, the review diagnostic, and tests — they have no session of
+    /// their own to persist, so the round boundary is a plain no-op there.
+    round_persist: std::sync::Mutex<Option<RoundPersistFn>>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -175,6 +274,7 @@ impl Agent {
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         skills_registry: skills::SkillRegistry,
+        identity: AgentIdentity,
     ) -> Self {
         let pursuit_state = crate::pursuit_state::PursuitState::new();
         let thread_id = Arc::new(std::sync::Mutex::new(None));
@@ -212,10 +312,12 @@ impl Agent {
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reviews: crate::default_reviews(),
-            write_scope: std::sync::Mutex::new(neenee_core::WriteScope::default()),
+            operation_scope: std::sync::Mutex::new(neenee_core::OperationScope::unrestricted()),
             hooks: crate::hook_runner::HookRunner::new(),
             inbox_tx: std::sync::Mutex::new(None),
             inbox_rx: std::sync::Mutex::new(None),
+            identity,
+            round_persist: std::sync::Mutex::new(None),
         }
     }
 
@@ -285,6 +387,38 @@ impl Agent {
     /// config is parsed. Sub-agents and tests leave the default empty registry.
     pub fn set_hooks(&self, registry: crate::hooks::HookRegistry) {
         self.hooks.set(registry);
+    }
+
+    /// Install the mid-turn save point fired at every tool-round boundary
+    /// (ADR-0035). The closure receives the *current full* turn history and
+    /// should durably append only the new tail (see
+    /// `SessionStore::append_round`). Called once by orchestration after the
+    /// agent is built and the session is open; sub-agents and the review
+    /// diagnostic never call this, so the default `None` keeps their round
+    /// boundaries no-ops.
+    pub fn set_round_persist(&self, f: RoundPersistFn) {
+        *self
+            .round_persist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Fire the mid-turn save point if installed. Returns `Ok(())` when no
+    /// closure is set (the sub-agent / review / test path) so the call site
+    /// stays unconditional. Invoked at the round boundary — after a round's
+    /// tool results are in `messages` and before the next model request.
+    async fn fire_round_persist(&self, messages: &[Message]) -> Result<(), HarnessError> {
+        let f = self
+            .round_persist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match f {
+            Some(f) => f(messages)
+                .await
+                .map_err(|error| HarnessError::Other(format!("could not persist mid-turn round: {error}"))),
+            None => Ok(()),
+        }
     }
 
     /// Snapshot the hook registry as a cheap `Arc` clone, so insertion points
@@ -447,21 +581,20 @@ impl Agent {
         self.permissions.set_auto_approve(enabled);
     }
 
-    /// Set this agent's filesystem-write boundary (ADR-0028). The main agent
-    /// leaves it at the default [`neenee_core::WriteScope::Unrestricted`];
-    /// `SubagentTool` sets the scope resolved from the bound subagent profile on
-    /// the child before it runs.
-    pub fn set_write_scope(&self, scope: neenee_core::WriteScope) {
-        *self.write_scope.lock().unwrap_or_else(|e| e.into_inner()) = scope;
+    /// Set this agent's operation boundary (ADR-0028). The main agent leaves it
+    /// unrestricted; `SubagentTool` sets the scope resolved from the bound
+    /// subagent profile on the child before it runs.
+    pub fn set_operation_scope(&self, scope: neenee_core::OperationScope) {
+        *self.operation_scope.lock().unwrap_or_else(|e| e.into_inner()) = scope;
     }
 
-    /// Snapshot of this agent's write boundary. Used by the `execute_tool`
-    /// funnel to gate write tools.
-    fn write_scope(&self) -> neenee_core::WriteScope {
-        self.write_scope
+    /// Snapshot of this agent's operation boundary. Used by the `execute_tool`
+    /// funnel to gate tools whose target falls outside the granted scope.
+    fn operation_scope(&self) -> neenee_core::OperationScope {
+        self.operation_scope
             .lock()
             .map(|guard| guard.clone())
-            .unwrap_or(neenee_core::WriteScope::Unrestricted)
+            .unwrap_or_else(|_| neenee_core::OperationScope::unrestricted())
     }
 
     pub fn get_pursuit(&self) -> Option<Pursuit> {
@@ -820,7 +953,6 @@ impl Agent {
                 neenee_core::ToolInfo {
                     name: name.to_string(),
                     description: t.description().to_string(),
-                    access: t.access(),
                     enabled: !disabled.contains(name),
                     source,
                 }
@@ -956,6 +1088,8 @@ impl Agent {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                // Mid-turn save point (ADR-0035): see the streaming path.
+                self.fire_round_persist(messages).await?;
                 self.maybe_inject_loop_nudge(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
@@ -1191,6 +1325,11 @@ impl Agent {
                     return Err(self.hard_stop_error());
                 }
                 self.relieve_pressure_if_needed(messages, cancel).await?;
+                // Mid-turn save point (ADR-0035): persist this round's new
+                // messages (the assistant response + all tool results) before
+                // any further work, so a crash leaves the transcript in sync
+                // with filesystem side effects.
+                self.fire_round_persist(messages).await?;
                 self.maybe_inject_loop_nudge(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
@@ -1259,11 +1398,12 @@ impl Agent {
             // Classify this round once, for two consumers: the round-hook axis
             // (consecutive read-only streak, surfaced to user hooks) and the
             // deterministic read-loop guard (a canonical signature of an all-read
-            // round, checked at the round boundary). Any Execute/Write call makes
-            // the round "progress", resetting both.
+            // round, checked at the round boundary). Any call whose target is a
+            // real Path/Command (i.e. not Unspecified) makes the round
+            // "progress", resetting both.
             let all_read = tool_calls
                 .iter()
-                .all(|c| self.tool_access(&c.name) == ToolAccess::Read);
+                .all(|c| self.tool_target_is_unspecified(&c.name, &c.arguments));
             if all_read {
                 state.consecutive_readonly_rounds =
                     state.consecutive_readonly_rounds.saturating_add(1);
@@ -1497,15 +1637,19 @@ impl Agent {
         }
     }
 
-    /// Look up a tool's [`ToolAccess`] by name. Used to classify a round as
-    /// read-only for the round-hook streak counter. An unknown name (a
-    /// disabled or not-yet-registered tool) reads as `Read`.
-    fn tool_access(&self, name: &str) -> ToolAccess {
-        self.tools
-            .iter()
-            .find(|t| t.name() == name)
-            .map(|t| t.access())
-            .unwrap_or(ToolAccess::Read)
+    /// Whether a tool call's [`ScopeTarget`] is [`ScopeTarget::Unspecified`] —
+    /// i.e. the tool declares no locatable target (a pure read/search like
+    /// `read_file`, `grep`). Used to classify a round as read-only for the
+    /// round-hook streak counter. An unknown tool name reads as `true`
+    /// (unspecified), matching the trait default.
+    fn tool_target_is_unspecified(&self, name: &str, arguments: &str) -> bool {
+        match self.tools.iter().find(|t| t.name() == name) {
+            Some(t) => matches!(
+                t.scope_target(arguments),
+                neenee_core::ScopeTarget::Unspecified
+            ),
+            None => true,
+        }
     }
 
     /// Fire user-configured `Round` hooks at the round boundary and fold any
@@ -1774,25 +1918,24 @@ impl Agent {
             ));
         }
 
-        // Write-scope gate (ADR-0028): the agent's filesystem-write boundary.
-        // The main agent is Unrestricted (no-op here); a subagent carries a
-        // Scoped/None scope resolved from its profile, and a write tool whose
-        // target is outside that scope is blocked outright — a hard capability
-        // limit, not a prompt. Sits before the broker, which is the
-        // interactive layer inside an Unrestricted scope.
-        if tool.access() == ToolAccess::Write {
-            let scope = self.write_scope();
-            if !matches!(scope, neenee_core::WriteScope::Unrestricted) {
-                let target = tool.permission_scope(&call.arguments);
-                if !scope.allows(&target) {
-                    tracing::warn!(tool = %call.name, ?scope, "tool blocked by write scope");
-                    return ToolOutput::Text(format!(
-                        "[write scope] Tool '{}' is blocked: its target ({}) is outside this \
-                         agent's permitted write paths. Only writes under the granted paths are \
-                         allowed.",
-                        call.name, target
-                    ));
-                }
+        // Operation-scope gate (ADR-0028). The main agent's scope is
+        // unrestricted (no-op here); a subagent carries a scope resolved from
+        // its profile's `write_paths` / `command_allowlist` grants. Any tool
+        // whose [`ScopeTarget`] is a real target (Path/Command) and falls
+        // outside the granted scope is blocked outright — a hard capability
+        // limit, not a prompt. Sits before the broker, which is the interactive
+        // layer inside an unrestricted scope. Tools with
+        // [`ScopeTarget::Unspecified`] (`read`, `grep`) skip this gate.
+        let target = tool.scope_target(&call.arguments);
+        if !matches!(target, neenee_core::ScopeTarget::Unspecified) {
+            let scope = self.operation_scope();
+            if !scope.allows(&target) {
+                tracing::warn!(tool = %call.name, ?scope, "tool blocked by operation scope");
+                return ToolOutput::Text(format!(
+                    "[operation scope] Tool '{}' is blocked: its target ({:?}) is outside this \
+                     agent's permitted scope (granted write paths or command allowlist).",
+                    call.name, target
+                ));
             }
         }
 
@@ -1800,8 +1943,11 @@ impl Agent {
             return self.execute_ask_user(call, call_id, event_tx).await;
         }
 
-        if tool.access() > ToolAccess::Read {
-            let scope = tool.permission_scope(&call.arguments);
+        // Permission broker: a tool with a real [`ScopeTarget`] (Path/Command)
+        // has a side effect the user should approve. Tools with
+        // [`ScopeTarget::Unspecified`] (pure reads/searches) skip the broker.
+        if !matches!(target, neenee_core::ScopeTarget::Unspecified) {
+            let scope = scope_target_to_rule(&target);
             let rule = PermissionRule {
                 tool: tool.name().to_string(),
                 scope: scope.clone(),
@@ -2005,6 +2151,20 @@ impl Agent {
                 }
             }
         }
+    }
+}
+
+/// Render a [`neenee_core::ScopeTarget`] as the stable string used to key and
+/// display a permission rule. A path becomes the path string; a command becomes
+/// the command string; [`ScopeTarget::Unspecified`] becomes `"*"` (the legacy
+/// "any scope" sentinel), so tools without a locatable target are ruled as
+/// before. This string is purely a dedup key + UI label — the actual scope
+/// admission decision is made by [`neenee_core::OperationScope::allows`].
+fn scope_target_to_rule(target: &neenee_core::ScopeTarget) -> String {
+    match target {
+        neenee_core::ScopeTarget::Path(p) => p.to_string_lossy().into_owned(),
+        neenee_core::ScopeTarget::Command(c) => c.clone(),
+        neenee_core::ScopeTarget::Unspecified => "*".to_string(),
     }
 }
 

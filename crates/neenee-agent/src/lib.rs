@@ -70,7 +70,7 @@ pub use neenee_core::{
     PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision, PermissionRequest, Provider,
     ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome,
     Pursuit, RetryableError, Role, SessionOverview, SkillsConfig, SubagentEvent, SubagentProfile,
-    TITLE, ThreadPursuit, TokenUsage, Tool, ToolAccess, ToolCall, ToolOutput, ToolPolicy,
+    TITLE, ThreadPursuit, TokenUsage, Tool, ToolCall, ToolOutput, ToolPolicy,
     ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption,
     UserQuestionReply, UserQuestionRequest, WebSearchConfig, estimate_chars, estimate_tokens,
     is_context_overflow, parse_retryable_error, prune_tool_results, public_error_message,
@@ -121,7 +121,7 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const CHAT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub mod agent;
-pub use agent::Agent;
+pub use agent::{Agent, AgentIdentity};
 
 pub mod catalog;
 pub mod dynamic;

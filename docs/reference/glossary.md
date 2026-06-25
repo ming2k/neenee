@@ -131,9 +131,11 @@ symbol, the symbol is backticked and never abbreviated.
 | **`neenee-providers`** | Provider implementations and the `build_provider_for_channel` factory; a peer of tools/store, depending only on core. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`neenee-tools`** | Built-in domain tools depending only on core; a peer of providers/store. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`neenee-agent`** | The orchestration layer; primary export is the `Agent` struct. Re-exports all of `neenee-core`. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
-| **`neenee-cli`** | The crate producing the `neenee` binary; assembles concrete tool/provider instances and contains the TUI. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
+| **`neenee-code`** | The crate producing the `neenee-code` binary; assembles concrete tool/provider instances and contains the TUI. The *coding* application. [ADR-0035](../adr/0035-application-layer-split.md) |
+| **`neenee-quant`** | The *quantitative-trading* application crate, a peer of `neenee-code` at the application layer; depends on `neenee-agent` and provides its own quant domain tools (and a future GUI). Application-layer: core ← {providers, tools, store} ← agent ← {code, quant}. [ADR-0035](../adr/0035-application-layer-split.md) |
 | **`Agent`** | The central type in `neenee-agent`; owns the turn/round loop, gates, pursuit cell, permission broker, and `WriteScope`. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
-| **strict layering** | The dependency graph is strictly layered with zero reverse edges: core ← {providers, tools, store} ← agent ← cli. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
+| **strict layering** | The dependency graph is strictly layered with zero reverse edges: core ← {providers, tools, store} ← agent ← {code, quant}. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
+| **`QUANT` profile** | A bounded subagent profile admitting read-only quant tools (`market_data`, `backtest`, `list_positions`) plus shared read-only inspection, while excluding live trading (`place_order`) and all coding write/edit/exec tools — domain isolation between the coding and quant applications. [ADR-0035](../adr/0035-application-layer-split.md) |
 | **MCP server** | A local stdio MCP server exposing dynamically discovered tools; surfaces as `mcp__<server>__<tool>`. [MCP servers](../explanation/agent-design/mcp.md) |
 
 ## Legacy terms
@@ -144,6 +146,8 @@ documentation and ADRs.
 | Term | Superseded by | Reference |
 |------|---------------|-----------|
 | `neenee-app` | `neenee-store` | [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
+| `neenee-cli` | `neenee-code` | [ADR-0035](../adr/0035-application-layer-split.md) |
+| `neenee` (binary) | `neenee-code` | [ADR-0035](../adr/0035-application-layer-split.md) |
 | `neenee-harness` | `neenee-agent` | [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | `/goal` + `/loop` | `/pursue` + `/repeat` | [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
 | `[NEENEE_GOAL_COMPLETE]` | `[NEENEE_PURSUIT_COMPLETE]` | [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |

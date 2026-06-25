@@ -60,10 +60,10 @@ On first launch, press `Ctrl+M` to pick a provider and enter your API key. Then 
 
 ## Architecture
 
-Six-crate workspace with strict layering:
+Seven-crate workspace with strict layering:
 
 ```
-neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  neenee-cli
+neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  {neenee-code, neenee-quant}
 ```
 
 See [docs/](docs/) for detailed architecture, guides, and reference.

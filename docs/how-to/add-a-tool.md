@@ -174,7 +174,7 @@ narrow.
 
 ## Register the tool
 
-Add the tool to the literal registry in `crates/neenee-cli/src/main.rs` (the
+Add the tool to the literal registry in `crates/neenee-code/src/main.rs` (the
 `let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![ … ]` block),
 preserving the existing order (write tools first, then read tools, then
 `use_skill`, then MCP extension).

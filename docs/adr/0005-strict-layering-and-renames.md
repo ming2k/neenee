@@ -1,6 +1,6 @@
 # 0005. Strictly-layered topology + scenario-bound store
 
-- **Status:** Accepted
+- **Status:** Accepted (revised by ADR-0035 for the application-layer rename `neenee-cli` → `neenee-code`; the topology fix and `app`/`harness` renames below still stand)
 - **Date:** 2026-06-20
 - **Supersedes:** ADR-0004 (which codified the six-crate split but left two
   reverse dependency edges and a misleadingly generic `neenee-app` name)

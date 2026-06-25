@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{
     Agent, AgentEvent, AgentOp, Message, Provider, ProviderStreamEvent, Role, SubagentEvent,
-    SubagentTool, ToolAccess, ToolCall,
+    SubagentTool, ToolCall,
 };
 use neenee_core::{PermissionDecision, SubagentProfile, Tool, ToolOutput, ToolPolicy};
 
@@ -62,6 +62,7 @@ async fn inject_user_message_lands_in_transcript() {
         Arc::new(IdleProvider),
         Vec::new(),
         SkillRegistry::empty(),
+    neenee_agent::AgentIdentity::default(),
     ));
     let handle = agent.install_inbox();
 
@@ -126,8 +127,8 @@ impl Tool for BrokerGatedTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Execute
+    fn scope_target(&self, _arguments: &str) -> neenee_core::ScopeTarget {
+        neenee_core::ScopeTarget::Path(std::path::PathBuf::from("/tmp/gated"))
     }
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -151,6 +152,7 @@ async fn handle_reply_permission_unblocks_parked_write_tool() {
         Arc::new(WriteCallProvider(AtomicUsize::new(0))),
         vec![Arc::new(BrokerGatedTool(Arc::clone(&ran)))],
         SkillRegistry::empty(),
+    neenee_agent::AgentIdentity::default(),
     ));
     let handle = agent.install_inbox();
 
@@ -202,6 +204,7 @@ async fn handle_reply_is_noop_after_agent_dropped() {
         Arc::new(IdleProvider),
         Vec::new(),
         SkillRegistry::empty(),
+    neenee_agent::AgentIdentity::default(),
     ));
     let handle = agent.install_inbox();
     drop(agent);
@@ -260,9 +263,10 @@ const INTERACTIVE: SubagentProfile = SubagentProfile {
     name: "test_interactive",
     system_prompt: "test",
     tool_policy: ToolPolicy {
-        access: ToolAccess::Execute,
+        allowed_tools: None,
         allow_user_interaction: false,
         write_paths: &[],
+        command_allowlist: &[],
     },
     auto_approve: false,
 };
@@ -277,6 +281,7 @@ async fn streaming_loop_fires_permission_broker_direct() {
         Arc::new(StreamWriteCallProvider(AtomicUsize::new(0))),
         vec![Arc::new(BrokerGatedTool(Arc::clone(&ran))) as Arc<dyn Tool>],
         SkillRegistry::empty(),
+    neenee_agent::AgentIdentity::default(),
     ));
     agent.set_auto_approve(false);
 

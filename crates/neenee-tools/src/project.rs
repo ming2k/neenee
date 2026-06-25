@@ -9,7 +9,7 @@
 //! `init_config` tool and the `/init` slash command.
 
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -46,10 +46,7 @@ impl Tool for CreateProjectTool {
             "required": ["name", "type"]
         })
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Write
-    }
-    fn permission_scope(&self, arguments: &str) -> String {
+    fn scope_target(&self, arguments: &str) -> neenee_core::ScopeTarget {
         let name = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
             .and_then(|value| value.get("name")?.as_str().map(str::to_string))
@@ -60,7 +57,7 @@ impl Tool for CreateProjectTool {
             .and_then(|value| value.get("path")?.as_str().map(str::to_string))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| ".".to_string());
-        format!("{}/{}", path, name)
+        neenee_core::ScopeTarget::Path(std::path::PathBuf::from(format!("{}/{}", path, name)))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
@@ -131,15 +128,13 @@ impl Tool for InitConfigTool {
             "required": []
         })
     }
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Write
-    }
-    fn permission_scope(&self, arguments: &str) -> String {
-        serde_json::from_str::<serde_json::Value>(arguments)
+    fn scope_target(&self, arguments: &str) -> neenee_core::ScopeTarget {
+        let path = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
             .and_then(|value| value.get("path")?.as_str().map(str::to_string))
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| ".".to_string())
+            .unwrap_or_else(|| ".".to_string());
+        neenee_core::ScopeTarget::Path(std::path::PathBuf::from(path))
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =

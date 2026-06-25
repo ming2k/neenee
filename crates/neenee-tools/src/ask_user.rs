@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use neenee_core::{Tool, ToolAccess};
+use neenee_core::Tool;
 use serde_json::json;
 
 /// Ask the user one or more multiple-choice questions mid-task.
@@ -75,9 +75,6 @@ impl Tool for AskUserTool {
         })
     }
 
-    fn access(&self) -> ToolAccess {
-        ToolAccess::Read
-    }
 
     /// `ask_user` blocks on a live human answer; sub-agents (which have no
     /// user reachable) must be excluded from it by their profile.

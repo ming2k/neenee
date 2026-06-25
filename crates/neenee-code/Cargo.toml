@@ -1,0 +1,39 @@
+[package]
+name = "neenee-code"
+version = "0.6.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[[bin]]
+name = "neenee-code"
+path = "src/main.rs"
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+neenee-store = { path = "../neenee-store" }
+neenee-providers = { path = "../neenee-providers" }
+neenee-tools = { path = "../neenee-tools" }
+neenee-agent = { path = "../neenee-agent" }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+arboard = "3.6"
+dirs = { workspace = true }
+pulldown-cmark = "0.13"
+unicode-width = "0.1"
+similar = { version = "2", features = ["unicode"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+chrono = { workspace = true }
+
+[dev-dependencies]
+insta = "1.48"
+tempfile = "3"

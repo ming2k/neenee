@@ -272,4 +272,32 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[tokio::test]
+    async fn reading_a_directory_suggests_list_dir() {
+        // A directory read used to surface the raw OS error ("Is a directory
+        // (os error 21)"), which gives the model no hint about what to do.
+        // Now it gets an explicit, actionable message naming `list_dir`, which
+        // breaks any retry loop.
+        let dir = std::env::temp_dir().join(format!(
+            "neenee-read-isdir-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = ReadFileTool
+            .call(&r#"{"path":"PATH"}"#.replace("PATH", &dir.to_string_lossy()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("list_dir"),
+            "should point to list_dir, got: {err}"
+        );
+        assert!(
+            !err.contains("os error"),
+            "should not leak the raw OS error, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

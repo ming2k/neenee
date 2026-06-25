@@ -5,6 +5,44 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Inline code rendering.** Inline-code spans (`` `read_file` ``) in assistant
+  prose, headings, list items, blockquotes, and reasoning traces are now styled
+  on the same surface as fenced code blocks (`` `code_fg` `` on `` `code_bg` ``)
+  instead of being flattened into the surrounding text with bare backticks. The
+  markdown parser records each span's byte range on the prose block and the
+  renderer paints the run (delimiters included) as a distinct chip, so the span
+  reads as inline code at a glance. Copy and semantic selection are unchanged:
+  the flattened text still carries the original backticks and the byte-addressable
+  model is untouched, so selecting and copying an inline-code span yields the
+  exact source.
+
+## [Unreleased]
+
+### Changed
+
+- **Renamed the coding application: crate `neenee-cli` → `neenee-code`, binary
+  `neenee` → `neenee-code`.** The workspace now has two domain applications
+  (coding and quant), so neither carries the bare name. Every existing `neenee`
+  invocation is now `neenee-code`. See [ADR-0035](docs/adr/0035-application-layer-split.md).
+
+### Added
+
+- **`neenee-quant` application crate** — the quantitative-trading application, a
+  peer of `neenee-code` at the application layer. Depends on `neenee-agent` and
+  layers on quant domain tools: `market_data`, `backtest`, `place_order`, and
+  `list_positions`. The quant tools deliberately do not self-register, so a
+  coding agent can never link `place_order` and a quant agent can never link
+  `write_file` — domain isolation is enforced at assembly time. See
+  [ADR-0035](docs/adr/0035-application-layer-split.md).
+
+- **`QUANT` subagent profile** — a bounded subagent profile in `neenee-core`
+  admitting read-only quant tools plus shared read-only inspection, while
+  excluding live trading and all coding write/edit/exec tools.
+
 ## [0.6.1] - 2026-06-26
 
 ### Fixed

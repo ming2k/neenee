@@ -1,7 +1,7 @@
 # TUI reference
 
 The neenee terminal UI is built with [ratatui] and rendered by the
-`crates/neenee-cli/src/tui/render/` module tree (entry point `render/mod.rs`).
+`crates/neenee-code/src/tui/render/` module tree (entry point `render/mod.rs`).
 
 ## Frame layout
 
