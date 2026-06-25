@@ -7,6 +7,9 @@
 # Backup files
 **/*.rs.bk
 
+# Insta snapshot test diffs (only committed .snap files are the source of truth)
+*.snap.new
+
 # IDE files
 .vscode/
 .idea/

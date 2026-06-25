@@ -94,7 +94,6 @@ impl Tool for TodoWriteTool {
         }
 
         let mut desired: Vec<(String, TodoStatus)> = Vec::with_capacity(parsed.items.len());
-        let mut in_progress = 0;
         for entry in parsed.items {
             if entry.content.trim().is_empty() {
                 return Err("Todo item content cannot be empty.".to_string());
@@ -105,13 +104,30 @@ impl Tool for TodoWriteTool {
                     entry.status
                 )
             })?;
-            if status == TodoStatus::InProgress {
-                in_progress += 1;
-            }
             desired.push((entry.content, status));
         }
-        if in_progress > 1 {
-            return Err("At most one todo item may be in_progress.".to_string());
+
+        // "At most one in_progress" is reconciled here rather than rejected.
+        // The model's full-replace list frequently carries a leftover
+        // in_progress from the previous turn (it forgot to flip it back); a
+        // hard error there wastes a turn and shows the user a red message for
+        // what is an obvious bookkeeping slip. Instead, keep the *last*
+        // declared in_progress (the agent's current focus) and demote every
+        // earlier one to pending. The rendered list still satisfies the ≤ one
+        // in_progress invariant the panel relies on; the model is told via the
+        // returned note so it can correct course.
+        let in_progress_idx: Vec<usize> = desired
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, s))| *s == TodoStatus::InProgress)
+            .map(|(i, _)| i)
+            .collect();
+        let mut demoted = 0;
+        if in_progress_idx.len() > 1 {
+            for &i in &in_progress_idx[..in_progress_idx.len() - 1] {
+                desired[i].1 = TodoStatus::Pending;
+                demoted += 1;
+            }
         }
 
         let now = neenee_core::todos::unix_now();
@@ -133,7 +149,7 @@ impl Tool for TodoWriteTool {
             .map(|i| i.content.as_str())
             .filter(|c| !prev_contents.contains(*c))
             .collect();
-        let note = if new_contents.is_empty() {
+        let identity_note = if new_contents.is_empty() {
             String::new()
         } else if new_contents.len() == prev_contents.len()
             && !prev_contents.is_empty()
@@ -147,7 +163,19 @@ impl Tool for TodoWriteTool {
         } else {
             format!("\nNote: {} new item(s) created.", new_contents.len())
         };
-        Ok(format!("Todo list updated:\n{rendered}{note}"))
+        // Surface the in_progress reconciliation so the model sees its
+        // bookkeeping slip was absorbed, not silently lost.
+        let demotion_note = if demoted > 0 {
+            format!(
+                "\nNote: {demoted} item(s) had in_progress demoted to pending — at most one \
+                 item may be in_progress at a time. The most recently declared one was kept."
+            )
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "Todo list updated:\n{rendered}{identity_note}{demotion_note}"
+        ))
     }
 }
 
@@ -298,10 +326,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn todo_write_tool_rejects_two_in_progress() {
-        let (context, _) = ctx();
-        let tool = TodoWriteTool::new(context);
-        let err = tool
+    async fn todo_write_tool_auto_demotes_extra_in_progress() {
+        // Full-replace must never reject on >1 in_progress — that would waste a
+        // turn on a routine bookkeeping slip. Instead it keeps the last-declared
+        // in_progress and demotes the earlier ones to pending, then commits.
+        let (context, list) = ctx();
+        let tool = TodoWriteTool::new(context.clone());
+        let body = tool
             .call(
                 r#"{"items":[
                     {"content":"a","status":"in_progress"},
@@ -309,8 +340,13 @@ mod tests {
                 ]}"#,
             )
             .await
-            .unwrap_err();
-        assert!(err.contains("in_progress"));
+            .unwrap();
+        // Earlier in_progress ("a") demoted to pending; later one ("b") kept.
+        let guard = list.lock().unwrap();
+        assert_eq!(guard.items[0].status, TodoStatus::Pending);
+        assert_eq!(guard.items[1].status, TodoStatus::InProgress);
+        // The model is told the demotion happened.
+        assert!(body.contains("demoted"));
     }
 
     #[tokio::test]
