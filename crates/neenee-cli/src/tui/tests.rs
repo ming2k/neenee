@@ -521,8 +521,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         current_round: 0,
         review_alert: String::new(),
         turn_started_at: None,
-        plan_preview_content: String::new(),
-        plan_preview_scroll: 0,
         activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
         pending_permission: None,

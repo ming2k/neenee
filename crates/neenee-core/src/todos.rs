@@ -1,19 +1,13 @@
 //! Unified task list (todos) — the single source of truth for "what is the
 //! agent working on and what is left to do."
 //!
-//! One list, one sticky panel, one persisted field. There is no longer a
-//! parallel "plan progress" tracker: the [`crate::plan`] module owns only the
-//! Plan *Mode* workflow (`plan_enter` / `plan_exit` / the plan document), and
-//! on `plan_exit` it seeds a [`TodoList`] (see [`TodoList::from_plan_markdown`])
-//! rather than maintaining its own progress type. Entering Plan mode clears
-//! the list.
+//! One list, one sticky panel, one persisted field.
 //!
 //! Architecture: domain types live here, a shared [`TodoToolContext`] holds
 //! the `Arc<Mutex<TodoList>>` that the host `Agent` (in `neenee-agent`) also
 //! owns, and the tools mutate that shared cell so a call takes effect
-//! immediately for the next system prompt and the TUI. The same context is
-//! embedded in [`crate::plan::PlanToolContext`] so the plan workflow can
-//! reseed/clear the list. The harness mirrors the cell back into the session
+//! immediately for the next system prompt and the TUI. The harness mirrors
+//! the cell back into the session
 //! each turn (event-sourced) and replays it on resume.
 //!
 //! ## Identity vs. display
@@ -340,31 +334,6 @@ impl TodoList {
         }
     }
 
-    /// Seed a list from a plan document's `##` headings. Each heading becomes a
-    /// `Pending` item, in document order. If the plan has no headings a
-    /// single synthetic "Plan" item is used so the panel still renders.
-    pub fn from_plan_markdown(content: &str, now: u64, turn: u64) -> Self {
-        let headings = parse_plan_headings(content);
-        let mut list = TodoList::new();
-        list.updated_at_turn = turn;
-        let names = if headings.is_empty() {
-            vec!["Plan".to_string()]
-        } else {
-            headings
-        };
-        for name in names {
-            let id = list.allocate_id();
-            list.items.push(TodoItem {
-                id,
-                content: name,
-                status: TodoStatus::Pending,
-                created_at: now,
-                updated_at: now,
-            });
-        }
-        list
-    }
-
     /// Plain-text rendering with 1-based positions and bracket glyphs, the
     /// format the model is trained on for `todo` tool results.
     pub fn render(&self) -> String {
@@ -380,31 +349,8 @@ impl TodoList {
     }
 }
 
-/// Extract `## ` (level-2) heading text from a markdown plan. Deeper
-/// headings (`### `+) are sub-bullets inside a section and do not become
-/// items. Used by [`TodoList::from_plan_markdown`] to seed the list when a
-/// plan is approved via `plan_exit`.
-fn parse_plan_headings(content: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("## ") else {
-            continue;
-        };
-        if rest.starts_with('#') {
-            continue;
-        }
-        let name = rest.trim().trim_end_matches('#').trim();
-        if !name.is_empty() {
-            out.push(name.to_string());
-        }
-    }
-    out
-}
-
-/// Current wall-clock time in Unix-epoch seconds. Shared with [`crate::plan`]
-/// so `plan_exit` can stamp `created_at` when seeding a [`TodoList`] from the
-/// approved plan markdown.
+/// Current wall-clock time in Unix-epoch seconds. Used to stamp `created_at` /
+/// `updated_at` when allocating todo items.
 pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -415,7 +361,7 @@ pub fn unix_now() -> u64 {
 /// Shared handle injected into the todo tools so they can read and mutate
 /// the live [`TodoList`]. The same `Arc`s are held by the host `Agent` (in
 /// `neenee-agent`), so a tool call is visible to the agent, the harness, and
-/// the TUI immediately. Mirrors [`crate::plan::PlanToolContext`].
+/// the TUI immediately.
 #[derive(Clone)]
 pub struct TodoToolContext {
     todos: Arc<Mutex<TodoList>>,
@@ -771,26 +717,6 @@ mod tests {
         );
         assert_eq!(list.remove("a", 2), 2);
         assert!(list.is_empty());
-    }
-
-    #[test]
-    fn from_plan_markdown_seeds_pending_items_from_headings() {
-        let list = TodoList::from_plan_markdown(
-            "# Title\n\n## Summary\nbody\n\n## Key Changes\n- x\n",
-            100,
-            1,
-        );
-        let names: Vec<_> = list.items.iter().map(|i| i.content.as_str()).collect();
-        assert_eq!(names, vec!["Summary", "Key Changes"]);
-        assert!(list.items.iter().all(|i| i.status == TodoStatus::Pending));
-        assert_eq!(list.updated_at_turn, 1);
-    }
-
-    #[test]
-    fn from_plan_markdown_synthesizes_plan_item_without_headings() {
-        let list = TodoList::from_plan_markdown("just prose", 100, 1);
-        assert_eq!(list.items.len(), 1);
-        assert_eq!(list.items[0].content, "Plan");
     }
 
     #[test]

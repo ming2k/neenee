@@ -2,11 +2,11 @@
 //! agent background task's `match req { … }` dispatch.
 //!
 //! This is the largest handler — it fans the parsed command out across every
-//! `BuiltinCmd` variant (`/provider`, `/plan`, `/verify`, `/mcp`,
-//! `/compact`, `/clear`, `/permissions`, `/auto-approve`, `/review`,
-//! `/verify-nudge`, `/search`, `/resume`, `/session`, `/sessions`, `/btw`,
-//! `/pursue`, `/repeat`, `/init`, `/skills`, `/skill`, `/export`, `/help`,
-//! `/exit`) plus the `None` arm that runs a user-defined project command.
+//! `BuiltinCmd` variant (`/provider`, `/mcp`, `/compact`, `/clear`,
+//! `/permissions`, `/auto-approve`, `/review`, `/search`, `/resume`,
+//! `/session`, `/sessions`, `/btw`, `/pursue`, `/repeat`, `/init`,
+//! `/skills`, `/skill`, `/export`, `/debug`, `/help`, `/exit`) plus the
+//! `None` arm that runs a user-defined project command.
 //!
 //! The body is the original inline match arm, lifted unchanged except that
 //! every loop-level `continue` is now a function-level `return` (semantically
@@ -27,10 +27,10 @@ use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
 use neenee_core::{
-    AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, Provider, Pursuit,
-    PursuitService, RepeatStore, Tool, TurnEvent,
+    AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, Provider, Pursuit, Tool,
+    TurnEvent,
 };
-use neenee_store::{config::Config, embedding, session::SessionStore};
+use neenee_store::{PursuitService, RepeatStore, config::Config, embedding, session::SessionStore};
 use neenee_tools::commands::{expand_command, CustomCommand};
 use neenee_tools::project::init_neenee_config;
 
@@ -98,43 +98,6 @@ pub(crate) async fn dispatch(
                 )
             };
             let _ = resp_tx.send(turn(&session.id().await, TurnEvent::Text(message)));
-        }
-        Some(BuiltinCmd::Plan) => {
-            // Open the plan preview modal. The TUI loads
-            // the file content from disk on its side; the
-            // harness just signals that the modal should
-            // open. No-op (with a user-visible message)
-            // when no plan is active.
-            match agent.active_plan_path() {
-                Some(path) => {
-                    let _ = resp_tx.send(AgentResponse::OpenPlanPreview(path));
-                }
-                None => {
-                    let _ = resp_tx.send(turn(
-                        &session.id().await,
-                        TurnEvent::Text("No active plan to preview.".to_string()),
-                    ));
-                }
-            }
-        }
-        Some(BuiltinCmd::Verify) => {
-            // Trigger plan verification by submitting a
-            // hidden prompt that calls the
-            // verify_plan_execution tool. The turn runs
-            // through the normal pipeline so the verifier
-            // result lands in the transcript and the model
-            // can act on it.
-            match agent.active_plan_path() {
-                Some(_) => {
-                    let _ = resp_tx.send(AgentResponse::TriggerVerification);
-                }
-                None => {
-                    let _ = resp_tx.send(turn(
-                        &session.id().await,
-                        TurnEvent::Text("No active plan to verify.".to_string()),
-                    ));
-                }
-            }
         }
         Some(BuiltinCmd::Permissions) => {
             if parts.get(1) == Some(&"clear") {
@@ -226,33 +189,6 @@ pub(crate) async fn dispatch(
             let _ = resp_tx.send(turn(
                 &session.id().await,
                 TurnEvent::Text(format_review_report(&verdicts, rounds)),
-            ));
-        }
-        Some(BuiltinCmd::VerifyNudge) => {
-            // /verify-nudge        → show current state
-            // /verify-nudge on|off → set explicitly
-            let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
-                Some("on") | Some("true") | Some("1") => Some(true),
-                Some("off") | Some("false") | Some("0") => Some(false),
-                Some(other) => {
-                    let _ = resp_tx.send(AgentResponse::Error(format!(
-                        "Unknown value '{other}'. Use `/verify-nudge on|off`."
-                    )));
-                    return;
-                }
-                None => None,
-            };
-            let enabled = next.unwrap_or_else(|| !agent.get_verify_nudge_enabled());
-            agent.set_verify_nudge_enabled(enabled);
-            let _ = resp_tx.send(turn(
-                &session.id().await,
-                TurnEvent::Text(format!(
-                    "Verify hard nudge {}: the harness {} inject a reminder when \
-                                     the model ends a turn with an approved plan but no \
-                                     verify_plan_execution call.",
-                    if enabled { "ON" } else { "OFF" },
-                    if enabled { "will" } else { "won't" },
-                )),
             ));
         }
         Some(BuiltinCmd::Search) => {
@@ -1022,14 +958,12 @@ pub(crate) async fn dispatch(
             let provider_id = agent.provider.provider_id();
             let model_name = agent.provider.model();
             let pursuit = agent.get_pursuit();
-            let plan_path = agent.active_plan_path();
             let markdown = crate::tui::export::format_export_markdown(
                 crate::tui::export::ExportContext {
                     session_id: &session_id,
                     provider: &provider_id,
                     model: &model_name,
                     pursuit: pursuit.as_ref(),
-                    active_plan_path: plan_path.as_deref(),
                 },
                 &messages,
             );

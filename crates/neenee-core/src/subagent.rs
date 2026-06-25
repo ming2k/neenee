@@ -59,11 +59,10 @@ pub struct ToolPolicy {
     ///
     /// Admission effect: a `Write` tool is admitted when `access == Write`
     /// *or* this list is non-empty; an `Execute` tool (e.g. `bash`) is never
-    /// admitted this way. So a `Read` ceiling plus `[".neenee/plans"]` yields
-    /// "read tools + writes scoped to the plans dir, but no bash" — the
-    /// `PLAN` shape. At spawn, [`SubagentProfile::resolve_write_scope`]
-    /// canonicalizes these against the cwd into a runtime [`WriteScope`] the
-    /// agent enforces. See ADR-0028.
+    /// admitted this way. So a `Read` ceiling plus a scoped write list yields
+    /// "read tools + writes scoped to that dir, but no bash". At spawn,
+    /// [`SubagentProfile::resolve_write_scope`] canonicalizes these against the
+    /// cwd into a runtime [`WriteScope`] the agent enforces. See ADR-0028.
     pub write_paths: &'static [&'static str],
 }
 
@@ -179,33 +178,6 @@ handful of tool rounds, then answer.",
     auto_approve: true,
 };
 
-/// The built-in independent-verifier role used by `verify_plan_execution`.
-///
-/// Distinct from [`EXPLORE`] in one dimension: its access ceiling is
-/// `Execute`, so it additionally admits command-execution tools (`bash`) for
-/// running tests, builds, and type-checks as concrete verification evidence.
-/// It still excludes `Write` tools (a verifier must not edit the
-/// implementation it is auditing), `requires_user` tools (no user reachable),
-/// and `spawns_subagent` tools (no recursion). See ADR-0012.
-pub const VERIFY: SubagentProfile = SubagentProfile {
-    name: "verify",
-    system_prompt: "\
-You are an independent verification subagent. Your job is to audit whether an \
-implementation actually matches a plan, with no bias from whoever wrote it. \
-Read the plan and the current workspace state; run read-only inspection and \
-command-line checks (tests, builds, type-checks) as needed to gather concrete \
-evidence. You may run commands but must not modify any files. You are \
-non-interactive: never ask the user any question — if you cannot determine \
-something, report it as inconclusive. Report only what you directly observed, \
-never the implementer's claims.",
-    tool_policy: ToolPolicy {
-        access: ToolAccess::Execute,
-        allow_user_interaction: false,
-        write_paths: &[],
-    },
-    auto_approve: true,
-};
-
 /// The diagnostic role used by session review (ADR-0016). Read-only,
 /// non-interactive, non-recursive — like [`EXPLORE`] in capability, but framed
 /// as a health auditor that reasons over a handed-off transcript snapshot and
@@ -253,40 +225,8 @@ the title in the same language as the conversation.",
     auto_approve: true,
 };
 
-/// The planning role (ADR-0027). Pure read-only research like [`EXPLORE`]:
-/// no `write_paths` grant, no `bash`, non-interactive. Its sole job is to
-/// research the change, design the approach, and **return the full plan
-/// markdown as its final reply**. The main agent writes it to
-/// `.neenee/plans/` after the user approves — the subagent never touches the
-/// filesystem. This replaces the old self-write + path-signal contract
-/// (ADR-0028's scoped-write special case) with a deterministic data flow.
-///
-/// Spawned by the main agent's `plan` tool. The plan must use `## ` (level-2)
-/// headings — one per implementation step, since the headings seed the todo
-/// list on approval.
-pub const PLAN: SubagentProfile = SubagentProfile {
-    name: "plan",
-    system_prompt: "\
-You are a planning subagent. Research the assigned change with read-only tools, \
-design a concrete implementation approach, and return the full plan as markdown \
-as your final reply. Do NOT write any file and do NOT run commands. Structure \
-the plan with a `## ` (level-2) heading per implementation step — each heading \
-becomes a tracked todo on approval, so make them discrete, ordered, actionable \
-steps. Under each, give the files to touch and the approach. You may NOT ask \
-the user any question; if a decision is genuinely blocking, state the \
-assumption you made and the open question explicitly in the plan. Your entire \
-final reply is the plan markdown; it will be written to disk and shown to the \
-user for approval.",
-    tool_policy: ToolPolicy {
-        access: ToolAccess::Read,
-        allow_user_interaction: false,
-        write_paths: &[],
-    },
-    auto_approve: true,
-};
-
 /// The interactive subagent role (ADR-0029). The built-in roles
-/// ([`EXPLORE`]/[`VERIFY`]/[`PLAN`]) are autonomous: `auto_approve: true` and
+/// ([`EXPLORE`]) are autonomous: `auto_approve: true` and
 /// no `requires_user` tools, so they never block on a human. This role is the
 /// opposite shape — it is meant to run **under user supervision**: a `Write`
 /// ceiling admits the full tool ladder (read + execute + write),
@@ -391,31 +331,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_policy_admits_read_and_execute_but_not_write() {
-        // VERIFY is the verifier shape: read-only inspection + command
-        // execution for tests/builds, but no file-write.
-        assert!(VERIFY
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, false)));
-        assert!(VERIFY
-            .tool_policy
-            .admits(&make(ToolAccess::Execute, false, false)));
-        assert!(!VERIFY
-            .tool_policy
-            .admits(&make(ToolAccess::Write, false, false)));
-    }
-
-    #[test]
-    fn verify_policy_still_rejects_user_and_recursion() {
-        assert!(!VERIFY
-            .tool_policy
-            .admits(&make(ToolAccess::Read, true, false)));
-        assert!(!VERIFY
-            .tool_policy
-            .admits(&make(ToolAccess::Execute, false, true)));
-    }
-
-    #[test]
     fn explore_policy_rejects_user_interaction_tool() {
         // ask_user shape: Read + requires_user.
         assert!(!EXPLORE
@@ -459,51 +374,10 @@ mod tests {
         assert_eq!(selected[0].name(), "stub");
     }
 
-    #[test]
-    fn verify_select_tools_admits_read_and_execute_only() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(Stub {
-                name: "read_file",
-                access: ToolAccess::Read,
-                requires_user: false,
-                spawns_subagent: false,
-            }),
-            Arc::new(Stub {
-                name: "bash",
-                access: ToolAccess::Execute,
-                requires_user: false,
-                spawns_subagent: false,
-            }),
-            Arc::new(Stub {
-                name: "write_file",
-                access: ToolAccess::Write,
-                requires_user: false,
-                spawns_subagent: false,
-            }),
-            Arc::new(Stub {
-                name: "ask_user",
-                access: ToolAccess::Read,
-                requires_user: true,
-                spawns_subagent: false,
-            }),
-            Arc::new(Stub {
-                name: "subagent",
-                access: ToolAccess::Read,
-                requires_user: false,
-                spawns_subagent: true,
-            }),
-        ];
-        let selected = VERIFY.select_tools(&tools);
-        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["read_file", "bash"]);
-    }
-
     /// The `write_paths` grant mechanism (ADR-0028): a `Read` ceiling plus a
     /// non-empty `write_paths` admits read tools **and** write tools (scoped at
     /// runtime), but **not** `Execute` (`bash`). It still drops user-interactive
-    /// and recursive tools. (The built-in `PLAN` profile no longer uses this —
-    /// it returns markdown for the parent to write — but the capability remains
-    /// for `INTERACTIVE` and future profiles.)
+    /// and recursive tools.
     #[test]
     fn write_paths_grant_admits_write_below_read_ceiling_but_not_execute() {
         let scoped_policy = ToolPolicy {
@@ -529,32 +403,6 @@ mod tests {
         };
         assert!(read_only.admits(&make(ToolAccess::Read, false, false)));
         assert!(!read_only.admits(&make(ToolAccess::Write, false, false)));
-    }
-
-    /// The built-in `PLAN` profile (ADR-0027): pure read-only research —
-    /// admits read tools but excludes write, `bash` (Execute), interactive
-    /// tools, and recursion. The subagent returns plan markdown for the parent
-    /// agent to write; it has no filesystem-write capability.
-    #[test]
-    fn plan_profile_is_pure_read_only() {
-        use crate::PLAN;
-        assert!(PLAN
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, false)));
-        // No write (the subagent no longer writes the plan itself).
-        assert!(!PLAN
-            .tool_policy
-            .admits(&make(ToolAccess::Write, false, false)));
-        // No bash, no user-interactive, no recursion.
-        assert!(!PLAN
-            .tool_policy
-            .admits(&make(ToolAccess::Execute, false, false)));
-        assert!(!PLAN
-            .tool_policy
-            .admits(&make(ToolAccess::Read, true, false)));
-        assert!(!PLAN
-            .tool_policy
-            .admits(&make(ToolAccess::Read, false, true)));
     }
 
     /// The `INTERACTIVE` profile (ADR-0029): the supervised shape — a `Write`

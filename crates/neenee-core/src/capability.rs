@@ -222,9 +222,8 @@ pub trait Tool: Send + Sync {
 /// - **Subagent profiles** — a [`crate::subagent::ToolPolicy`] sets an access
 ///   *ceiling*; a tool is admitted when `tool.access() <= policy.access`, or
 ///   when it is a write tool covered by a `write_paths` grant. `EXPLORE`
-///   (ceiling `Read`) gets pure read tools; `VERIFY` (ceiling `Execute`)
-///   additionally gets command execution for tests/builds; `PLAN` (ceiling
-///   `Read` + `write_paths`) additionally gets scoped writes. See ADR-0012/0028.
+///   (ceiling `Read`) gets pure read tools; `INTERACTIVE` (ceiling `Write`)
+///   admits the full ladder including scoped writes. See ADR-0012/0028.
 ///
 /// Variant order is load-bearing: it defines the ordering used by the derived
 /// `Ord`. Do not reorder.
@@ -326,16 +325,14 @@ mod tests {
 
     #[test]
     fn scoped_allows_under_granted_dir_and_blocks_outside() {
-        // Simulate resolve_write_scope's output: a canonical dir prefix. Use
-        // a (possibly non-existent) plans dir under the cwd; resolution falls
-        // back to the joined path, so membership still holds.
+        // Simulate resolve_write_scope's output: a canonical dir prefix.
         let cwd = std::env::current_dir().unwrap();
-        let granted: PathBuf = cwd.join(".neenee/plans");
+        let granted: PathBuf = cwd.join("output");
         let scope = WriteScope::Scoped(vec![granted.clone()]);
 
         // A new file under the granted dir resolves to granted/file and is allowed,
         // even though neither the dir nor the file exists yet.
-        assert!(scope.allows(&granted.join("feature.md").display().to_string()));
+        assert!(scope.allows(&granted.join("result.md").display().to_string()));
         // A path outside the granted dir is blocked.
         assert!(!scope.allows(&cwd.join("src/main.rs").display().to_string()));
     }

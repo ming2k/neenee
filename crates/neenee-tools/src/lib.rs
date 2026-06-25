@@ -33,6 +33,7 @@ pub use list::ListDirTool;
 pub use read::ReadFileTool;
 pub(crate) use web::html_to_text;
 pub use web::{WebFetchTool, WebSearchTool};
+pub use project::{CreateProjectTool, InitConfigTool};
 pub use write::WriteFileTool;
 
 #[cfg(test)]

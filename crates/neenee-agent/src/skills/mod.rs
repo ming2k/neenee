@@ -25,7 +25,7 @@
 //!   dependencies:
 //!     tools:
 //!       - type: mcp
-//!         value: rust-analyzer
+//!         value: context7
 //!   ---
 //!   ```
 

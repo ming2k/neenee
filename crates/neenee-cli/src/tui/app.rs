@@ -83,12 +83,6 @@ pub enum Modal {
     /// MCP servers, permissions, tools, and skills. Opened with the `/session`
     /// slash command; the active pane is [`App::session_tab`].
     Session,
-    /// Read-only preview of the active plan file. Opened by clicking the
-    /// sticky plan panel above the input box or pressing `Ctrl+P` while a
-    /// plan is active. The content is loaded from disk at open time and
-    /// stored in [`App::plan_preview_content`]; `plan_preview_scroll` holds
-    /// the overlay's own scroll offset.
-    PlanPreview,
     /// Activity overview: the current pursuit (objective + checklist), the live
     /// plan-progress breakdown, and the running turn/round/model/elapsed/
     /// status. Opened by clicking the activity bar. The body scrolls via
@@ -137,7 +131,7 @@ impl Modal {
 
     /// Whether this modal closes when the user clicks outside its rect
     /// (click-outside-to-dismiss). True only for read-only / info overlays
-    /// (Help, ToolStepDetail, Session, Sessions, PlanPreview, Activity).
+    /// (Help, ToolStepDetail, Session, Sessions, Activity).
     /// Entry modals (Provider, ModelEditor, Question) and the permission
     /// sheet stay open so an accidental click never discards in-progress
     /// input or a pending decision; HistorySearch borrows the input line and
@@ -153,7 +147,6 @@ impl Modal {
                 | Modal::ToolStepDetail
                 | Modal::Session
                 | Modal::Sessions
-                | Modal::PlanPreview
                 | Modal::Activity
         )
     }
@@ -362,14 +355,6 @@ pub struct App {
     /// Wall-clock instant the current turn started, or `None` between turns.
     /// Drives the muted `<elapsed>` segment in the activity bar.
     pub turn_started_at: Option<std::time::Instant>,
-    /// Cached content of the plan file currently shown in `Modal::PlanPreview`.
-    /// Loaded from disk when the modal opens so the preview does not flicker
-    /// on every redraw; cleared on close so the next open re-reads the file
-    /// (the model may have updated it).
-    pub plan_preview_content: String,
-    /// Scroll offset inside `Modal::PlanPreview`. Reset to 0 each time the
-    /// modal opens.
-    pub plan_preview_scroll: u16,
     /// Active tab inside the Activity modal ([`Modal::Activity`]).
     /// Ignored while any other modal is open.
     pub activity_tab: ActivityTab,

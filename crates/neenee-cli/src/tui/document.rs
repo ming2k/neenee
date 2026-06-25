@@ -152,12 +152,6 @@ pub enum Block {
     Rule,
     /// Soft / hard line break marker.
     Break,
-    /// A `<proposed_plan>…</proposed_plan>` block emitted by the model in
-    /// Plan mode (mirrors codex's wire convention). The inner markdown is
-    /// preserved verbatim so the renderer can style it as a distinct
-    /// "plan-ready" card during both streaming (tag not yet closed) and the
-    /// final transcript.
-    ProposedPlan { content: String },
 }
 
 impl Block {
@@ -172,7 +166,6 @@ impl Block {
             Block::Table { rendered, .. } => rendered,
             Block::Rule => "",
             Block::Break => "\n",
-            Block::ProposedPlan { content } => content,
         }
     }
 
@@ -1050,13 +1043,6 @@ fn truncate(value: &str, max_chars: usize) -> String {
 /// (code fences, headings, rules, blockquotes) while preserving the original
 /// text so copying yields exact source.
 pub fn parse_blocks(text: &str) -> Vec<Block> {
-    // Pre-split on `<proposed_plan>…</proposed_plan>` blocks so they render
-    // as a distinct card rather than as loose markdown paragraphs. A missing
-    // closing tag (mid-stream) is treated as extending to the end of input,
-    // so live streaming still classifies the partial block correctly.
-    if text.contains(PROPOSED_PLAN_OPEN) {
-        return parse_blocks_with_plan_splits(text);
-    }
     parse_blocks_markdown(text)
 }
 
@@ -1071,53 +1057,6 @@ fn parse_blocks_plain(text: &str) -> Vec<Block> {
     vec![Block::Text {
         content: text.to_string(),
     }]
-}
-
-const PROPOSED_PLAN_OPEN: &str = "<proposed_plan>";
-const PROPOSED_PLAN_CLOSE: &str = "</proposed_plan>";
-
-fn parse_blocks_with_plan_splits(text: &str) -> Vec<Block> {
-    let mut blocks = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(rel_open) = text[cursor..].find(PROPOSED_PLAN_OPEN) {
-        let open_start = cursor + rel_open;
-        let open_end = open_start + PROPOSED_PLAN_OPEN.len();
-        // Emit any markdown before the tag through the normal parser.
-        if open_start > cursor {
-            let prefix = &text[cursor..open_start];
-            if !prefix.trim().is_empty() {
-                blocks.extend(parse_blocks_markdown(prefix));
-            }
-        }
-        // Find the closing tag. Missing close = end of input (streaming).
-        let after_open = &text[open_end..];
-        let inner_end = after_open
-            .find(PROPOSED_PLAN_CLOSE)
-            .map(|rel| open_end + rel)
-            .unwrap_or(text.len());
-        let close_end = if inner_end < text.len() {
-            inner_end + PROPOSED_PLAN_CLOSE.len()
-        } else {
-            text.len()
-        };
-        let inner = text[open_end..inner_end].trim();
-        if !inner.is_empty() {
-            blocks.push(Block::ProposedPlan {
-                content: inner.to_string(),
-            });
-        }
-        cursor = close_end;
-        if cursor >= text.len() {
-            break;
-        }
-    }
-    if cursor < text.len() {
-        let suffix = &text[cursor..];
-        if !suffix.trim().is_empty() {
-            blocks.extend(parse_blocks_markdown(suffix));
-        }
-    }
-    blocks
 }
 
 fn parse_blocks_markdown(text: &str) -> Vec<Block> {
@@ -1653,60 +1592,6 @@ mod tests {
     }
 
     #[test]
-    fn proposed_plan_block_is_extracted_with_surrounding_markdown() {
-        let text =
-            "before\n\n<proposed_plan>\n# Plan\n- step A\n- step B\n</proposed_plan>\n\nafter";
-        let blocks = parse_blocks(text);
-        let plan = blocks
-            .iter()
-            .find(|block| matches!(block, Block::ProposedPlan { .. }));
-        assert!(
-            matches!(plan, Some(Block::ProposedPlan { content }) if content.contains("# Plan")
-                && content.contains("step A")
-                && content.contains("step B")),
-            "expected a ProposedPlan with inner markdown, got {:?}",
-            plan
-        );
-        assert!(blocks
-            .iter()
-            .any(|block| matches!(block, Block::Text { content } if content == "before")));
-        assert!(blocks
-            .iter()
-            .any(|block| matches!(block, Block::Text { content } if content == "after")));
-    }
-
-    #[test]
-    fn proposed_plan_streaming_without_closing_tag_still_parses() {
-        // Mid-stream: the closing tag has not arrived yet. The parser must
-        // treat the rest of the input as the plan body so the TUI renders the
-        // partial card live rather than waiting for `</proposed_plan>`.
-        let text = "<proposed_plan>\n# Draft\n- step";
-        let blocks = parse_blocks(text);
-        assert_eq!(
-            blocks.len(),
-            1,
-            "expected exactly one block during streaming, got {:?}",
-            blocks
-        );
-        assert!(matches!(
-            &blocks[0],
-            Block::ProposedPlan { content } if content.contains("# Draft") && content.contains("step")
-        ));
-    }
-
-    #[test]
-    fn proposed_plan_empty_block_is_dropped() {
-        let text = "<proposed_plan>\n   \n</proposed_plan>\nafter";
-        let blocks = parse_blocks(text);
-        assert!(blocks
-            .iter()
-            .all(|block| !matches!(block, Block::ProposedPlan { .. })));
-        assert!(blocks
-            .iter()
-            .any(|block| matches!(block, Block::Text { content } if content == "after")));
-    }
-
-    #[test]
     fn markdown_soft_breaks_flow_but_hard_breaks_are_preserved() {
         let soft = parse_blocks("第一行\n第二行");
         assert!(matches!(
@@ -1864,12 +1749,12 @@ mod tests {
             r#"{"description":"write the plan","prompt":"..."}"#,
         );
         assert_eq!(task.subagent_label(), "write the plan");
-        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "plan" }));
-        assert_eq!(task.subagent_label(), "plan · write the plan");
+        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore" }));
+        assert_eq!(task.subagent_label(), "explore · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.
         let header = task.tool_step_summary().expect("summary");
         assert!(
-            header.starts_with("plan:"),
+            header.starts_with("explore:"),
             "collapsed summary should lead with the role; got: {header}"
         );
     }

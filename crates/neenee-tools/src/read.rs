@@ -11,14 +11,24 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read the full contents of a file as text. Use when you need to see \
-         code or text. Supports `offset` (1-based start line) and `limit` \
-         (max lines). Output is paginated by whole lines with a byte budget, \
-         so a large read returns the first chunk plus a concrete \
-         `offset=<next>` to continue — always advance to that exact offset \
-         and never re-read the same range. The result declares its line range \
-         (`lines A-B of N`); an empty range means you are past EOF. Prefer \
-         `offset`/`limit` over re-issuing the same full read."
+        "Read a file as text. Each line is prefixed with its file line number \
+         (e.g. `17: ...`) so you can reference exact lines later. Supports \
+         `offset` (1-based start line) and `limit` (max lines). Output is \
+         paginated (~50 KB per page); a large read returns the first chunk \
+         plus a concrete `offset=<next>` to continue.\n\
+         \n\
+         HOW TO USE:\n\
+         - First read of an unknown file: call with just `path` (offset \
+         defaults to 1) to discover its structure.\n\
+         - Looking for specific content in a large file: use `grep` FIRST — \
+         it returns `path:line:content` matches with exact line numbers, \
+         which you can then target with this tool's `offset` parameter.\n\
+         - To continue a paginated read: advance to the exact `offset=<next>` \
+         shown in the suffix — never re-read the same range.\n\
+         - Avoid tiny repeated slices (e.g. 30-line chunks). If you need more \
+         context, read a larger window with a bigger `limit`.\n\
+         - An empty range means you are past EOF.\n\
+         - Binary files (images, archives, executables) are rejected."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -43,17 +53,25 @@ impl Tool for ReadFileTool {
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
 
-        let content = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+
+        let lang = std::path::Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string());
+
+        if is_binary_extension(path) || is_binary_content(&bytes[..bytes.len().min(4096)]) {
+            return Err(format!("Cannot read binary file: {}", path));
+        }
+
+        let content = String::from_utf8(bytes)
+            .map_err(|_| format!("File '{}' is not valid UTF-8", path))?;
 
         let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = args["limit"].as_u64().unwrap_or(0) as usize;
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
-        let lang = std::path::Path::new(path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string());
 
         // Empty file / offset past EOF: nothing to show. Surface an explicit,
         // machine-actionable note so the model does NOT re-read in a loop
@@ -90,20 +108,34 @@ impl Tool for ReadFileTool {
         // BOUNDARIES, which is what makes pagination deterministic and
         // loop-safe: every read returns whole lines plus a concrete
         // continuation offset, so the model can always compute the next
-        // `offset` and can never get stuck re-truncating the same window
-        // (the old char-mid-cut + "use offset/limit" with no number could).
+        // `offset` and can never get stuck re-truncating the same window.
         // The first line is always included even if it alone exceeds the
         // budget, so a read always makes forward progress.
-        const READ_BUDGET_BYTES: usize = 8000;
+        const READ_BUDGET_BYTES: usize = 50_000;
+        const MAX_LINE_LENGTH: usize = 2000;
+        const MAX_LINE_SUFFIX: &str = "... (line truncated)";
         let requested_end = if limit > 0 {
             (start + limit).min(total_lines)
         } else {
             total_lines
         };
+        // Pre-compute truncated lines so cost reflects what we actually return.
+        let truncated_lines: Vec<String> = lines[start..requested_end]
+            .iter()
+            .map(|line| {
+                if line.len() > MAX_LINE_LENGTH {
+                    let truncated: String = line.chars().take(MAX_LINE_LENGTH).collect();
+                    format!("{}{}", truncated, MAX_LINE_SUFFIX)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
         let mut used = 0usize;
         let mut shown_end = start; // exclusive index into `lines`
-        for i in start..requested_end {
-            let cost = lines[i].len() + 1; // +1 for the '\n' we rejoin with
+        for (idx, truncated) in truncated_lines.iter().enumerate() {
+            let i = start + idx;
+            let cost = truncated.len() + 1; // +1 for the '\n' we rejoin with
             if i > start && used + cost > READ_BUDGET_BYTES {
                 break;
             }
@@ -111,7 +143,8 @@ impl Tool for ReadFileTool {
             shown_end = i + 1;
         }
 
-        let text = lines[start..shown_end].join("\n");
+        let shown_count = shown_end - start;
+        let text = truncated_lines[..shown_count].join("\n");
         // 1-based range of what we actually returned.
         let first_line = offset; // == start + 1
         let last_line = shown_end; // exclusive 0-based index → 1-based last
@@ -157,3 +190,37 @@ impl Tool for ReadFileTool {
     }
 }
 neenee_core::register_tool!(ReadFileFactory => ReadFileTool);
+
+/// Extensions that are always treated as binary and never read as text.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
+    "exe", "dll", "so", "dylib", "o", "a", "lib",
+    "class", "jar", "war",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
+    "bin", "dat", "obj", "wasm", "pyc", "pyo",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif",
+    "mp3", "mp4", "avi", "mov", "mkv", "flv", "wav", "flac", "ogg",
+    "pdf", "sqlite", "db", "mdb",
+];
+
+fn is_binary_extension(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| BINARY_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn is_binary_content(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes.contains(&0) {
+        return true;
+    }
+    let non_printable = bytes
+        .iter()
+        .filter(|&&b| b < 9 || (b > 13 && b < 32))
+        .count();
+    non_printable as f64 / bytes.len() as f64 > 0.3
+}

@@ -1,7 +1,5 @@
-use std::time::Instant;
-
 use super::store::PursuitStore;
-use super::{Pursuit, ThreadPursuit};
+use neenee_core::pursuits::{Pursuit, ThreadPursuit};
 
 /// Slimmed (ADR-0010) facade over the `thread_pursuits` SQLite table.
 ///
@@ -90,30 +88,5 @@ fn runtime_pursuit_from_persisted(pursuit: ThreadPursuit) -> Pursuit {
     Pursuit {
         objective: pursuit.objective,
         is_complete: pursuit.is_complete,
-    }
-}
-
-/// Turn-level elapsed-time keeper. Kept after ADR-0010 even though
-/// pursuit-level time accounting is gone, because the harness still uses it
-/// for per-turn telemetry (e.g. plan-progress timestamps).
-pub struct TurnTimer {
-    start: Instant,
-}
-
-impl Default for TurnTimer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TurnTimer {
-    pub fn new() -> Self {
-        Self {
-            start: Instant::now(),
-        }
-    }
-
-    pub fn elapsed_seconds(&self) -> i64 {
-        self.start.elapsed().as_secs() as i64
     }
 }

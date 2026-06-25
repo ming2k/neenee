@@ -13,7 +13,8 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
-use neenee_core::{AgentResponse, Message, ParentStatus, Provider, PursuitService, Tool};
+use neenee_core::{AgentResponse, Message, ParentStatus, Provider, Tool};
+use neenee_store::PursuitService;
 use neenee_store::config::Config;
 use neenee_store::session::SessionStore;
 use std::sync::RwLock;

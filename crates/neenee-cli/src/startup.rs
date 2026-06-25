@@ -50,9 +50,6 @@ macro_rules! define_builtin_commands {
 
 define_builtin_commands! {
     Provider    = "/provider"     : "Select an LLM provider",
-    Plan        = "/plan"         : "Open the active plan file in a preview modal",
-    Verify      = "/verify"       : "Trigger independent plan verification",
-    VerifyNudge = "/verify-nudge" : "Toggle the verify-plan hard nudge at turn end (on/off)",
     Mcp         = "/mcp"          : "Show configured MCP server status",
     Compact     = "/compact"      : "Compact older complete turns now",
     Clear       = "/clear"        : "Clear the conversation history",

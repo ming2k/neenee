@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use super::ThreadPursuit;
+use neenee_core::pursuits::ThreadPursuit;
 
 /// Schema for the `thread_pursuits` table.
 ///

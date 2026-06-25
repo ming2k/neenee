@@ -137,15 +137,6 @@ pub enum AgentResponse {
     ConversationReplaced(Vec<Message>),
     /// Replace the sessions picker contents (and open the picker).
     SessionsOverview(Vec<SessionOverview>),
-    /// User asked the TUI to open the plan preview modal (via `/plan` or
-    /// clicking the sticky panel). Carries the active plan path; the TUI
-    /// loads the file content from disk into `App::plan_preview_content`.
-    OpenPlanPreview(std::path::PathBuf),
-    /// User asked the harness to trigger plan verification (via `/verify`).
-    /// The harness turns this into a synthetic hidden prompt that calls
-    /// `verify_plan_execution`, so the verifier result lands in the
-    /// transcript and the model can act on it.
-    TriggerVerification,
     Error(String),
     Exit,
     ProviderSwitched {
@@ -206,9 +197,8 @@ pub enum TurnEvent {
     HarnessState(HarnessSnapshot),
     PursuitUpdated(Pursuit),
     /// The task list changed (full-replace via `todo`, surgical update via
-    /// `todo_update`, seeded by an approved `plan`). Mirrors
-    /// [`AgentEvent::TodosUpdated`]. An empty list means "no active task
-    /// list" and hides the sticky panel.
+    /// `todo_update`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
+    /// means "no active task list" and hides the sticky panel.
     TodosUpdated(crate::todos::TodoList),
     /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
@@ -434,8 +424,7 @@ pub enum AgentEvent {
         name: String,
     },
     PursuitUpdated(Pursuit),
-    /// The task list changed (`todo` / `todo_update` / an approved `plan`
-    /// seed). The TUI uses this to refresh the
+    /// The task list changed (`todo` / `todo_update`). The TUI uses this to refresh the
     /// unified sticky panel above the input box.
     TodosUpdated(crate::todos::TodoList),
     /// The auto-approve toggle changed (via `/auto-approve`).

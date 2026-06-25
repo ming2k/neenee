@@ -1,3 +1,14 @@
+//! Event-sourced session persistence (ADR-0017 / ADR-0022).
+//!
+//! Each session is an append-only JSONL event log (`sessions/<id>.jsonl`)
+//! plus a JSON snapshot cache (`sessions/<id>.json`) with a CRC32C checksum
+//! and a `schema_version` for lazy on-load migration; the log wins on
+//! conflict. Large payloads are offloaded to the content-addressed
+//! [`crate::blobs::BlobStore`]. Sessions are bucketed per project under
+//! `projects/<sha256(cwd)[..16]>/sessions/`. [`SessionStore`] is the facade
+//! for load/save/resume/fork and for committing context-relief (compaction)
+//! checkpoints; it also drives the one-shot legacy layout migrations.
+
 use crate::blobs::BlobStore;
 use crate::events::{EventLog, SessionEvent};
 use crate::fsutil;
@@ -64,11 +75,6 @@ struct SessionData {
     /// during the one-shot legacy migration. Legacy snapshots missing the
     /// field default to the current cwd.
     project_root: PathBuf,
-    /// Path to the plan file most recently approved via `plan_exit`. Mirrored
-    /// from `Agent::active_plan_path` so resume restores the Build-mode
-    /// "you are implementing X" hint. `None` for legacy snapshots.
-    #[serde(default)]
-    active_plan_path: Option<PathBuf>,
     /// Unified task list, mirrored from `Agent::todos`. The single source of
     /// truth for "what is left to do" — a plan approved by `plan_exit` seeds
     /// this list (one `Pending` item per `##` heading). An empty list means
@@ -108,7 +114,6 @@ impl Default for SessionData {
             loop_checkpoint: None,
             last_relief: None,
             project_root: default_project_root(),
-            active_plan_path: None,
             todos: neenee_core::TodoList::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
             checksum: None,
@@ -290,9 +295,6 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.last_relief = Some(checkpoint.clone());
             }
             SessionEvent::Archived { messages } => data.archived_messages.extend(messages.clone()),
-            SessionEvent::ActivePlanPathSet { path } => {
-                data.active_plan_path = path.clone();
-            }
             SessionEvent::TodosSet { todos } => {
                 data.todos = todos.clone();
             }
@@ -354,15 +356,6 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             timestamp: data.updated_at,
             event: SessionEvent::CheckpointSet {
                 checkpoint: Some(checkpoint.clone()),
-            },
-        });
-    }
-    if let Some(plan_path) = &data.active_plan_path {
-        events.push(crate::events::EventEnvelope {
-            seq: events.len() as u64,
-            timestamp: data.updated_at,
-            event: SessionEvent::ActivePlanPathSet {
-                path: Some(plan_path.clone()),
             },
         });
     }
@@ -558,27 +551,6 @@ impl SessionStore {
 
     pub async fn checkpoint(&self) -> Option<PursuitCheckpoint> {
         self.state.lock().await.data.loop_checkpoint.clone()
-    }
-
-    /// Path to the plan file most recently approved via `plan_exit`. Mirrored
-    /// from `Agent::active_plan_path` so a resumed session restores the
-    /// Build-mode "you are implementing X" hint.
-    pub async fn active_plan_path(&self) -> Option<PathBuf> {
-        self.state.lock().await.data.active_plan_path.clone()
-    }
-
-    /// Replace the active plan path. Pass `None` to clear (used when the
-    /// agent re-enters Plan mode). Persists both the snapshot and the event
-    /// log so resume restores the same path.
-    pub async fn set_active_plan_path(&self, path: Option<PathBuf>) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.active_plan_path = path.clone();
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state
-            .event_log
-            .append(SessionEvent::ActivePlanPathSet { path })?;
-        self.persist_locked(&state)
     }
 
     /// The unified task list, mirrored from `Agent::todos`. Empty means no
@@ -2353,35 +2325,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_plan_path_round_trips_through_disk() {
-        let directory =
-            std::env::temp_dir().join(format!("neenee-plan-state-{}", uuid::Uuid::new_v4()));
-        let path = directory.join("session.json");
-        let store = SessionStore::for_path(path.clone());
-        assert_eq!(store.active_plan_path().await, None);
-
-        let plan = PathBuf::from(".neenee/plans/feature-x.md");
-        store
-            .set_active_plan_path(Some(plan.clone()))
-            .await
-            .unwrap();
-
-        // Reload from disk and confirm the path round-trips.
-        let reloaded = SessionStore::for_path(path.clone());
-        assert_eq!(
-            reloaded.active_plan_path().await.as_deref(),
-            Some(plan.as_path()),
-            "active plan path should round-trip through disk"
-        );
-
-        // Clearing also persists.
-        reloaded.set_active_plan_path(None).await.unwrap();
-        assert_eq!(reloaded.active_plan_path().await, None);
-
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[tokio::test]
     async fn todos_round_trip_through_disk() {
         let directory =
             std::env::temp_dir().join(format!("neenee-todos-state-{}", uuid::Uuid::new_v4()));
@@ -2389,12 +2332,12 @@ mod tests {
         let store = SessionStore::for_path(path.clone());
         assert!(store.todos().await.is_empty());
 
-        // Seed via the domain helper (same path plan_exit will use) and persist.
-        let mut list = neenee_core::TodoList::from_plan_markdown(
-            "## Summary\n## Key Changes\n## Test Plan\n",
-            1000,
-            3,
-        );
+        // Seed via the domain API and persist.
+        let mut list = neenee_core::TodoList::new();
+        list.updated_at_turn = 3;
+        list.add("Summary".to_string(), 1000, 3).unwrap();
+        list.add("Key Changes".to_string(), 1000, 3).unwrap();
+        list.add("Test Plan".to_string(), 1000, 3).unwrap();
         store.set_todos(list.clone()).await.unwrap();
 
         // Mutate (mark progress) and persist again — identity must survive.

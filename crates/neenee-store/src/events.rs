@@ -54,12 +54,8 @@ pub enum SessionEvent {
     /// was recorded. Any archived messages are preserved by a preceding
     /// `Archived` event.
     Forked { id: String, parent_id: String },
-    /// The active plan path (set when `plan_exit` is approved, cleared when
-    /// the agent re-enters Plan mode). Mirrored from `Agent::active_plan_path`
-    /// so resume restores the Build-mode "you are implementing X" hint.
-    ActivePlanPathSet { path: Option<std::path::PathBuf> },
-    /// The unified task list changed (`todo` / `todo_update` / `plan_exit`
-    /// seed / `plan_enter` or `/todos clear`). Mirrored from `Agent::todos`
+    /// The unified task list changed (`todo` / `todo_update` /
+    /// `/todos clear`). Mirrored from `Agent::todos`
     /// so resume restores the sticky panel. The full list is stored on every
     /// change (snapshot semantics); history of individual items is
     /// reconstructable from the log itself.

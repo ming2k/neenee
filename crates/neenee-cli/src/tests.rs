@@ -10,12 +10,9 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
-use neenee_core::{
-    async_trait, AgentResponse, Message, Provider, ProviderStreamEvent, PursuitService,
-    PursuitStore, TurnEvent,
-};
+use neenee_core::{async_trait, AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent};
 use neenee_providers::MockProvider;
-use neenee_store::session::SessionStore;
+use neenee_store::{session::SessionStore, PursuitService, PursuitStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;

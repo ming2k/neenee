@@ -578,7 +578,7 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
 }
 
 #[test]
-fn repeated_tool_calls_are_bounded() {
+fn repeated_tool_calls_are_counted_without_aborting() {
     let agent = agent();
     let call = ToolCall {
         id: "call".to_string(),
@@ -588,14 +588,21 @@ fn repeated_tool_calls_are_bounded() {
     let mut previous = None;
     let mut repeats = 0;
 
-    for _ in 0..MAX_REPEATED_TOOL_CALLS {
-        assert!(agent
-            .guard_repeated_call(&call, &mut previous, &mut repeats)
-            .is_ok());
+    // The guard counts repeats for the loop-review trigger but no longer
+    // hard-aborts — the model is free to re-issue calls and the soft
+    // intervention (maybe_run_loop_review) steers it instead.
+    for i in 0..10 {
+        agent.guard_repeated_call(&call, &mut previous, &mut repeats);
+        assert_eq!(repeats, i + 1);
     }
-    assert!(agent
-        .guard_repeated_call(&call, &mut previous, &mut repeats)
-        .is_err());
+    // A different call resets the counter.
+    let other = ToolCall {
+        id: "call2".to_string(),
+        name: "read_file".to_string(),
+        arguments: "{\"path\":\"other.rs\"}".to_string(),
+    };
+    agent.guard_repeated_call(&other, &mut previous, &mut repeats);
+    assert_eq!(repeats, 1);
 }
 
 #[tokio::test]
@@ -982,10 +989,13 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
 }
 
 #[tokio::test]
-async fn golden_repeated_identical_tool_calls_abort_the_turn() {
+async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
+    // The equality-guard hard abort was removed in favour of the soft
+    // loop-review intervention. Identical calls now all execute; the turn
+    // ends when the model stops calling tools (the scripted provider runs
+    // out of rounds).
     let tool = RecordingTool::read("alpha", "A-out");
     let calls = tool.calls_handle();
-    // Four identical rounds: the guard trips on the fourth.
     let identical = || tool_round(&[("c", "alpha", "{}")]);
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(vec![
@@ -998,24 +1008,14 @@ async fn golden_repeated_identical_tool_calls_abort_the_turn() {
         test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
-    // This test exercises the equality guard's hard abort in isolation. The
-    // ADR-0030 in-loop review is disabled so its reviewer sub-agent does not
-    // consume a scripted round and pre-empt the guard (ADR-0016 keeps review
-    // off sub-agents for the same recursion reason).
     agent.set_loop_review_enabled(false);
 
     let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
 
-    assert!(matches!(
-        outcome.unwrap_err(),
-        HarnessError::Other(message) if message.contains("repeating the same")
-    ));
-    // The first MAX_REPEATED_TOOL_CALLS calls run; the fourth is blocked.
-    assert_eq!(
-        calls.lock().unwrap().len(),
-        MAX_REPEATED_TOOL_CALLS,
-        "guard must stop before executing the repeat"
-    );
+    // No hard abort — all 4 rounds execute.
+    assert_eq!(calls.lock().unwrap().len(), 4);
+    // The turn completes normally (provider exhausts its rounds).
+    let _ = outcome.unwrap();
 }
 
 #[tokio::test]
@@ -1305,9 +1305,9 @@ async fn turn_runs_uncapped_until_model_emits_text() {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Build a turn of N distinct read-only `alpha` calls (each with a different
-/// path so `guard_repeated_call` does not trip), optionally followed by a
-/// final text round. Drives the round counter past a review/hard-stop line
-/// without tripping the exact-repeat guard.
+/// path so they count as distinct calls rather than repeats), optionally
+/// followed by a final text round. Drives the round counter past a review
+/// line without accumulating repeated-call counts.
 fn distinct_read_rounds(n: usize, suffix: Option<&str>) -> Vec<Vec<ProviderStreamEvent>> {
     let mut rounds: Vec<Vec<ProviderStreamEvent>> = (0..n)
         .map(|i| tool_round(&[("c", "alpha", &format!("{{\"path\":\"f{i}\"}}"))]))
@@ -1459,97 +1459,6 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
     assert!(alert.contains("1 rounds"), "{alert}");
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Verify hard nudge
-// ─────────────────────────────────────────────────────────────────────
-
-#[test]
-fn should_nudge_verify_only_when_build_mode_and_active_plan_and_no_prior_call() {
-    use crate::agent::TurnState;
-    let agent = agent();
-    let mut state = TurnState::default();
-
-    // No active plan → no nudge, even in Build mode.
-    assert!(!agent.should_nudge_verify(&state));
-
-    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
-    // Active plan + Build + no verify call + not nudged → nudge.
-    assert!(agent.should_nudge_verify(&state));
-
-    // Verify was called this turn → no nudge.
-    state.verify_called_this_turn = true;
-    assert!(!agent.should_nudge_verify(&state));
-
-    // Reset, but already nudged → no second nudge (one-shot per turn).
-    state.verify_called_this_turn = false;
-    state.verify_nudged = true;
-    assert!(!agent.should_nudge_verify(&state));
-}
-
-#[tokio::test]
-async fn verify_nudge_fires_once_then_lets_model_wrap_up() {
-    // No tools needed — the gate fires on the text-only round before the
-    // turn ends, before the model even has a chance to call anything.
-    // The first round is text-only, which triggers the nudge; the second
-    // round is text-only again, which the harness lets through because
-    // `verify_nudged` is now true.
-    let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(vec![
-            text_round("all done"),
-            text_round("really done"),
-        ])),
-        Vec::new(),
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
-
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let outcome = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
-        .await
-        .expect("turn completes after the model's second text round");
-
-    assert_eq!(outcome.message.content, "really done");
-    let nudge_count = messages
-        .iter()
-        .filter(|m| m.role == Role::User && m.hidden && m.content.contains("verify_plan_execution"))
-        .count();
-    assert_eq!(
-        nudge_count, 1,
-        "verify nudge must fire exactly once per turn"
-    );
-}
-
-#[tokio::test]
-async fn verify_nudge_disabled_when_toggle_off() {
-    // `set_verify_nudge_enabled(false)` opts out of the gate: the model
-    // can end the turn with an approved plan and no verify call, and the
-    // harness does not inject the reminder.
-    let agent = Agent::new(
-        Arc::new(ScriptedProvider::new(vec![text_round("all done")])),
-        Vec::new(),
-        test_pursuit_service(),
-        crate::skills::SkillRegistry::empty(),
-    );
-    agent.set_active_plan_path(Some(std::path::PathBuf::from(".neenee/plans/x.md")));
-    agent.set_verify_nudge_enabled(false);
-
-    let mut messages = vec![Message::new(Role::User, "go")];
-    let outcome = agent
-        .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
-        .await
-        .expect("toggle off → turn ends immediately");
-
-    assert_eq!(outcome.message.content, "all done");
-    assert!(
-        !messages.iter().any(|m| {
-            m.role == Role::User && m.hidden && m.content.contains("verify_plan_execution")
-        }),
-        "verify nudge must not fire when the toggle is off"
-    );
-}
-
 #[test]
 fn agent_config_defaults_match_runtime_constants() {
     // The config struct's defaults must match the seeds the agent uses when
@@ -1558,21 +1467,9 @@ fn agent_config_defaults_match_runtime_constants() {
     use neenee_store::config::AgentConfig;
     let cfg = AgentConfig::default();
     assert_eq!(cfg.hard_stop_rounds, 0);
-    assert!(cfg.verify_nudge_enabled);
     // The agent seeds the same hard-stop budget by default (uncapped).
     let agent = agent();
     assert_eq!(agent.get_hard_stop_rounds(), 0);
-}
-
-#[test]
-fn verify_nudge_getter_round_trips_setter() {
-    // Same contract for /verify-nudge: getter/setter pair must round-trip.
-    let agent = agent();
-    assert!(agent.get_verify_nudge_enabled());
-    agent.set_verify_nudge_enabled(false);
-    assert!(!agent.get_verify_nudge_enabled());
-    agent.set_verify_nudge_enabled(true);
-    assert!(agent.get_verify_nudge_enabled());
 }
 
 #[test]
@@ -1710,7 +1607,7 @@ async fn debug_network_capture_aggregates_a_full_stream_into_one_file() {
         .unwrap();
     assert_eq!(entries.len(), 1, "one streaming round-trip -> one file");
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&entries[0].path()).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(entries[0].path()).unwrap()).unwrap();
     assert_eq!(value["kind"], "stream_chat_events");
     let captured = value["response"]["items"].as_array().unwrap();
     assert_eq!(captured.len(), 2);

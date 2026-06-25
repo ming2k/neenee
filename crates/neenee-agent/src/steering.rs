@@ -8,9 +8,7 @@
 //!
 //! Stage 1 ships a single concrete nudge ([`LoopingNudge`]). It is kept as a
 //! struct, not a `Nudge` trait: with one implementation a trait is pure overhead
-//! (the YAGNI bar ADR-0025 applied when deleting the one-shot traits). When
-//! `should_nudge_verify` / `should_nudge_todos` migrate in (ADR-0030 Stage 3),
-//! the shared shape earns a trait.
+//! (the YAGNI bar ADR-0025 applied when deleting the one-shot traits).
 
 use neenee_core::{ReviewStatus, ReviewVerdict};
 

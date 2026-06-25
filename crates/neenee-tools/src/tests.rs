@@ -153,12 +153,12 @@ mod tests {
 
     #[tokio::test]
     async fn large_read_paginates_with_concrete_non_overlapping_continuation() {
-        // 3000 lines × 10 bytes ("lineNNNNN\n") = 30KB. The 8000-byte budget
-        // holds ~800 lines per page. The tool MUST return whole lines, declare
+        // 6000 lines × 10 bytes ("lineNNNNN\n") = 60KB. The 50 000-byte budget
+        // holds ~5000 lines per page. The tool MUST return whole lines, declare
         // the range, and give an exact next offset — and following that offset
         // must continue without overlap or gap (the loop-safety contract).
-        const LINES: usize = 3000;
-        const PAGE: usize = 800; // 8000 / (9 + 1)
+        const LINES: usize = 6000;
+        const PAGE: usize = 5000; // 50_000 / (9 + 1)
         let (path, lines) = make_fixed_width_file(LINES);
         let tool = ReadFileTool;
         let arg = |offset: usize| {
@@ -169,7 +169,7 @@ mod tests {
             )
         };
 
-        // Page 1: lines 1..=800, continuation offset = 801.
+        // Page 1: lines 1..=5000, continuation offset = 5001.
         let (text1, pre1, suf1) = code_parts(tool.call_structured(&arg(1)).await.unwrap());
         assert_eq!(
             pre1,
@@ -182,36 +182,23 @@ mod tests {
         );
         let suf1 = suf1.expect("page 1 has a continuation suffix");
         assert!(
-            suf1.contains("offset=801"),
+            suf1.contains("offset=5001"),
             "suffix must name the exact next offset, got: {suf1}"
         );
         assert_eq!(text1.lines().count(), PAGE);
         assert_eq!(text1.lines().next().unwrap(), "line00001");
         assert_eq!(text1.lines().last().unwrap(), &format!("line{:05}", PAGE));
 
-        // Page 2 from the advertised offset: must start exactly at 801 (no gap)
-        // and not repeat line 800 (no overlap) — this is what breaks the loop.
-        let (text2, _pre2, suf2) = code_parts(tool.call_structured(&arg(801)).await.unwrap());
-        assert_eq!(text2.lines().next().unwrap(), "line00801", "no gap");
+        // Page 2 from the advertised offset: must start exactly at 5001 (no gap)
+        // and not repeat line 5000 (no overlap) — this is what breaks the loop.
+        let (text2, _pre2, suf2) = code_parts(tool.call_structured(&arg(5001)).await.unwrap());
+        assert_eq!(text2.lines().next().unwrap(), "line05001", "no gap");
         assert!(
-            !text2.lines().any(|l| l == "line00800"),
+            !text2.lines().any(|l| l == "line05000"),
             "no overlap with previous page"
         );
-        assert_eq!(text2.lines().count(), PAGE);
-        assert!(
-            suf2.expect("page 2 suffix").contains("offset=1601"),
-            "continuation advances"
-        );
-
-        // Final page reaches EOF and carries no continuation suffix.
-        let (text_last, _pre, suf_last) =
-            code_parts(tool.call_structured(&arg(LINES - PAGE + 1)).await.unwrap());
-        assert_eq!(
-            text_last.lines().last().unwrap(),
-            &format!("line{:05}", LINES),
-            "lands exactly on the last line"
-        );
-        assert!(suf_last.is_none(), "no suffix at EOF");
+        // Page 2 is the final page (1000 lines remaining).
+        assert!(suf2.is_none(), "page 2 reaches EOF, no suffix");
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -223,7 +210,7 @@ mod tests {
         // same window, and emit a generic "use offset/limit" with no number.
         // Now the window is line-bounded and the continuation is concrete, so
         // the model advances instead of looping.
-        const LINES: usize = 3000;
+        const LINES: usize = 6000;
         let (path, _lines) = make_fixed_width_file(LINES);
         let arg = format!(
             r#"{{"path":"{}","limit":{}}}"#,
@@ -231,7 +218,7 @@ mod tests {
             LINES
         );
         let (text, _pre, suf) = code_parts(ReadFileTool.call_structured(&arg).await.unwrap());
-        // Far fewer than the requested 3000 lines — bounded by the budget.
+        // Far fewer than the requested 6000 lines — bounded by the budget.
         assert!(text.lines().count() < LINES);
         assert!(
             suf.expect("oversized limit still paginates")

@@ -104,13 +104,6 @@ pub(super) struct UiRuntime {
     /// Set by the response listener on a "running" `HarnessState` and cleared
     /// on idle; drives the muted `<elapsed>` segment in the activity bar.
     pub turn_started_at: Arc<Mutex<Option<std::time::Instant>>>,
-    /// One-shot: when set, the event loop opens the plan preview modal by
-    /// loading the file at the given path into `App::plan_preview_content`
-    /// and switching to `Modal::PlanPreview`. Drained each frame.
-    pub open_plan_preview: Arc<Mutex<Option<std::path::PathBuf>>>,
-    /// One-shot: when set, the event loop sends a synthetic Chat request
-    /// asking the agent to run `verify_plan_execution`. Drained each frame.
-    pub trigger_verification: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A pending `/btw` side-view transition queued by the response listener and
@@ -222,28 +215,6 @@ pub(super) async fn run_app_loop<B: Backend>(
             {
                 app.active_modal = Modal::Sessions;
                 app.modal_index = 0;
-            }
-            // Plan preview modal: listener stashed the path, load the file
-            // and switch to the modal.
-            if let Some(path) = runtime.open_plan_preview.lock().await.take() {
-                if app.active_modal == Modal::None {
-                    let body = std::fs::read_to_string(&path)
-                        .unwrap_or_else(|e| format!("(could not read {}: {})", path.display(), e));
-                    app.plan_preview_content = body;
-                    app.plan_preview_scroll = 0;
-                    app.active_modal = Modal::PlanPreview;
-                }
-            }
-            // Verifier trigger: send a synthetic Chat asking the agent to
-            // call verify_plan_execution. Goes through the normal pipeline
-            // so the result lands in the transcript and the model can act.
-            if runtime.trigger_verification.swap(false, Ordering::SeqCst)
-                && app.active_modal == Modal::None
-            {
-                let _ = app.tx.send(AgentRequest::Chat {
-                    text: "Run verify_plan_execution now and report the result.".to_string(),
-                    images: Vec::new(),
-                });
             }
         }
 
@@ -523,7 +494,7 @@ pub(super) async fn run_app_loop<B: Backend>(
                     // unmasked string.
                 } else if !app.in_subagent_view() {
                     // The composer stays mounted for the dim-recess modals
-                    // (Help / ToolStepDetail / Session / PlanPreview /
+                    // (Help / ToolStepDetail / Session /
                     // Activity) so the footer layout doesn't shift when the
                     // overlay opens or closes; the recess pass darkens it in
                     // place with the rest of the surface. The caret is hidden
@@ -683,12 +654,6 @@ pub(super) async fn run_app_loop<B: Backend>(
                     app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.session_scroll,
-                    &app.theme,
-                ),
-                Modal::PlanPreview => render::draw_plan_preview_modal(
-                    f,
-                    &app.plan_preview_content,
-                    app.plan_preview_scroll,
                     &app.theme,
                 ),
                 Modal::Activity => {
@@ -1761,7 +1726,6 @@ pub(super) async fn run_app_loop<B: Backend>(
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
-                    | Modal::PlanPreview
                     | Modal::Activity
                     | Modal::None => {}
                 },
@@ -1787,7 +1751,6 @@ pub(super) async fn run_app_loop<B: Backend>(
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
-                    | Modal::PlanPreview
                     | Modal::Activity
                     | Modal::None => {}
                 },

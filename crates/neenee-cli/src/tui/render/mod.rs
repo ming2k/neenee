@@ -39,7 +39,7 @@ use notice::draw_notice;
 pub(crate) use overlays::draw_models_modal;
 pub use overlays::{
     draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
-    draw_model_editor, draw_permission_sheet, draw_plan_preview_modal, draw_question_modal,
+    draw_model_editor, draw_permission_sheet, draw_question_modal,
     draw_session_modal, draw_sessions_modal, draw_tool_step_detail_overlay, ActivityModalView,
 };
 pub use primitives::recess_backdrop;
@@ -93,8 +93,7 @@ pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option
     let (percent_x, percent_y) = match modal {
         Modal::Help => (58, 70),
         Modal::ToolStepDetail => (92, 84),
-        Modal::PlanPreview => (80, 70),
-        Modal::Activity => (72, 70),
+    Modal::Activity => (72, 70),
         Modal::Session => (76, 70),
         Modal::Sessions => (80, 64),
         _ => return None,

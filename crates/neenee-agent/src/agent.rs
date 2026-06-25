@@ -16,16 +16,9 @@ pub struct Agent {
     /// rebuilding the agent. Toggled from the session modal via
     /// `set_tool_enabled` / `ToggleTool`.
     disabled_tools: Arc<std::sync::Mutex<HashSet<String>>>,
-    /// Path to the plan file most recently approved via the `plan` tool.
-    /// Surfaced in the Build-mode system prompt so the model keeps the plan
-    /// in context without re-reading the file each turn. Cleared by
-    /// `plan_enter`. Shared with the plan tools.
-    active_plan_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// Unified task list, the single source of truth for "what is left to
     /// do." Drives the sticky panel and persists across restarts. Shared
-    /// with the `todo` / `todo_update` tools via `TodoToolContext`, and with
-    /// the plan workflow tools via `PlanToolContext` (a plan approved by
-    /// `plan_exit` seeds this list; entering Plan mode clears it).
+    /// with the `todo` / `todo_update` tools via `TodoToolContext`.
     todos: Arc<std::sync::Mutex<neenee_core::TodoList>>,
     /// Harness turn counter, bumped at the start of every `execute_turn`.
     /// Shared with the plan + todo tools so they can stamp
@@ -55,11 +48,6 @@ pub struct Agent {
     /// subagent (`/review`). Defaults to [`crate::default_reviews`] (looping);
     /// empty on sub-agents (which have no `/review` path).
     reviews: Vec<Arc<dyn SessionReview>>,
-    /// Whether the verify hard-nudge gate is active. Seeded to `true` and
-    /// mutated at runtime via `set_verify_nudge_enabled`. When `false` the
-    /// harness never injects the "you forgot to call verify_plan_execution"
-    /// reminder, even with an active plan in Build mode.
-    verify_nudge_enabled: Arc<std::sync::Mutex<bool>>,
     /// Whether the in-loop semantic review and anti-anchoring nudge are active
     /// (ADR-0030). Seeded to `true`; sub-agents (which have no `/review` path
     /// and must not recurse into a reviewer) and tests that want the pure
@@ -167,19 +155,6 @@ pub(crate) struct TurnState {
     /// The last tool `(name, arguments)` seen, used to bound consecutive repeats.
     previous_call: Option<(String, String)>,
     repeated_calls: usize,
-    /// True once the model has invoked `verify_plan_execution` at any
-    /// point during this turn. Drives the verify-nudge gate at turn end.
-    pub(crate) verify_called_this_turn: bool,
-    /// One-shot flag so the verify nudge fires at most once per turn.
-    /// Without this the harness and model could ping-pong indefinitely
-    /// (nudge → text-only reply → nudge → …).
-    pub(crate) verify_nudged: bool,
-    /// Bounded counter for the todo-continuation nudge. Each time the model
-    /// ends a round with an approved plan and pending todos, the gate nudges
-    /// it to continue, up to [`MAX_TODO_NUDGES`] per turn. Bounded so a
-    /// stalled plan is pushed forward without unbounded ping-pong (nudge →
-    /// text reply → nudge → …).
-    pub(crate) todo_nudges: u32,
     /// Consecutive rounds whose tool calls were all `Read`-tier. A weak
     /// trigger for the in-loop semantic review (ADR-0030): a read-only streak
     /// is not itself a verdict — `LoopingReview` decides whether the turn is
@@ -196,17 +171,6 @@ pub(crate) struct TurnState {
     pub(crate) loop_signal: Option<String>,
 }
 
-/// The user's decision on a plan-approval prompt. Shared by the `plan_exit`
-/// approval (mode world) and the `plan` subagent approval so the prompt and
-/// reply handling stay identical.
-enum PlanApproval {
-    Approved,
-    /// User chose "Keep planning" — the plan needs more work.
-    KeepPlanning,
-    /// User dismissed/cancelled the prompt.
-    Cancelled,
-}
-
 impl Agent {
     pub fn new(
         provider: Arc<dyn Provider>,
@@ -214,19 +178,9 @@ impl Agent {
         pursuit_service: PursuitService,
         skills_registry: skills::SkillRegistry,
     ) -> Self {
-        // Clone the provider + tool handles before they move into Self, so
-        // the VerifyPlanExecutionTool can construct its own internal SubagentTool
-        // for spawning clean-context verifier sub-agents. The verifier runs
-        // in a clean context, so we snapshot the input toolset before the
-        // pursuit/plan tools are layered on below; admission (read-only /
-        // non-interactive / non-recursive) is applied by the explore profile
-        // inside that SubagentTool, not re-implemented here. See ADR-0011.
-        let verify_provider = provider.clone();
-        let verify_tools: Vec<Arc<dyn Tool>> = tools.clone();
-
         let pursuit_state = crate::pursuit_state::PursuitState::new();
         let thread_id = Arc::new(std::sync::Mutex::new(None));
-        let context = pursuits::tools::PursuitToolContext {
+        let context = neenee_store::pursuits::tools::PursuitToolContext {
             thread_id: Arc::clone(&thread_id),
             pursuit_service: pursuit_service.clone(),
         };
@@ -238,39 +192,23 @@ impl Agent {
                 "get_pursuit" | "start_pursuit" | "complete_pursuit"
             )
         });
-        tools.push(Arc::new(pursuits::tools::GetPursuitTool::new(
+        tools.push(Arc::new(neenee_store::pursuits::tools::GetPursuitTool::new(
             context.clone(),
         )));
-        tools.push(Arc::new(pursuits::tools::StartPursuitTool::new(
+        tools.push(Arc::new(neenee_store::pursuits::tools::StartPursuitTool::new(
             context.clone(),
         )));
-        tools.push(Arc::new(pursuits::tools::CompletePursuitTool::new(
+        tools.push(Arc::new(neenee_store::pursuits::tools::CompletePursuitTool::new(
             context.clone(),
         )));
 
         // The unified task list shares its cell + turn counter with the
-        // todo tools, and the active plan path is shared with the verifier.
-        // The `plan` tool seeds both on approval (directly, via the agent's
-        // own Arcs in `execute_plan`); an ad-hoc task edit (todo /
-        // todo_update) moves the same shared list.
-        let active_plan_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        // todo tools. An ad-hoc task edit (todo / todo_update) moves the
+        // same shared list.
         let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
         let todo_context =
             neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
-        // `plan` (ADR-0027): delegate planning to a read-only `PLAN` subagent
-        // that returns the plan markdown; `execute_plan` writes the file after
-        // approval. Built from the same pre-pursuit tool snapshot as the verifier.
-        tools.push(Arc::new(crate::plan_subagent::PlanTool::new(
-            verify_provider.clone(),
-            verify_tools.clone(),
-        )));
-        tools.push(Arc::new(crate::plan_verify::VerifyPlanExecutionTool::new(
-            verify_provider,
-            verify_tools,
-            Arc::clone(&active_plan_path),
-        )));
         tools.push(Arc::new(neenee_core::TodoWriteTool::new(
             todo_context.clone(),
         )));
@@ -280,7 +218,6 @@ impl Agent {
             provider,
             tools,
             disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            active_plan_path,
             todos,
             turn_counter,
             pursuit_state,
@@ -293,7 +230,6 @@ impl Agent {
             context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             reviews: crate::default_reviews(),
-            verify_nudge_enabled: Arc::new(std::sync::Mutex::new(true)),
             loop_review_enabled: Arc::new(std::sync::Mutex::new(true)),
             write_scope: std::sync::Mutex::new(neenee_core::WriteScope::default()),
             hooks: crate::hook_runner::HookRunner::new(),
@@ -344,17 +280,6 @@ impl Agent {
         }
     }
 
-    /// Override whether the verify hard-nudge gate is active. Mirrors
-    /// `[agent] verify_nudge_enabled` in `config.toml` but can be flipped
-    /// at runtime — useful for tests and for headless runs that do not
-    /// want a hidden reminder pushed into the transcript.
-    pub fn set_verify_nudge_enabled(&self, enabled: bool) {
-        *self
-            .verify_nudge_enabled
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = enabled;
-    }
-
     /// Override whether the in-loop semantic review / anti-anchoring nudge is
     /// active (ADR-0030). Mirrors `[agent] loop_review_enabled` in
     /// `config.toml`; flipped to `false` on sub-agents (no recursion) and in
@@ -370,15 +295,6 @@ impl Agent {
     pub fn get_loop_review_enabled(&self) -> bool {
         *self
             .loop_review_enabled
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Whether the verify hard-nudge gate is currently active. Read by
-    /// the `/verify-nudge` slash command to display the live state.
-    pub fn get_verify_nudge_enabled(&self) -> bool {
-        *self
-            .verify_nudge_enabled
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -510,33 +426,6 @@ impl Agent {
 
     pub fn clear_thread_id(&self) {
         if let Ok(mut guard) = self.thread_id.lock() {
-            *guard = None;
-        }
-    }
-
-    /// Path to the plan file most recently approved via `plan_exit`. `None`
-    /// when no plan is active (initial state, after re-entering Plan mode).
-    pub fn active_plan_path(&self) -> Option<std::path::PathBuf> {
-        self.active_plan_path
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-    }
-
-    /// Replace the active plan path. Used by session-restore code paths to
-    /// rehydrate the hint after resume; in normal operation the plan tools
-    /// own this state through their shared `PlanToolContext`.
-    pub fn set_active_plan_path(&self, path: Option<std::path::PathBuf>) {
-        if let Ok(mut guard) = self.active_plan_path.lock() {
-            *guard = path;
-        }
-    }
-
-    /// Drop the active plan path. Called when entering Plan mode by any path
-    /// (tool, slash command, or programmatic) so the Build-mode hint does
-    /// not point at a stale plan file.
-    pub fn clear_active_plan_path(&self) {
-        if let Ok(mut guard) = self.active_plan_path.lock() {
             *guard = None;
         }
     }
@@ -900,7 +789,6 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let pursuit = ["get_pursuit", "start_pursuit", "complete_pursuit"];
-        let plan = ["plan"];
         let subagent = ["subagent"];
         let mut infos: Vec<neenee_core::ToolInfo> = self
             .tools
@@ -912,8 +800,6 @@ impl Agent {
                     format!("mcp:{}", server)
                 } else if pursuit.contains(&name) {
                     "pursuit".to_string()
-                } else if plan.contains(&name) {
-                    "plan".to_string()
                 } else if subagent.contains(&name) {
                     "subagent".to_string()
                 } else {
@@ -1060,41 +946,6 @@ impl Agent {
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 self.maybe_run_loop_review(messages, &mut state).await;
-                continue;
-            }
-
-            // Verify hard nudge (mirror of the streaming loop). See the
-            // streaming path for the full rationale.
-            if self.should_nudge_verify(&state) {
-                state.verify_nudged = true;
-                messages.push(Message::hidden(
-                    Role::User,
-                    "You are about to end the turn without calling \
-                     verify_plan_execution on the active plan. Before \
-                     reporting completion to the user, call \
-                     verify_plan_execution so an independent verifier can \
-                     audit the implementation against the plan. If you \
-                     have already run it this turn and addressed its \
-                     findings, ignore this reminder and finish.",
-                ));
-                continue;
-            }
-
-            // Todo-continuation nudge (mirror of the streaming loop).
-            if self.should_nudge_todos(&state) {
-                state.todo_nudges += 1;
-                messages.push(Message::hidden(
-                    Role::User,
-                    format!(
-                        "You are implementing an approved plan but the todo \
-                         list still has unfinished items. Keep going — make \
-                         progress with a tool call and update the todo list \
-                         with `todo` / `todo_update` as you complete each \
-                         step. Do not end the turn until the list is done or \
-                         you are genuinely blocked.\n\nUnfinished todos:\n{}",
-                        self.todos().render()
-                    ),
-                ));
                 continue;
             }
 
@@ -1328,50 +1179,6 @@ impl Agent {
                 continue;
             }
 
-            // Verify hard nudge: if the model is about to end the turn
-            // with an approved plan active, the todo list is drained, and it
-            // has not run verification yet (and has not already been nudged
-            // about it this turn), push a hidden reminder and force one more
-            // round. Mirrors the PURSUIT_COMPLETE_MARKER gate but for plan
-            // completion, and fires at most once per turn so the model can
-            // still wrap up if it judges the nudge irrelevant.
-            if self.should_nudge_verify(&state) {
-                state.verify_nudged = true;
-                messages.push(Message::hidden(
-                    Role::User,
-                    "You are about to end the turn without calling \
-                     verify_plan_execution on the active plan. Before \
-                     reporting completion to the user, call \
-                     verify_plan_execution so an independent verifier can \
-                     audit the implementation against the plan. If you \
-                     have already run it this turn and addressed its \
-                     findings, ignore this reminder and finish.",
-                ));
-                continue;
-            }
-
-            // Todo-continuation nudge: in Build mode with an approved plan,
-            // if the model ends a round while the todo list still has
-            // pending or in-progress items, push it to keep going rather
-            // than letting a partially-done plan stall. Bounded by
-            // MAX_TODO_NUDGES per turn.
-            if self.should_nudge_todos(&state) {
-                state.todo_nudges += 1;
-                messages.push(Message::hidden(
-                    Role::User,
-                    format!(
-                        "You are implementing an approved plan but the todo \
-                         list still has unfinished items. Keep going — make \
-                         progress with a tool call and update the todo list \
-                         with `todo` / `todo_update` as you complete each \
-                         step. Do not end the turn until the list is done or \
-                         you are genuinely blocked.\n\nUnfinished todos:\n{}",
-                        self.todos().render()
-                    ),
-                ));
-                continue;
-            }
-
             // Pursuit stop-gate (mirror of the non-streaming path): if a
             // pursuit is armed and the model has not signalled completion,
             // re-inject the condition and force another round.
@@ -1428,7 +1235,7 @@ impl Agent {
                     call,
                     &mut state.previous_call,
                     &mut state.repeated_calls,
-                )?;
+                );
             }
             // ADR-0030: classify this round for the loop-review trigger. An
             // all-Read round extends the consecutive read-only streak; any
@@ -1442,16 +1249,6 @@ impl Agent {
                     state.consecutive_readonly_rounds.saturating_add(1);
             } else {
                 state.consecutive_readonly_rounds = 0;
-            }
-            // Track whether the model invoked the plan verifier this round —
-            // it feeds the completion-time verify nudge in the outer loop.
-            // (Round productivity no longer needs bookkeeping: session review
-            // reads the transcript directly, see ADR-0016.)
-            if tool_calls
-                .iter()
-                .any(|call| call.name == "verify_plan_execution")
-            {
-                state.verify_called_this_turn = true;
             }
             // Emit all ToolCall events up front.
             let call_ids: Vec<String> = tool_calls
@@ -1503,14 +1300,8 @@ impl Agent {
             if streamed_text {
                 on_event(AgentEvent::AssistantDiscard);
             }
-            self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls)?;
+            self.guard_repeated_call(&call, &mut state.previous_call, &mut state.repeated_calls);
             tracing::debug!(tool = %call.name, "tool call (text fallback)");
-            // Mirror the native path's verify-flag tracking so the completion
-            // nudge behaves identically for text-emitted tool calls. Round
-            // productivity is no longer tracked here (ADR-0016).
-            if call.name == "verify_plan_execution" {
-                state.verify_called_this_turn = true;
-            }
             tool_call::attach_fallback_tool_call(messages, &call);
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
             on_event(AgentEvent::ToolCall {
@@ -1654,12 +1445,18 @@ impl Agent {
         }
     }
 
+    /// Track repeated tool calls for the loop-review trigger (ADR-0030).
+    /// Counts consecutive identical calls (same name + same arguments) so
+    /// [`maybe_run_loop_review`](Self::maybe_run_loop_review) can fire a soft
+    /// semantic review when the count reaches [`LOOP_REVIEW_REPEATED`]. No
+    /// longer hard-aborts — the model is free to re-issue calls and the soft
+    /// intervention steers it instead.
     pub(crate) fn guard_repeated_call(
         &self,
         call: &ToolCall,
         previous_call: &mut Option<(String, String)>,
         repeated_calls: &mut usize,
-    ) -> Result<(), HarnessError> {
+    ) {
         let signature = (call.name.clone(), call.arguments.clone());
         if previous_call.as_ref() == Some(&signature) {
             *repeated_calls += 1;
@@ -1667,14 +1464,6 @@ impl Agent {
             *previous_call = Some(signature);
             *repeated_calls = 1;
         }
-
-        if *repeated_calls > MAX_REPEATED_TOOL_CALLS {
-            return Err(HarnessError::Other(format!(
-                "Agent stopped after repeating the same '{}' tool call {} times.",
-                call.name, MAX_REPEATED_TOOL_CALLS
-            )));
-        }
-        Ok(())
     }
 
     /// Look up a tool's [`ToolAccess`] by name (ADR-0030). Used to classify a
@@ -1824,60 +1613,15 @@ impl Agent {
             .count()
     }
 
-    /// Whether the harness should fire the verify-hard-nudge gate before
-    /// letting the turn end. Conditions: the gate is enabled in config,
-    /// there is an active (approved) plan, the agent is in Build mode,
-    /// the model has not invoked `verify_plan_execution` at any point
-    /// this turn, the nudge has not already fired (one-shot per turn), and
-    /// the todo list has no pending or in-progress items. That last guard
-    /// keeps verification in its right place: while work remains the
-    /// todo-continuation gate pushes progress, and only once the list is
-    /// drained does this gate ask for an independent audit. Returns `false`
-    /// in Plan mode or when no plan is active.
-    pub(crate) fn should_nudge_verify(&self, state: &TurnState) -> bool {
-        let enabled = *self
-            .verify_nudge_enabled
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        enabled
-            && !state.verify_nudged
-            && !state.verify_called_this_turn
-            && self.active_plan_path().is_some()
-            && !self.has_pending_todos()
-    }
-
-    /// Whether the harness should fire the todo-continuation nudge before
-    /// letting the turn end. With an approved plan, if the model ends a round
-    /// while the todo list still has pending or in-progress items, it is
-    /// pushed to continue. Bounded by [`MAX_TODO_NUDGES`] per turn so a
-    /// stalled plan moves forward without looping forever.
-    pub(crate) fn should_nudge_todos(&self, state: &TurnState) -> bool {
-        self.active_plan_path().is_some()
-            && state.todo_nudges < MAX_TODO_NUDGES
-            && self.has_pending_todos()
-    }
-
-    /// Whether the shared todo list has any item the model has not finished.
-    /// Drives the split between the todo-continuation nudge (work remains)
-    /// and the verify nudge (work is done, audit it).
-    fn has_pending_todos(&self) -> bool {
-        self.todos().items.iter().any(|item| {
-            matches!(
-                item.status,
-                neenee_core::TodoStatus::Pending | neenee_core::TodoStatus::InProgress
-            )
-        })
-    }
-
     /// Emit a [`AgentEvent::TodosUpdated`] snapshot whenever a tool mutates
-    /// the task list (`todo` full-replace, `todo_update` surgical edit, or an
-    /// approved `plan` that reseeds it). The TUI stores the snapshot and
-    /// re-renders the sticky panel above the input box.
+    /// the task list (`todo` full-replace or `todo_update` surgical edit).
+    /// The TUI stores the snapshot and re-renders the sticky panel above the
+    /// input box.
     fn emit_todos_change<F>(&self, call: &ToolCall, on_event: &mut F)
     where
         F: FnMut(AgentEvent) + Send,
     {
-        if matches!(call.name.as_str(), "todo" | "todo_update" | "plan") {
+        if matches!(call.name.as_str(), "todo" | "todo_update") {
             on_event(AgentEvent::TodosUpdated(self.todos()));
         }
     }
@@ -1937,187 +1681,6 @@ impl Agent {
             }
             None => {
                 ToolOutput::Text("User cancelled the question; no answer was provided.".to_string())
-            }
-        }
-    }
-
-    /// Raise the *Approve* / *Keep planning* prompt for a plan and await the
-    /// user's decision. The prompt shows the plan's target path plus a short
-    /// excerpt of its content so the user can decide without opening the file.
-    async fn request_plan_approval(
-        &self,
-        path: &str,
-        excerpt: &str,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    ) -> PlanApproval {
-        let header = path.to_string();
-        let question_text = format!(
-            "Approve this plan and start implementing?\n\nPath: {}\n\n{}",
-            path, excerpt
-        );
-
-        let request = UserQuestionRequest {
-            id: format!("plan_approval_{}", uuid::Uuid::new_v4()),
-            questions: vec![UserQuestion {
-                header: Some(header),
-                question: question_text,
-                options: vec![
-                    UserQuestionOption {
-                        label: "Approve".to_string(),
-                        description: Some(
-                            "Start implementing the plan with full tool access.".to_string(),
-                        ),
-                    },
-                    UserQuestionOption {
-                        label: "Keep planning".to_string(),
-                        description: Some(
-                            "Stay planning. Tell the agent what to refine in your reply."
-                                .to_string(),
-                        ),
-                    },
-                ],
-                multi_select: false,
-            }],
-        };
-
-        let (sender, receiver) = oneshot::channel();
-        self.ask_user
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .insert(request.id.clone(), sender);
-        let _ = event_tx.send(AgentEvent::UserQuestionRequest(request));
-        match receiver.await.unwrap_or(None) {
-            Some(reply) => {
-                let approved = reply
-                    .answers
-                    .first()
-                    .and_then(|labels| labels.first())
-                    .map(|label| label == "Approve")
-                    .unwrap_or(false);
-                if approved {
-                    PlanApproval::Approved
-                } else {
-                    PlanApproval::KeepPlanning
-                }
-            }
-            None => PlanApproval::Cancelled,
-        }
-    }
-
-    /// The `plan` tool (ADR-0027): delegate planning to a read-only `PLAN`
-    /// subagent that returns the full plan markdown in its reply, then gate
-    /// the result behind user approval. On approval the main agent writes the
-    /// plan to `.neenee/plans/<slug>.md` (the subagent never touches the
-    /// filesystem), records the active plan path, and seeds the todo list
-    /// from the plan's `##` headings. The main agent never leaves Build.
-    async fn execute_plan(
-        &self,
-        tool: &Arc<dyn Tool>,
-        call: &ToolCall,
-        call_id: &str,
-        event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    ) -> ToolOutput {
-        // 1. Spawn the PLAN subagent via the tool's structured call,
-        //    forwarding its SubAgentEvents to the parent stream (same wrapping
-        //    the normal dispatch path applies to spawns_subagent tools).
-        let parent_call_id = call_id.to_string();
-        let sub_tx = event_tx.clone();
-        let mut on_stream = |_: neenee_core::ToolStream| ();
-        let sub_output = tool
-            .call_structured_with_events(
-                call_id,
-                &call.arguments,
-                Box::new(move |event| {
-                    let _ = sub_tx.send(AgentEvent::SubAgent {
-                        parent_call_id: parent_call_id.clone(),
-                        event,
-                    });
-                }),
-                &mut on_stream,
-            )
-            .await;
-        let plan_markdown = match sub_output {
-            Ok(output) => output.to_text(),
-            Err(err) => {
-                return ToolOutput::Error {
-                    message: format!("plan subagent failed: {err}"),
-                    detail: None,
-                }
-            }
-        };
-
-        // 2. The subagent returns the full plan markdown as its reply. If it
-        //    came back empty, there is nothing to approve.
-        if plan_markdown.trim().is_empty() {
-            return ToolOutput::Text(
-                "The plan subagent returned no plan. Ask the user for any missing \
-                 information, then call plan again with the refined request."
-                    .to_string(),
-            );
-        }
-
-        // 3. Derive the on-disk path from the request and an excerpt for the
-        //    approval prompt (deterministic: no path-string parsing).
-        let request_text = std::str::from_utf8(call.arguments.as_bytes())
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|v| {
-                v.get("request")
-                    .and_then(|r| r.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        let slug = plan_slug(&request_text);
-        let path = format!(".neenee/plans/{}.md", slug);
-        let excerpt = excerpt_of(&plan_markdown);
-
-        // 4. Approval gate.
-        match self.request_plan_approval(&path, &excerpt, event_tx).await {
-            PlanApproval::Approved => {
-                tracing::info!(plan = %path, "plan approved via subagent");
-                // 5. Write the plan to disk, record the active plan path, and
-                //    seed the todo list from the plan's `##` headings — all
-                //    from the in-memory markdown, no disk read-back needed.
-                if let Err(err) = std::fs::write(&path, &plan_markdown) {
-                    return ToolOutput::Error {
-                        message: format!("Could not write plan to {path}: {err}"),
-                        detail: None,
-                    };
-                }
-                if let Ok(mut guard) = self.active_plan_path.lock() {
-                    *guard = Some(std::path::PathBuf::from(&path));
-                }
-                let turn = self.turn_counter.lock().map(|g| *g).unwrap_or(0);
-                let seeded = neenee_core::TodoList::from_plan_markdown(
-                    &plan_markdown,
-                    neenee_core::todos::unix_now(),
-                    turn,
-                );
-                if let Ok(mut guard) = self.todos.lock() {
-                    *guard = seeded.clone();
-                }
-                let _ = event_tx.send(AgentEvent::TodosUpdated(seeded));
-                ToolOutput::Text(format!(
-                    "Plan approved. You can now start coding — begin implementing the plan now, \
-                     and track progress with the `todo` / `todo_update` tools. Do not end the \
-                     turn until the work is done or you are genuinely blocked.\n\nFollow the \
-                     plan at {path}."
-                ))
-            }
-            PlanApproval::KeepPlanning => {
-                tracing::info!("plan (subagent) rejected by user");
-                ToolOutput::Text(
-                    "User wants to keep planning. Ask the user (or use the ask_user tool) what                      should change, then call plan again with the refined request."
-                        .to_string(),
-                )
-            }
-            PlanApproval::Cancelled => {
-                tracing::info!("plan (subagent) cancelled by user");
-                ToolOutput::Text(
-                    "Plan approval was cancelled. Wait for the user's next instruction."
-                        .to_string(),
-                )
             }
         }
     }
@@ -2196,15 +1759,6 @@ impl Agent {
 
         if call.name == "ask_user" {
             return self.execute_ask_user(call, call_id, event_tx).await;
-        }
-
-        // `plan` (ADR-0027) delegates planning to a read-only `PLAN` subagent
-        // and then gates the result behind user approval. Routed here because
-        // the approval prompt needs `self.ask_user` and the event channel,
-        // which only the harness side (not the tool) can reach. The tool
-        // itself spawns the subagent.
-        if call.name == "plan" {
-            return self.execute_plan(tool, call, call_id, event_tx).await;
         }
 
         if tool.access() > ToolAccess::Read {
@@ -2425,39 +1979,6 @@ fn valid_assistant_response(message: &Message) -> bool {
             .reasoning_content
             .as_ref()
             .is_some_and(|reasoning| !reasoning.is_empty())
-}
-
-/// Build a filesystem-safe slug (kebab-case) from a plan request. Takes the
-/// first few words, lowercases, and keeps only `[a-z0-9-]`, collapsing runs.
-fn plan_slug(request: &str) -> String {
-    let slug: String = request
-        .split_whitespace()
-        .take(6)
-        .map(|w| {
-            w.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect::<String>()
-        })
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "plan".to_string()
-    } else {
-        slug.to_string()
-    }
-}
-
-/// Take up to 280 chars of a plan as an approval-prompt excerpt.
-fn excerpt_of(markdown: &str) -> String {
-    let trimmed = markdown.trim();
-    let chars: Vec<char> = trimmed.chars().take(280).collect();
-    let mut snippet: String = chars.into_iter().collect();
-    if trimmed.chars().count() > 280 {
-        snippet.push('\u{2026}');
-    }
-    snippet
 }
 
 /// Build the "empty assistant response" error, after logging enough state to

@@ -1,3 +1,9 @@
+//! Terminal UI frontend: a ratatui + crossterm app split into application
+//! state ([`app`]), input mapping ([`input`]), the event/render loop
+//! ([`event_loop`]), the semantic document model ([`document`]), and the
+//! rendering engine ([`render`], with its `step`/`overlays`/`tools`
+//! subtrees). [`start_tui`] is the entry point wired by `main`.
+
 pub mod app;
 pub mod clipboard;
 pub mod clipboard_ops;
@@ -126,13 +132,6 @@ pub async fn run_tui(
     // HarnessState so the activity bar can render a live `<elapsed>` segment.
     let turn_started_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
     let turn_started_at_clone = turn_started_at.clone();
-    // One-shot signals from the response listener to the event loop. The
-    // listener can't touch App or send AgentRequests directly, so it stashes
-    // the request here and the event loop drains it next frame.
-    let open_plan_preview: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
-    let open_plan_preview_clone = open_plan_preview.clone();
-    let trigger_verification = Arc::new(AtomicBool::new(false));
-    let trigger_verification_clone = trigger_verification.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
@@ -726,12 +725,6 @@ pub async fn run_tui(
                 AgentResponse::SessionContext(snapshot) => {
                     *session_context_clone.lock().await = Some(snapshot);
                 }
-                AgentResponse::OpenPlanPreview(path) => {
-                    *open_plan_preview_clone.lock().await = Some(path);
-                }
-                AgentResponse::TriggerVerification => {
-                    trigger_verification_clone.store(true, Ordering::SeqCst);
-                }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
                 }
@@ -798,8 +791,6 @@ pub async fn run_tui(
         current_round: 0,
         review_alert: String::new(),
         turn_started_at: None,
-        plan_preview_content: String::new(),
-        plan_preview_scroll: 0,
         activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
         pending_permission: None,
@@ -872,8 +863,6 @@ pub async fn run_tui(
             current_round,
             review_alert,
             turn_started_at,
-            open_plan_preview,
-            trigger_verification,
         },
     )
     .await;

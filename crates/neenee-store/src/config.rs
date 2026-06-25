@@ -1,3 +1,11 @@
+//! User configuration schema and persistence.
+//!
+//! Deserializes/serializes the TOML config file (`agent`, `tui`, providers,
+//! channels, MCP servers, hooks, skills, web-search) via [`crate::fsutil`]'s
+//! atomic-write helpers, and loads/saves the input history. Config is state
+//! (recency-merged under a companion file lock, ADR-0018); the live
+//! provider/model selection telemetry lives in [`crate::provider_usage`].
+
 use crate::fsutil;
 use crate::paths;
 use neenee_core::{
@@ -24,11 +32,6 @@ pub const THINKING_KEY: &str = "thinking";
 /// # turn cap; the loop otherwise runs until the model stops, the user
 /// # interrupts, or context compaction cannot relieve pressure (ADR-0009).
 /// # hard_stop_rounds = 0
-/// # When true, the harness injects a hidden reminder if the model tries
-/// # to end a turn with an approved plan but without calling
-/// # `verify_plan_execution`. Disable for trusted fast models or
-/// # plan-less workflows.
-/// verify_nudge_enabled = true
 /// # In-loop semantic review + anti-anchoring nudge (ADR-0030). When true the
 /// # harness fires `/review` once per turn on a read-only-round streak or a
 /// # repeated-call count, injecting a steering nudge on a `Stuck` verdict so a
@@ -43,11 +46,6 @@ pub struct AgentConfig {
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
     /// `Agent::set_hard_stop_rounds`.
     pub hard_stop_rounds: usize,
-    /// Whether the verify hard-nudge gate is active. When `true` the
-    /// harness injects a hidden reminder before letting a turn end with
-    /// an approved plan but no `verify_plan_execution` call. Mutated at
-    /// runtime via `Agent::set_verify_nudge_enabled`.
-    pub verify_nudge_enabled: bool,
     /// Whether the in-loop semantic review and anti-anchoring nudge are active
     /// (ADR-0030). When `true` the harness fires `review_now` once per turn on
     /// a read-only-round streak or a repeated-call count, injecting a steering
@@ -60,7 +58,6 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             hard_stop_rounds: 0,
-            verify_nudge_enabled: true,
             loop_review_enabled: true,
         }
     }
@@ -356,16 +353,13 @@ mod tests {
         let toml_full = r#"
             [agent]
             hard_stop_rounds = 40
-            verify_nudge_enabled = false
         "#;
         let cfg: Config = toml::from_str(toml_full).unwrap();
         assert_eq!(cfg.agent.hard_stop_rounds, 40);
-        assert!(!cfg.agent.verify_nudge_enabled);
 
         // Missing `[agent]` table → defaults match the documented values.
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.agent.hard_stop_rounds, 0);
-        assert!(cfg.agent.verify_nudge_enabled);
 
         // A legacy `[agent.review]` block no longer maps to anything; it must
         // not break parsing (unknown sub-tables are ignored) and the new
@@ -381,10 +375,8 @@ mod tests {
         // Round-trip through save+load format (serialize then parse).
         let mut cfg = Config::default();
         cfg.agent.hard_stop_rounds = 99;
-        cfg.agent.verify_nudge_enabled = false;
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
         assert_eq!(parsed.agent.hard_stop_rounds, 99);
-        assert!(!parsed.agent.verify_nudge_enabled);
     }
 }

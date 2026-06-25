@@ -6,24 +6,23 @@ rust-version = "1.88"
 license = "MIT"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream", "socks", "gzip", "brotli"] }
-tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
-async-trait = "0.1"
-glob = "0.3"
-walkdir = "2"
-dirs = "5"
-uuid = { version = "1", features = ["v4"] }
-httpdate = "1"
-rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
-chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-tracing = "0.1"
-inventory = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+glob = { workspace = true }
+walkdir = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+httpdate = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
 
 [dev-dependencies]
-toml = "0.8"
+toml = { workspace = true }

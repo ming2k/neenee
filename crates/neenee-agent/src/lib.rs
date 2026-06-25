@@ -55,6 +55,11 @@
 
 pub use neenee_core::*;
 
+// Persistence-backed types that lived in core pre-refactor now live in store
+// (ADR-0005: core is zero-I/O). Re-exported here so consumers keep reaching
+// them through `neenee_agent::` unchanged.
+pub use neenee_store::{PursuitService, PursuitStore, RepeatStore};
+
 // Explicit re-exports of core's top-level re-exports. `pub use X::*` does
 // not propagate through X's own `pub use` re-exports in Rust, so the items
 // the Agent struct expects at the crate root have to be listed here by name.
@@ -65,11 +70,11 @@ pub use neenee_core::{
     AgentRequest, AgentResponse, Channel, ContextReliefGate, HarnessError, HarnessSnapshot,
     ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
     PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
-    ProviderStreamEvent, PruneOutcome, Pursuit, PursuitService, PursuitStore, RetryableError, Role,
-    SessionOverview, SkillsConfig, SubagentEvent, SubagentProfile, TokenUsage, Tool, ToolAccess,
+    ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role, SessionOverview,
+    SkillsConfig, SubagentEvent, SubagentProfile, TokenUsage, ThreadPursuit, Tool, ToolAccess,
     ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
     UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
-    EXPLORE, PRUNED_TOOL_PLACEHOLDER, TITLE, VERIFY,
+    EXPLORE, PRUNED_TOOL_PLACEHOLDER, TITLE,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -79,16 +84,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-
-/// Maximum number of times the same tool call (same name + same arguments)
-/// may repeat within a turn before the agent treats it as a stuck loop and
-/// errors out. This is the only per-turn backstop: distinct tool calls are
-/// allowed to run unbounded, matching the codex / claude-code model where
-/// the agentic loop runs until the model itself stops calling tools. Context
-/// compaction (thresholds derived from the active model's context window, plus
-/// mid-turn pruning) keeps the transcript bounded; the user can interrupt at
-/// any time with `Esc` or `/pursue stop`.
-const MAX_REPEATED_TOOL_CALLS: usize = 3;
 
 /// Safety cap on the number of rounds the `/pursue` stop-gate will drive
 /// within a single turn. Prevents a pursuit that never signals completion
@@ -102,16 +97,6 @@ const MAX_REPEATED_TOOL_CALLS: usize = 3;
 /// the user explicitly armed — see ADR-0015.
 const MAX_PURSUIT_ITERATIONS: u32 = 50;
 
-/// Per-turn cap on the todo-continuation nudge. In Build mode with an
-/// approved plan, each time the model ends a round while the todo list still
-/// has pending or in-progress items the harness re-injects the list and
-/// forces another round. This cap bounds that forcing so a plan that the
-/// model keeps refusing to advance cannot loop forever — after it fires, the
-/// turn is allowed to end and the user can resume. Small by design: a
-/// willing model starts working after the first nudge; a stuck one should
-/// surface to the user rather than burn rounds.
-const MAX_TODO_NUDGES: u32 = 6;
-
 /// Consecutive all-read-only rounds after which the in-loop semantic review
 /// fires automatically (ADR-0030). A weak trigger only — the verdict still
 /// comes from `LoopingReview`. Micro-adjusted re-reads (which bypass the
@@ -123,8 +108,9 @@ const LOOP_REVIEW_ROUNDS: u32 = 6;
 
 /// Repeated-call count at which the in-loop semantic review fires automatically
 /// (ADR-0030), independent of the read-only-round trigger. Catches tight loops
-/// that interleave a non-read call. Kept below `MAX_REPEATED_TOOL_CALLS` so the
-/// review can steer the model before the equality guard's hard abort.
+/// that interleave a non-read call. This is the primary soft intervention for
+/// repeated calls — the hard equality-guard abort was removed in favour of
+/// relying on this review plus context compaction and user interrupt (`Esc`).
 const LOOP_REVIEW_REPEATED: usize = 2;
 
 /// Maximum interval between consecutive stream events (text/reasoning/tool-call
@@ -159,8 +145,6 @@ pub use hooks::{matcher_matches, HookRegistry, UserPromptVerdict};
 mod hook_runner;
 pub mod orchestration;
 mod permission_store;
-pub mod plan_subagent;
-mod plan_verify;
 mod prompt;
 mod pursuit_state;
 pub mod session_review;
@@ -169,8 +153,6 @@ pub mod skills;
 mod steering;
 pub mod subagent_tool;
 
-pub use plan_subagent::PlanTool;
-pub use plan_verify::VerifyPlanExecutionTool;
 pub use session_review::{default_reviews, LoopingReview};
 pub use subagent_tool::{SubagentRegistry, SubagentTool};
 

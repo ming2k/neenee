@@ -19,7 +19,7 @@ pub(crate) mod session;
 pub use activity::{draw_activity_modal, ActivityModalView};
 pub use misc::{
     draw_armed_toast, draw_copy_toast, draw_help_modal, draw_history_modal,
-    draw_plan_preview_modal, draw_tool_step_detail_overlay,
+    draw_tool_step_detail_overlay,
 };
 pub use permission::{draw_permission_sheet, draw_question_modal};
 pub use provider::draw_model_editor;

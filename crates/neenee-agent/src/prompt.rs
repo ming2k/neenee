@@ -31,38 +31,6 @@ impl Agent {
                 .to_string(),
         );
 
-        parts.push(
-            "Planning: for a request that is complex, spans multiple files, has several \
-             valid approaches, or needs design before editing, call the `plan` tool. It \
-             delegates to a read-only plan subagent that researches the codebase and writes \
-             the plan to .neenee/plans/<slug>.md; the user then approves it before you \
-             implement. On approval a todo list is seeded from the plan's `##` headings — \
-             keep it current with the `todo` (full-replace) or `todo_update` (mark one step) \
-             tools: move a step to in_progress when you start it and completed when done. \
-             Don't call `plan` for simple or well-specified edits; make them directly."
-                .to_string(),
-        );
-
-        // Surface the active (approved) plan path so the model follows it
-        // without re-reading the file each turn.
-        if let Some(path) = self.active_plan_path() {
-            let display = path.display().to_string();
-            parts.push(format!(
-                "You are implementing the approved plan at {display}. Follow it step by \
-                 step. If you discover the plan is wrong or incomplete, pause and tell \
-                 the user rather than silently deviating; call `plan` again if a redesign \
-                 is required.\n\n\
-                 A todo list has been seeded from the plan's `##` headings — keep it \
-                 current with the `todo` / `todo_update` tools. The user sees a sticky \
-                 panel with step status, so keeping it honest is part of the job. Before \
-                 declaring the work complete, call verify_plan_execution so an independent \
-                 verifier re-reads the plan and the workspace and reports PASS / PARTIAL / \
-                 FAIL per section with concrete evidence. Address every PARTIAL and FAIL \
-                 before reporting completion to the user.",
-                display = display,
-            ));
-        }
-
         if let Some(pursuit) = self.get_pursuit() {
             let state_label = if pursuit.is_complete {
                 "complete"

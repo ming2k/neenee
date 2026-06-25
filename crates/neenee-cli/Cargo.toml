@@ -18,22 +18,21 @@ neenee-agent = { path = "../neenee-agent" }
 ratatui = "0.26"
 crossterm = { version = "0.27", features = ["event-stream"] }
 arboard = "3.4"
-dirs = "5"
+dirs = { workspace = true }
 pulldown-cmark = "0.10"
 unicode-width = "0.1"
 similar = { version = "2", features = ["unicode"] }
-tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
-clap = { version = "4.4", features = ["derive"] }
-futures = "0.3"
-toml = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1", features = ["v4"] }
-tracing = "0.1"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 
 [dev-dependencies]
 insta = "1"

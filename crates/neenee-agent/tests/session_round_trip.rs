@@ -19,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 use neenee_agent::orchestration::{execute_turn, CompactionSettings, TurnContext, TurnInput};
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
-use neenee_core::{PursuitService, PursuitStore, Role};
+use neenee_core::Role;
 use neenee_providers::MockProvider;
-use neenee_store::session::SessionStore;
+use neenee_store::{session::SessionStore, PursuitService, PursuitStore};
 
 /// Concatenation of the chunks emitted by `MockProvider::stream_chat`. Kept
 /// here rather than imported so a change to the mock's payload shows up as a

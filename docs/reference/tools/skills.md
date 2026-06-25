@@ -33,7 +33,7 @@ policy:
 dependencies:
   tools:
     - type: mcp
-      value: rust-analyzer
+      value: context7
 ---
 Skill body injected into the context on demand.
 ```

@@ -23,7 +23,6 @@ pub struct ExportContext<'a> {
     pub provider: &'a str,
     pub model: &'a str,
     pub pursuit: Option<&'a Pursuit>,
-    pub active_plan_path: Option<&'a std::path::Path>,
 }
 
 /// Render the current conversation as a Markdown handoff document.
@@ -48,9 +47,6 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
             pursuit.objective
         )),
         None => out.push_str("- **Pursuit:** _none_\n"),
-    }
-    if let Some(plan) = ctx.active_plan_path {
-        out.push_str(&format!("- **Active plan:** {}\n", plan.display()));
     }
     out.push_str(&format!("- **Exported at:** {}\n\n", exported_at));
 
@@ -285,7 +281,6 @@ mod tests {
                 provider: "kimi-code",
                 model: "kimi-k2.7-code",
                 pursuit: None,
-                active_plan_path: None,
             },
             &[user("hello")],
         );
@@ -307,7 +302,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: Some(&pursuit),
-                active_plan_path: None,
             },
             &[user("hi")],
         );
@@ -327,7 +321,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: None,
-                active_plan_path: None,
             },
             &messages,
         );
@@ -354,7 +347,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: None,
-                active_plan_path: None,
             },
             &messages,
         );
@@ -388,7 +380,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: None,
-                active_plan_path: None,
             },
             &messages,
         );
@@ -416,7 +407,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: None,
-                active_plan_path: None,
             },
             &messages,
         );
@@ -431,7 +421,6 @@ mod tests {
                 provider: "p",
                 model: "m",
                 pursuit: None,
-                active_plan_path: None,
             },
             &[],
         );

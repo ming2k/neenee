@@ -31,9 +31,8 @@ use neenee_agent::{
     Agent, AgentEvent, AgentOp, Message, Provider, ProviderStreamEvent, Role, SubagentEvent,
     SubagentTool, ToolAccess, ToolCall,
 };
-use neenee_core::{
-    PermissionDecision, PursuitService, PursuitStore, SubagentProfile, Tool, ToolOutput, ToolPolicy,
-};
+use neenee_core::{PermissionDecision, SubagentProfile, Tool, ToolOutput, ToolPolicy};
+use neenee_store::{PursuitService, PursuitStore};
 
 async fn pursuit() -> PursuitService {
     PursuitService::new(

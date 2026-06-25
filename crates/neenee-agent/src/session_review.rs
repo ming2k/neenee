@@ -89,7 +89,7 @@ impl Agent {
         // open a file to check a looping claim but cannot mutate anything or
         // spawn further agents.
         let sub_tools = REVIEW.select_tools(&self.tools);
-        let pursuit_store = match neenee_core::PursuitStore::open_in_memory().await {
+        let pursuit_store = match neenee_store::PursuitStore::open_in_memory().await {
             Ok(store) => store,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to open reviewer pursuit store; skipping review");
@@ -99,7 +99,7 @@ impl Agent {
         let reviewer = Agent::new(
             self.provider.clone(),
             sub_tools,
-            neenee_core::PursuitService::new(pursuit_store),
+            neenee_store::PursuitService::new(pursuit_store),
             SkillRegistry::empty(),
         );
         // The reviewer must not run its own reviews (recursion) and is bounded

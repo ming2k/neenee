@@ -8,7 +8,8 @@
 
 use neenee_agent::orchestration::TurnInput;
 use neenee_agent::Agent;
-use neenee_core::{AgentResponse, Message, PursuitService};
+use neenee_core::{AgentResponse, Message};
+use neenee_store::PursuitService;
 use neenee_store::{config::Config, session::SessionStore};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;

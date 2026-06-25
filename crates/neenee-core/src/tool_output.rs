@@ -62,10 +62,12 @@ pub enum ToolOutput {
     /// `prefix` / `suffix` carry **model-facing framing only** (line-range
     /// header, pagination/EOF continuation hints). The renderer ignores them
     /// and draws `text` with the line-number gutter; [`ToolOutput::to_text`]
-    /// composes `prefix\n{text}\nsuffix` for the model. Splitting the two
-    /// audiences is what lets a paginated read both render cleanly (pure
-    /// content, correct line base) and tell the model exactly where it is and
-    /// how to continue — preventing re-read loops.
+    /// composes `prefix\n{numbered-text}\nsuffix` for the model, prefixing
+    /// each line with its file line number (derived from `start_line`) so the
+    /// model can reference exact lines when targeting `offset` or composing
+    /// edits. Splitting the two audiences is what lets a paginated read both
+    /// render cleanly (pure content, correct line base) and tell the model
+    /// exactly where it is, what to target, and how to continue.
     Code {
         lang: Option<String>,
         text: String,
@@ -121,6 +123,23 @@ pub enum PatchOp {
     Delete,
 }
 
+/// Prefix each line of `text` with its 1-based file line number, derived from
+/// `start_line`. This is what the model sees in tool results — the line
+/// numbers let it reference exact lines when targeting `offset` in a
+/// follow-up read or composing an edit. `start_line == 0` falls back to
+/// 1-based numbering within the slice.
+fn number_code_lines(text: &str, start_line: usize) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let base = if start_line == 0 { 1 } else { start_line };
+    text.lines()
+        .enumerate()
+        .map(|(i, line)| format!("{}: {}", base + i, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl ToolOutput {
     /// Wrap a raw string as the back-compat [`ToolOutput::Text`] variant.
     pub fn text(s: impl Into<String>) -> Self {
@@ -154,13 +173,17 @@ impl ToolOutput {
                 text,
                 prefix,
                 suffix,
+                start_line,
                 ..
-            } => match (prefix, suffix) {
-                (Some(pre), Some(suf)) => format!("{}\n{}\n{}", pre, text, suf),
-                (Some(pre), None) => format!("{}\n{}", pre, text),
-                (None, Some(suf)) => format!("{}\n{}", text, suf),
-                (None, None) => text.clone(),
-            },
+            } => {
+                let numbered = number_code_lines(text, *start_line);
+                match (prefix, suffix) {
+                    (Some(pre), Some(suf)) => format!("{}\n{}\n{}", pre, numbered, suf),
+                    (Some(pre), None) => format!("{}\n{}", pre, numbered),
+                    (None, Some(suf)) => format!("{}\n{}", numbered, suf),
+                    (None, None) => numbered,
+                }
+            }
             ToolOutput::Listing { entries } => entries.join("\n"),
             ToolOutput::Matches { lines, .. } => lines.join("\n"),
             ToolOutput::Patch { path, op, new, .. } => match op {
@@ -392,15 +415,15 @@ mod tests {
             prefix: None,
             suffix: None,
         };
-        assert_eq!(o.to_text(), "fn main() {}");
+        assert_eq!(o.to_text(), "1: fn main() {}");
         assert!(!o.is_error());
     }
 
     #[test]
     fn code_start_line_round_trips_and_defaults_to_zero() {
-        // `start_line` is structural metadata for the renderer; it must not
-        // leak into `to_text()` (the model still sees bare content) and must
-        // survive cloning so an offset snippet keeps its line base.
+        // `start_line` drives per-line numbering in `to_text()` so the model
+        // can reference exact file lines. It must survive cloning so an offset
+        // snippet keeps its line base.
         let o = ToolOutput::Code {
             lang: None,
             text: "x".into(),
@@ -408,7 +431,7 @@ mod tests {
             prefix: None,
             suffix: None,
         };
-        assert_eq!(o.to_text(), "x");
+        assert_eq!(o.to_text(), "42: x");
         let cloned = o.clone();
         match cloned {
             ToolOutput::Code { start_line, .. } => assert_eq!(start_line, 42),
@@ -418,9 +441,10 @@ mod tests {
 
     #[test]
     fn code_prefix_suffix_frame_the_content_for_the_model() {
-        // The renderer draws `text`; the model sees framing composed around it.
-        // This split is what makes pagination loop-safe: the model gets a
-        // concrete continuation without polluting the rendered code block.
+        // The renderer draws `text`; the model sees framing composed around
+        // line-numbered content. This split is what makes pagination loop-safe:
+        // the model gets a concrete continuation without polluting the rendered
+        // code block.
         let with_both = ToolOutput::Code {
             lang: None,
             text: "body".into(),
@@ -430,7 +454,7 @@ mod tests {
         };
         assert_eq!(
             with_both.to_text(),
-            "[f: lines 100-100 of 5000]\nbody\n[4900 more lines — read with offset=101]"
+            "[f: lines 100-100 of 5000]\n100: body\n[4900 more lines — read with offset=101]"
         );
 
         let prefix_only = ToolOutput::Code {
@@ -440,7 +464,7 @@ mod tests {
             prefix: Some("[f: lines 100-105 of 105]".into()),
             suffix: None,
         };
-        assert_eq!(prefix_only.to_text(), "[f: lines 100-105 of 105]\nbody");
+        assert_eq!(prefix_only.to_text(), "[f: lines 100-105 of 105]\n100: body");
     }
 
     #[test]

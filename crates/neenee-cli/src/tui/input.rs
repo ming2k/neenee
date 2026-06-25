@@ -618,7 +618,6 @@ pub fn process_event(
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
-                    super::Modal::PlanPreview => InputAction::CloseModal,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -1170,7 +1169,6 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
-                    super::Modal::PlanPreview => InputAction::ScrollUp,
                     super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
@@ -1207,7 +1205,6 @@ pub fn process_event(
                         }
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
-                    super::Modal::PlanPreview => InputAction::ScrollDown,
                     super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
@@ -1409,7 +1406,7 @@ mod tests {
 
     #[test]
     fn enter_accepts_a_highlighted_slash_suggestion() {
-        // User typed `/m`, menu shows `/mcp` / `/plan` / `/provider`, user
+        // User typed `/m`, menu shows `/mcp` / `/model` / `/provider`, user
         // pressed ↓ to highlight `/mcp` (index 1). Enter must accept the
         // highlighted item rather than sending `/m` as a (rejected) command.
         let mut input = "/m".to_string();

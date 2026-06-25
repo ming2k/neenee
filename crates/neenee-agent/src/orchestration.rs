@@ -33,11 +33,11 @@ use tokio_util::sync::CancellationToken;
 use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
-    Message, Provider, ProviderStreamEvent, Pursuit, PursuitService, RepeatStore, Role, TurnEvent,
-    PURSUIT_COMPLETE_MARKER,
+    Message, Provider, ProviderStreamEvent, Pursuit, Role, TurnEvent, PURSUIT_COMPLETE_MARKER,
 };
 use neenee_store::{
     config::Config,
+    PursuitService, RepeatStore,
     session::{
         estimate_chars, estimate_tokens, run_compaction, ContextReliefCheckpoint,
         ContextReliefResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
@@ -814,18 +814,6 @@ pub async fn execute_turn(
             &session_id,
             TurnEvent::Text("Pursuit completed.".to_string()),
         ));
-    }
-
-    // Sync the agent's active plan path to the session so resume restores
-    // the "you are implementing X" hint. The value is compared against the
-    // session's current value to skip the write on turns where nothing
-    // changed (the common case).
-    let agent_plan = agent.active_plan_path();
-    let stored_plan = session.active_plan_path().await;
-    if agent_plan != stored_plan {
-        if let Err(err) = session.set_active_plan_path(agent_plan).await {
-            tracing::warn!(error = %err, "could not persist active plan path");
-        }
     }
 
     // Mirror the unified task list so resume restores the sticky panel. The

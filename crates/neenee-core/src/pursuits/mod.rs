@@ -1,13 +1,17 @@
-pub mod prompts;
-pub mod service;
-pub mod store;
-pub mod tools;
+//! Pursuit domain types (ADR-0005 pure-domain half).
+//!
+//! The persisted/I/O-bound layer — the `rusqlite`-backed `PursuitStore`, the
+//! `PursuitService` facade, and the pursuit tools — lives in
+//! `neenee_store::pursuits`. This module keeps only the domain shapes a
+//! frontend needs without pulling in SQLite: `Pursuit` (runtime view),
+//! `ThreadPursuit` (persisted view), `TokenUsage`, `TurnOutcome`, and the
+//! per-turn `TurnTimer`.
 
-pub use service::{PursuitService, TurnTimer};
-pub use store::PursuitStore;
+pub mod prompts;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// The persisted view of a thread/session pursuit.
 ///
@@ -55,4 +59,29 @@ pub struct TurnOutcome {
     pub message: crate::Message,
     pub token_usage: TokenUsage,
     pub duration_ms: u64,
+}
+
+/// Turn-level elapsed-time keeper. Kept after ADR-0010 even though
+/// pursuit-level time accounting is gone, because the harness still uses it
+/// for per-turn telemetry (e.g. plan-progress timestamps).
+pub struct TurnTimer {
+    start: Instant,
+}
+
+impl Default for TurnTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TurnTimer {
+    pub fn new() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+
+    pub fn elapsed_seconds(&self) -> i64 {
+        self.start.elapsed().as_secs() as i64
+    }
 }

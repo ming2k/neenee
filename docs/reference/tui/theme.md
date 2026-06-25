@@ -35,6 +35,12 @@ All colors are defined in `Theme::default()` (`crates/neenee-cli/src/tui/render/
 | `warning` | (181, 149, 93) | Warnings; context-usage indicator 70–90% |
 | `error_fg` | (190, 111, 104) | Failed tool status; context-usage indicator > 90% |
 
+## Modifiers
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `modal_dim_factor` | `0.5` | Brightness multiplier (0.0–1.0) applied to every cell of the live surface while a **Dim**-recess modal is open. The terminal cannot alpha-blend, so a dim-recess modal darkens the transcript/chrome in place by scaling each color by this factor — lower is darker. See [Modals](modals.md). |
+
 ## Background hierarchy
 
 ```text

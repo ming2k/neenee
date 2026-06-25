@@ -18,12 +18,10 @@ use neenee_agent::catalog;
 use neenee_agent::orchestration::send_harness_state;
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentRegistry};
-use neenee_core::{
-    AgentRequest, AgentResponse, McpConnectionStatus, Message, Provider, PursuitService,
-    RepeatStore, Tool,
-};
+use neenee_core::{AgentRequest, AgentResponse, McpConnectionStatus, Message, Provider, Tool};
 use neenee_store::{
-    config::Config, embedding, provider_usage::ProviderUsage, session::SessionStore,
+    PursuitService, RepeatStore, config::Config, embedding, provider_usage::ProviderUsage,
+    session::SessionStore,
 };
 use neenee_tools::commands::CustomCommand;
 

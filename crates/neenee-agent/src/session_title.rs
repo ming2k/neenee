@@ -195,11 +195,11 @@ mod tests {
             reply: reply.to_string(),
             last_messages: Mutex::new(Vec::new()),
         });
-        let store = neenee_core::PursuitStore::open_in_memory().await.unwrap();
+        let store = neenee_store::PursuitStore::open_in_memory().await.unwrap();
         let agent = Agent::new(
             provider.clone(),
             Vec::new(),
-            neenee_core::PursuitService::new(store),
+            neenee_store::PursuitService::new(store),
             crate::skills::SkillRegistry::empty(),
         );
         (agent, provider)

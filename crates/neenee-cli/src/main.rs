@@ -6,10 +6,10 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentTool};
 use neenee_core::{
-    AgentRequest, AgentResponse, Provider, PursuitService, PursuitStore, RepeatStore, TurnEvent,
-    CHARS_PER_TOKEN, EXPLORE,
+    AgentRequest, AgentResponse, Provider, TurnEvent, CHARS_PER_TOKEN, EXPLORE,
 };
 use neenee_store::{
+    PursuitService, PursuitStore, RepeatStore,
     config::Config,
     embedding, lock, paths, provider_usage,
     session::{self, SessionStore},
@@ -244,7 +244,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so it has no config to seed.) All default to sensible values when the
     // table is absent, so this is a no-op for the common case.
     agent.set_hard_stop_rounds(config.agent.hard_stop_rounds);
-    agent.set_verify_nudge_enabled(config.agent.verify_nudge_enabled);
     agent.set_loop_review_enabled(config.agent.loop_review_enabled);
 
     // Lifecycle event hooks (ADR-0025): each `[[hooks]]` entry runs a shell
@@ -262,14 +261,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
-
-    // Restore the active plan path from the persisted session so resume
-    // re-enters Build mode with the "you are implementing X" hint intact.
-    // If the session was in Plan mode when last saved this will be None
-    // (plan_enter clears it), so there is nothing to restore.
-    if let Some(plan_path) = session.active_plan_path().await {
-        agent.set_active_plan_path(Some(plan_path));
-    }
 
     // Restore the unified task list so resume re-shows the sticky panel with
     // the same items (and identity) the model last persisted. An empty list

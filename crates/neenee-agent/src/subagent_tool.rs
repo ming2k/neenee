@@ -89,9 +89,7 @@ pub struct SubagentTool {
 impl SubagentTool {
     /// `tools` should be the parent agent's full toolset; `profile` declares
     /// what the spawned subagent may actually use (admission + framing). The
-    /// caller binds the role explicitly — `&EXPLORE` for the `task` tool,
-    /// `&VERIFY` for the plan verifier — so the dispatch surface shows the
-    /// intended subagent shape rather than hiding a default.
+    /// caller binds the role explicitly — `&EXPLORE` for the `subagent` tool.
     pub fn new(
         provider: Arc<dyn neenee_core::Provider>,
         tools: Vec<Arc<dyn neenee_core::Tool>>,
@@ -254,8 +252,8 @@ impl SubagentTool {
         // admission. See ADR-0011.
         let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
 
-        let pursuit_service = neenee_core::PursuitService::new(
-            neenee_core::PursuitStore::open_in_memory()
+        let pursuit_service = neenee_store::PursuitService::new(
+            neenee_store::PursuitStore::open_in_memory()
                 .await
                 .map_err(|err| format!("failed to create subagent pursuit store: {err}"))?,
         );
@@ -293,7 +291,7 @@ impl SubagentTool {
         sub_agent.set_auto_approve(self.profile.auto_approve);
         // Resolve the bound profile's write grant (ADR-0028) against the
         // process cwd and set it on the child. All built-in profiles
-        // (EXPLORE/VERIFY/PLAN/REVIEW/TITLE: empty `write_paths`) resolve to
+        // (EXPLORE/REVIEW/TITLE: empty `write_paths`) resolve to
         // `WriteScope::None`, consistent with their admission (no write tools
         // admitted anyway). The `INTERACTIVE` role carries an unrestricted
         // scope via its `Write` ceiling.
@@ -562,14 +560,12 @@ mod tests {
 
     /// Cross-cut regression for ADR-0012: the real `bash` tool is now
     /// `Execute`, so `EXPLORE` (Read ceiling) excludes it — an explorer must
-    /// not run commands — while `VERIFY` (Execute ceiling) admits it so an
-    /// independent plan verifier can run tests/builds/type-checks. `VERIFY`
-    /// still drops the same dangerous trio (`ask_user`, write, recursion).
+    /// not run commands. `EXPLORE` still drops the same dangerous trio
+    /// (`ask_user`, write, recursion).
     #[test]
-    fn verify_profile_admits_real_bash_but_not_writes_user_or_recursion() {
-        use neenee_core::VERIFY;
+    fn explore_profile_excludes_bash_writes_user_and_recursion() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
-        let subagent_tool = SubagentTool::new(provider.clone(), Vec::new(), &VERIFY);
+        let subagent_tool = SubagentTool::new(provider.clone(), Vec::new(), &EXPLORE);
 
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
             std::sync::Arc::new(EchoReadTool),
@@ -584,10 +580,5 @@ mod tests {
         let explore_selected = EXPLORE.select_tools(&tools);
         let explore_names: Vec<&str> = explore_selected.iter().map(|t| t.name()).collect();
         assert_eq!(explore_names, vec!["echo_read"]);
-
-        // VERIFY: read + bash admitted; write / ask_user / task excluded.
-        let verify_selected = VERIFY.select_tools(&tools);
-        let verify_names: Vec<&str> = verify_selected.iter().map(|t| t.name()).collect();
-        assert_eq!(verify_names, vec!["echo_read", "bash"]);
     }
 }

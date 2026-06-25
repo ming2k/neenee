@@ -16,10 +16,8 @@ impl Tool for BashTool {
     }
     /// `bash` runs commands — its primary purpose is execution, not workspace
     /// mutation — so it sits in the `Execute` tier between pure reads and
-    /// file-writing tools. The broker still gates it (`Execute > Read`), and
-    /// it is the tier the `VERIFY` subagent profile admits so an independent
-    /// verifier can run tests/builds/type-checks without gaining file-write
-    /// capability. See ADR-0012.
+    /// file-writing tools. The broker still gates it (`Execute > Read`). See
+    /// ADR-0012.
     fn access(&self) -> ToolAccess {
         ToolAccess::Execute
     }
