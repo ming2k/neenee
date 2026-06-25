@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
-use neenee_core::repeat::{DEFAULT_MAX_AGE_DAYS, RepeatJob};
+use neenee_core::repeat::{RepeatJob, DEFAULT_MAX_AGE_DAYS};
 
 const SCHEMA: &str = r#"
                 CREATE TABLE IF NOT EXISTS repeat_jobs (

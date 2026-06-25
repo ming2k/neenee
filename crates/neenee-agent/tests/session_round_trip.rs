@@ -21,7 +21,7 @@ use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
 use neenee_core::Role;
 use neenee_providers::MockProvider;
-use neenee_store::{session::SessionStore, PursuitService, PursuitStore};
+use neenee_store::session::SessionStore;
 
 /// Concatenation of the chunks emitted by `MockProvider::stream_chat`. Kept
 /// here rather than imported so a change to the mock's payload shows up as a
@@ -36,13 +36,9 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     ));
     let session_path = directory.join("session.json");
     let session = Arc::new(SessionStore::for_path(session_path.clone()));
-    let pursuit_service = PursuitService::new(
-        PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
-    );
     let agent = Arc::new(Agent::new(
         Arc::new(MockProvider),
         Vec::new(),
-        pursuit_service.clone(),
         SkillRegistry::empty(),
     ));
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -56,7 +52,6 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             token: CancellationToken::new(),
             session: session.clone(),
             session_id: session.id().await,
-            pursuit_service,
             compaction: CompactionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,

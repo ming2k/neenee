@@ -37,11 +37,11 @@ use neenee_core::{
 };
 use neenee_store::{
     config::Config,
-    PursuitService, RepeatStore,
     session::{
         estimate_chars, estimate_tokens, run_compaction, ContextReliefCheckpoint,
         ContextReliefResult, PursuitCheckpoint, SessionStore, UNCAPPED_ITERATIONS,
     },
+    RepeatStore,
 };
 
 /// Wrap a session-scoped [`TurnEvent`] in the [`AgentResponse::Turn`]
@@ -423,22 +423,16 @@ pub fn send_harness_state(
     ));
 }
 
-pub async fn refresh_agent_pursuit(
-    agent: &Agent,
-    pursuit_service: &PursuitService,
-    thread_id: &str,
-) -> Option<Pursuit> {
-    match pursuit_service.get_pursuit(thread_id).await {
-        Ok(Some(db_pursuit)) => {
-            let pursuit = db_pursuit;
+pub async fn refresh_agent_pursuit(agent: &Agent, session: &SessionStore) -> Option<Pursuit> {
+    match session.pursuit().await {
+        Some(pursuit) => {
             agent.set_pursuit(pursuit.clone());
             Some(pursuit)
         }
-        Ok(None) => {
+        None => {
             agent.clear_pursuit();
             None
         }
-        Err(_) => agent.get_pursuit(),
     }
 }
 
@@ -460,7 +454,6 @@ pub struct TurnContext {
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
     /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
-    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
@@ -486,7 +479,6 @@ pub struct InteractiveTurnContext {
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
     /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
-    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
@@ -516,7 +508,6 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                 token: token.clone(),
                 session: context.session,
                 session_id: context.session_id.clone(),
-                pursuit_service: context.pursuit_service,
                 compaction: context.compaction,
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,
@@ -561,7 +552,6 @@ pub async fn execute_turn(
         token,
         session,
         session_id,
-        pursuit_service,
         compaction,
         retry_max_attempts,
         retry_base_ms,
@@ -597,7 +587,6 @@ pub async fn execute_turn(
     }
 
     let admitted_session_id = session.id().await;
-    let thread_id = admitted_session_id.clone();
     let mut turn_history = {
         let mut history = history.lock().await;
         history.push(if input.hidden {
@@ -771,7 +760,7 @@ pub async fn execute_turn(
     let requested_completion = outcome.message.content.contains(PURSUIT_COMPLETE_MARKER);
     let mut completed = false;
     if requested_completion && agent.pursuit_can_complete() {
-        match pursuit_service.mark_complete(&thread_id).await {
+        match session.mark_pursuit_complete().await {
             Ok(Some(pursuit)) => {
                 agent.set_pursuit(pursuit.clone());
                 emit_pursuit_updated(&tx, &session_id, &pursuit);
@@ -1042,7 +1031,6 @@ pub struct PursuitContext {
     pub session: Arc<SessionStore>,
     /// Session id this pursuit belongs to (ADR-0017).
     pub session_id: String,
-    pub pursuit_service: PursuitService,
     pub compaction: CompactionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
@@ -1107,7 +1095,6 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                 token: token.clone(),
                 session: context.session.clone(),
                 session_id: context.session_id.clone(),
-                pursuit_service: context.pursuit_service.clone(),
                 compaction: context.compaction.clone(),
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,

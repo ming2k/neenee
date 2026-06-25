@@ -1749,7 +1749,9 @@ mod tests {
             r#"{"description":"write the plan","prompt":"..."}"#,
         );
         assert_eq!(task.subagent_label(), "write the plan");
-        assert!(task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore" }));
+        assert!(
+            task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore" })
+        );
         assert_eq!(task.subagent_label(), "explore · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.
         let header = task.tool_step_summary().expect("summary");

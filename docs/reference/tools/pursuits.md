@@ -1,45 +1,52 @@
-# Pursuit tools
+# Pursuit interface
 
-`get_pursuit`, `start_pursuit`, and `complete_pursuit` are force-injected by `Agent::new`
-from `crates/neenee-core/src/pursuits/tools.rs` (any externally supplied copies
-are stripped first). They share a `PursuitToolContext` carrying the session/thread
-id and the `PursuitService`, which persists pursuit state in SQLite.
+A pursuit is a durable, per-session objective: `{ objective, is_complete }`
+persisted as a field on `SessionData` via `SessionStore` (ADR-0032) — not a
+separate database. There is no status machine, no token/time budget, and no
+checklist (ADR-0010). The lifecycle is driven by three mechanisms owned by
+three distinct roles — there are no model-facing pursuit tools (ADR-0031):
 
-`get_pursuit` is `Read` and bypasses the permission broker; `start_pursuit` and
-`complete_pursuit` are `Write`. Both `Write` tools override `permission_label` and
-`permission_description` so the prompt header reads `Create pursuit` /
-`Update pursuit` and the body describes the effect of the call rather than the
-model-facing instructions encoded in `Tool::description`.
+| Role | Responsibility | Mechanism |
+|------|----------------|-----------|
+| **User** | Set the condition (entry) | `/pursue <condition>` slash command |
+| **Harness** | Drive + gate (continuation) | stop-gate re-injects the condition each round |
+| **Model** | Signal completion (exit) | `[NEENEE_PURSUIT_COMPLETE]` marker |
 
-A pursuit is `{ objective, is_complete }` — there is no status machine and no
-checklist. The `/pursue` stop-gate (not a tool) drives the agent toward the
-objective; these tools only read/set/complete it. See
+## Entry: `/pursue <condition>`
+
+A slash command (`crates/neenee-cli/src/handlers/slash.rs`), not a tool. It
+persists the condition via `SessionStore::set_pursuit`, arms the stop-gate on
+the agent, and drives one turn via `orchestration::start_pursuit`. The model
+cannot start a pursuit on its own — by architecture, not by prompt constraint.
+
+## Continuation: the stop-gate
+
+`/pursue` arms a stop-gate on the `Agent`. At each turn-loop exit, if a pursuit
+is armed, an active (incomplete) pursuit exists, the latest response did not
+signal completion, and the 50-round safety cap (`MAX_PURSUIT_ITERATIONS`) is not
+exhausted, the gate re-injects the condition as a hidden user message and forces
+another round instead of returning. See
 [Pursuits and the pursue stop-gate](../../explanation/agent-design/pursuits.md).
 
-### `get_pursuit`
+## Exit: `[NEENEE_PURSUIT_COMPLETE]`
 
-No parameters. Returns the current pursuit as JSON — objective and completion
-flag — or `{"pursuit": null}` when none is set.
+The sole completion signal. The working model emits the
+`[NEENEE_PURSUIT_COMPLETE]` marker in an assistant message; the gate sees it and
+lets the turn end; orchestration finalizes by calling
+`session.mark_pursuit_complete()`. The marker is always stripped from visible
+output — it is a control signal, not prose. There is no `complete_pursuit` tool;
+the marker is the single path. (`/pursue done` remains the user-driven
+completion slash command.)
 
-### `start_pursuit`
+## See also
 
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `objective` | string | yes | The objective to start pursuing |
-
-Starts a new active pursuit (replaces any existing one). The model is instructed
-to call this only when the user or developer instructions explicitly ask for a
-pursuit, never inferred from an ordinary task.
-
-### `complete_pursuit`
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| `status` | enum | yes | `complete` |
-
-Marks the active pursuit `complete` (objective achieved, no work remaining). This
-is the tool-based completion path; the `[NEENEE_PURSUIT_COMPLETE]` marker is the
-in-turn path a running `/pursue` uses.
-
-See [Pursuits and the pursue stop-gate](../../explanation/agent-design/pursuits.md)
-for the pursuit primitive.
+- [Pursuits and the pursue stop-gate](../../explanation/agent-design/pursuits.md)
+  — the primitive, the stop-gate mechanism, and the `/repeat` comparison
+- [ADR-0010](../../../adr/0010-slim-goal-primitive.md) — slimmed the pursuit
+  primitive
+- [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — introduced
+  the stop-gate and the marker
+- [ADR-0031](../../../adr/0031-pursuit-tools-removed.md) — removed the
+  model-facing pursuit tools
+- [ADR-0032](../../../adr/0032-fold-pursuit-into-session-store.md) — folded
+  pursuit persistence into `SessionStore`

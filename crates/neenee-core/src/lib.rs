@@ -6,11 +6,12 @@
 //!
 //! This crate is **pure domain, zero I/O** (ADR-0005): no `rusqlite`, no
 //! filesystem, no network. Persistence-backed types that once lived here
-//! (`PursuitService`/`PursuitStore`, `RepeatStore`, the SQLite migrations)
-//! moved to `neenee-store`; this crate keeps only the domain shapes
+//! (`RepeatStore`, the SQLite migrations) moved to `neenee-store`; this
+//! crate keeps only the domain shapes
 //! (`Pursuit`, `ThreadPursuit`, `RepeatJob`, `TodoList`, …) and the traits
 //! (`Provider`, `Tool`, `Hook`, `SessionReview`, `ContextReliefGate`) the
-//! rest of the stack is built on.
+//! rest of the stack is built on. Pursuit persistence moved onto
+//! `SessionStore` (`SessionData.pursuit`) in ADR-0032.
 
 pub use async_trait::async_trait;
 
@@ -42,10 +43,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod model;
 pub mod todos;
-pub use todos::{
-    TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext, TodoUpdateTool, TodoWriteTool,
-    MAX_TODOS, TODO_STALE_TURN_THRESHOLD,
-};
+pub use todos::{TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext, MAX_TODOS};
 pub mod pressure;
 pub mod session_review;
 pub mod session_title;
@@ -74,9 +72,7 @@ pub use pressure::{
 pub use session_review::{ReviewStatus, ReviewVerdict, SessionReview, DEFAULT_REVIEWER_HARD_STOP};
 pub use session_title::{clean_title, TITLE_MAX_LEN};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{
-    SubagentProfile, ToolPolicy, EXPLORE, INTERACTIVE, REVIEW, TITLE,
-};
+pub use subagent::{SubagentProfile, ToolPolicy, EXPLORE, INTERACTIVE, REVIEW, TITLE};
 pub use tool_output::truncate_utf8;
 pub use tool_registry::{collect_tools, ToolContext, ToolContextBuilder, ToolFactory};
 pub use webconfig::WebSearchConfig;

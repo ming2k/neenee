@@ -252,15 +252,9 @@ impl SubagentTool {
         // admission. See ADR-0011.
         let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
 
-        let pursuit_service = neenee_store::PursuitService::new(
-            neenee_store::PursuitStore::open_in_memory()
-                .await
-                .map_err(|err| format!("failed to create subagent pursuit store: {err}"))?,
-        );
         let sub_agent = Arc::new(Agent::new(
             self.provider.clone(),
             sub_tools,
-            pursuit_service,
             SkillRegistry::empty(),
         ));
         // ADR-0016/0030: a `task` sub-agent has no `/review` path and must not

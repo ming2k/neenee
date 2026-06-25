@@ -13,7 +13,7 @@ use crate::blobs::BlobStore;
 use crate::events::{EventLog, SessionEvent};
 use crate::fsutil;
 use crate::paths;
-use neenee_core::{Message, Provider, Role};
+use neenee_core::{Message, Provider, Pursuit, Role};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,11 +25,10 @@ use tokio::sync::Mutex;
 // `session::estimate_chars` / `session::estimate_tokens`.
 pub use neenee_core::{estimate_chars, estimate_tokens};
 
-/// C2 (ADR-0022): added `title` and `title_manual`. A structural no-op for
-/// legacy snapshots, which load with `title = None` / `title_manual = false`
-/// via `#[serde(default)]` and render through the unchanged first-user-message
-/// fallback until they gain a title.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// C2 (ADR-0022): added `title` and `title_manual`. C3 (ADR-0032): added
+/// `pursuit`. Both are structural no-ops for legacy snapshots, which load with
+/// the new fields at their `#[serde(default)]` values (`None` / `false`).
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Sentinel value for `PursuitCheckpoint::max_iterations` indicating an uncapped
 /// run. `/pursue` runs until the model emits the completion marker, the user
@@ -76,8 +75,7 @@ struct SessionData {
     /// field default to the current cwd.
     project_root: PathBuf,
     /// Unified task list, mirrored from `Agent::todos`. The single source of
-    /// truth for "what is left to do" — a plan approved by `plan_exit` seeds
-    /// this list (one `Pending` item per `##` heading). An empty list means
+    /// truth for "what is left to do." An empty list means
     /// no active task list. `#[serde(default)]` so legacy snapshots load as
     /// an empty list with no migration.
     #[serde(default)]
@@ -99,6 +97,14 @@ struct SessionData {
     /// `false` for legacy snapshots and AI-generated titles.
     #[serde(default)]
     title_manual: bool,
+    /// The durable per-session pursuit (ADR-0032). `None` means no pursuit is
+    /// set. Mirrors the runtime [`neenee_core::Pursuit`] carried by
+    /// [`crate::pursuit_state::PursuitState`] (the in-memory stop-gate view);
+    /// this field is the durable authority read on resume and written by the
+    /// `/pursue` slash command and the harness completion path. `#[serde(default)]`
+    /// so legacy snapshots load with `pursuit = None` and no migration is needed.
+    #[serde(default)]
+    pursuit: Option<Pursuit>,
 }
 
 impl Default for SessionData {
@@ -119,6 +125,7 @@ impl Default for SessionData {
             checksum: None,
             title: None,
             title_manual: false,
+            pursuit: None,
         }
     }
 }
@@ -140,6 +147,9 @@ fn migrate_session_data(mut data: SessionData) -> SessionData {
     // C2 (ADR-0022): title fields were added with `#[serde(default)]`, so a
     // legacy snapshot already loads with `title = None` / `title_manual =
     // false`; no payload transformation is needed, only the version bump.
+    // C3 (ADR-0032): `pursuit` was added with `#[serde(default)]`, so a legacy
+    // snapshot already loads with `pursuit = None`; no payload transformation
+    // is needed, only the version bump.
     data.schema_version = CURRENT_SCHEMA_VERSION;
     data
 }
@@ -302,6 +312,9 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.title = title.clone();
                 data.title_manual = *manual;
             }
+            SessionEvent::PursuitSet { pursuit } => {
+                data.pursuit = pursuit.clone();
+            }
             SessionEvent::Reset { id } => {
                 let project_root = data.project_root.clone();
                 let schema_version = data.schema_version;
@@ -314,6 +327,10 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.id = id.clone();
                 data.parent_id = Some(parent_id.clone());
                 data.loop_checkpoint = None;
+                // A forked side session starts without the parent's pursuit
+                // (ADR-0032). The old per-thread store keyed by session id, so
+                // a fresh id had no pursuit row; the session field mirrors that.
+                data.pursuit = None;
             }
         }
         data.updated_at = envelope.timestamp;
@@ -386,6 +403,15 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             event: SessionEvent::TitleSet {
                 title: data.title.clone(),
                 manual: data.title_manual,
+            },
+        });
+    }
+    if let Some(pursuit) = &data.pursuit {
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::PursuitSet {
+                pursuit: Some(pursuit.clone()),
             },
         });
     }
@@ -609,6 +635,67 @@ impl SessionStore {
 
     pub async fn parent_id(&self) -> Option<String> {
         self.state.lock().await.data.parent_id.clone()
+    }
+
+    /// The durable per-session pursuit (ADR-0032). `None` means no pursuit is
+    /// set. Read on resume to seed the agent's runtime `PursuitState` and by
+    /// `/pursue status` / `/pursue` (empty, re-arm).
+    pub async fn pursuit(&self) -> Option<Pursuit> {
+        self.state.lock().await.data.pursuit.clone()
+    }
+
+    /// Replace the pursuit (or clear it with `None`). Persists both the
+    /// snapshot and the event log so resume restores the same pursuit. The
+    /// single write path for the pursuit primitive; `mark_pursuit_complete`
+    /// and `update_pursuit_objective` delegate here.
+    pub async fn set_pursuit(&self, pursuit: Option<Pursuit>) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        state.data.pursuit = pursuit.clone();
+        state.data.updated_at = unix_timestamp();
+        ensure_event_log_started(&state.event_log, &state.data)?;
+        state
+            .event_log
+            .append(SessionEvent::PursuitSet { pursuit })?;
+        self.persist_locked(&state)
+    }
+
+    /// Flip `is_complete = true` on the current pursuit, if any. Returns the
+    /// updated pursuit, or `None` if no pursuit was set. Called by the harness
+    /// completion path after the model emits `[NEENEE_PURSUIT_COMPLETE]` and by
+    /// the `/pursue done` slash command.
+    pub async fn mark_pursuit_complete(&self) -> Result<Option<Pursuit>, String> {
+        let current = self.pursuit().await;
+        if let Some(mut pursuit) = current {
+            pursuit.is_complete = true;
+            self.set_pursuit(Some(pursuit.clone())).await?;
+            Ok(Some(pursuit))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Rewrite the objective on the current pursuit, if any. Returns the
+    /// updated pursuit, or `None` if no pursuit was set. Called by the
+    /// `/pursue edit` slash command.
+    pub async fn update_pursuit_objective(
+        &self,
+        objective: &str,
+    ) -> Result<Option<Pursuit>, String> {
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return Err("pursuit objective must not be empty".to_string());
+        }
+        if objective.chars().count() > 4000 {
+            return Err("pursuit objective must be at most 4000 characters".to_string());
+        }
+        let current = self.pursuit().await;
+        if let Some(mut pursuit) = current {
+            pursuit.objective = objective.to_string();
+            self.set_pursuit(Some(pursuit.clone())).await?;
+            Ok(Some(pursuit))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn replace_messages(&self, messages: Vec<Message>) -> Result<(), String> {
@@ -2332,12 +2419,17 @@ mod tests {
         let store = SessionStore::for_path(path.clone());
         assert!(store.todos().await.is_empty());
 
-        // Seed via the domain API and persist.
+        // Seed via reconcile and persist.
         let mut list = neenee_core::TodoList::new();
-        list.updated_at_turn = 3;
-        list.add("Summary".to_string(), 1000, 3).unwrap();
-        list.add("Key Changes".to_string(), 1000, 3).unwrap();
-        list.add("Test Plan".to_string(), 1000, 3).unwrap();
+        list.reconcile(
+            &[
+                ("Summary".to_string(), neenee_core::TodoStatus::Pending),
+                ("Key Changes".to_string(), neenee_core::TodoStatus::Pending),
+                ("Test Plan".to_string(), neenee_core::TodoStatus::Pending),
+            ],
+            1000,
+            3,
+        );
         store.set_todos(list.clone()).await.unwrap();
 
         // Mutate (mark progress) and persist again — identity must survive.

@@ -20,8 +20,7 @@ use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentRegistry};
 use neenee_core::{AgentRequest, AgentResponse, McpConnectionStatus, Message, Provider, Tool};
 use neenee_store::{
-    PursuitService, RepeatStore, config::Config, embedding, provider_usage::ProviderUsage,
-    session::SessionStore,
+    config::Config, embedding, provider_usage::ProviderUsage, session::SessionStore, RepeatStore,
 };
 use neenee_tools::commands::CustomCommand;
 
@@ -79,8 +78,6 @@ pub(crate) struct Harness {
     pub embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>>,
     /// Durable store for `/repeat` cron jobs (`repeat_store_for_commands`).
     pub repeat_store: RepeatStore,
-    /// Pursuit persistence service.
-    pub pursuit_service: PursuitService,
     /// Primary turn cancellation slot (`ctt_clone` in the old code).
     pub current_task_token: Arc<AsyncRwLock<Option<CancellationToken>>>,
     /// Primary turn generation counter (`generation_clone` in the old code).
@@ -129,7 +126,6 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,
         repeat_store: repeat_store_for_commands,
-        pursuit_service,
         current_task_token: ctt_clone,
         task_generation: generation_clone,
         side,
@@ -293,7 +289,6 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                     &active_view_side,
                     &base_tools_for_side,
                     &provider_for_task,
-                    &pursuit_service,
                     skills_registry.clone(),
                     &skills_registry_for_commands,
                     &mcp_statuses,
@@ -316,7 +311,6 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                     &ctt_clone,
                     &generation_clone,
                     &resp_tx,
-                    pursuit_service.clone(),
                     &config,
                     text,
                     images,

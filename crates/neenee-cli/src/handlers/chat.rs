@@ -9,7 +9,6 @@
 use neenee_agent::orchestration::TurnInput;
 use neenee_agent::Agent;
 use neenee_core::{AgentResponse, Message};
-use neenee_store::PursuitService;
 use neenee_store::{config::Config, session::SessionStore};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
@@ -31,7 +30,6 @@ pub(crate) async fn chat(
     ctt_clone: &Arc<AsyncRwLock<Option<CancellationToken>>>,
     generation_clone: &Arc<AtomicU64>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
-    pursuit_service: PursuitService,
     config: &Config,
     text: String,
     images: Vec<neenee_core::ImagePart>,
@@ -45,7 +43,6 @@ pub(crate) async fn chat(
         ctt_clone,
         generation_clone,
         resp_tx,
-        pursuit_service,
         config,
         TurnInput {
             prompt: text,

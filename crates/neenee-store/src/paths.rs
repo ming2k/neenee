@@ -108,7 +108,8 @@ impl Dirs {
         self.data_dir.join("sessions")
     }
 
-    /// SQLite pursuit database, keyed by session id (thread id).
+    /// Legacy SQLite pursuit database (pre-ADR-0032). Kept so the one-shot
+    /// migration in `main.rs` can read old rows; no new code writes here.
     pub fn pursuits_db(&self) -> PathBuf {
         self.data_dir.join("pursuits.db")
     }

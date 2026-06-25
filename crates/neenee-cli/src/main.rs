@@ -5,14 +5,12 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentTool};
-use neenee_core::{
-    AgentRequest, AgentResponse, Provider, TurnEvent, CHARS_PER_TOKEN, EXPLORE,
-};
+use neenee_core::{AgentRequest, AgentResponse, Provider, TurnEvent, CHARS_PER_TOKEN, EXPLORE};
 use neenee_store::{
-    PursuitService, PursuitStore, RepeatStore,
     config::Config,
     embedding, lock, paths, provider_usage,
     session::{self, SessionStore},
+    RepeatStore,
 };
 use neenee_tools::commands::{discover_commands, CustomCommand};
 use neenee_tools::mcp::load_mcp_tools;
@@ -74,8 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let config = Config::load();
-    let pursuit_store = PursuitStore::open(paths::get().pursuits_db()).await?;
-    let pursuit_service = PursuitService::new(pursuit_store);
 
     // Durable store for `/repeat` cron jobs. Opened once; cloned for the
     // command handler and the background scheduler.
@@ -204,7 +200,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = Arc::new(Agent::new(
         agent_provider,
         tools,
-        pursuit_service.clone(),
         (*skills_registry).clone(),
     ));
     // Wire the per-project "always allow" allowlist so prior `Always`
@@ -250,17 +245,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // command at one lifecycle point (PreToolUse / PostToolUse / Stop / …).
     agent.set_hooks(hooks::build_hook_registry(&config.hooks));
 
-    // Tie the agent and its pursuit persistence to this session/thread.
+    // Tie the agent to this session/thread and restore the durable pursuit.
+    // ADR-0032: pursuit now lives on `SessionData` (via `SessionStore`), not a
+    // separate SQLite db. Two legacy sources are folded in once on startup:
+    //   1. pre-ADR-0032 `pursuits.db` (keyed by session id) — best-effort.
+    //   2. pre-ADR-0010 config-file `harness_goal*` keys — best-effort.
+    // If the session already has a pursuit (e.g. resuming a post-0032 session),
+    // both legacy sources are skipped.
     let thread_id = session.id().await;
     agent.set_thread_id(&thread_id);
-    if pursuit_service.get_pursuit(&thread_id).await?.is_none() {
-        if let Some(pursuit) = load_legacy_pursuit_from_config() {
-            let _ = pursuit_service
-                .set_pursuit(&thread_id, &pursuit.objective)
-                .await;
+    if session.pursuit().await.is_none() {
+        let legacy_db = paths::get().pursuits_db();
+        if let Some(pursuit) =
+            neenee_store::legacy_pursuit::read_legacy_pursuit(&legacy_db, &thread_id)
+        {
+            let _ = session.set_pursuit(Some(pursuit)).await;
+        } else if let Some(pursuit) = load_legacy_pursuit_from_config() {
+            let _ = session.set_pursuit(Some(pursuit)).await;
         }
     }
-    refresh_agent_pursuit(&agent, &pursuit_service, &thread_id).await;
+    refresh_agent_pursuit(&agent, &session).await;
 
     // Restore the unified task list so resume re-shows the sticky panel with
     // the same items (and identity) the model last persisted. An empty list
@@ -322,7 +326,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,
         repeat_store: repeat_store_for_commands,
-        pursuit_service,
         current_task_token: ctt_clone,
         task_generation: generation_clone,
         side,

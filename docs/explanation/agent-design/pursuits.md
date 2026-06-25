@@ -41,22 +41,25 @@ A pursuit is two things:
 | **Objective** | The condition to pursue — a durable statement of the end state |
 | **`is_complete`** | A single boolean mirroring the persisted column |
 
-Both persist to SQLite (`data_dir/pursuits.db`).
+Both persist as a field on `SessionData` (`crates/neenee-store/src/session.rs`),
+the event-sourced per-session store (ADR-0032). Pursuit is `Option<Pursuit>`
+written via `SessionEvent::PursuitSet`; it survives restarts and `/resume`
+because the session snapshot + event log is the single durable authority.
 
-## Pursuit tools
+## Pursuit interface
 
-Three tools are layered onto every agent so they share the live pursuit cell.
-Parameter schemas live in [Built-in tools](../../reference/tools/index.md).
+The pursuit lifecycle has three phases, each owned by one role. There are no
+model-facing pursuit tools (ADR-0031): the entry, continuation, and exit are
+mechanisms, not tool calls.
 
-| Tool | Access | Purpose |
-|------|--------|---------|
-| `get_pursuit` | Read | Reads the current pursuit as JSON |
-| `start_pursuit` | Write | Starts a new active pursuit (replaces any existing one) |
-| `complete_pursuit` | Write | Marks the pursuit complete |
+| Role | Responsibility | Mechanism |
+|------|----------------|-----------|
+| **User** | Set the condition (entry) | `/pursue <condition>` slash command |
+| **Harness** | Drive + gate (continuation) | stop-gate re-injects the condition each round |
+| **Model** | Signal completion (exit) | `[NEENEE_PURSUIT_COMPLETE]` marker |
 
-`start_pursuit` and `complete_pursuit` are Write tools and pass through the
-permission broker; `get_pursuit` is a Read tool and bypasses it. `complete_pursuit`
-accepts only `complete`.
+The active `objective` is surfaced in the system prompt each turn for
+visibility, but the system prompt no longer advertises any pursuit tools.
 
 ## The pursue stop-gate
 
@@ -97,15 +100,9 @@ working model itself signals completion — by emitting the
 *gates*, the model *signals*). This matches Claude Code's stop-hook `/pursuit`,
 avoids a model call per stop, and keeps the decision deterministic.
 
-The two completion paths both call the same persistence routine:
-
-| Path | Form | Typical use |
-|------|------|-------------|
-| `[NEENEE_PURSUIT_COMPLETE]` marker | Plain text in the assistant message | A running pursuit |
-| `complete_pursuit(complete)` tool | A tool call through the permission broker | Interactive turns |
-
-The marker is always stripped from visible output — it is a control signal,
-not prose.
+The marker is the sole completion path. It is always stripped from visible
+output — it is a control signal, not prose. (`/pursue done` remains the
+user-driven completion slash command for interactive turns.)
 
 ### Safety cap
 
@@ -136,14 +133,17 @@ for the command surface.
 
 ## Persistence
 
-The pursuit store is one SQLite table keyed by `thread_id` (the active session
-id), so resuming the same session restores the same pursuit — there is no
-separate "pursuit resume" step. The legacy `token_budget`, `tokens_used`, and
-`time_used_seconds` columns remain for backward compatibility with pre-0010
-databases but are no longer read or written.
+The pursuit lives as a `pursuit: Option<Pursuit>` field on `SessionData`
+(ADR-0032), the event-sourced per-session store. Resuming the same session
+restores the same pursuit — there is no separate "pursuit resume" step and no
+separate database; pursuit, todos, title, and checkpoints all share one
+session file (`<id>.json` snapshot + `<id>.jsonl` event log).
 
-On startup, if no thread-scoped pursuit exists, a one-time migration imports any
-legacy pursuit from the old config keys. That migration is one-way.
+On startup, a one-time best-effort migration reads the legacy `pursuits.db`
+(pre-ADR-0032) and the pre-ADR-0010 config-file `harness_goal*` keys and folds
+either into `SessionData.pursuit` if the session does not already have one.
+The old `pursuits.db` is left on disk but never read again after the first
+successful migration.
 
 A `PursuitCheckpoint` is written while a pursuit runs (status
 running/completed/interrupted/error) so `/session status` can report it, but a
@@ -155,10 +155,14 @@ multi-turn loop.
 - [Harness architecture](harness.md) — the control plane, the stop-gate's
   place beside the verify-nudge gate, and how completion interleaves with
   retry and cancellation
-- [Built-in tools](../../reference/tools/index.md) — `get_pursuit`, `start_pursuit`,
-  `complete_pursuit` parameter schemas
+- [Built-in tools](../../reference/tools/index.md) — the pursuit interface has
+  no model-facing tools; see [pursuits](../../reference/tools/pursuits.md)
 - [Slash commands](../../reference/commands.md) — `/pursue` and `/repeat`
 - [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — the
   decision to replace `/goal` + `/loop` with the stop-gate + cron scheduler
 - [ADR-0010](../../../adr/0010-slim-goal-primitive.md) — slimming the pursuit
   primitive
+- [ADR-0031](../../../adr/0031-pursuit-tools-removed.md) — removing the
+  model-facing pursuit tools
+- [ADR-0032](../../../adr/0032-fold-pursuit-into-session-store.md) — folding
+  pursuit persistence into `SessionStore`

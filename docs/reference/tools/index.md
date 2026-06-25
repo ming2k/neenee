@@ -1,8 +1,7 @@
 # Built-in tools
 
 The neenee agent exposes a fixed set of built-in tools to the model on every
-turn. MCP server tools and the synthetic pursuit tools (`get_pursuit`, `start_pursuit`,
-`complete_pursuit`) are appended at runtime. This is the lookup
+turn. MCP server tools are appended at runtime. This is the lookup
 surface — one page per tool category. For how tools are gated (access tiers,
 capability axes, the permission broker), see [Tool access](access.md).
 
@@ -13,14 +12,15 @@ live in `neenee-agent`. The `Tool` trait is defined in
 ## Registry
 
 Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::new`
-strips any externally supplied `get_pursuit`, `start_pursuit`, and
-`complete_pursuit`, then appends its own pursuit tools from
-`crates/neenee-core/src/pursuits/tools.rs`, the `plan` + `verify_plan_execution`
-tools from `crates/neenee-agent`, and the `todo` / `todo_update` tools, so they
-share the agent's live state. The plan and todo tools share one todo-list cell,
-so a plan approved via `plan` seeds the same list the model edits with `todo`.
-`SubagentTool` is pushed last so it can capture a snapshot of the assembled
-toolset.
+appends the `plan` + `verify_plan_execution` tools from `crates/neenee-agent`, and
+the `todo` / `todo_update` tools, so they share the agent's live state. The plan
+and todo tools share one todo-list cell, so a plan approved via `plan` seeds the
+same list the model edits with `todo`. `SubagentTool` is pushed last so it can
+capture a snapshot of the assembled toolset.
+
+The pursuit lifecycle has no model-facing tools: `/pursue` (entry, user), the
+stop-gate (continuation, harness), and `[NEENEE_PURSUIT_COMPLETE]` (exit, model)
+own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 
 | Tool | Access | Permission scope | Reference page |
 |------|--------|------------------|----------------|
@@ -36,9 +36,6 @@ toolset.
 | `todo_update` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |
 | `websearch` | `Read` | `*` | [web](web.md) |
-| `get_pursuit` | `Read` | `*` | [pursuits](pursuits.md) |
-| `start_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
-| `complete_pursuit` | `Write` | `*` | [pursuits](pursuits.md) |
 | `plan` | `Read` (spawns subagent) | `*` | [plan](plan.md) |
 | `verify_plan_execution` | `Read` | `*` | [plan](plan.md) |
 | `subagent` | `Read` (spawns subagent) | `*` | [subagent](subagent.md) |

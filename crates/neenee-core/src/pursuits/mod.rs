@@ -1,11 +1,13 @@
 //! Pursuit domain types (ADR-0005 pure-domain half).
 //!
-//! The persisted/I/O-bound layer — the `rusqlite`-backed `PursuitStore`, the
-//! `PursuitService` facade, and the pursuit tools — lives in
-//! `neenee_store::pursuits`. This module keeps only the domain shapes a
-//! frontend needs without pulling in SQLite: `Pursuit` (runtime view),
-//! `ThreadPursuit` (persisted view), `TokenUsage`, `TurnOutcome`, and the
-//! per-turn `TurnTimer`.
+//! The persisted/I/O-bound layer — the `rusqlite`-backed `PursuitStore` and the
+//! `PursuitService` facade — lives in `neenee_store::pursuits`. This module
+//! keeps only the domain shapes a frontend needs without pulling in SQLite:
+//! `Pursuit` (runtime view), `ThreadPursuit` (persisted view), `TokenUsage`,
+//! `TurnOutcome`, and the per-turn `TurnTimer`. The pursuit lifecycle is driven
+//! by the `/pursue` slash command, the in-turn stop-gate, and the
+//! `[NEENEE_PURSUIT_COMPLETE]` marker; there are no model-facing pursuit tools
+//! (ADR-0031).
 
 pub mod prompts;
 
@@ -31,7 +33,7 @@ pub struct ThreadPursuit {
     pub updated_at: DateTime<Utc>,
 }
 
-/// The runtime view of a pursuit exposed to the agent, tools, and TUI.
+/// The runtime view of a pursuit exposed to the agent and TUI.
 ///
 /// Carries the durable `objective` and a single `is_complete` flag that
 /// mirrors the persisted column.

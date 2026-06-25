@@ -464,7 +464,10 @@ mod tests {
             prefix: Some("[f: lines 100-105 of 105]".into()),
             suffix: None,
         };
-        assert_eq!(prefix_only.to_text(), "[f: lines 100-105 of 105]\n100: body");
+        assert_eq!(
+            prefix_only.to_text(),
+            "[f: lines 100-105 of 105]\n100: body"
+        );
     }
 
     #[test]

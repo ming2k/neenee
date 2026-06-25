@@ -149,15 +149,10 @@ impl Tool for StreamingReadTool {
     }
 }
 
-fn test_pursuit_service() -> PursuitService {
-    PursuitService::new(PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"))
-}
-
 fn agent() -> Agent {
     Agent::new(
         Arc::new(TestProvider),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     )
 }
@@ -177,7 +172,6 @@ fn pursuit_is_injected_into_system_prompt() {
     let prompt = agent.build_system_message().content;
 
     assert!(prompt.contains("ship the harness"));
-    assert!(prompt.contains("complete_pursuit"));
 }
 
 #[test]
@@ -278,7 +272,6 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
     let agent = Agent::new(
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "run")];
@@ -344,7 +337,6 @@ async fn stalled_provider_stream_times_out_as_retryable() {
     let agent = Agent::new(
         Arc::new(StalledStreamProvider),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -392,7 +384,6 @@ async fn stream_request_that_never_resolves_times_out() {
     let agent = Agent::new(
         Arc::new(PendingStreamProvider),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -431,7 +422,6 @@ async fn non_streaming_chat_that_never_resolves_times_out() {
     let agent = Agent::new(
         Arc::new(PendingChatProvider),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -479,7 +469,6 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
     let agent = Agent::new(
         Arc::new(ReasoningOnlyProvider),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
@@ -534,7 +523,6 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
         vec![Arc::new(BlockingTool {
             started: started.clone(),
         })],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     let token = CancellationToken::new();
@@ -610,7 +598,6 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     let call = ToolCall {
@@ -667,7 +654,6 @@ async fn rejected_permission_does_not_execute_tool() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     let call = ToolCall {
@@ -700,15 +686,9 @@ async fn rejected_permission_does_not_execute_tool() {
 
 #[tokio::test]
 async fn headless_run_rejects_write_tools_without_hanging() {
-    let pursuit_service = PursuitService::new(
-        PursuitStore::open_in_memory()
-            .await
-            .expect("in-memory pursuit store"),
-    );
     let agent = Agent::new(
         Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
         vec![Arc::new(WriteTestTool)],
-        pursuit_service,
         crate::skills::SkillRegistry::empty(),
     );
     let mut messages = vec![Message::new(Role::User, "write something")];
@@ -931,7 +911,6 @@ async fn golden_native_tool_round_then_final_text() {
             Arc::new(RecordingTool::read("alpha", "A-out")),
             Arc::new(RecordingTool::read("beta", "B-out")),
         ],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -963,7 +942,6 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
             text_round("finished"),
         ])),
         vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1005,7 +983,6 @@ async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
             identical(),
         ])),
         vec![Arc::new(tool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_loop_review_enabled(false);
@@ -1028,7 +1005,6 @@ async fn golden_rejected_write_tool_terminates_turn() {
             text_round("stopped"),
         ])),
         vec![Arc::new(tool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1058,7 +1034,6 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
             ProviderStreamEvent::TextDelta("answer".to_string()),
         ]])),
         Vec::new(),
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1098,7 +1073,6 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
             text_round("done"),
         ])),
         vec![Arc::new(neenee_tools::AskUserTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1143,7 +1117,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     agent.set_project_root(Some(project_root.clone()));
@@ -1188,7 +1161,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent2 = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     agent2.set_project_root(Some(project_root.clone()));
@@ -1210,7 +1182,6 @@ async fn always_permission_persists_across_agents_for_same_project() {
     let agent3 = Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent3.set_project_root(Some(other_root));
@@ -1237,7 +1208,6 @@ async fn agent_without_project_root_never_writes_permissions_file() {
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     ));
     // Mutations of the allowlist must be no-ops on disk when no project root
@@ -1285,7 +1255,6 @@ async fn turn_runs_uncapped_until_model_emits_text() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 
@@ -1398,7 +1367,6 @@ async fn hard_stop_aborts_when_budget_configured() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
         vec![Arc::new(tool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
     agent.set_hard_stop_rounds(3);
@@ -1431,7 +1399,6 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
     let agent = Agent::new(
         Arc::new(ScriptedProvider::new(vec![text_round(verdict_json)])),
         vec![Arc::new(tool)],
-        test_pursuit_service(),
         crate::skills::SkillRegistry::empty(),
     );
 

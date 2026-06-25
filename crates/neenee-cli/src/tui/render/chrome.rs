@@ -3,7 +3,7 @@
 //! anchored above the input, and the persistent hint bar pinned below the
 //! input. The activity bar is also the click target that opens the Activity
 //! modal (pursuit + plan + live activity), replacing the old always-pinned pursuit
-//! bar and plan panel.
+//! bar and task panel.
 
 use ratatui::{
     layout::Rect,
@@ -63,7 +63,7 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
 ///
-/// Layout: `<spinner> <status> [· ⟴ <pursuit>] [· plan d/t] · <elapsed>`.
+/// Layout: `<spinner> <status> [· ⟴ <pursuit>] [· tasks d/t] · <elapsed>`.
 ///
 /// The bar surfaces what the user most wants to know mid-turn — the live
 /// status, whether a pursuit/plan is in flight, and how long the turn has
@@ -72,7 +72,7 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// the modal: they change rarely and take space, while the bar is a glance
 /// surface. Segments are omitted when there is nothing to report:
 /// - pursuit badge only when a pursuit is armed (`⟴ <truncated objective>`);
-/// - `plan d/t` only when a non-empty task list exists;
+/// - `tasks d/t` only when a non-empty task list exists;
 /// - elapsed only while the turn timer is running.
 ///
 /// When the status string already carries a reason (e.g.
@@ -136,15 +136,15 @@ pub fn draw_activity_bar(
         spans.push(Span::styled(truncate_for_bar(&p.objective, 32), dim));
     }
 
-    // Plan/task progress: `plan d/t` while a non-empty task list exists, so
-    // a glance answers "is there a plan, and how far along?". The per-item
+    // Task progress: `tasks d/t` while a non-empty task list exists, so
+    // a glance answers "are there tasks, and how far along?". The per-item
     // breakdown lives in the modal.
     if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
         use neenee_core::TodoStatus;
         let done = list.count(TodoStatus::Completed);
         let total = list.items.len();
         spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(format!("plan {done}/{total}"), dim));
+        spans.push(Span::styled(format!("tasks {done}/{total}"), dim));
     }
 
     // Elapsed: the only live counter on the bar, shown while the turn timer

@@ -14,7 +14,6 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
 use neenee_core::{AgentResponse, Message, ParentStatus, Provider, Tool};
-use neenee_store::PursuitService;
 use neenee_store::config::Config;
 use neenee_store::session::SessionStore;
 use std::sync::RwLock;
@@ -51,7 +50,6 @@ impl SideSession {
         primary: &SessionStore,
         base_tools: &[Arc<dyn Tool>],
         provider_holder: &Arc<RwLock<Arc<dyn Provider>>>,
-        pursuit_service: PursuitService,
         skills: SkillRegistry,
         project_root: &std::path::Path,
     ) -> Result<Self, String> {
@@ -67,12 +65,7 @@ impl SideSession {
         // primary — mirroring the subagent profile filter in `SubagentTool`.
         let side_provider: Arc<dyn Provider> =
             Arc::new(ProxyProvider::new(provider_holder.clone()));
-        let agent = Arc::new(Agent::new(
-            side_provider,
-            base_tools.to_vec(),
-            pursuit_service,
-            skills,
-        ));
+        let agent = Arc::new(Agent::new(side_provider, base_tools.to_vec(), skills));
         agent.set_thread_id(&side_id);
         agent.set_project_root(Some(project_root.to_path_buf()));
         // A side conversation is a quick aside; auto-approve its write tools so
@@ -145,7 +138,6 @@ pub async fn start_active_turn(
     primary_token_slot: &Arc<AsyncRwLock<Option<CancellationToken>>>,
     primary_generation: &Arc<AtomicU64>,
     tx: &mpsc::UnboundedSender<AgentResponse>,
-    pursuit_service: PursuitService,
     config: &Config,
     input: TurnInput,
 ) {
@@ -199,7 +191,6 @@ pub async fn start_active_turn(
             generation_counter: generation,
             session,
             session_id,
-            pursuit_service,
             compaction,
             retry_max_attempts,
             retry_base_ms,

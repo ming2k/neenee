@@ -91,14 +91,16 @@ broker, and result-message format apply to native and fallback calls.
 
 ## Pursuit state
 
-`/pursue <condition>` creates a durable, per-session objective persisted in
-SQLite (`pursuits.db`) keyed by thread id, so it survives restarts and `/resume`.
-A pursuit is a slim primitive: an objective and a single `is_complete` flag (no
-status machine, no token or time budget, no checklist — all removed; see
+`/pursue <condition>` creates a durable, per-session objective persisted as a
+field on `SessionData` (`Option<Pursuit>` via `SessionStore`, ADR-0032), so it
+survives restarts and `/resume`. A pursuit is a slim primitive: an objective
+and a single `is_complete` flag (no status machine, no token or time budget,
+no checklist — all removed; see
 [ADR-0010](../../../adr/0010-slim-goal-primitive.md) and
-[ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). The model
-reads and completes pursuits through `get_pursuit`, `start_pursuit`, and
-`complete_pursuit`, and signals completion with `[NEENEE_PURSUIT_COMPLETE]`. See
+[ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). There are no
+model-facing pursuit tools: the user sets the condition via `/pursue`, the
+harness drives continuation via the stop-gate, and the model signals completion
+with `[NEENEE_PURSUIT_COMPLETE]` (ADR-0031). See
 [Pursuits](pursuits.md) for the primitive and the persistence model.
 
 ## Pursue stop-gate

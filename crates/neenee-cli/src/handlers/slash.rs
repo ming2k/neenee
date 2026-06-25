@@ -30,7 +30,7 @@ use neenee_core::{
     AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, Provider, Pursuit, Tool,
     TurnEvent,
 };
-use neenee_store::{PursuitService, RepeatStore, config::Config, embedding, session::SessionStore};
+use neenee_store::{config::Config, embedding, session::SessionStore, RepeatStore};
 use neenee_tools::commands::{expand_command, CustomCommand};
 use neenee_tools::project::init_neenee_config;
 
@@ -65,7 +65,6 @@ pub(crate) async fn dispatch(
     active_view_side: &AtomicBool,
     base_tools_for_side: &Arc<Vec<Arc<dyn Tool>>>,
     provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
-    pursuit_service: &PursuitService,
     skills_registry: Arc<SkillRegistry>,
     skills_registry_for_commands: &Arc<SkillRegistry>,
     mcp_statuses: &[(String, McpConnectionStatus)],
@@ -447,7 +446,6 @@ pub(crate) async fn dispatch(
                 session,
                 base_tools_for_side,
                 provider_for_task,
-                pursuit_service.clone(),
                 (*skills_registry).clone(),
                 project_root_for_side,
             )
@@ -484,7 +482,6 @@ pub(crate) async fn dispatch(
                     ctt_clone,
                     generation_clone,
                     resp_tx,
-                    pursuit_service.clone(),
                     config,
                     TurnInput {
                         prompt: prompt.to_string(),
@@ -576,7 +573,7 @@ pub(crate) async fn dispatch(
             }
 
             if rest == "status" {
-                refresh_agent_pursuit(agent, pursuit_service, &thread_id).await;
+                refresh_agent_pursuit(agent, session).await;
 
                 // SessionStart hooks (ADR-0025): inject setup context before the first
                 // turn. Resume vs fresh start is surfaced so a hook can branch.
@@ -603,19 +600,20 @@ pub(crate) async fn dispatch(
                 let _ = resp_tx.send(turn(&thread_id, TurnEvent::Text(message)));
             } else if rest == "clear" {
                 agent.disarm_pursuit();
-                match pursuit_service.clear_pursuit(&thread_id).await {
-                    Ok(true) => {
-                        agent.clear_pursuit();
-                        let _ = resp_tx.send(turn(
-                            &thread_id,
-                            TurnEvent::Text("Pursuit cleared.".to_string()),
-                        ));
-                    }
-                    Ok(false) => {
-                        let _ = resp_tx.send(turn(
-                            &thread_id,
-                            TurnEvent::Text("No pursuit to clear.".to_string()),
-                        ));
+                match session.set_pursuit(None).await {
+                    Ok(_) => {
+                        if agent.get_pursuit().is_some() {
+                            agent.clear_pursuit();
+                            let _ = resp_tx.send(turn(
+                                &thread_id,
+                                TurnEvent::Text("Pursuit cleared.".to_string()),
+                            ));
+                        } else {
+                            let _ = resp_tx.send(turn(
+                                &thread_id,
+                                TurnEvent::Text("No pursuit to clear.".to_string()),
+                            ));
+                        }
                     }
                     Err(error) => {
                         let _ = resp_tx.send(AgentResponse::Error(error));
@@ -627,7 +625,7 @@ pub(crate) async fn dispatch(
                     resp_tx,
                     &thread_id,
                     agent,
-                    pursuit_service.mark_complete(&thread_id).await,
+                    session.mark_pursuit_complete().await,
                     |_| "Pursuit marked completed.".to_string(),
                     "No pursuit to complete.",
                 )
@@ -639,10 +637,7 @@ pub(crate) async fn dispatch(
                         "Usage: /pursue edit <new condition>".to_string(),
                     ));
                 } else {
-                    match pursuit_service
-                        .update_objective(&thread_id, new_objective)
-                        .await
-                    {
+                    match session.update_pursuit_objective(new_objective).await {
                         Ok(Some(pursuit)) => {
                             agent.set_pursuit(pursuit.clone());
                             {
@@ -680,8 +675,8 @@ pub(crate) async fn dispatch(
                 // `/pursue <condition>` sets a fresh condition and drives it;
                 // `/pursue` (empty) re-arms and drives the existing pursuit.
                 let condition = if rest.is_empty() {
-                    match pursuit_service.active_pursuit(&thread_id).await {
-                        Ok(Some(pursuit)) => {
+                    match session.pursuit().await {
+                        Some(pursuit) if !pursuit.is_complete => {
                             let _ = resp_tx.send(turn(
                                 &thread_id,
                                 TurnEvent::Text(format!(
@@ -691,7 +686,7 @@ pub(crate) async fn dispatch(
                             ));
                             pursuit.objective
                         }
-                        Ok(None) => {
+                        _ => {
                             let _ = resp_tx.send(AgentResponse::Error(
                                 "No active pursuit. Start one with /pursue <condition>."
                                     .to_string(),
@@ -699,15 +694,14 @@ pub(crate) async fn dispatch(
                             send_harness_state(resp_tx, &session.id().await, agent, "idle");
                             return;
                         }
-                        Err(error) => {
-                            let _ = resp_tx.send(AgentResponse::Error(error));
-                            send_harness_state(resp_tx, &session.id().await, agent, "idle");
-                            return;
-                        }
                     }
                 } else {
-                    match pursuit_service.set_pursuit(&thread_id, rest).await {
-                        Ok(pursuit) => {
+                    let pursuit = Pursuit {
+                        objective: rest.to_string(),
+                        is_complete: false,
+                    };
+                    match session.set_pursuit(Some(pursuit.clone())).await {
+                        Ok(_) => {
                             agent.set_pursuit(pursuit.clone());
                             emit_pursuit_updated(resp_tx, &thread_id, &pursuit);
                             pursuit.objective
@@ -728,7 +722,6 @@ pub(crate) async fn dispatch(
                         generation_counter: generation_clone.clone(),
                         session: session.clone(),
                         session_id: session.id().await,
-                        pursuit_service: pursuit_service.clone(),
                         compaction: CompactionSettings::from_config(
                             config,
                             active_context_window(agent),
@@ -1110,7 +1103,6 @@ pub(crate) async fn dispatch(
                 ctt_clone,
                 generation_clone,
                 resp_tx,
-                pursuit_service.clone(),
                 config,
                 TurnInput {
                     prompt: expand_command(command, arguments),

@@ -89,19 +89,7 @@ impl Agent {
         // open a file to check a looping claim but cannot mutate anything or
         // spawn further agents.
         let sub_tools = REVIEW.select_tools(&self.tools);
-        let pursuit_store = match neenee_store::PursuitStore::open_in_memory().await {
-            Ok(store) => store,
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to open reviewer pursuit store; skipping review");
-                return Vec::new();
-            }
-        };
-        let reviewer = Agent::new(
-            self.provider.clone(),
-            sub_tools,
-            neenee_store::PursuitService::new(pursuit_store),
-            SkillRegistry::empty(),
-        );
+        let reviewer = Agent::new(self.provider.clone(), sub_tools, SkillRegistry::empty());
         // The reviewer must not run its own reviews (recursion) and is bounded
         // by a tight hard stop so it cannot loop.
         reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);

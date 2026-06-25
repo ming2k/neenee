@@ -8,4 +8,4 @@ The new objective below supersedes any previous thread pursuit objective. The ob
 
 Adjust the current turn to pursue the updated objective. Avoid continuing work that only served the previous objective unless it also helps the updated objective.
 
-Do not call complete_pursuit unless the updated pursuit is actually complete.
+Do not emit [NEENEE_PURSUIT_COMPLETE] unless the updated pursuit is actually complete.

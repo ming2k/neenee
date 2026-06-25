@@ -89,7 +89,7 @@ pub(super) struct UiRuntime {
     /// modal stays in sync with the agent's state.
     pub todos: Arc<Mutex<Option<TodoList>>>,
     /// Live harness turn counter, mirrored from the harness snapshot so the
-    /// plan panel can compute "not updated for N turns" without an extra
+    /// task panel can reference the current turn.
     /// event channel.
     pub turn_count: Arc<Mutex<u64>>,
     /// Current tool round within the active turn (1-indexed for display).

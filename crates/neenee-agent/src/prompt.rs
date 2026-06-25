@@ -31,6 +31,16 @@ impl Agent {
                 .to_string(),
         );
 
+        parts.push(
+            "Task tracking: for work that spans multiple steps, use the `todo` tool to lay out \
+             the steps up front, then update each item's status with `todo_update` (or `todo` for \
+             a full restructure) as you progress — move a step to in_progress when you start it \
+             and completed/cancelled the moment it is done. Keep the list honest: it is the single \
+             source of truth shown to the user, so don't let it drift from reality. At most one \
+             item may be in_progress at a time. Skip the list entirely for single-step requests."
+                .to_string(),
+        );
+
         if let Some(pursuit) = self.get_pursuit() {
             let state_label = if pursuit.is_complete {
                 "complete"
@@ -41,15 +51,6 @@ impl Agent {
                 "\nActive harness pursuit ({state_label}):\n{}",
                 pursuit.objective
             ));
-            if !pursuit.is_complete {
-                parts.push(
-                    "Work toward this pursuit across turns. Use get_pursuit to read the current pursuit, \
-                     start_pursuit when the user asks for a new pursuit, and complete_pursuit to mark the \
-                     pursuit complete. Only when the objective is fully achieved and verified, call \
-                     complete_pursuit with status \"complete\"."
-                        .to_string(),
-                );
-            }
         }
 
         // Tool definitions

@@ -58,7 +58,7 @@ pub use neenee_core::*;
 // Persistence-backed types that lived in core pre-refactor now live in store
 // (ADR-0005: core is zero-I/O). Re-exported here so consumers keep reaching
 // them through `neenee_agent::` unchanged.
-pub use neenee_store::{PursuitService, PursuitStore, RepeatStore};
+pub use neenee_store::RepeatStore;
 
 // Explicit re-exports of core's top-level re-exports. `pub use X::*` does
 // not propagate through X's own `pub use` re-exports in Rust, so the items
@@ -71,7 +71,7 @@ pub use neenee_core::{
     ImagePart, McpConnectionStatus, McpServerConfig, Message, PatchOp, PermissionDecision,
     PermissionRequest, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
     ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role, SessionOverview,
-    SkillsConfig, SubagentEvent, SubagentProfile, TokenUsage, ThreadPursuit, Tool, ToolAccess,
+    SkillsConfig, SubagentEvent, SubagentProfile, ThreadPursuit, TokenUsage, Tool, ToolAccess,
     ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
     UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
     EXPLORE, PRUNED_TOOL_PLACEHOLDER, TITLE,
@@ -152,9 +152,11 @@ pub mod session_title;
 pub mod skills;
 mod steering;
 pub mod subagent_tool;
+pub mod todo_tools;
 
 pub use session_review::{default_reviews, LoopingReview};
 pub use subagent_tool::{SubagentRegistry, SubagentTool};
+pub use todo_tools::{TodoUpdateTool, TodoWriteTool};
 
 #[cfg(test)]
 mod tests;

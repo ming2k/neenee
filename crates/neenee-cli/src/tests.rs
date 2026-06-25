@@ -12,7 +12,7 @@ use neenee_agent::skills::SkillRegistry;
 use neenee_agent::Agent;
 use neenee_core::{async_trait, AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent};
 use neenee_providers::MockProvider;
-use neenee_store::{session::SessionStore, PursuitService, PursuitStore};
+use neenee_store::session::SessionStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -209,13 +209,9 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
         std::env::temp_dir().join(format!("neenee-retry-test-{}", uuid::Uuid::new_v4()));
     let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
     let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let pursuit_service = PursuitService::new(
-        PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
-    );
     let agent = Arc::new(Agent::new(
         Arc::new(RetryOnceProvider(AtomicUsize::new(0))),
         Vec::new(),
-        pursuit_service.clone(),
         SkillRegistry::empty(),
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -228,7 +224,6 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            pursuit_service,
             compaction: CompactionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
@@ -302,13 +297,9 @@ async fn turn_does_not_retry_after_tool_activity() {
     let directory =
         std::env::temp_dir().join(format!("neenee-retry-tool-{}", uuid::Uuid::new_v4()));
     let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
-    let pursuit_service = PursuitService::new(
-        PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
-    );
     let agent = Arc::new(Agent::new(
         Arc::new(ToolThenRetryProvider(AtomicUsize::new(0))),
         vec![Arc::new(RetryReadTool)],
-        pursuit_service.clone(),
         SkillRegistry::empty(),
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -321,7 +312,6 @@ async fn turn_does_not_retry_after_tool_activity() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            pursuit_service,
             compaction: CompactionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
@@ -369,13 +359,9 @@ async fn turn_exhaustion_message_explains_retry_budget() {
     let directory =
         std::env::temp_dir().join(format!("neenee-retry-exhaust-{}", uuid::Uuid::new_v4()));
     let session = Arc::new(SessionStore::for_path(directory.join("session.json")));
-    let pursuit_service = PursuitService::new(
-        PursuitStore::open_in_memory_blocking().expect("in-memory pursuit store"),
-    );
     let agent = Arc::new(Agent::new(
         Arc::new(AlwaysRetryableProvider),
         Vec::new(),
-        pursuit_service.clone(),
         SkillRegistry::empty(),
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -388,7 +374,6 @@ async fn turn_exhaustion_message_explains_retry_budget() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            pursuit_service,
             compaction: CompactionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,

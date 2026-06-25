@@ -21,7 +21,7 @@ pub struct Agent {
     /// with the `todo` / `todo_update` tools via `TodoToolContext`.
     todos: Arc<std::sync::Mutex<neenee_core::TodoList>>,
     /// Harness turn counter, bumped at the start of every `execute_turn`.
-    /// Shared with the plan + todo tools so they can stamp
+    /// Shared with the todo tools so they can stamp
     /// `updated_at_turn` for the TUI stale detector.
     turn_counter: Arc<std::sync::Mutex<u64>>,
     /// In-memory pursuit state: the active [`Pursuit`], the stop-gate armed
@@ -30,7 +30,6 @@ pub struct Agent {
     permissions: crate::permission_store::PermissionStore,
     ask_user: std::sync::Mutex<AskUserState>,
     pub(crate) skills_registry: skills::SkillRegistry,
-    pursuit_service: PursuitService,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Context-pressure threshold (in tokens) above which the harness asks the
     /// [`ContextReliefGate`] to relieve pressure between tool rounds. `0` disables
@@ -175,32 +174,12 @@ impl Agent {
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
-        pursuit_service: PursuitService,
         skills_registry: skills::SkillRegistry,
     ) -> Self {
         let pursuit_state = crate::pursuit_state::PursuitState::new();
         let thread_id = Arc::new(std::sync::Mutex::new(None));
-        let context = neenee_store::pursuits::tools::PursuitToolContext {
-            thread_id: Arc::clone(&thread_id),
-            pursuit_service: pursuit_service.clone(),
-        };
 
         let mut tools = tools;
-        tools.retain(|tool| {
-            !matches!(
-                tool.name(),
-                "get_pursuit" | "start_pursuit" | "complete_pursuit"
-            )
-        });
-        tools.push(Arc::new(neenee_store::pursuits::tools::GetPursuitTool::new(
-            context.clone(),
-        )));
-        tools.push(Arc::new(neenee_store::pursuits::tools::StartPursuitTool::new(
-            context.clone(),
-        )));
-        tools.push(Arc::new(neenee_store::pursuits::tools::CompletePursuitTool::new(
-            context.clone(),
-        )));
 
         // The unified task list shares its cell + turn counter with the
         // todo tools. An ad-hoc task edit (todo / todo_update) moves the
@@ -209,10 +188,12 @@ impl Agent {
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
         let todo_context =
             neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
-        tools.push(Arc::new(neenee_core::TodoWriteTool::new(
+        tools.push(Arc::new(crate::todo_tools::TodoWriteTool::new(
             todo_context.clone(),
         )));
-        tools.push(Arc::new(neenee_core::TodoUpdateTool::new(todo_context)));
+        tools.push(Arc::new(crate::todo_tools::TodoUpdateTool::new(
+            todo_context,
+        )));
 
         Self {
             provider,
@@ -224,7 +205,6 @@ impl Agent {
             permissions: crate::permission_store::PermissionStore::new(),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
             skills_registry,
-            pursuit_service,
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
@@ -436,18 +416,14 @@ impl Agent {
         self.todos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Replace the task list. Used by `plan_exit` (to seed from the approved
-    /// plan), `plan_enter` / `/todos clear` (to clear), and session-restore
-    /// paths on resume.
+    /// Replace the task list. Used by session-restore paths on resume.
     pub fn set_todos(&self, todos: neenee_core::TodoList) {
         if let Ok(mut guard) = self.todos.lock() {
             *guard = todos;
         }
     }
 
-    /// Drop the task list. Called when entering Plan mode (via `plan_enter`)
-    /// so the panel disappears as soon as the user starts a fresh planning
-    /// cycle.
+    /// Drop the task list.
     pub fn clear_todos(&self) {
         if let Ok(mut guard) = self.todos.lock() {
             *guard = neenee_core::TodoList::default();
@@ -513,10 +489,6 @@ impl Agent {
 
     pub fn pursuit_can_complete(&self) -> bool {
         self.pursuit_state.can_complete()
-    }
-
-    pub fn pursuit_service(&self) -> &PursuitService {
-        &self.pursuit_service
     }
 
     // ── Pursuit stop-gate ───────────────────────────────────────────────
@@ -782,13 +754,12 @@ impl Agent {
 
     /// Structured view of every installed tool, for the session modal's Tools
     /// pane. `enabled` reflects the disabled mask; `source` classifies origin
-    /// (`builtin` / `mcp:<server>` / `pursuit` / `plan`) from the tool's name.
+    /// (`builtin` / `mcp:<server>` / `plan`) from the tool's name.
     pub fn snapshot_tools(&self) -> Vec<neenee_core::ToolInfo> {
         let disabled = self
             .disabled_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let pursuit = ["get_pursuit", "start_pursuit", "complete_pursuit"];
         let subagent = ["subagent"];
         let mut infos: Vec<neenee_core::ToolInfo> = self
             .tools
@@ -798,8 +769,6 @@ impl Agent {
                 let source = if let Some(rest) = name.strip_prefix("mcp__") {
                     let server = rest.split("__").next().unwrap_or(rest);
                     format!("mcp:{}", server)
-                } else if pursuit.contains(&name) {
-                    "pursuit".to_string()
                 } else if subagent.contains(&name) {
                     "subagent".to_string()
                 } else {
@@ -1231,11 +1200,7 @@ impl Agent {
             .filter(|calls| !calls.is_empty())
         {
             for call in tool_calls {
-                self.guard_repeated_call(
-                    call,
-                    &mut state.previous_call,
-                    &mut state.repeated_calls,
-                );
+                self.guard_repeated_call(call, &mut state.previous_call, &mut state.repeated_calls);
             }
             // ADR-0030: classify this round for the loop-review trigger. An
             // all-Read round extends the consecutive read-only streak; any

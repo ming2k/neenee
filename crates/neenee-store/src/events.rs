@@ -11,7 +11,7 @@
 
 use crate::fsutil;
 use crate::session::{ContextReliefCheckpoint, PursuitCheckpoint};
-use neenee_core::Message;
+use neenee_core::{Message, Pursuit};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -54,16 +54,20 @@ pub enum SessionEvent {
     /// was recorded. Any archived messages are preserved by a preceding
     /// `Archived` event.
     Forked { id: String, parent_id: String },
-    /// The unified task list changed (`todo` / `todo_update` /
-    /// `/todos clear`). Mirrored from `Agent::todos`
-    /// so resume restores the sticky panel. The full list is stored on every
-    /// change (snapshot semantics); history of individual items is
-    /// reconstructable from the log itself.
+    /// The unified task list changed (`todo` / `todo_update`). Mirrored from
+    /// `Agent::todos` so resume restores the task panel. The full list is
+    /// stored on every change (snapshot semantics); history of individual
+    /// items is reconstructable from the log itself.
     TodosSet { todos: neenee_core::TodoList },
     /// The session title changed (ADR-0022). `title = None` clears it. `manual`
     /// marks a user-set title (`/title <text>`) that AI generation must not
     /// overwrite; automatic and on-demand generation always set `manual = false`.
     TitleSet { title: Option<String>, manual: bool },
+    /// The per-session pursuit changed (ADR-0032). `pursuit = None` clears it.
+    /// Snapshot semantics, mirroring `TodosSet`: the full `Option<Pursuit>` is
+    /// stored on every change. Set by the `/pursue` slash command and the
+    /// harness completion path; read on resume to restore the active pursuit.
+    PursuitSet { pursuit: Option<Pursuit> },
 }
 
 /// Wrapper around a [`SessionEvent`] that adds metadata for ordering and
