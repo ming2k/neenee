@@ -1,7 +1,10 @@
 # 0026. Plan progression forcing functions: plan-exit nudge, todo-continuation nudge, approval handoff
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0033
 - **Date:** 2026-06-25
+
+> Superseded by [ADR-0033](0033-remove-plan-and-verify-workflow.md). The
+> plan-exit, todo-continuation, and verify nudges were removed.
 
 ## Context
 
@@ -158,8 +161,8 @@ after six nudges the turn is allowed to end and the user resumes.
   the model for bounded within-turn forcing.
 - [ADR-0020](0020-unified-task-list.md) — the unified todo list the
   todo-continuation gate reads.
-- [Plan](../explanation/agent-design/plan.md) — the end-to-end workflow and
-  the forcing cascade this ADR realises.
+- [ADR-0033](0033-remove-plan-and-verify-workflow.md) — the end-to-end
+  workflow this ADR realised was later removed.
 - Claude Code `2.1.190` binary (reverse-engineered) — turn-end constraint,
   ExitPlanMode tool-result instruction, and todo reminder loop; the prior art
   this ADR adapts, softened from a hard constraint to bounded nudges.

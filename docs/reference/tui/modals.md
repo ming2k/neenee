@@ -66,7 +66,6 @@ scroll directly. The two [toasts](#toasts) are non-modal and use a different
 | [Permission sheet](#permission-sheet) | Automatic | (inline, not centered) | `draw_permission_sheet` |
 | [Tool-step detail](#tool-step-detail-overlay) | `Enter` on focused tool step | 92 × 84 | `draw_tool_step_detail_overlay` |
 | [Help](#help-modal) | `Ctrl+H` / `/help` | 58 × 70 | `draw_help_modal` |
-| [Plan preview](#plan-preview-modal) | `Ctrl+P` / click plan panel | 80 × 70 | `draw_plan_preview_modal` |
 | [Activity](#activity-modal) | Click activity bar | 72 × 70 | `draw_activity_modal` |
 | [Toasts](#toasts) | Transient | top-right, 3 rows | `draw_armed_toast`, `draw_copy_toast` |
 
@@ -352,31 +351,6 @@ Keybindings cheat sheet (`Ctrl+H`). The narrowest centered modal: 58 × 70.
 Sections: **General**, **Line editing**, **Focus zones**, **Views & tools**,
 **Modes**. Closes with a one-line note: `Drag to select · Ctrl+C or
 Ctrl+Shift+C to copy.`
-
-## Plan preview modal
-
-Read-only preview of the active plan file. Opened by clicking the sticky
-plan panel above the input box or pressing `Ctrl+P`. The caller caches the
-file content (`App::plan_preview_content`) at open time so the modal does
-not hit disk per redraw.
-
-```text
-╭────────────────────────────────────────────────────╮
-│ Plan preview                                       │
-│                                                    │
-│ # Pursuit                                             │
-│ - Ship the auth refactor                           │
-│ - Step 1: extract session store                    │
-│ - Step 2: migrate tests                            │
-│ …                                                  │
-│                                                    │
-│ Esc to close · ↑/↓ scroll · Ctrl+P toggles         │
-╰────────────────────────────────────────────────────╯
-```
-
-Body text is rendered verbatim (no markdown styling), wrapped at word
-boundaries. See [Plan](../../explanation/agent-design/plan.md)
-for when the plan panel is shown.
 
 ## Activity modal
 

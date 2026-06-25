@@ -16,15 +16,15 @@ a threshold:
 | Tier | Subagent admission | Permission broker | Examples |
 |------|-----------|-------------------|----------|
 | `Read` | Admitted by every profile | Bypassed | `read_file`, `grep`, `glob` |
-| `Execute` | Admitted only above a `Read` ceiling (e.g. `VERIFY`) | Prompted unless a cached `Always` rule matches | `bash` |
+| `Execute` | Admitted only above a `Read` ceiling | Prompted unless a cached `Always` rule matches | `bash` |
 | `Write` (default) | Admitted only by a `Write` ceiling or a `write_paths` grant, then scoped by `WriteScope` | Prompted unless a cached `Always` rule matches | `write_file`, `edit_file` |
 
 The broker prompts for any tool above `Read` (`Execute` or `Write`). Subagent
 admission is by capability axis (ceiling + `write_paths` grant); a write tool
-admitted to a subagent is then scoped at runtime by the agent's `WriteScope`
-(e.g. the `PLAN` profile writes only under `.neenee/plans/`). A tool that does
-not override `access()` is treated as `Write`. See
-[Plan](../../explanation/agent-design/plan.md) and
+admitted to a subagent is then scoped at runtime by the agent's `WriteScope`.
+A tool that does not override `access()` is treated as `Write`. All built-in
+subagent profiles carry a `Read` ceiling today, so only the main agent runs
+`Execute`/`Write` tools. See
 [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
 
 ## Capability axes
@@ -35,7 +35,7 @@ harness consults for subagent admission rather than for permissions:
 | Axis | Method | Consulted by | Overrides |
 |------|--------|--------------|-----------|
 | Needs a human | `requires_user()` (default `false`) | Subagent profiles | `ask_user` |
-| Spawns a subagent | `spawns_subagent()` (default `false`) | Subagent profiles | `subagent`, `plan`, `verify_plan_execution` |
+| Spawns a subagent | `spawns_subagent()` (default `false`) | Subagent profiles | `subagent` |
 
 A `requires_user()` tool is excluded from subagents unless the profile allows
 user interaction; a `spawns_subagent()` tool is excluded in *every* profile to
@@ -65,5 +65,5 @@ providers, so they can be reworded freely without changing tool behavior.
 - [ADR-0012](../../adr/0012-toolaccess-tier-split.md) — the tier split decision.
 - [Sub-agent profiles](../../explanation/agent-design/subagents.md#profiles) —
   how the axes drive subagent tool admission.
-- [Plan](../../explanation/agent-design/plan.md) — the `PLAN` subagent and its
-  scoped `WriteScope` grant.
+- [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md) — the
+  `WriteScope` / `write_paths` mechanism.

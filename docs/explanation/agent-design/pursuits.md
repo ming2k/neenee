@@ -28,8 +28,8 @@ The pursuit carries **no status machine, no token/time budget, and no
 checklist**. Earlier revisions had all three; they were removed because the
 statuses were user-only, the budget flip was a footgun, and the checklist
 added a second completion gate that rarely changed outcomes. See
-[ADR-0010](../../../adr/0010-slim-goal-primitive.md) and
-[ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) for that
+[ADR-0010](../../adr/0010-slim-goal-primitive.md) and
+[ADR-0015](../../adr/0015-pursue-stop-gate-and-repeat-cron.md) for that
 history.
 
 ## The slim primitive
@@ -65,8 +65,7 @@ visibility, but the system prompt no longer advertises any pursuit tools.
 
 `/pursue <condition>` does three things: persists the condition as the active
 pursuit, **arms the stop-gate** on the agent, and drives one agent turn. The
-gate sits at the turn-loop exit — the same place the verify-nudge gate already
-forced one more model call instead of ending. On each exit it consults
+gate sits at the turn-loop exit. On each exit it consults
 `pursuit_continuation`, which returns a continuation prompt when **all** of
 these hold:
 
@@ -153,16 +152,16 @@ multi-turn loop.
 ## See also
 
 - [Harness architecture](harness.md) — the control plane, the stop-gate's
-  place beside the verify-nudge gate, and how completion interleaves with
-  retry and cancellation
+  place in the turn loop, and how completion interleaves with retry and
+  cancellation
 - [Built-in tools](../../reference/tools/index.md) — the pursuit interface has
   no model-facing tools; see [pursuits](../../reference/tools/pursuits.md)
 - [Slash commands](../../reference/commands.md) — `/pursue` and `/repeat`
-- [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — the
+- [ADR-0015](../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — the
   decision to replace `/goal` + `/loop` with the stop-gate + cron scheduler
-- [ADR-0010](../../../adr/0010-slim-goal-primitive.md) — slimming the pursuit
+- [ADR-0010](../../adr/0010-slim-goal-primitive.md) — slimming the pursuit
   primitive
-- [ADR-0031](../../../adr/0031-pursuit-tools-removed.md) — removing the
+- [ADR-0031](../../adr/0031-pursuit-tools-removed.md) — removing the
   model-facing pursuit tools
-- [ADR-0032](../../../adr/0032-fold-pursuit-into-session-store.md) — folding
+- [ADR-0032](../../adr/0032-fold-pursuit-into-session-store.md) — folding
   pursuit persistence into `SessionStore`

@@ -22,8 +22,7 @@ Each option: `{ "label": string, "description"?: string }`. The model should put
 
 Full-replace the unified task list — the single source of truth for "what is
 left to do," shown in the [Activity](../tui/modals.md) modal and persisted
-across restarts. A plan approved via `plan` seeds this list from the
-plan's `##` headings. The tool reconciles the desired list against the current
+across restarts. The tool reconciles the desired list against the current
 one, preserving item identity when content is unchanged, so re-sending the same
 steps does not reset their timestamps. See
 [ADR-0020](../../adr/0020-unified-task-list.md).

@@ -1,6 +1,7 @@
-# Skills and `use_skill`
+# Skills tools
 
-Skills are not tools, but the `use_skill` tool loads them.
+Skills are not tools, but three small tools manage them, and a fourth searches
+session history. All are `Read` and bypass the permission broker.
 
 ### `use_skill`
 
@@ -9,7 +10,37 @@ Skills are not tools, but the `use_skill` tool loads them.
 | `name` | string | yes | Skill name from frontmatter |
 
 `UseSkillTool` (`crates/neenee-agent/src/skills/tools.rs`) loads the skill body
-into the conversation. `Read`; bypasses the permission broker.
+into the conversation.
+
+### `list_skills`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| — | — | — | No parameters |
+
+`ListSkillsTool` lists every available skill with its scope, description, and
+enabled state. Useful for seeing what the agent can load before calling
+`use_skill`.
+
+### `reload_skills`
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| — | — | — | No parameters |
+
+`ReloadSkillsTool` rescans local skill directories and refetches remote skill
+repositories. Call it after adding, removing, or editing skill files.
+
+### `search_history`
+
+| Parameter | Type | Required | Default | Notes |
+|-----------|------|----------|---------|-------|
+| `query` | string | yes | — | Natural-language query |
+| `limit` | integer | no | `5` | Maximum results |
+
+`SearchHistoryTool` (`crates/neenee-store/src/search_tool.rs`) runs a semantic
+search over the current project's session history and returns the most relevant
+past messages.
 
 ## Skill format
 

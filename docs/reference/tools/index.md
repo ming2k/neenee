@@ -11,12 +11,11 @@ live in `neenee-agent`. The `Tool` trait is defined in
 
 ## Registry
 
-Registration order is the literal in `crates/neenee-cli/src/main.rs`. `Agent::new`
-appends the `plan` + `verify_plan_execution` tools from `crates/neenee-agent`, and
-the `todo` / `todo_update` tools, so they share the agent's live state. The plan
-and todo tools share one todo-list cell, so a plan approved via `plan` seeds the
-same list the model edits with `todo`. `SubagentTool` is pushed last so it can
-capture a snapshot of the assembled toolset.
+Registration order is the literal in `crates/neenee-cli/src/main.rs`.
+`Agent::new` (`crates/neenee-agent/src/agent.rs`) appends the `todo` /
+`todo_update` tools so they share the agent's live task-list cell.
+`SubagentTool` is pushed last so it can capture a snapshot of the assembled
+toolset.
 
 The pursuit lifecycle has no model-facing tools: `/pursue` (entry, user), the
 stop-gate (continuation, harness), and `[NEENEE_PURSUIT_COMPLETE]` (exit, model)
@@ -26,8 +25,8 @@ own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 |------|--------|------------------|----------------|
 | `bash` | `Execute` | `command` argument | [bash](bash.md) |
 | `read_file` | `Read` | `*` | [filesystem](filesystem.md) |
-| `write_file` | `Write` (scoped to `.neenee/plans/` under the `PLAN` profile) | `path` argument | [filesystem](filesystem.md) |
-| `edit_file` | `Write` (scoped to `.neenee/plans/` under the `PLAN` profile) | `path` argument | [filesystem](filesystem.md) |
+| `write_file` | `Write` | `path` argument | [filesystem](filesystem.md) |
+| `edit_file` | `Write` | `path` argument | [filesystem](filesystem.md) |
 | `grep` | `Read` | `*` | [filesystem](filesystem.md) |
 | `glob` | `Read` | `*` | [filesystem](filesystem.md) |
 | `list_dir` | `Read` | `*` | [filesystem](filesystem.md) |
@@ -36,10 +35,11 @@ own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 | `todo_update` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |
 | `websearch` | `Read` | `*` | [web](web.md) |
-| `plan` | `Read` (spawns subagent) | `*` | [plan](plan.md) |
-| `verify_plan_execution` | `Read` | `*` | [plan](plan.md) |
 | `subagent` | `Read` (spawns subagent) | `*` | [subagent](subagent.md) |
+| `search_history` | `Read` | `*` | [skills](skills.md) |
 | `use_skill` | `Read` | `*` | [skills](skills.md) |
+| `list_skills` | `Read` | `*` | [skills](skills.md) |
+| `reload_skills` | `Read` | `*` | [skills](skills.md) |
 | `create_project` | `Write` | `{path}/{name}` or `*` | [projects](projects.md) |
 | `init_config` | `Write` | `path` argument or `.` | [projects](projects.md) |
 | `mcp__<server>__<tool>` | `Read` if server `read_only = true`, else `Write` | `*` | [mcp](mcp.md) |

@@ -7,7 +7,7 @@ inside explicit state, execution, and safety boundaries.
 
 Every CLI turn runs the streaming agent loop:
 
-1. Refresh the system context with mode, pursuit, tools, and skill metadata.
+1. Refresh the system context with pursuit, tools, and skill metadata.
 2. Stream provider text and reconstruct native tool-call deltas by index.
 3. Execute native or JSON fallback tool calls through the same registry.
 4. Emit tool call/result events for the TUI.
@@ -96,8 +96,8 @@ field on `SessionData` (`Option<Pursuit>` via `SessionStore`, ADR-0032), so it
 survives restarts and `/resume`. A pursuit is a slim primitive: an objective
 and a single `is_complete` flag (no status machine, no token or time budget,
 no checklist — all removed; see
-[ADR-0010](../../../adr/0010-slim-goal-primitive.md) and
-[ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). There are no
+[ADR-0010](../../adr/0010-slim-goal-primitive.md) and
+[ADR-0015](../../adr/0015-pursue-stop-gate-and-repeat-cron.md)). There are no
 model-facing pursuit tools: the user sets the condition via `/pursue`, the
 harness drives continuation via the stop-gate, and the model signals completion
 with `[NEENEE_PURSUIT_COMPLETE]` (ADR-0031). See
@@ -106,10 +106,9 @@ with `[NEENEE_PURSUIT_COMPLETE]` (ADR-0031). See
 ## Pursue stop-gate
 
 `/pursue` arms a **stop-gate** on the agent and drives one turn. Each time the
-model would end the turn, the gate (at the turn-loop exit, beside the
-verify-nudge gate) re-injects the condition as a hidden user message and
-forces another round instead of returning. The turn therefore runs to
-completion across many rounds.
+model would end the turn, the gate re-injects the condition as a hidden user
+message and forces another round instead of returning. The turn therefore runs
+to completion across many rounds.
 
 | Form | Effect |
 |------|--------|
@@ -182,9 +181,9 @@ made redundant:
 - "Is the agent looping?" is the first dimension (`LoopingReview`); adding more
   (context bloat, tool-error storms, …) is a `SessionReview` trait impl, no
   dispatch changes and no extra model call per dimension.
-- Sub-agents (`subagent`, `verify_plan_execution`) run with review **disabled**, so
-  a short-lived read-only research sub-agent never pays for a diagnostic and
-  review cannot recurse.
+- Sub-agents (`subagent`) run with review **disabled**, so a short-lived
+  read-only research sub-agent never pays for a diagnostic and review cannot
+  recurse.
 
 Configure or inspect live via the `/review` slash command
 (`/review off`, `/review N [M]`, `/review default`).
@@ -195,16 +194,15 @@ a separate future layer.
 Write capability is enforced per-agent through a `WriteScope` boundary
 (ADR-0028): the main agent is unrestricted (the permission broker is still the
 interactive layer inside it); a subagent carries a scope resolved from its
-profile, and a write tool whose target is outside that scope is blocked. The
-`PLAN` profile, for example, is scoped to `.neenee/plans/`. MCP servers with
-`read_only = false` declare `Write` and are subject to the same gate when run
-inside a scoped subagent. The model plans via the injected `plan` tool, which
-delegates to a `PLAN` subagent; see [Plan](plan.md) for the full workflow.
+profile, and a write tool whose target is outside that scope is blocked. All
+built-in subagent profiles carry a `Read` ceiling today, so this gate is
+inactive in practice but available to future scoped-write roles. MCP servers
+with `read_only = false` declare `Write` and are subject to the same gate when
+run inside a scoped subagent.
 
 ## Permission broker
 
-Write-capable Build-mode tools pass through a core permission broker before
-execution:
+Write-capable tools pass through a core permission broker before execution:
 
 1. Core stores a one-shot waiter and emits `PermissionRequest`.
 2. The CLI projects the request to the TUI.
@@ -265,7 +263,7 @@ survives while only the model-visible prefix is replaced.
 The first two layers each have a dedicated deep-dive — [Context
 pruning](context-pruning.md) and [Context compaction](context-compaction.md);
 exact keys and defaults live in the
-[Configuration Reference](../../../reference/configuration.md#compaction).
+[Configuration Reference](../../reference/configuration.md#compaction).
 
 **Overflow recovery** is the harness's own reactive backstop and has no separate
 page. If a provider reports context overflow *before* any `ToolCall` event, the

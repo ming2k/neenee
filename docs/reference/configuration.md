@@ -63,14 +63,11 @@ The optional `[agent]` table.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `agent.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
-| `agent.verify_nudge_enabled` | `true` | Inject a hidden reminder if the model ends a turn with an approved plan but no `verify_plan_execution` call |
-| `agent.loop_review_enabled` | `true` | Fire the in-loop semantic review once per turn on a read-only-round streak or a repeated-call count, injecting an anti-anchoring nudge on a `Stuck` verdict (ADR-0030). Always off on sub-agents |
+| `agent.loop_review_enabled` | `true` | Parsed for compatibility but a deprecated no-op: the in-loop semantic review now runs unconditionally via the steering module (ADR-0030). Always off on sub-agents |
 
 ```toml
 [agent]
 hard_stop_rounds = 0
-verify_nudge_enabled = true
-loop_review_enabled = true
 ```
 
 ## Provider selection and retry

@@ -53,7 +53,6 @@ and nothing else:
 | Tools | Snapshot, profile-filtered | The tools the bound [profile](#profiles) admits |
 | Write boundary | No | A `WriteScope` resolved from the profile's `write_paths` grant |
 | Pursuit state | No | An empty in-memory pursuit store |
-| Plan state | No | No active plan (a planner child writes one; it does not inherit one) |
 | Skills | No | No loaded skills |
 | Cancellation token | No | A fresh, independent token |
 | Session persistence | No | The subagent is never persisted |
@@ -73,54 +72,40 @@ vocabulary; the dispatch tools bind them by reference.
 
 | Profile | Bound by | Ceiling | Write grant | Gets |
 |---------|----------|---------|-------------|------|
-| `EXPLORE` | `subagent` | `Read` | none | Pure read tools (`read_file`, `grep`, `glob`, `list_dir`, …) |
-| `VERIFY` | `verify_plan_execution` | `Execute` | none | Read tools **plus `bash`** for tests/builds/type-checks |
-| `PLAN` | `plan` | `Read` | `.neenee/plans` | Read tools **plus scoped writes** to the plans dir, no `bash` |
+| `EXPLORE` | `subagent` tool | `Read` | none | Pure read tools (`read_file`, `grep`, `glob`, `list_dir`, …) |
+| `REVIEW` | harness session-review diagnostic | `Read` | none | Pure read tools, run on a transcript snapshot |
+| `TITLE` | harness title generation | `Read` | none | No tools — a single `provider.chat()` call |
+| `INTERACTIVE` | (reserved, no dispatch tool yet) | `Read` | none | Pure read tools, with `ask_user` forwarded up |
 
-All three are non-interactive (`allow_user_interaction: false`) today and
-non-recursive (recursion is excluded absolutely, not per-profile — see
-[Tool admission](#tool-admission)). The profile is the single source of truth;
-the dispatch tool takes the profile explicitly, the verifier goes through the
-same dispatch machinery, and the planner is a third binding.
+All four are non-recursive (recursion is excluded absolutely, not per-profile
+— see [Tool admission](#tool-admission)). Only `EXPLORE` is reachable from a
+model tool call today; `REVIEW`, `TITLE`, and `INTERACTIVE` are internal
+roles. `INTERACTIVE` opts into `allow_user_interaction: true` so an
+`ask_user` request surfaces to the parent through the full-duplex channel; it
+is defined ahead of a dispatch tool that needs it.
 
-### Why three roles
+### Why a `Read` ceiling
 
-`EXPLORE` is the research role: pure inspection, no side effects. A researcher
-should not run commands — an exploration subagent with `bash` could mutate the
-workspace or run arbitrary commands, which is wrong for "go find things and
-report back".
-
-`VERIFY` is the independent-auditor role. Its most valuable evidence is
-*behaviour*: does `cargo test` pass, does it build, does it type-check? Static
-inspection alone cannot answer those, so the verifier needs command execution.
-But it must still not edit the implementation it is auditing.
-
-`PLAN` is the designer role. It researches read-only and writes the plan to
-`.neenee/plans/`, but must not run commands (a planner does not execute the
-change) and must not touch source. It gets write tools scoped to the plans
-directory via a `write_paths` grant, without raising its access ceiling to
-`Execute` (which would admit `bash`). See
-[ADR-0027](../../adr/0027-plan-as-subagent.md) and
-[ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
-
-The three needs (no commands; commands-but-no-file-writes; writes-but-no-commands)
-cannot be expressed by a single ceiling. The `Read < Execute < Write` tier split
-plus the decoupled `write_paths` grant is what resolves them: `VERIFY`'s
-`Execute` ceiling admits `bash` while excluding writes; `PLAN`'s `Read` ceiling
-plus `write_paths` grant admits scoped writes while excluding `bash`. See
-[ADR-0012](../../adr/0012-toolaccess-tier-split.md).
+The research role is pure inspection, no side effects. A researcher should not
+run commands — an exploration subagent with `bash` could mutate the workspace
+or run arbitrary commands, which is wrong for "go find things and report
+back". Every built-in profile therefore carries a `Read` ceiling. The
+`Read < Execute < Write` tier split (ADR-0012) and the decoupled `write_paths`
+grant (ADR-0028) remain available for a future command-running or
+scoped-write role, but no built-in profile exercises them today.
 
 ### Extending
 
-Adding a fourth role is a new profile constant plus a binding at the dispatch
+Adding a new role is a new profile constant plus a binding at the dispatch
 site — no orchestration surgery, no changes to the admission rule. An
-interactive role (one whose `ask_user` requests are forwarded to the user) would
-land here; the full-duplex channel ([ADR-0029](#full-duplex)) already carries
-it. The profile primitive was introduced in
-[ADR-0011](../../adr/0011-subagent-profiles.md), extended to two roles + the
-tier split in [ADR-0012](../../adr/0012-toolaccess-tier-split.md), and to the
-scoped-write `PLAN` role in
-[ADR-0027](../../adr/0027-plan-as-subagent.md) / [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
+interactive role (one whose `ask_user` requests are forwarded to the user)
+already exists as `INTERACTIVE`; a future dispatch tool can bind it. The
+full-duplex channel ([ADR-0029](#full-duplex)) already carries the request
+and reply path. The profile primitive was introduced in
+[ADR-0011](../../adr/0011-subagent-profiles.md) and extended with the tier
+split in [ADR-0012](../../adr/0012-toolaccess-tier-split.md); the `PLAN` /
+`VERIFY` profiles ADR-0027 / ADR-0012 once added were later removed
+([ADR-0033](../../adr/0033-remove-plan-and-verify-workflow.md)).
 
 ## Tool admission
 
@@ -136,24 +121,25 @@ admitted by a non-empty `write_paths` grant; the other two axes are gates:
 
 | Axis | Rule |
 |------|------|
-| Filesystem access | Admitted when the tool's tier is at or below the ceiling — so `EXPLORE` drops `bash`/`Write`, `VERIFY` drops only `Write` |
-| Scoped write | A `Write` tool below the ceiling is admitted when `write_paths` is non-empty (then scoped at runtime) — this is how `PLAN` gets writes-without-`bash`. `Execute` is never granted this way |
+| Filesystem access | Admitted when the tool's tier is at or below the ceiling — every built-in profile has a `Read` ceiling, so it drops `bash`/`Write` |
+| Scoped write | A `Write` tool below the ceiling is admitted when `write_paths` is non-empty (then scoped at runtime). No built-in profile sets `write_paths` today. `Execute` is never granted this way |
 | Needs a human | Excluded unless the profile opts in — `ask_user` and any future approval-gated tool |
 | Spawns a subagent | Always excluded, in *every* profile — this is what prevents recursion |
 
 ### What falls out of the policy
 
 - **Recursion is impossible.** `subagent` marks itself `spawns_subagent()`, so
-  it is excluded from every subagent regardless of profile. `plan` and
-  `verify_plan_execution` do the same. No name list is involved — a new
-  dispatch tool that declares the axis is covered automatically.
-- **Scoped writes, not blanket writes.** A `Write` tool admitted by `write_paths`
-  is then scoped at runtime by the agent's `WriteScope`: the `PLAN` profile's
-  writes resolve to `.neenee/plans/` and a write anywhere else is blocked at
-  the execution funnel. Admission says *whether*; `WriteScope` says *where*.
-- **Pursuit, plan, and verify tools are inert.** They are added inside the
-  subagent from a snapshot, tied to its own (empty) state cells — not the
-  parent's. For a read-only research task they have nothing to act on.
+  it is excluded from every subagent regardless of profile. No name list is
+  involved — a new dispatch tool that declares the axis is covered
+  automatically.
+- **Scoped writes, not blanket writes.** A `Write` tool admitted by
+  `write_paths` is then scoped at runtime by the agent's `WriteScope`, so a
+  write anywhere outside the granted path is blocked at the execution funnel.
+  Admission says *whether*; `WriteScope` says *where*. No built-in profile
+  uses this today.
+- **Pursuit and todo tools are inert.** They are added inside the subagent
+  from a snapshot, tied to its own (empty) state cells — not the parent's.
+  For a read-only research task they have nothing to act on.
 
 ### Why capability axes, not a name list
 
@@ -187,10 +173,11 @@ onto an inbox drained at the next tool-round boundary, so it can never
 interrupt a side effect mid-flight; **request/reply** resolves a parked oneshot
 immediately, since the child is already waiting on it.
 
-The built-in profiles stay non-interactive, so in practice no nested request is
-surfaced today and the child's `set_auto_approve(true)` is a transitional gate
-rather than a load-bearing deadlock fix. An interactive profile that opts into
-`allow_user_interaction` can drop that gate and the round-trip just works.
+The built-in profiles other than `INTERACTIVE` stay non-interactive, so in
+practice no nested request is surfaced today and the child's
+`set_auto_approve(true)` is a transitional gate rather than a load-bearing
+deadlock fix. The `INTERACTIVE` profile opts into `allow_user_interaction`, so
+its `ask_user` round-trip works through the handle directly.
 
 ## Runtime
 
@@ -225,8 +212,8 @@ stack and the transcript switches to showing that step's children.
 
 When zoomed in:
 
-- The entire footer — plan panel, pursuit bar, status bar, input box, hint
-  bar — is hidden. The subagent view is read-only chrome.
+- The entire footer — pursuit bar, status bar, input box, hint bar — is
+  hidden. The subagent view is read-only chrome.
 - A one-row navigation band at the bottom shows the position (`N of M`) on the
   left and `Esc back   [ prev   ] next` on the right.
 - `Esc` pops back up the focus stack; `[` and `]` cycle sibling `subagent`
@@ -256,51 +243,20 @@ holds a dead handle.
 Real token usage from the subagent is accumulated into the parent turn's cost,
 so it flows up to the active [pursuit](pursuits.md) if one is set.
 
-## Plan verification
-
-`verify_plan_execution` is the second subagent scenario — the mechanism behind
-the "verify before declaring completion" instruction. It is documented as a tool
-in [`verify_plan_execution`](../../reference/tools/plan.md#verify_plan_execution);
-this section covers *why* it is a distinct subagent role.
-
-### A second role, not a second `subagent`
-
-The verifier runs through the same subagent plumbing — isolation, snapshot,
-event forwarding, failure handling — but binds the [`VERIFY`](#profiles) profile
-instead of `EXPLORE`. The difference is one axis: `VERIFY`'s access ceiling is
-`Execute`, so the verifier additionally gets `bash` to run tests, builds, and
-type-checks as concrete evidence — while still excluding file writes, user
-questions, and recursion.
-
-This is the scenario that forced the `Read < Execute < Write` tier split. An
-independent auditor's most useful signal is behaviour — does it compile, do the
-tests pass — not just "the code looks right". Static-only verification (what
-`EXPLORE` gives) cannot produce that signal. But handing the verifier a
-`Write`-ceiling profile would let it edit the implementation it is auditing,
-which defeats independence. `Execute` is the tier between them: command
-execution without file-write capability. See
-[ADR-0012](../../adr/0012-toolaccess-tier-split.md).
-
-### Clean role/task separation
-
-The verifier's *role* contract — independent, unbiased, may run commands, must
-not edit, non-interactive — lives in the `VERIFY` profile's system prompt. The
-*task* — which plan to read, the PASS/PARTIAL/FAIL report format, the final
-verdict line — is carried in the call's user prompt. Adding a new kind of
-verification (a different report shape, a focused scope) is a different user
-prompt against the same profile, not a new subagent.
-
 ## See also
 
 - [`subagent`](../../reference/tools/subagent.md) — parameter reference.
-- [Plan](plan.md) — the `PLAN` subagent and the plan workflow.
 - [Turns and rounds](turns-and-rounds.md) — the round trip the subagent runs
   internally.
 - [Pursuits](pursuits.md) — how subagent token cost flows up to a parent
   pursuit.
 - [Harness architecture](harness.md) — the safety bounds that bound a subagent
   turn.
+- [ADR-0011](../../adr/0011-subagent-profiles.md) — the capability-axis
+  profile primitive.
 - [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md) — the
   `WriteScope` grant.
 - [ADR-0029](../../adr/0029-full-duplex-subagent-communication.md) — full-duplex
   communication.
+- [ADR-0033](../../adr/0033-remove-plan-and-verify-workflow.md) — removal of
+  the former `PLAN` / `VERIFY` profiles.

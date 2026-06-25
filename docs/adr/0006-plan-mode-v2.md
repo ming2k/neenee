@@ -141,9 +141,9 @@ Migration:
 
 ## References
 
-- [Plan mode](../explanation/agent-design/plan.md) — updated explanation of the
-  end-to-end flow
-- [How to plan a change](../how-to/plan-a-change.md) — step-by-step guide
+- [ADR-0007](0007-plan-progress-panel.md) — plan progress panel (superseded).
+- [ADR-0033](0033-remove-plan-and-verify-workflow.md) — Plan mode was later
+  replaced by a subagent (ADR-0027) and then removed.
 - [Built-in tools](../reference/tools/index.md) — `plan_enter` and `plan_exit`
   parameter schemas
 - opencode: `packages/opencode/src/tool/plan.ts`,

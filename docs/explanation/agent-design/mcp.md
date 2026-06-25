@@ -139,15 +139,17 @@ The session modal (`Ctrl+I`) shows the same data plus per-server tool names.
 ## Access tier and subagent admission
 
 An MCP tool's `read_only` flag sets its `ToolAccess` tier, which a subagent
-profile admits by capability axis (ADR-0011). The `PLAN` profile, for example,
-admits `Read` MCP tools plus scoped writes; an MCP server that needs to be
-usable inside a planner must declare `read_only = true`. Outside subagents the
-main agent is unrestricted, so an MCP tool's tier only gates its *subagent*
-admission and the permission broker (below), never the main agent.
+profile admits by capability axis (ADR-0011). Every built-in subagent profile
+carries a `Read` ceiling, so only `read_only = true` MCP servers are usable
+inside a subagent; a server that needs to run inside one must declare
+`read_only = true`. Outside subagents the main agent is unrestricted, so an
+MCP tool's tier only gates its *subagent* admission and the permission broker
+(below), never the main agent.
 
-- `read_only = true` server → `Read` → admitted by `EXPLORE`/`PLAN`/`VERIFY`.
-- `read_only = false` server (the default) → `Write` → admitted only where the
-  profile grants writes (and then scoped by `WriteScope`).
+- `read_only = true` server → `Read` → admitted by every built-in profile.
+- `read_only = false` server (the default) → `Write` → admitted only by a
+  profile that grants writes (then scoped by `WriteScope`); no built-in
+  profile does today.
 
 ## Permission broker
 
@@ -173,8 +175,6 @@ sent `SIGKILL`.
 
 - [Built-in tools](../../reference/tools/index.md) — `mcp__<server>__<tool>`
   parameter surface and the MCP tools subsection
-- [Plan](plan.md) — the `PLAN` subagent and its scoped `.neenee/plans/`
-  write grant
 - [Sub-agents](subagents.md) — why `read_only` MCP servers are visible
   to sub-agents and write servers are not
 - [Harness architecture](harness.md) — the 8-second MCP init bound and the

@@ -103,12 +103,13 @@ future then resolves to the cancelled result.
 ## Planning
 
 `ask_user` is `Read` access, so the main agent can use it freely to clarify
-requirements before or during planning. Inside a `PLAN` subagent it is gated by
-the profile's `allow_user_interaction` flag and the full-duplex channel
-([ADR-0029](../../adr/0029-full-duplex-subagent-communication.md)); the default
-`PLAN` profile stays non-interactive in practice, so a planner that needs
-clarification surfaces the request up to the main agent rather than calling
-`ask_user` directly.
+requirements before or during a task. Inside a subagent it is gated by the
+profile's `allow_user_interaction` flag and the full-duplex channel
+([ADR-0029](../../adr/0029-full-duplex-subagent-communication.md)): the default
+`EXPLORE` profile is non-interactive, so a read-only research subagent that
+needs clarification surfaces the request up to the main agent rather than
+calling `ask_user` directly; the `INTERACTIVE` profile opts in and the
+round-trip works through the handle.
 
 ## Sub-agents
 

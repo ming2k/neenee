@@ -13,7 +13,7 @@ see [Harness architecture](harness.md); for the events they share with other
 mechanisms see [Tool rounds](turns-and-rounds.md), [Pursuits](pursuits.md), and
 [Context compaction](context-compaction.md). For the configuration fields see
 [Configuration Reference](../../reference/configuration.md#hooks); for the
-decision history see [ADR-0025](../../../adr/0025-lifecycle-event-hooks.md).
+decision history see [ADR-0025](../../adr/0025-lifecycle-event-hooks.md).
 
 ## Why hooks exist
 
@@ -180,9 +180,9 @@ influence what the model summarizes), and `PostCompact` observes the result.
   `PreCompact` / `PostCompact` events surround
 - [Configuration Reference](../../reference/configuration.md#hooks) — the
   `[[hooks]]` table fields
-- [ADR-0025](../../../adr/0025-lifecycle-event-hooks.md) — the decision to
+- [ADR-0025](../../adr/0025-lifecycle-event-hooks.md) — the decision to
   adopt a single event axis with implicit capability, and the multi-axis
   design rejected along the way
-- [ADR-0030](../../../adr/0030-early-loop-intervention-and-round-hook.md) — the
+- [ADR-0030](../../adr/0030-early-loop-intervention-and-round-hook.md) — the
   `Deny`-forbidden `Round` event that partially supersedes ADR-0025's exclusion
   of round-count, plus the in-loop review + anti-anchoring nudge

@@ -42,11 +42,11 @@ completion slash command.)
 
 - [Pursuits and the pursue stop-gate](../../explanation/agent-design/pursuits.md)
   — the primitive, the stop-gate mechanism, and the `/repeat` comparison
-- [ADR-0010](../../../adr/0010-slim-goal-primitive.md) — slimmed the pursuit
+- [ADR-0010](../../adr/0010-slim-goal-primitive.md) — slimmed the pursuit
   primitive
-- [ADR-0015](../../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — introduced
+- [ADR-0015](../../adr/0015-pursue-stop-gate-and-repeat-cron.md) — introduced
   the stop-gate and the marker
-- [ADR-0031](../../../adr/0031-pursuit-tools-removed.md) — removed the
+- [ADR-0031](../../adr/0031-pursuit-tools-removed.md) — removed the
   model-facing pursuit tools
-- [ADR-0032](../../../adr/0032-fold-pursuit-into-session-store.md) — folded
+- [ADR-0032](../../adr/0032-fold-pursuit-into-session-store.md) — folded
   pursuit persistence into `SessionStore`

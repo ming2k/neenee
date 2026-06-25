@@ -26,7 +26,7 @@ User-edited configuration. Lossy; back it up.
 | Path | Purpose | Lossy? |
 |------|---------|--------|
 | `config.toml` | User-edited configuration (`[provider]`, `[skills]`, `[mcp]`, ...) | Yes |
-| `.migrated-v2` | Marker that the legacy `~/.config/neenee` data files have been migrated to the split layout | Rebuildable |
+| `.migrated-v3` | Marker that the legacy `~/.config/neenee` data files have been migrated to the split layout | Rebuildable |
 
 Default location: `~/.config/neenee/`.
 
@@ -37,7 +37,7 @@ Persistent, program-generated, must survive restart. Back it up.
 | Path | Purpose | Lossy? |
 |------|---------|--------|
 | `blobs/<2-char-prefix>/<hash>` | Content-addressed blob store for large payloads | Yes |
-| `pursuits.db` | SQLite pursuit database, keyed by session id | Yes |
+| `pursuits.db` | **Legacy** SQLite pursuit database (pre-ADR-0032); read once on startup to migrate into `SessionStore`, no new code writes here | Yes |
 | `repeat.db` | SQLite `/repeat` cron-job database (durable recurring prompts) | Yes |
 | `projects/<16-hex-bucket>/` | Per-project bucket: sessions, current pointer, metadata | Yes |
 | `projects/<bucket>/embeddings.json` | Per-project lightweight embedding index | Rebuildable (re-indexed) |
@@ -61,7 +61,6 @@ re-prompts; no conversation is lost.
 |------|---------|--------|
 | `history.json` | Slash-command input history | Rebuildable |
 | `provider_usage.json` | Per-model usage telemetry driving recency sort in the provider picker | Rebuildable |
-| `current.json` | Active session pointer per project (reserved for project-isolation phase) | Rebuildable |
 | `neenee.lock` | Cross-process advisory lock when no runtime directory is available | Rebuildable |
 | `log/` | Structured rolling-log appender output (reserved) | Rebuildable |
 
@@ -95,7 +94,6 @@ Lives with the project root; travels with the repository.
 |------|---------|
 | `.neenee/skills/<name>/SKILL.md` | Project-local skills (highest discovery priority) |
 | `.neenee/commands/<name>.md` | Project-local slash commands (highest discovery priority) |
-| `.neenee/plans/<name>.md` | Plan files — the only location a `PLAN` subagent may write (its `WriteScope` grant) |
 | `.neenee/session.json`, `.neenee/sessions/` | Legacy in-project session storage ( transitional) |
 | `.agents/skills/`, `.claude/skills/` | External application conventions (read-only) |
 | `.agents/commands/` | External application conventions (read-only) |
@@ -117,9 +115,9 @@ The override stack is identical; only the fallback locations differ.
 
 | Category | macOS | Windows |
 |----------|-------|---------|
-| Config | `~/Library/Preferences/neenee` | `%APPDATA%\neenee\config` |
+| Config | `~/Library/Application Support/neenee` | `%APPDATA%\neenee\config` |
 | Data | `~/Library/Application Support/neenee` | `%APPDATA%\neenee\data` |
-| State | `~/Library/Application Support/neenee` (no native state on macOS) | `%LOCALAPPDATA%\neenee\state` |
+| State | `~/Library/Application Support/state` (no native state dir on macOS; falls back to the data dir's sibling `../state`) | `%LOCALAPPDATA%\neenee\state` |
 | Cache | `~/Library/Caches/neenee` | `%LOCALAPPDATA%\neenee\cache` |
 
 `XDG_*_HOME` env vars still take precedence over these on every platform.

@@ -27,7 +27,6 @@ before the individual docs.
 | [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-turn condition-driven pursuit) and the `/repeat` cron scheduler |
 | [Sub-agents](agent-design/subagents.md) | The `subagent` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and access-tier gating |
-| [Plan](agent-design/plan.md) | Plan as a subagent: the read-only `PLAN` profile with a scoped `.neenee/plans/` write grant, the `plan` tool's delegation + approval gate, the end-to-end lifecycle, and the progression model that drives a plan to completion |
 | [User questions](agent-design/user-questions.md) | How the `ask_user` tool blocks the agent, renders a modal, and returns answers |
 | [Skills](agent-design/skills.md) | On-demand domain expertise: the catalog/body two-channel model, the source/priority cascade, and explicit versus implicit invocation |
 | [Lifecycle hooks](agent-design/hooks.md) | User-configured actions on the agent's lifecycle events (PreToolUse, Stop, SessionStart, PreCompact…): one event axis with capability implied by the event |

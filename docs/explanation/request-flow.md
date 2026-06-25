@@ -157,10 +157,10 @@ flowchart TD
 ```
 
 The loop has **no per-round cap**. The earlier `MAX_TOOL_ROUNDS = 32`
-hard limit was removed in [ADR-0009](../../adr/0009-uncapped-agentic-loop.md);
+hard limit was removed in [ADR-0009](../adr/0009-uncapped-agentic-loop.md);
 the loop now runs until the model emits a final assistant message with no
 tool call, with the repeated-call guard, periodic session review
-([ADR-0016](../../adr/0016-session-review-over-round-counting.md)), and
+([ADR-0016](../adr/0016-session-review-over-round-counting.md)), and
 context compaction as backstops.
 
 ### Tool dispatch
@@ -248,7 +248,7 @@ The loop returns a final assistant message when any of these holds:
 
 Distinct tool rounds are uncapped — the loop runs until the model emits a
 final assistant message, with context compaction as the backstop
-([ADR-0009](../../adr/0009-uncapped-agentic-loop.md)):
+([ADR-0009](../adr/0009-uncapped-agentic-loop.md)):
 
 - After three consecutive identical tool calls (same name and arguments),
   the fourth is rejected with an error. Distinct calls and interleaved text

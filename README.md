@@ -14,7 +14,6 @@ A Rust-based AI coding agent with a semantic TUI, tool use, on-demand skills, an
 - **Semantic TUI** — Ratatui-based interface with live status, expandable tool steps, and structured diffs.
 - **Tool Use** — Full ReAct loop with native and fallback tool-calling; bash, file I/O, grep, glob, web search, and MCP servers.
 - **Autonomous Pursuits** — Set a pursuit with `/pursue <condition>` and the harness keeps the turn going (a stop-gate) until the condition is met. Schedule recurring prompts on a clock with `/repeat`.
-- **Plan Mode** — Read-only analysis and planning without touching the codebase.
 - **Durable Sessions** — Atomic persistence with compaction, resume, and fork.
 - **Skills** — Load domain-specific instructions on demand or automatically by mention.
 
@@ -33,7 +32,7 @@ On first launch, press `Ctrl+M` to pick a provider and enter your API key. Then 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
-| `Tab` | Switch between Build and Plan mode |
+| `Tab` | Accept slash-command / `@path` completion |
 | `Ctrl+M` | Open provider picker |
 | `Ctrl+T` | Expand / collapse tool details |
 | `Ctrl+B` | Toggle between input and conversation stream |

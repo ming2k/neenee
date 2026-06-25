@@ -1,7 +1,10 @@
 # 0027. Plan as a subagent (replace Plan mode with a `PLAN` profile + a `plan` tool)
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0033
 - **Date:** 2026-06-25
+
+> Superseded by [ADR-0033](0033-remove-plan-and-verify-workflow.md). The
+> `PLAN` profile, the `plan` tool, and `verify_plan_execution` were removed.
 
 > This supersedes [ADR-0006](0006-plan-mode-v2.md) (plan mode v2) and revises
 > [ADR-0026](0026-plan-progression-forcing-functions.md) (the plan-exit nudge
@@ -144,8 +147,9 @@ profile flag away once the gate is dropped.)
 
 `active_plan_path` (set by the `plan` tool on approval) still drives the
 Build-mode system-prompt hint and `verify_plan_execution`. The
-[verify gate + two-phase pipeline](../explanation/agent-design/plan.md) is
-orthogonal to how the plan was produced and needs no change.
+verify gate + two-phase pipeline is orthogonal to how the plan was produced
+and needs no change (both were later removed by
+[ADR-0033](0033-remove-plan-and-verify-workflow.md)).
 
 ### 7. Forcing functions (ADR-0026) re-anchor
 
@@ -245,8 +249,8 @@ orthogonal to how the plan was produced and needs no change.
   nudges survive, re-anchored on the `plan` tool result.
 - [ADR-0028](0028-capability-allocation-scoped-writes.md) — the `WriteScope` /
   `write_paths` mechanism the `PLAN` profile's scoped write uses; a prerequisite.
-- [Plan](../explanation/agent-design/plan.md) — the workflow doc, to be
-  rewritten when this lands.
+- [ADR-0033](0033-remove-plan-and-verify-workflow.md) — this workflow was
+  later removed.
 - opencode — plan as a distinct read-only `plan` agent separate from `build`.
 - Claude Code `2.1.190` — research/design delegated to `explore` / `plan`
   subagents inside the plan workflow.

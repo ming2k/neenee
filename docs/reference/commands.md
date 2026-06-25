@@ -18,7 +18,6 @@ Project and user-defined commands are covered under
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
 | `/auto-approve [on\|off]` | Toggle bypassing write-tool permission prompts |
 | `/review` | Run an on-demand session-review diagnostic of the current turn |
-| `/verify-nudge [on\|off]` | Toggle the verify-plan hard nudge at turn end |
 | `/search <query>` | Semantic search over the project's session history |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
 | `/sessions` | Browse past sessions |
@@ -30,6 +29,7 @@ Project and user-defined commands are covered under
 | `/skills [list\|reload]` | List or reload available skills |
 | `/skill <name>` | Load a skill by name |
 | `/export` | Export the current conversation to the clipboard as Markdown |
+| `/debug network [on\|off]` | Toggle per-project network capture for debugging |
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
 
@@ -118,18 +118,6 @@ diagnoses the current turn and reports verdicts. `/review` takes no
 arguments; the periodic-cadence design was superseded (see
 [ADR-0018](../adr/0018-per-project-multi-instance-concurrency.md)
 revising [ADR-0016](../adr/0016-session-review-over-round-counting.md)).
-
-### `/verify-nudge`
-
-| Form | Effect |
-|------|--------|
-| `/verify-nudge` | Show whether the verify-plan hard nudge is on or off |
-| `/verify-nudge on` | Enable the hard nudge at turn end |
-| `/verify-nudge off` | Disable the hard nudge at turn end |
-
-When on, at the end of each turn the harness re-injects a plan-verification
-nudge if the active plan looks unfinished. See
-[Plan](../explanation/agent-design/plan.md).
 
 ### `/search`
 

@@ -162,7 +162,8 @@ Migration:
 
 ## References
 
-- [Plan mode](../explanation/agent-design/plan.md) — overall mode design
+- [ADR-0033](0033-remove-plan-and-verify-workflow.md) — Plan mode was later
+  replaced (ADR-0027) and removed.
 - [ADR-0006](0006-plan-mode-v2.md) — approval gate + active plan path +
   `<proposed_plan>` rendering, of which this is a direct follow-up
 - codex `update_plan` tool (`codex-rs/core/src/tools/handlers/plan.rs`)

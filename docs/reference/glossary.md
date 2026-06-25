@@ -33,16 +33,12 @@ symbol, the symbol is backticked and never abbreviated.
 | **`MAX_PURSUIT_ITERATIONS`** | The 50-round safety cap that bounds a pursuit that never signals completion. [Pursuits](../explanation/agent-design/pursuits.md) |
 | **`/repeat` cron scheduler** | Orthogonal clock-driven scheduler: schedules a prompt on a five-field cron expression, stores jobs durably, fires a fresh turn per tick, auto-expires after 30 days. [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
 
-## Plans and the task list
+## Task list
 
 | Term | Definition |
 |------|------------|
-| **plan** | A read-only `PLAN` subagent researches the codebase and writes a plan to `.neenee/plans/<slug>.md`; on user approval the todo list is seeded and the main agent implements. [Plan](../explanation/agent-design/plan.md) |
-| **`PLAN` profile** | The built-in subagent profile that does planning: `Read` ceiling plus a `write_paths` grant to `.neenee/plans`, no `bash`. [Plan](../explanation/agent-design/plan.md) |
-| **approval gate** | The *Approve* / *Keep planning* prompt the `plan` tool raises after the subagent returns. [Plan](../explanation/agent-design/plan.md) |
-| **todo list** | The single source of truth for remaining work, seeded from a plan's `##` headings; shared with `todo`/`todo_update`, persisted across restarts. [ADR-0020](../adr/0020-unified-task-list.md) |
-| **forcing cascade** | The ordered turn-exit gates (todo-continuation → verify-nudge → pursue stop-gate) that may refuse a turn ending and force one more round. [Plan](../explanation/agent-design/plan.md) |
-| **verify-nudge** | A one-shot-per-turn exit gate: with an active plan and an empty todo list, injects a hidden reminder if `verify_plan_execution` was not called. [Plan](../explanation/agent-design/plan.md) |
+| **todo list** | The single source of truth for remaining work, shared with `todo`/`todo_update`, shown in the Activity modal, and persisted across restarts. The model populates it directly; there is no longer a plan tool that seeds it. [ADR-0020](../adr/0020-unified-task-list.md) |
+| **stop-gate** | The turn-exit forcing function: the `/pursue` stop-gate plus any `Stop` hooks. It is the only gate that can refuse a turn ending and force one more round. [Harness architecture](../explanation/agent-design/harness.md) |
 
 ## Sub-agents
 
@@ -51,7 +47,8 @@ symbol, the symbol is backticked and never abbreviated.
 | **subagent** | An isolated child agent spawned by the `subagent` tool to investigate a sub-question; shares only the provider with the parent, runs with a fresh history and profile-filtered tools. [Sub-agents](../explanation/agent-design/subagents.md) |
 | **profile** | A declarative bundle (name, system-prompt fragment, and a `ToolPolicy`) that scopes a subagent's behavior; bound by reference by dispatch tools. [Sub-agents](../explanation/agent-design/subagents.md) |
 | **`EXPLORE` profile** | Research role: `Read` ceiling, no write grant; pure read tools. [Sub-agents](../explanation/agent-design/subagents.md) |
-| **`VERIFY` profile** | Independent-auditor role: `Execute` ceiling, read tools plus `bash`, no writes. Bound by `verify_plan_execution`. [Sub-agents](../explanation/agent-design/subagents.md) |
+| **`REVIEW` profile** | Read-only transcript auditor role used by the session-review diagnostic. [ADR-0016](../adr/0016-session-review-over-round-counting.md) |
+| **`TITLE` profile** | Read-only role used to generate a session title in a single model call. [ADR-0022](../adr/0022-session-level-ai-title.md) |
 | **full-duplex** | A subagent is not fire-and-forget: requests travel up to the parent, replies travel down to the exact child. [ADR-0029](../adr/0029-full-duplex-subagent-communication.md) |
 
 ## Tools and capabilities
@@ -152,6 +149,9 @@ documentation and ADRs.
 | `[NEENEE_GOAL_COMPLETE]` | `[NEENEE_PURSUIT_COMPLETE]` | [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
 | Plan mode | plan-as-a-subagent | [ADR-0027](../adr/0027-plan-as-subagent.md) |
 | per-plan progress panel | unified todo list | [ADR-0020](../adr/0020-unified-task-list.md) |
+| `plan` / `verify_plan_execution` tools | removed (planning is prompt-level) | [ADR-0033](../adr/0033-remove-plan-and-verify-workflow.md) |
+| `PLAN` / `VERIFY` profiles | removed | [ADR-0033](../adr/0033-remove-plan-and-verify-workflow.md) |
+| verify-nudge / todo-continuation nudge | stop-gate (pursue + `Stop` hooks) | [ADR-0033](../adr/0033-remove-plan-and-verify-workflow.md) |
 | stall detector | session-review diagnostic | [ADR-0009](../adr/0009-uncapped-agentic-loop.md) |
 
 ## See also

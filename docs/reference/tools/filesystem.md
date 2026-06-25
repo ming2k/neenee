@@ -1,8 +1,8 @@
 # Filesystem tools
 
 Read and mutate files and directory listings. `read_file` / `grep` / `glob` /
-`list_dir` are `Read`; `write_file` / `edit_file` are `Write` (Plan-exempt for
-paths under `.neenee/plans/`). Source: `crates/neenee-tools/src/lib.rs`.
+`list_dir` are `Read`; `write_file` / `edit_file` are `Write`. Source:
+`crates/neenee-tools/src/lib.rs`.
 
 ### `read_file`
 

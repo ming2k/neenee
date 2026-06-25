@@ -3,7 +3,7 @@
 The agent talks to LLM providers through the `Provider` trait
 (`crates/neenee-core/src/capability.rs`). Every provider implementation lives
 in `crates/neenee-providers/src/`. Provider selection happens at startup and
-on `/provider switch` in `crates/neenee-cli/src/main.rs`.
+on `/provider` (the picker) in `crates/neenee-cli/src/main.rs`.
 
 ## Capability matrix
 
@@ -39,7 +39,7 @@ universal fallback.
 ## Provider catalog
 
 `default_provider` in `config.toml` selects the initial provider. The same
-names are accepted by `/provider switch`. API keys may be supplied through
+names are accepted by the `/provider` picker. API keys may be supplied through
 environment variables or `config.toml` fields; model selection uses a
 separate `<NAME>_MODEL` env var.
 

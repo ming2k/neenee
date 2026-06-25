@@ -5,7 +5,7 @@
 
 ## Context
 
-[`ToolAccess`](../explanation/agent-design/plan.md) (`Read < Execute < Write`)
+[`ToolAccess`](../reference/tools/access.md) (`Read < Execute < Write`)
 is the single filesystem knob today. It tiers *admission*: a sub-agent profile
 sets a ceiling and admits every tool at or below it. That cannot express the
 capability shape plan-as-a-subagent (ADR-0027) needs: **read tools + writes to
@@ -156,4 +156,5 @@ parent and re-append the file name so a not-yet-existing file still resolves.
   write tier is decoupled by `write_paths`.
 - [ADR-0026](0026-plan-progression-forcing-functions.md) — unaffected.
 - [ADR-0027](0027-plan-as-subagent.md) — the `PLAN` profile this enables.
-- [Plan](../explanation/agent-design/plan.md) — the workflow that consumes it.
+- [ADR-0033](0033-remove-plan-and-verify-workflow.md) — the workflow that
+  consumed it was later removed.

@@ -188,8 +188,7 @@ paths — and any future tool source — pass through identical checks:
    turn-ending failure.
 2. **Write-scope gate.** A per-agent `WriteScope` boundary blocks write tools
    whose target is outside the agent's granted paths — the main agent is
-   unrestricted, a subagent is scoped by its profile (e.g. `PLAN` writes only
-   under `.neenee/plans/`). See [Plan](plan.md) and
+   unrestricted, a subagent is scoped by its profile. See
    [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
 3. **Permission broker.** Write-capable calls are authorized against a
    scoped rule set. A cached *always* rule skips the prompt; otherwise
@@ -300,7 +299,6 @@ of all four rounds, and the plan's staleness counter advances by one turn.
 - [Guided decoding](../guided-decoding.md) — the constrained-decoding
   layer that produces valid native calls
 - [Pursuits](pursuits.md) — turn-scoped token and time accounting
-- [Plan](plan.md) — plan staleness measured in turns
 - [Sub-agents](subagents.md) — independent turns and round budgets
   for child agents
 - [How to add a tool](../../how-to/add-a-tool.md) — adding a new tool
