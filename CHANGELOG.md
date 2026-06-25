@@ -5,6 +5,44 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-06-26
+
+### Fixed
+
+- **Non-streaming chat lost assistant content.** The OpenAI-compatible
+  provider's `chat()` path fed the response through the tool-call echo filter
+  but discarded `feed`'s return value, keeping only `finish()`'s output. Since
+  `feed` emits ordinary prose as it classifies, every plain assistant response
+  came back empty in the non-streaming path — silently breaking title
+  generation, session summarization, and the non-streaming agent fallback. The
+  streaming path was already correct. It now accumulates `feed`'s emission
+  before resolving the held remainder with `finish`.
+
+### Added
+
+- **Provider wire-level integration tests.** A new `tests/wire.rs` in
+  `neenee-providers` stands up a mock HTTP server (mockito) and drives the full
+  request → HTTP → SSE-byte-reassembly → event-parse path for both the
+  OpenAI-compatible and Anthropic `/messages` providers — covering header
+  attachment, 5xx retry classification, keyless auth, text/reasoning/tool-call
+  stream parsing, echo suppression, tool_use argument fragmenting, and in-band
+  stream errors. providers previously had zero async tests; the first one
+  caught the regression above.
+
+- **Coverage reporting CI.** A `coverage` job runs `cargo-llvm-cov` to produce
+  an lcov report (uploaded as a workflow artifact) plus a textual summary. It
+  builds without `-D warnings` and never gates merges.
+
+- **Tag-driven release workflow.** `release.yml` builds release binaries for
+  x86_64/aarch64 (linux gnu + musl) and macOS (both arches) on `v*` tags and
+  publishes a GitHub release with auto-generated notes.
+
+### Changed
+
+- The `flock`-exclusion test in `neenee-store` is now `#[cfg(unix)]`-gated so
+  the suite is Windows-ready, and the `path_scan` cache access in the TUI uses
+  `get_or_insert_with` instead of a check-then-`unwrap`.
+
 ## [0.6.0] - 2026-06-26
 
 ### Added
@@ -377,7 +415,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/ming2k/neenee/releases/tag/v0.6.1
 [0.6.0]: https://github.com/ming2k/neenee/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ming2k/neenee/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ming2k/neenee/releases/tag/v0.4.0
