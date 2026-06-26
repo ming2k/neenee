@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/rust-2024-orange?logo=rust" alt="Rust 2024"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
 
@@ -58,15 +58,7 @@ On first launch, press `Ctrl+M` to pick a provider and enter your API key. Then 
 | `/export` | Export conversation as Markdown |
 | `/mcp` | Inspect MCP server connections |
 
-## Architecture
-
-Seven-crate workspace with strict layering:
-
-```
-neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  {neenee-code, neenee-quant}
-```
-
-See [docs/](docs/) for detailed architecture, guides, and reference.
+See [docs/](docs/) for architecture, guides, and reference.
 
 ## License
 

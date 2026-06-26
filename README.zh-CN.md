@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/rust-2021%2B-orange?logo=rust" alt="Rust 2021+"></a>
+  <a href="#"><img src="https://img.shields.io/badge/rust-2024-orange?logo=rust" alt="Rust 2024"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
 
@@ -57,14 +57,6 @@ cargo run --release
 | `/session list` | 浏览和恢复历史会话 |
 | `/export` | 将对话导出为 Markdown |
 | `/mcp` | 查看 MCP 服务器连接状态 |
-
-## 架构
-
-七个 crate 组成的严格分层工作区：
-
-```
-neenee-core  ←  {neenee-providers, neenee-tools, neenee-store}  ←  neenee-agent  ←  {neenee-code, neenee-quant}
-```
 
 详细架构、指南和参考文档见 [docs/](docs/)。
 
