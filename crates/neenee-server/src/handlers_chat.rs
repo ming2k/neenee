@@ -21,7 +21,7 @@ use crate::side::{SideSession, start_active_turn};
 /// `AgentRequest::Chat` — start an interactive turn against whichever session
 /// the user is currently composing into (primary or `/btw` side).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn chat(
+pub async fn chat(
     active_view_side: &AtomicBool,
     side: &Arc<AsyncRwLock<Option<SideSession>>>,
     agent: &Arc<Agent>,
@@ -59,7 +59,7 @@ pub(crate) async fn chat(
 /// a normal tool step (`ToolCall` → live `ToolStream` → `ToolResult`) so the
 /// existing render path picks it up with no special-casing. Spawned onto its
 /// own task so it runs concurrently with the dispatch loop.
-pub(crate) async fn shell(
+pub async fn shell(
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     ctt_clone: &Arc<AsyncRwLock<Option<CancellationToken>>>,
     generation_clone: &Arc<AtomicU64>,

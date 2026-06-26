@@ -35,7 +35,8 @@ use crate::tui::selection::{
 use crate::tui::step_interaction;
 use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use neenee_core::AgentResponse;
 
 /// Shared runtime state crossing the response-listener / event-loop boundary.
 /// Each field is the single source of truth for one piece of live harness
@@ -119,6 +120,7 @@ pub(super) async fn run_app_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     runtime: UiRuntime,
+    session: Arc<neenee_store::session::SessionStore>,
 ) -> io::Result<()>
 where
     io::Error: From<<B as Backend>::Error>,
@@ -997,6 +999,77 @@ where
                         app.input_history.push(cmd.clone());
                     }
                     app.history_index = None;
+                    // `/serve` is a pure frontend concern (hot-attach a
+                    // WebSocket listener to the running session). Intercept
+                    // it here rather than routing through agent_loop.
+                    if cmd == "/serve" || cmd.starts_with("/serve ") {
+                        let port: u16 = cmd
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|p| p.parse().ok())
+                            .unwrap_or(0);
+                        let mut tap = app.serve_tap.lock().await;
+                        if tap.is_some() {
+                            // `/serve` with no arg while active = stop.
+                            if cmd == "/serve" {
+                                *tap = None;
+                                if let Some(ct) = app.serve_cancel.take() {
+                                    ct.cancel();
+                                }
+                                runtime
+                                    .messages
+                                    .lock()
+                                    .await
+                                    .push(
+                                        TranscriptMessage::new(
+                                            Role::Assistant,
+                                            "Serve mode stopped.".to_string(),
+                                        )
+                                        .with_origin(UserMessageOrigin::Slash),
+                                    );
+                            } else {
+                                runtime.messages.lock().await.push(
+                                    TranscriptMessage::new(
+                                        Role::Assistant,
+                                        "Serve already active. Use /serve (no port) to stop."
+                                            .to_string(),
+                                    )
+                                    .with_origin(UserMessageOrigin::Slash),
+                                );
+                            }
+                        } else {
+                            let (bc_tx, _) = broadcast::channel::<AgentResponse>(1024);
+                            *tap = Some(bc_tx.clone());
+                            let (port_rx, cancel_token) =
+                                neenee_server::serve::start_server(
+                                    port,
+                                    app.tx.clone(),
+                                    bc_tx,
+                                    session.clone(),
+                                );
+                            // Stash the cancel token so `/serve` (stop) can
+                            // shut the listener down.
+                            app.serve_cancel = Some(cancel_token);
+                            // Wait for the listener to report the actual bound
+                            // port (resolves port=0 to the OS-assigned value).
+                            let actual_port = port_rx.await.unwrap_or(port);
+                            let msg = format!(
+                                "Serve mode started on port {}. \
+                                 Open ws://localhost:{} in a WebSocket client.",
+                                actual_port, actual_port,
+                            );
+                            runtime
+                                .messages
+                                .lock()
+                                .await
+                                .push(
+                                    TranscriptMessage::new(Role::Assistant, msg)
+                                        .with_origin(UserMessageOrigin::Slash),
+                                );
+                        }
+                        runtime.is_responding.store(false, Ordering::SeqCst);
+                        return Ok(());
+                    }
                     let _ = app.tx.send(AgentRequest::SlashCommand(cmd));
                 }
                 input::InputAction::SendShell(command) => {
@@ -1534,14 +1607,13 @@ where
                         // after modal-close so an open overlay still wins.
                         app.exit_side_view();
                         let _ = app.tx.send(AgentRequest::ExitSideView);
-                    } else if runtime.is_responding.load(Ordering::SeqCst) {
-                        let _ = app.tx.send(AgentRequest::Interrupt);
                     } else if !app.input.is_empty() {
-                        app.input.clear();
-                        app.cursor_position = 0;
-                        app.input_scroll = 0;
-                        app.suggestion_index = None;
-                        // Clearing the input also arms the quit window so
+                        // Ctrl+C is purely a compose-level action: copy,
+                        // close overlay, clear, or quit. It never interrupts a
+                        // running turn — only double-Esc does — so a task in
+                        // flight is left untouched here and the input is
+                        // cleared instead. Clearing the input also arms the
+                        // quit window so
                         // the chain is exactly two presses total (clear,
                         // then quit). The combined toast says both what
                         // just happened and what the next Ctrl+C will do,
@@ -1766,7 +1838,13 @@ where
                                     i - 1
                                 }
                             }
-                            None => app.input_history.len() - 1,
+                            None => {
+                                // First ↑: stash the in-progress draft so a
+                                // later ↓ past the newest entry restores it
+                                // instead of leaving the composer empty.
+                                app.history_draft = std::mem::take(&mut app.input);
+                                app.input_history.len() - 1
+                            }
                         };
                         app.history_index = Some(new_idx);
                         app.input = app.input_history[new_idx].clone();
@@ -1791,9 +1869,12 @@ where
                             app.input = app.input_history[new_idx].clone();
                             app.cursor_position = app.input.chars().count();
                         } else {
+                            // Walked past the newest entry: restore the draft
+                            // the user was composing before the first ↑,
+                            // rather than blanking the composer.
                             app.history_index = None;
-                            app.input = String::new();
-                            app.cursor_position = 0;
+                            app.input = std::mem::take(&mut app.history_draft);
+                            app.cursor_position = app.input.chars().count();
                         }
                     }
                 }
@@ -2099,12 +2180,19 @@ where
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();
-                    } else if app.todos_rect.is_some_and(|r| {
-                        // `todos d/t` badge: open the Activity modal on the
-                        // Todos section directly. Checked before the full-bar
-                        // rect since the badge sits inside the bar.
-                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-                    }) {
+                    } else if app.active_modal == Modal::None
+                        && app.todos_rect.is_some_and(|r| {
+                            // `todos d/t` badge: open the Activity modal on the
+                            // Todos section directly. Checked before the full-bar
+                            // rect since the badge sits inside the bar.
+                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                        })
+                    {
+                        // The activity bar may still be painted while a modal
+                        // owns the surface — especially the pending Permission
+                        // sheet, whose expanded body grows up over this row.
+                        // Gate on `Modal::None` so a click never stacks an
+                        // Activity modal on top of an in-progress decision.
                         app.active_modal = Modal::Activity;
                         app.activity_tab = ActivityTab::Todos;
                         app.modal_index = 0;
@@ -2112,9 +2200,11 @@ where
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();
-                    } else if app.activity_rect.is_some_and(|r| {
-                        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-                    }) {
+                    } else if app.active_modal == Modal::None
+                        && app.activity_rect.is_some_and(|r| {
+                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                        })
+                    {
                         app.active_modal = Modal::Activity;
                         app.activity_tab = ActivityTab::Activity;
                         app.modal_index = 0;

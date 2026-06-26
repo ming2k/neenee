@@ -241,7 +241,7 @@ impl SubagentTool {
         // can label this subagent by its role (explore / plan / verify / …)
         // rather than a generic "Subagent". Emitted before the child runs.
         on_event(neenee_core::SubagentEvent::Started {
-            profile: self.profile.name,
+            profile: self.profile.name.to_string(),
         });
 
         // Subagent tools come from the bound profile's policy — the single

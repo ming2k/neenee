@@ -36,16 +36,18 @@ use tokio_util::sync::CancellationToken;
 use crate::session_view::{build_sessions_overview, provider_key_status};
 use crate::side::SideSession;
 use crate::startup::StartupMode;
+use crate::UiBridge;
 
 /// Every piece of long-lived state the agent background task owns. Built by
 /// `main` after startup wiring and moved into [`run`].
 ///
 /// The field set is exactly the set of locals the old inline
 /// `tokio::spawn(async move { … })` block closed over; nothing has been added
-/// or removed, only named. Fields are `pub(crate)` because the binary is the
-/// only consumer.
+/// or removed, only named. Fields are `pub` because the harness is assembled
+/// by a frontend (the TUI binary or a server process) before being handed to
+/// [`run`].
 #[allow(clippy::type_complexity)]
-pub(crate) struct Harness {
+pub struct Harness {
     /// Responses bound for the TUI (`resp_tx` in the old code).
     pub tx: mpsc::UnboundedSender<AgentResponse>,
     /// Inbound request channel, cloned so `/repeat` can self-fire a `Chat`
@@ -96,6 +98,10 @@ pub(crate) struct Harness {
     pub startup: StartupMode,
     /// Whether the sessions picker should open on launch.
     pub open_picker_on_start: bool,
+    /// Frontend clipboard bridge (ADR-0037 step 3). The TUI provides a real
+    /// impl; a future browser frontend provides its own. Used only by the
+    /// `/export` slash command.
+    pub ui: Arc<dyn UiBridge>,
 }
 
 /// Run the agent background task to completion (i.e. until the TUI drops the
@@ -110,7 +116,7 @@ pub(crate) struct Harness {
 // `/pursue status` branch has inconsistent indentation and looks misplaced —
 // it fires session-start hooks every time `/pursue status` runs. Preserved
 // verbatim here; not this refactor's job to fix.
-pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) {
+pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) {
     let Harness {
         tx: resp_tx,
         req_tx: req_tx_for_commands,
@@ -134,6 +140,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
         project_root: project_root_for_side,
         startup,
         open_picker_on_start,
+        ui,
     } = h;
     // The old inline block captured two clones of the skills registry —
     // `skills_registry` (read for the session-context snapshot) and
@@ -168,7 +175,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
     while let Some(req) = req_rx.recv().await {
         match req {
             AgentRequest::Interrupt => {
-                crate::handlers::permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
+                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
                     .await;
             }
             // The model's self-initiated escape hatch (the `abort` tool).
@@ -177,7 +184,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
             // and SessionEnd hooks fire before the process ends. The turn
             // executing the `abort` tool call is itself cancelled by this.
             AgentRequest::Abort => {
-                crate::handlers::permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
+                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
                     .await;
                 let _ = resp_tx.send(AgentResponse::Exit);
             }
@@ -186,7 +193,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 decision,
                 parent_call_id,
             } => {
-                crate::handlers::permission::reply(
+                crate::handlers_permission::reply(
                     &agent,
                     &subagent_registry,
                     &resp_tx,
@@ -201,7 +208,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 answers,
                 parent_call_id,
             } => {
-                crate::handlers::permission::reply_question(
+                crate::handlers_permission::reply_question(
                     &agent,
                     &subagent_registry,
                     &side,
@@ -218,7 +225,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 api_key,
                 base_url,
             } => {
-                crate::handlers::provider::switch(
+                crate::handlers_provider::switch(
                     &mut config,
                     &agent,
                     &provider_for_task,
@@ -232,7 +239,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 .await;
             }
             AgentRequest::ToggleFavorite { id } => {
-                crate::handlers::provider::toggle_favorite(
+                crate::handlers_provider::toggle_favorite(
                     &mut config,
                     &resp_tx,
                     &provider_usage,
@@ -241,7 +248,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 .await;
             }
             AgentRequest::SetDefaultModel { id } => {
-                crate::handlers::provider::set_default_model(
+                crate::handlers_provider::set_default_model(
                     &mut config,
                     &agent,
                     &provider_for_task,
@@ -252,10 +259,10 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 .await;
             }
             AgentRequest::DeleteSession { id } => {
-                crate::handlers::session::delete(&session, &resp_tx, id).await;
+                crate::handlers_session::delete(&session, &resp_tx, id).await;
             }
             AgentRequest::QuerySessionContext => {
-                crate::handlers::session::query_context(
+                crate::handlers_session::query_context(
                     &agent,
                     &skills_registry,
                     &mcp_statuses,
@@ -264,7 +271,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 );
             }
             AgentRequest::RevokePermission { tool, scope } => {
-                crate::handlers::session::revoke_permission(
+                crate::handlers_session::revoke_permission(
                     &agent,
                     &skills_registry,
                     &mcp_statuses,
@@ -275,7 +282,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 );
             }
             AgentRequest::ToggleTool { name, enabled } => {
-                crate::handlers::session::toggle_tool(
+                crate::handlers_session::toggle_tool(
                     &agent,
                     &skills_registry,
                     &mcp_statuses,
@@ -286,7 +293,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 );
             }
             AgentRequest::SlashCommand(cmd) => {
-                crate::handlers::slash::dispatch(
+                crate::handlers_slash::dispatch(
                     cmd,
                     &config,
                     &agent,
@@ -308,11 +315,12 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                     &req_tx_for_commands,
                     &project_root_for_side,
                     &startup,
+                    &*ui,
                 )
                 .await;
             }
             AgentRequest::Chat { text, images } => {
-                crate::handlers::chat::chat(
+                crate::handlers_chat::chat(
                     &active_view_side,
                     &side,
                     &agent,
@@ -328,7 +336,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 .await;
             }
             AgentRequest::ShellCommand { command } => {
-                crate::handlers::chat::shell(
+                crate::handlers_chat::shell(
                     &resp_tx,
                     &ctt_clone,
                     &generation_clone,
@@ -339,7 +347,7 @@ pub(crate) async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Ha
                 .await;
             }
             AgentRequest::ExitSideView => {
-                crate::handlers::session::exit_side_view(&side, &active_view_side, &resp_tx).await;
+                crate::handlers_session::exit_side_view(&side, &active_view_side, &resp_tx).await;
             }
         }
     }

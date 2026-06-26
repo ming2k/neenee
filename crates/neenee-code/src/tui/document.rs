@@ -568,7 +568,7 @@ impl TranscriptMessage {
             // label can render "explore: …" / "plan: …" instead of a generic
             // "Subagent". No child message is produced.
             SubagentEvent::Started { profile: name } => {
-                *profile = Some(name.to_string());
+                *profile = Some(name.clone());
             }
             SubagentEvent::StreamStart => {
                 children.push(TranscriptMessage::new(Role::Assistant, ""));
@@ -2038,7 +2038,7 @@ mod tests {
         );
         assert_eq!(task.subagent_label(), "write the plan");
         assert!(
-            task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore" })
+            task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore".to_string() })
         );
         assert_eq!(task.subagent_label(), "explore · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.

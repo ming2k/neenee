@@ -52,6 +52,7 @@ impl SideSession {
         provider_holder: &Arc<RwLock<Arc<dyn Provider>>>,
         skills: SkillRegistry,
         project_root: &std::path::Path,
+        identity: AgentIdentity,
     ) -> Result<Self, String> {
         let (side_id, _parent_id) = primary.fork_to_side().await?;
         let store = Arc::new(primary.open_side(&side_id).await?);
@@ -69,7 +70,7 @@ impl SideSession {
             side_provider,
             base_tools.to_vec(),
             skills,
-            AgentIdentity::new(crate::NEENEE_NAME, crate::NEENEE_MISSION),
+            identity,
         ));
         agent.set_thread_id(&side_id);
         agent.set_project_root(Some(project_root.to_path_buf()));

@@ -18,7 +18,7 @@ use crate::side::SideSession;
 
 /// `AgentRequest::DeleteSession` — delete by id (or short-id prefix) and push
 /// a fresh sessions-overview snapshot, or surface the storage error.
-pub(crate) async fn delete(
+pub async fn delete(
     session: &Arc<SessionStore>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     id: String,
@@ -37,7 +37,7 @@ pub(crate) async fn delete(
 
 /// `AgentRequest::QuerySessionContext` — build and push the
 /// model/tools/permissions/skills/mcp snapshot for the session modal.
-pub(crate) fn query_context(
+pub fn query_context(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
     mcp_statuses: &[(String, McpConnectionStatus)],
@@ -50,7 +50,7 @@ pub(crate) fn query_context(
 
 /// `AgentRequest::RevokePermission` — drop one cached always-allow rule and
 /// push a refreshed snapshot, or report there was nothing matching.
-pub(crate) fn revoke_permission(
+pub fn revoke_permission(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
     mcp_statuses: &[(String, McpConnectionStatus)],
@@ -75,7 +75,7 @@ pub(crate) fn revoke_permission(
 /// push a refreshed snapshot. A no-op (unknown tool, or already in the target
 /// state) still refreshes the snapshot so the modal settles rather than
 /// leaving the row looking stale, plus surfaces a soft error.
-pub(crate) fn toggle_tool(
+pub fn toggle_tool(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
     mcp_statuses: &[(String, McpConnectionStatus)],
@@ -100,7 +100,7 @@ pub(crate) fn toggle_tool(
 /// (ADR-0017). Any in-flight side turn is cancelled; the side file stays on
 /// disk, recoverable via `/sessions`. The primary turn — if running — is
 /// untouched.
-pub(crate) async fn exit_side_view(
+pub async fn exit_side_view(
     side: &Arc<AsyncRwLock<Option<SideSession>>>,
     active_view_side: &AtomicBool,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>neenee — WebSocket test client</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #1a1b26; color: #c0caf5; display: flex; flex-direction: column; height: 100vh; }
+  #bar { display: flex; gap: 8px; padding: 8px 12px; background: #16161e; border-bottom: 1px solid #2a2b3d; }
+  #bar input { flex: 1; background: #1f2335; border: 1px solid #2a2b3d; color: inherit; padding: 6px 10px; border-radius: 4px; font-size: 14px; }
+  #bar button { background: #7aa2f7; color: #16161e; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+  #bar button:hover { background: #89b4fa; }
+  #status { font-size: 12px; padding: 4px 12px; background: #16161e; border-bottom: 1px solid #2a2b3d; }
+  #status.connected { color: #9ece6a; }
+  #status.disconnected { color: #f7768e; }
+  #transcript { flex: 1; overflow-y: auto; padding: 12px; }
+  .msg { margin-bottom: 8px; padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { background: #1f2335; border-left: 3px solid #7aa2f7; }
+  .msg.assistant { background: #1a2b3d; border-left: 3px solid #9ece6a; }
+  .msg.tool { background: #2d2d3d; border-left: 3px solid #e0af68; font-family: monospace; font-size: 12px; }
+  .msg.event { background: transparent; color: #565f89; font-size: 12px; font-style: italic; }
+  #input-row { display: flex; gap: 8px; padding: 8px 12px; background: #16161e; border-top: 1px solid #2a2b3d; }
+  #msg-input { flex: 1; background: #1f2335; border: 1px solid #2a2b3d; color: inherit; padding: 8px 10px; border-radius: 4px; font-size: 14px; }
+  #send-btn { background: #7aa2f7; color: #16161e; border: none; padding: 8px 20px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+  #send-btn:hover { background: #89b4fa; }
+  #send-btn:disabled { background: #414868; color: #565f89; cursor: default; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <input id="ws-url" value="ws://localhost:0" placeholder="ws://host:port" spellcheck="false">
+  <button id="connect-btn">Connect</button>
+</div>
+<div id="status" class="disconnected">Disconnected</div>
+<div id="transcript"></div>
+<div id="input-row">
+  <input id="msg-input" placeholder="Type a message…" spellcheck="false" disabled>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+let ws = null;
+const transcript = document.getElementById('transcript');
+const statusEl = document.getElementById('status');
+const connectBtn = document.getElementById('connect-btn');
+const wsUrl = document.getElementById('ws-url');
+const msgInput = document.getElementById('msg-input');
+const sendBtn = document.getElementById('send-btn');
+
+function addMsg(text, cls) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.textContent = text;
+  transcript.appendChild(div);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+function setStatus(connected) {
+  statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+  statusEl.className = connected ? 'connected' : 'disconnected';
+  msgInput.disabled = !connected;
+  sendBtn.disabled = !connected;
+  connectBtn.textContent = connected ? 'Disconnect' : 'Connect';
+}
+
+connectBtn.onclick = () => {
+  if (ws) {
+    ws.close();
+    return;
+  }
+  const url = wsUrl.value.trim();
+  if (!url || url.endsWith(':0')) {
+    addMsg('Enter a valid ws://host:port URL (the :0 is a placeholder — use the port shown in the TUI).', 'event');
+    return;
+  }
+  ws = new WebSocket(url);
+  ws.onopen = () => { setStatus(true); addMsg('Connected to ' + url, 'event'); };
+  ws.onclose = () => { setStatus(false); ws = null; addMsg('Connection closed.', 'event'); };
+  ws.onerror = () => { addMsg('WebSocket error.', 'event'); };
+  ws.onmessage = (ev) => {
+    let wire;
+    try { wire = JSON.parse(ev.data); } catch { return; }
+    if (wire.type === 'History') {
+      addMsg(`— History replay (${wire.messages.length} messages) —`, 'event');
+      for (const msg of wire.messages) {
+        renderMessage(msg);
+      }
+    } else if (wire.type === 'Response') {
+      // #[serde(flatten)] on Wire::Response puts the AgentResponse's
+      // externally-tagged variants at the top level alongside "type":
+      // {"type":"Response","Turn":{"session_id":"...","event":{"Text":"..."}}}
+      // Strip "type" and pass the rest as the response object.
+      const resp = { ...wire };
+      delete resp.type;
+      renderResponse(resp);
+    }
+  };
+};
+
+function renderMessage(msg) {
+  // neenee_core::Message — {role: "User"|"Assistant"|"Tool"|"System", content: string}
+  const role = (msg.role || '').toLowerCase();
+  const cls = role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : 'tool';
+  addMsg(`[${msg.role}] ${msg.content || ''}`, cls);
+}
+
+function renderResponse(resp) {
+  // Flatten AgentResponse variants into readable text.
+  if (resp.Turn) {
+    const ev = resp.Turn.event;
+    if (ev.Text) { addMsg(ev.Text, 'assistant'); }
+    else if (ev.StreamDelta) { /* could append incrementally */ }
+    else if (ev.StreamEnd) { addMsg(ev.StreamEnd, 'assistant'); }
+    else if (ev.ToolCall) { addMsg(`🔧 ${ev.ToolCall.name}(${ev.ToolCall.arguments})`, 'tool'); }
+    else if (ev.ToolResult) { addMsg(`✓ ${ev.ToolResult.name}: ${ev.ToolResult.output.slice(0, 500)}`, 'tool'); }
+    else if (ev.Error) { addMsg(`⚠ ${ev.Error}`, 'tool'); }
+    else if (ev.Activity) { /* too noisy */ }
+    else if (ev.HarnessState) { /* status */ }
+    else { addMsg(JSON.stringify(ev).slice(0, 200), 'event'); }
+  } else if (resp.ConversationReplaced) {
+    addMsg(`— Conversation replaced (${resp.ConversationReplaced.length} messages) —`, 'event');
+  } else if (resp.Error) {
+    addMsg(`⚠ ${resp.Error}`, 'tool');
+  }
+}
+
+sendBtn.onclick = send;
+msgInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+function send() {
+  const text = msgInput.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+  let wire;
+  if (text.startsWith('/')) {
+    // AgentRequest::SlashCommand(String) — externally tagged, so the variant
+    // name is the key and the inner value is the string.
+    wire = { type: 'Request', SlashCommand: text };
+  } else {
+    wire = { type: 'Request', Chat: { text, images: [] } };
+  }
+  ws.send(JSON.stringify(wire));
+  addMsg(text, 'user');
+  msgInput.value = '';
+}
+</script>
+</body>
+</html>

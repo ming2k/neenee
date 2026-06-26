@@ -20,7 +20,7 @@ use crate::session_view::provider_key_status;
 /// startup, swap it into the shared holder, re-seed mid-turn relief, and push
 /// the picker + key snapshots.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn switch(
+pub async fn switch(
     config: &mut Config,
     agent: &Agent,
     provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
@@ -112,7 +112,7 @@ pub(crate) async fn switch(
 
 /// `AgentRequest::ToggleFavorite` — flip the id in the favorites list,
 /// persist, and push a fresh picker snapshot so the ★ flips at once.
-pub(crate) async fn toggle_favorite(
+pub async fn toggle_favorite(
     config: &mut Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     provider_usage: &ProviderUsage,
@@ -135,7 +135,7 @@ pub(crate) async fn toggle_favorite(
 /// `AgentRequest::SetDefaultModel` — make `id` the default AND activate it,
 /// reusing the catalog so resolution rules stay shared. No new key/model
 /// comes from the TUI — the provider's existing resolved config is used as-is.
-pub(crate) async fn set_default_model(
+pub async fn set_default_model(
     config: &mut Config,
     agent: &Agent,
     provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,

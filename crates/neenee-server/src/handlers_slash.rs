@@ -20,6 +20,7 @@
 //! verbatim; not this refactor's job to fix.
 
 use neenee_agent::Agent;
+use neenee_agent::AgentIdentity;
 use neenee_agent::orchestration::{
     CompactionSettings, PursuitContext, TurnInput, compact_turn_history, emit_pursuit_updated,
     refresh_agent_pursuit, send_compaction, send_harness_state, start_pursuit, turn,
@@ -52,7 +53,7 @@ use crate::startup::{BuiltinCmd, StartupMode, split_custom_command};
 /// `AgentRequest::SlashCommand` — parse the command, dispatch to the matching
 /// built-in handler, or fall through to the user-defined project-command path.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn dispatch(
+pub async fn dispatch(
     cmd: String,
     config: &Config,
     agent: &Arc<Agent>,
@@ -74,6 +75,7 @@ pub(crate) async fn dispatch(
     req_tx_for_commands: &mpsc::UnboundedSender<AgentRequest>,
     project_root_for_side: &std::path::Path,
     startup: &StartupMode,
+    ui: &dyn crate::UiBridge,
 ) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
@@ -453,6 +455,7 @@ pub(crate) async fn dispatch(
                 provider_for_task,
                 (*skills_registry).clone(),
                 project_root_for_side,
+                AgentIdentity::new(crate::NEENEE_NAME, crate::NEENEE_MISSION),
             )
             .await
             {
@@ -967,8 +970,8 @@ pub(crate) async fn dispatch(
             let provider_id = agent.provider.provider_id();
             let model_name = agent.provider.model();
             let pursuit = agent.get_pursuit();
-            let markdown = crate::tui::export::format_export_markdown(
-                crate::tui::export::ExportContext {
+            let markdown = crate::export::format_export_markdown(
+                crate::export::ExportContext {
                     session_id: &session_id,
                     provider: &provider_id,
                     model: &model_name,
@@ -977,8 +980,8 @@ pub(crate) async fn dispatch(
                 &messages,
             );
             let char_count = markdown.chars().count();
-            match crate::tui::clipboard::copy(&markdown).await {
-                Ok(crate::tui::clipboard::CopyOutcome::Native) => {
+            match ui.copy_to_clipboard(&markdown).await {
+                Ok(crate::CopyOutcome::Native) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
                         TurnEvent::Text(format!(
@@ -989,7 +992,7 @@ pub(crate) async fn dispatch(
                         )),
                     ));
                 }
-                Ok(crate::tui::clipboard::CopyOutcome::Osc52) => {
+                Ok(crate::CopyOutcome::Osc52) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
                         TurnEvent::Text(format!(

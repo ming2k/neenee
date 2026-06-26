@@ -12,7 +12,6 @@ pub mod composer_attachments;
 pub mod config;
 pub mod document;
 mod event_loop;
-pub mod export;
 pub mod fuzzy;
 pub mod input;
 pub mod layout;
@@ -23,6 +22,7 @@ pub mod selection;
 pub mod step_interaction;
 mod terminal;
 mod transcript;
+mod wide_heal_backend;
 
 pub(crate) use app::{ActivityTab, App, Modal, Recess, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
@@ -59,6 +59,8 @@ use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 use crate::tui::transcript::{finalize_streaming_reasoning, transcript_messages_from_core};
 
+use neenee_store::session::SessionStore;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_tui(
     tx: mpsc::UnboundedSender<AgentRequest>,
@@ -70,6 +72,7 @@ pub async fn run_tui(
     custom_commands: Vec<(String, String)>,
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
+    session: Arc<SessionStore>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
@@ -85,7 +88,11 @@ pub async fn run_tui(
         EnableBracketedPaste,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    let backend = CrosstermBackend::new(stdout);
+    // Wrap the crossterm backend so wide-character (CJK) trailing cells are
+    // healed: changed rows are re-emitted in full, keeping the glyph background
+    // spillover fresh so tmux can't leave gray "ghost" blocks. See
+    // `wide_heal_backend`.
+    let backend = wide_heal_backend::WideHealBackend::new(CrosstermBackend::new(stdout));
     let mut terminal = Terminal::new(backend)?;
     terminal.show_cursor()?;
     // Install the signal guard after the terminal enters raw mode + alt screen
@@ -178,6 +185,15 @@ pub async fn run_tui(
     let side_view_signal = Arc::new(Mutex::new(None::<event_loop::SideViewSignal>));
     let side_view_signal_clone = side_view_signal.clone();
 
+    // `/serve` hot-attach tap (ADR-0037 §7). `None` until `/serve <port>`
+    // activates it. The response listener clones each `AgentResponse` into the
+    // broadcast sender while it is `Some`; the event loop writes to it when the
+    // user types `/serve`.
+    let serve_tap: Arc<tokio::sync::Mutex<Option<tokio::sync::broadcast::Sender<AgentResponse>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let serve_tap_for_listener = serve_tap.clone();
+    let serve_tap_for_app = serve_tap.clone();
+
     // Spawn response listener
     tokio::spawn(async move {
         let mut reasoning_start: Option<std::time::Instant> = None;
@@ -187,6 +203,12 @@ pub async fn run_tui(
         // `side_messages` buffer.
         let mut listener_side_id: Option<String> = None;
         while let Some(resp) = rx.recv().await {
+            // `/serve` hot-attach: clone the response into the broadcast
+            // channel so WebSocket clients see the live stream. No-op when
+            // serve is inactive (the lock holds None).
+            if let Some(tx) = serve_tap_for_listener.lock().await.as_ref() {
+                let _ = tx.send(resp.clone());
+            }
             match resp {
                 // ADR-0017: per-turn events arrive tagged with the session
                 // they belong to. The listener routes each event to the side
@@ -783,6 +805,8 @@ pub async fn run_tui(
         focus_stack: Vec::new(),
         tx,
         should_quit,
+        serve_tap: serve_tap_for_app,
+        serve_cancel: None,
         suggestion_index: None,
         completion_dismissed: false,
         custom_commands,
@@ -818,6 +842,7 @@ pub async fn run_tui(
         permission_max_scroll: 0,
         input_history,
         history_index: None,
+        history_draft: String::new(),
         pending_images: Vec::new(),
         pending_text_pastes: Vec::new(),
         pending_dispatch: std::collections::VecDeque::new(),
@@ -879,6 +904,7 @@ pub async fn run_tui(
             review_alert,
             turn_started_at,
         },
+        session,
     )
     .await;
 
@@ -910,6 +936,7 @@ pub async fn start_tui(
     custom_commands: Vec<(String, String)>,
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
+    session: Arc<SessionStore>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     run_tui(
         tx,
@@ -921,6 +948,7 @@ pub async fn start_tui(
         custom_commands,
         mcp_statuses,
         tui_config,
+        session,
     )
     .await
 }

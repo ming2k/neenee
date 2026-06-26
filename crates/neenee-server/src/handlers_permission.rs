@@ -21,7 +21,7 @@ use crate::side::SideSession;
 /// idle snapshot, which is gated behind persistence fsyncs), then cancel the
 /// live token. The generation counter is deliberately NOT bumped here so the
 /// stale turn still emits its own "... [Interrupted]" cleanup.
-pub(crate) async fn interrupt(
+pub async fn interrupt(
     agent: &Agent,
     session: &Arc<SessionStore>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
@@ -60,7 +60,7 @@ pub(crate) async fn interrupt(
 /// registry handle; `None` keeps the legacy top-level (/btw side) path. A late
 /// reply after the child finished finds no handle and falls through to the
 /// "no longer pending" error.
-pub(crate) async fn reply(
+pub async fn reply(
     agent: &Agent,
     subagent_registry: &Arc<SubagentRegistry>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
@@ -85,7 +85,7 @@ pub(crate) async fn reply(
 /// `AgentRequest::UserQuestionReply` — mirror the permission arm: a
 /// `parent_call_id` targets the subagent; otherwise try the primary, then a
 /// `/btw` side agent (ADR-0017).
-pub(crate) async fn reply_question(
+pub async fn reply_question(
     agent: &Agent,
     subagent_registry: &Arc<SubagentRegistry>,
     side: &Arc<AsyncRwLock<Option<SideSession>>>,

@@ -5,7 +5,7 @@
 use crate::{ImagePart, Message, Pursuit, ToolOutput, ToolStream};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRequest {
     Chat {
         text: String,
@@ -100,7 +100,7 @@ pub enum AgentRequest {
     Abort,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentResponse {
     /// A per-turn event tagged with the session it belongs to (ADR-0017). The
     /// TUI keys its transcript buffers by `session_id` and routes `event` to
@@ -165,7 +165,7 @@ pub enum AgentResponse {
 /// question: every turn event — whether from the primary or a `/btw` side —
 /// arrives tagged with its `session_id`, and global/command responses stay
 /// top-level.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnEvent {
     Text(String),
     /// Turn-level error (e.g. a provider failure mid-turn). Distinct from the
@@ -256,7 +256,7 @@ pub enum TurnEvent {
 /// banner (ADR-0017). This is the codex `SideParentStatus` equivalent: the
 /// whole reason the parent turn is left running instead of cancelled is so the
 /// user can see the main session hit an approval or input wall and jump back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentStatus {
     Idle,
     Running,
@@ -278,7 +278,7 @@ pub struct HarnessSnapshot {
 
 /// A row in the sessions picker: enough to identify, describe and order a past
 /// session without leaking the full transcript to the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionOverview {
     pub id: String,
     pub overview: String,
@@ -292,7 +292,7 @@ pub struct SessionOverview {
 /// the dynamic per-provider signals the picker needs — key readiness, favorite
 /// flag, and last-used timestamp — keyed by canonical provider id. The TUI
 /// joins this with its own static display metadata. See ADR-0002.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderPickerRow {
     pub id: String,
     pub key_ready: bool,
@@ -307,7 +307,7 @@ pub struct ProviderPickerRow {
 /// mutation (favorite toggle, default change, provider switch) so the TUI
 /// always renders from a fresh, consistent picture rather than merging
 /// incremental updates.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderPickerSnapshot {
     /// Canonical id of the active/default provider. Matches
     /// `config.default_provider`.
@@ -320,13 +320,13 @@ pub struct ProviderPickerSnapshot {
 /// These are forwarded from the child agent back to the parent harness so that
 /// the TUI can render nested tool steps and streaming output inside the parent
 /// tool step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubagentEvent {
     /// Emitted once at subagent start, carrying the bound profile's name
     /// (e.g. `"explore"`, `"plan"`, `"verify"`). Lets the TUI label the
     /// subagent by its role rather than a generic "Subagent", so a user can
     /// tell a planning subagent from a research one at a glance.
-    Started { profile: &'static str },
+    Started { profile: String },
     /// The subagent started a new response stream.
     StreamStart,
     /// New text token from the subagent.
@@ -379,7 +379,7 @@ pub enum SubagentEvent {
 /// the live stream). The top-level agent and spawned sub-agents share the same
 /// `Op` vocabulary — a subagent is just an agent whose inbox sender the
 /// parent holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentOp {
     /// Append a visible user message to the live transcript before the next
     /// model request, as if the user typed it. Lets a parent (or, for a
@@ -401,7 +401,7 @@ pub enum AgentOp {
     Shutdown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentEvent {
     ModelRequestStarted {
         tool_round: usize,
@@ -531,7 +531,7 @@ pub struct UserQuestionReply {
 /// (revoke / toggle) only needs a single request/response round-trip rather
 /// than one per pane. Built by the harness from its own state (provider,
 /// tools, permissions, skills) plus the MCP load result.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContextSnapshot {
     pub model: ModelInfo,
     pub tools: Vec<ToolInfo>,
@@ -543,7 +543,7 @@ pub struct SessionContextSnapshot {
 /// Model-side pane of [`SessionContextSnapshot`]. `capabilities` carries
 /// heuristic hints (e.g. "tool calling", "reasoning") since per-model
 /// capability data is not yet modeled in the catalog.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub provider: String,
     pub model: String,
@@ -559,7 +559,7 @@ pub struct ModelInfo {
 /// reflects the session-level enable/disable flag (toggled via
 /// [`AgentRequest::ToggleTool`]); disabled tools stay installed but are hidden
 /// from the model and rejected if invoked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
@@ -569,7 +569,7 @@ pub struct ToolInfo {
 
 /// One cached "always allow" permission rule, shown in the modal's Permissions
 /// pane where it can be revoked individually via [`AgentRequest::RevokePermission`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PermissionRuleInfo {
     pub tool: String,
     pub scope: String,
@@ -578,7 +578,7 @@ pub struct PermissionRuleInfo {
 /// One skill in the registry, shown in the modal's Skills pane. `source` is the
 /// [`SkillScope`](../neenee_agent/skills/struct.SkillScope.html) display string
 /// (system / remote / user / extra / repo).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -593,7 +593,7 @@ pub struct SkillInfo {
 /// [`crate::mcp::McpConnectionStatus`] so the DTO stays decoupled from the
 /// enum, and `tool_names` carries the per-server tool list that the hint bar
 /// collapses to a mere count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerInfo {
     pub name: String,
     pub connected: bool,

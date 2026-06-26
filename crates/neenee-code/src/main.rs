@@ -4,7 +4,7 @@ use neenee_agent::orchestration::{
     MidTurnPruneGate, ProxyProvider, refresh_agent_pursuit, start_repeat_scheduler, turn,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::{Agent, AgentIdentity, SubagentTool};
+use neenee_agent::{Agent, SubagentTool};
 use neenee_core::{
     AgentRequest, AgentResponse, CHARS_PER_TOKEN, DynamicCatalog, EXPLORE, Provider, TurnEvent,
 };
@@ -16,42 +16,26 @@ use neenee_store::{
 };
 use neenee_tools::commands::{CustomCommand, discover_commands};
 use neenee_tools::mcp::load_mcp_tools;
-mod hooks;
-mod mcp_catalog;
 #[cfg(debug_assertions)]
 mod showcase;
 mod tui;
 
-mod pursuits;
-mod session_view;
-mod startup;
 
-mod agent_loop;
-mod agent_setup;
-mod handlers;
-mod review;
-mod shell;
-mod side;
+pub(crate) use neenee_server::{agent_loop, agent_setup, hooks, mcp_catalog, pursuits, side, startup};
 
 /// This CLI's identity, handed to the engine as its opening system prompt.
 /// Lives here (not in `neenee-agent`) so the engine stays identity-agnostic
 /// and a different frontend could reuse it as another agent.
 ///
-/// - `NEENEE_NAME` is the fixed product identity ("neenee") — invariant for
-///   this project.
-/// - `NEENEE_MISSION` is this CLI's purpose (software engineering) — a future
-///   embedding (research, ops) would pass a different mission while keeping
-///   the name, or swap both.
-const NEENEE_NAME: &str = "neenee";
-const NEENEE_MISSION: &str = "an expert AI coding assistant with tool access";
+/// The identity constants + [`neenee_identity`] now live in `neenee-server`
+/// (the layer that constructs agents); this binary re-exports them.
 
-/// The composed identity: name + mission, default tone (no persona override).
-fn neenee_identity() -> AgentIdentity {
-    AgentIdentity::new(NEENEE_NAME, NEENEE_MISSION)
-}
+use neenee_server::{
+    neenee_identity,
+    startup::{BuiltinCmd, StartupMode, init_tracing, parse_args},
+};
 
 use pursuits::load_legacy_pursuit_from_config;
-use startup::{BuiltinCmd, StartupMode, init_tracing, parse_args};
 
 use agent_setup::reseed_prune_threshold;
 use side::SideSession;
@@ -385,7 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx: resp_tx,
         req_tx: req_tx_for_commands,
         agent,
-        session,
+        session: session.clone(),
         history,
         config,
         provider_usage,
@@ -404,6 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         project_root: project_root_for_side,
         startup,
         open_picker_on_start,
+        ui: Arc::new(crate::tui::clipboard::TuiClipboard),
     };
     tokio::spawn(agent_loop::run(req_rx, harness));
 
@@ -418,6 +403,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         custom_command_suggestions,
         mcp_statuses_for_tui,
         tui_config,
+        session.clone(),
     )
     .await
     {

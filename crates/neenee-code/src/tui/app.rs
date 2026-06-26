@@ -12,10 +12,10 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc, broadcast};
 
 use neenee_core::{
-    AgentRequest, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
+    AgentRequest, AgentResponse, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
     ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, mcp::McpConnectionStatus,
 };
 
@@ -287,6 +287,14 @@ pub struct App {
     pub focus_stack: Vec<String>,
     pub tx: mpsc::UnboundedSender<AgentRequest>,
     pub should_quit: Arc<AtomicBool>,
+    /// `/serve` hot-attach tap (ADR-0037 §7). When active, the response
+    /// listener clones every `AgentResponse` into this broadcast sender so
+    /// WebSocket clients receive the live stream. `None` when serve is off —
+    /// zero cost (the listener's `if let` never fires).
+    pub serve_tap: Arc<AsyncMutex<Option<broadcast::Sender<AgentResponse>>>>,
+    /// Cancellation token for the serve listener, so `/serve stop` can
+    /// shut it down cleanly. `None` when serve is inactive.
+    pub serve_cancel: Option<tokio_util::sync::CancellationToken>,
     pub suggestion_index: Option<usize>,
     /// Latched whenever the user finishes a completion: an `Enter` commit (any
     /// kind), an `Esc` dismiss, **or a slash-command accept via Tab/Enter**
@@ -384,6 +392,11 @@ pub struct App {
     pub permission_max_scroll: usize,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
+    /// The in-progress draft the user was composing when they first pressed
+    /// ↑ to walk history. Restored when they press ↓ past the newest history
+    /// entry, so a stray ↑ no longer loses what they were typing. Cleared on
+    /// send. Distinct from `stashed_input`, which is borrowed by modal flows.
+    pub history_draft: String,
     /// Images pasted (Ctrl+V) and waiting to be sent with the next message.
     /// Each entry is paired 1-to-1 with an `[Image #N]` chip inside
     /// [`App::input`]; the chip's `#N` is `index + 1` after

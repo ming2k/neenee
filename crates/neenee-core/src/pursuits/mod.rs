@@ -48,7 +48,7 @@ pub struct Pursuit {
 ///
 /// Per-turn telemetry only — not booked against any pursuit (ADR-0010 removed
 /// pursuit-level token accounting).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,

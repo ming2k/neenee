@@ -14,6 +14,8 @@
 //! …) are added in the step that first migrates a tool to use them, so the
 //! type grows with real callers rather than speculatively.
 
+use serde::{Deserialize, Serialize};
+
 /// Typed result of a tool invocation.
 ///
 /// Neither `PartialEq` nor `Eq` is derived: the [`ToolOutput::Subagent`]
@@ -21,7 +23,7 @@
 /// trait (its `Vec<ImagePart>` base64 payloads make structural equality
 /// expensive and uninteresting). Compare via [`ToolOutput::to_text`] or by
 /// pattern-matching on the variant in tests.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolOutput {
     /// Plain text or markdown prose. The back-compat variant produced by the
     /// default [`Tool::call_structured`](crate::Tool::call_structured) for any
@@ -122,7 +124,7 @@ pub enum ToolOutput {
 }
 
 /// Kind of file change in a [`ToolOutput::Patch`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatchOp {
     /// A new file was created (`old` is empty).
     Create,
@@ -256,7 +258,7 @@ impl From<String> for ToolOutput {
 /// [`ToolOutput`] lands. Lets the UI render partial output (e.g. a bash
 /// command's stdout as it arrives) instead of freezing on a spinner until the
 /// process exits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStream {
     /// Bytes appended to the running stdout buffer.
     Stdout(String),
