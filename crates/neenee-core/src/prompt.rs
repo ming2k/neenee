@@ -66,6 +66,10 @@ pub struct PromptContext {
     /// Concatenation of the latest visible user text (used by mention-style
     /// sections such as implicit-skill load).
     pub last_visible_user_text: String,
+    /// Tool-usage guardrails from the resolved model. Empty for most models;
+    /// non-empty when the model entry carries a [`Model::tool_usage_hint`]
+    /// (e.g. GLM family). Rendered verbatim by [`ModelToolUsageGuidance`].
+    pub tool_usage_hint: &'static str,
 }
 
 impl PromptContext {

@@ -509,18 +509,22 @@ pub(super) async fn run_app_loop(
                     // (Help / ToolStepDetail / Session /
                     // Activity) so the footer layout doesn't shift when the
                     // overlay opens or closes; the recess pass darkens it in
-                    // place with the rest of the surface. The input box always
-                    // owns typing (a focused transcript step does not capture
-                    // it), so the composer renders active; the caret is hidden
-                    // only while a modal owns the keyboard or a text selection
-                    // is active.
-                    let show_caret = app.active_modal == Modal::None && !app.selection.is_active();
+                    // place with the rest of the surface. When a transcript
+                    // step carries keyboard focus (Ctrl+↑/↓), the composer drops
+                    // to its dim "blurred" palette and hides the caret so the
+                    // user can see at a glance that the next keypress targets
+                    // the step, not the input box. Typing into the box clears
+                    // the focus and re-brightens it immediately.
+                    let step_focused = app.focused_target.is_some();
+                    let show_caret = !step_focused
+                        && app.active_modal == Modal::None
+                        && !app.selection.is_active();
                     render::draw_composer(
                         f,
                         input_rect,
                         &app.input,
                         app.byte_cursor(),
-                        true,
+                        !step_focused,
                         show_caret,
                         &app.theme,
                         &mut layout_map,
@@ -1799,6 +1803,11 @@ pub(super) async fn run_app_loop(
                     // The user is editing again, so live completions are
                     // once again useful — clear the Enter-commit dismissal.
                     app.completion_dismissed = false;
+                    // Typing into the input box reclaims it as the active
+                    // surface: drop any transcript-step focus so the composer
+                    // re-brightens and the next arrow key resumes caret movement
+                    // rather than step navigation.
+                    app.focused_target = None;
                     // Reconcile attachments: if the user typed inside a chip
                     // (breaking its syntax) the backing staged entry must be
                     // dropped, and surviving chips relabeled.
@@ -1807,6 +1816,9 @@ pub(super) async fn run_app_loop(
                 input::InputAction::Backspace => {
                     app.suggestion_index = None;
                     app.completion_dismissed = false;
+                    // Same as InsertChar: editing the input box reclaims focus
+                    // from any transcript step.
+                    app.focused_target = None;
                     // Reconcile attachments: a chip-aware backspace has
                     // already spliced the chip out of `app.input`; this
                     // drops the orphaned entry from `pending_images` /

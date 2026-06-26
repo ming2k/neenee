@@ -85,6 +85,37 @@ impl PromptSection for ToneGuidance {
     }
 }
 
+/// Model-family-specific tool-usage guardrails. Renders the resolved model's
+/// [`Model::tool_usage_hint`] verbatim when non-empty — the model entry is the
+/// single source of truth. Empty for Claude/GPT/Gemini; carries anti-loop
+/// guidance for GLM-family models.
+struct ModelToolUsageGuidance;
+
+impl PromptSection for ModelToolUsageGuidance {
+    fn id(&self) -> &'static str {
+        "system.model_tool_usage"
+    }
+    fn channel(&self) -> PromptChannel {
+        PromptChannel::System
+    }
+    fn kind(&self) -> InjectionKind {
+        InjectionKind::SystemPrompt
+    }
+    fn rank(&self) -> u32 {
+        25
+    }
+    fn is_active(&self, ctx: &PromptContext) -> bool {
+        !ctx.tool_usage_hint.is_empty()
+    }
+    fn render(&self, ctx: &PromptContext) -> Option<String> {
+        if ctx.tool_usage_hint.is_empty() {
+            None
+        } else {
+            Some(format!("\n{}", ctx.tool_usage_hint))
+        }
+    }
+}
+
 /// Task-tracking guidance for the `todo` / `todo_update` tools.
 struct TodoGuidance;
 
@@ -214,6 +245,7 @@ pub(crate) fn default_prompt_registry() -> PromptRegistry {
     let mut registry = PromptRegistry::new();
     registry.register(IdentityPreamble);
     registry.register(ToneGuidance);
+    registry.register(ModelToolUsageGuidance);
     registry.register(TodoGuidance);
     registry.register(PursuitObjective);
     registry.register(AskUserGuidance);
@@ -362,12 +394,15 @@ impl Agent {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        let tool_usage_hint = neenee_core::resolve_model(&self.provider.model())
+            .tool_usage_hint;
         PromptContext {
             identity_preamble: self.identity.preamble(),
             pursuit: self.get_pursuit(),
             tool_names,
             skills_index,
             last_visible_user_text,
+            tool_usage_hint,
         }
     }
 

@@ -11,10 +11,10 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a text file. Each line is prefixed with its line number. \
-         Supports `offset` (1-based start line) and `limit` (max lines to read). \
-         Output is paginated (~50 KB per page); large reads return the first chunk \
-         and indicate the next `offset` to continue.\n\
+        "Read a text file. `path` is required. Each line is prefixed with its \
+         line number. Supports `offset` (1-based start line) and `limit` (max \
+         lines to read). Output is paginated (~50 KB per page); large reads \
+         return the first chunk and indicate the next `offset` to continue.\n\
          \n\
          - Use `grep` first to find specific content in large files.\n\
          - To inspect multiple scattered lines, make a single read encompassing the entire range.\n\

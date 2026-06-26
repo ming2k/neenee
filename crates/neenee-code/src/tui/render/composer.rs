@@ -64,10 +64,10 @@ pub(super) fn input_row_count(input: &str, text_width: usize, byte_cursor: usize
 
 /// Draw the flat input box panel at the bottom of the screen.
 ///
-/// `focused` selects the panel palette. The live composer always passes
-/// `true` (the input box owns typing even while a transcript step is focused);
-/// `false` renders the dimmer "read-only" palette and is used where the box is
-/// shown purely for layout (e.g. behind a takeover) rather than for editing.
+/// `focused` selects the panel palette. The live composer passes `true` when
+/// no transcript step carries keyboard focus, and `false` when the user has
+/// navigated into the transcript with Ctrl+↑/↓ — the dimmer "read-only"
+/// palette signals that the next keypress targets the step, not the input box.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_composer(
     frame: &mut Frame,

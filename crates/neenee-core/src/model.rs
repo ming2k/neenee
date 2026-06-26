@@ -10,7 +10,7 @@
 //! The [`WireFormat`] on each model records the wire protocol a provider uses to
 //! reach it. Most models speak OpenAI chat-completions everywhere they are
 //! served; a relay like opencode-go, however, serves MiniMax/Qwen behind an
-//! Anthropic `/messages` surface, so those models carry [`WireFormat::Anthropic`].
+//! Anthropic `/messages` surface, so those models carry [`WireFormat::AnthropicCompat`].
 //! The catalog consults this when building the [`crate::catalog::Transport`] so
 //! one provider (`opencode-go`) can host models of mixed formats.
 
@@ -26,11 +26,9 @@ pub enum WireFormat {
     OpenAiCompat,
     /// Anthropic Messages (`/v1/messages`). Used by opencode-go for
     /// MiniMax/Qwen, and by any Anthropic-compatible relay.
-    Anthropic,
+    AnthropicCompat,
     /// Google Gemini native (`generativelanguage.googleapis.com`).
     Gemini,
-    /// A local llama.cpp / compatible server.
-    Llama,
 }
 
 /// A canonical model definition with its intrinsic properties.
@@ -58,11 +56,31 @@ pub struct Model {
     pub vision: bool,
     /// Wire protocol used to reach this model. See [`WireFormat`].
     pub format: WireFormat,
+    /// Optional tool-usage guardrails injected into the system prompt as a
+    /// [`ModelToolUsageGuidance`] section. Empty for models that need no
+    /// extra guidance (Claude, GPT). Non-empty for models (e.g. GLM) that
+    /// benefit from explicit anti-loop / one-tool-per-turn instructions.
+    /// Stored here so the model entry is the single source of truth; the
+    /// prompt engine just renders whatever the resolved model carries.
+    pub tool_usage_hint: &'static str,
 }
 
 /// The canonical registry of known models. Add a model here when it is
 /// referenced by any built-in provider preset; user-defined models that are not
 /// in this list fall back to [`fallback_model`] at resolution time.
+
+/// Tool-usage guardrails for the GLM model family. These models can get
+/// stuck re-issuing identical tool calls without making progress. The
+/// prompt engine injects this hint via [`ModelToolUsageGuidance`] when
+/// the resolved model carries a non-empty [`Model::tool_usage_hint`].
+pub const GLM_TOOL_USAGE_HINT: &str = "\
+# Tool usage policy\n\
+- Use exactly one tool per assistant message. After each tool call, wait \
+for the result before continuing.\n\
+- Avoid repeating the same tool with the same parameters once you have \
+useful results. Use the result to take the next step (e.g. pick one match, \
+read that file, then act); do not search again in a loop.";
+
 pub const KNOWN_MODELS: &[Model] = &[
     // ── GLM family (Zhipu / Z.AI / opencode-go) ───────────────────────────
     Model {
@@ -74,6 +92,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: GLM_TOOL_USAGE_HINT,
     },
     Model {
         id: "glm-5.1",
@@ -84,6 +103,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: GLM_TOOL_USAGE_HINT,
     },
     Model {
         id: "glm-5",
@@ -94,6 +114,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: GLM_TOOL_USAGE_HINT,
     },
     Model {
         id: "glm-4.7",
@@ -104,6 +125,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: GLM_TOOL_USAGE_HINT,
     },
     // ── Kimi (Moonshot / opencode-go) ─────────────────────────────────────
     Model {
@@ -115,6 +137,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "kimi-k2.6",
@@ -125,6 +148,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "kimi-k2.5",
@@ -135,6 +159,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
@@ -146,6 +171,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "gpt-4o-mini",
@@ -156,6 +182,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     // ── Gemini (Google) ────────────────────────────────────────────────────
     Model {
@@ -167,6 +194,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
+        tool_usage_hint: "",
     },
     Model {
         id: "gemini-2.0-flash",
@@ -177,6 +205,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
+        tool_usage_hint: "",
     },
     // ── DeepSeek (opencode-go / direct) ────────────────────────────────────
     Model {
@@ -188,6 +217,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "deepseek-v4-pro",
@@ -198,6 +228,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     // ── MiMo (Xiaomi / opencode-go, OpenAI format) ─────────────────────────
     Model {
@@ -209,6 +240,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "mimo-v2.5-pro",
@@ -219,6 +251,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "mimo-v2-pro",
@@ -229,6 +262,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "mimo-v2-omni",
@@ -239,6 +273,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     // ── MiniMax (opencode-go, Anthropic /messages format) ──────────────────
     Model {
@@ -249,7 +284,8 @@ pub const KNOWN_MODELS: &[Model] = &[
         reasoning: true,
         tool_call: true,
         vision: false,
-        format: WireFormat::Anthropic,
+        format: WireFormat::AnthropicCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "minimax-m2.7",
@@ -259,7 +295,8 @@ pub const KNOWN_MODELS: &[Model] = &[
         reasoning: true,
         tool_call: true,
         vision: false,
-        format: WireFormat::Anthropic,
+        format: WireFormat::AnthropicCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "minimax-m2.5",
@@ -269,7 +306,8 @@ pub const KNOWN_MODELS: &[Model] = &[
         reasoning: true,
         tool_call: true,
         vision: false,
-        format: WireFormat::Anthropic,
+        format: WireFormat::AnthropicCompat,
+        tool_usage_hint: "",
     },
     // ── Qwen (opencode-go, OpenAI /chat/completions format) ────────────────
     // models.dev records qwen3.* as `@ai-sdk/openai-compatible` under
@@ -284,6 +322,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "qwen3.7-plus",
@@ -294,6 +333,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "qwen3.6-plus",
@@ -304,6 +344,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
     Model {
         id: "qwen3.5-plus",
@@ -314,6 +355,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     },
 ];
 
@@ -336,6 +378,7 @@ pub fn fallback_model(_id: &str) -> Model {
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
+        tool_usage_hint: "",
     }
 }
 
@@ -392,7 +435,7 @@ mod tests {
         );
         assert_eq!(resolve("mimo-v2.5-pro").format, WireFormat::OpenAiCompat);
         // Anthropic-/messages-format models served by opencode-go.
-        assert_eq!(resolve("minimax-m3").format, WireFormat::Anthropic);
+        assert_eq!(resolve("minimax-m3").format, WireFormat::AnthropicCompat);
         // models.dev records qwen3.* as openai-compatible under opencode-go.
         assert_eq!(resolve("qwen3.7-max").format, WireFormat::OpenAiCompat);
     }

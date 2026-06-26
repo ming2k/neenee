@@ -243,7 +243,7 @@ fn catalog_driven_entry(config: &Config, provider: &ModelsDevProvider) -> Provid
                 format!("{base}{suffix}")
             };
             let transport = match format {
-                WireFormat::Anthropic => Transport::Anthropic {
+                WireFormat::AnthropicCompat => Transport::Anthropic {
                     base_url: full_url,
                     user_agent: user_agent.clone(),
                 },
@@ -313,7 +313,7 @@ fn fallback_catalog_driven_entry(config: &Config, provider_id: &str) -> Provider
             let suffix = modelsdev::endpoint_suffix(m.format);
             let full_url = format!("{base}{suffix}");
             let transport = match m.format {
-                WireFormat::Anthropic => Transport::Anthropic {
+                WireFormat::AnthropicCompat => Transport::Anthropic {
                     base_url: full_url,
                     user_agent: user_agent.clone(),
                 },

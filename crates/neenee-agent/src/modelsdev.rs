@@ -132,7 +132,7 @@ pub struct ModelsDevLimit {
 /// common case for OpenAI-format relays).
 pub fn wire_format_from_npm(npm: &str) -> WireFormat {
     if npm.contains("anthropic") {
-        WireFormat::Anthropic
+        WireFormat::AnthropicCompat
     } else if npm.contains("google") || npm.contains("vertex") {
         WireFormat::Gemini
     } else {
@@ -148,10 +148,9 @@ pub fn wire_format_from_npm(npm: &str) -> WireFormat {
 /// transport (no suffix here).
 pub fn endpoint_suffix(format: WireFormat) -> &'static str {
     match format {
-        WireFormat::Anthropic => "/messages",
+        WireFormat::AnthropicCompat => "/messages",
         WireFormat::OpenAiCompat => "/chat/completions",
         WireFormat::Gemini => "",
-        WireFormat::Llama => "/chat/completions",
     }
 }
 
@@ -215,7 +214,7 @@ mod tests {
     fn npm_mapping_covers_known_packages() {
         assert_eq!(
             wire_format_from_npm("@ai-sdk/anthropic"),
-            WireFormat::Anthropic
+            WireFormat::AnthropicCompat
         );
         assert_eq!(
             wire_format_from_npm("@ai-sdk/openai-compatible"),
@@ -239,7 +238,7 @@ mod tests {
 
     #[test]
     fn endpoint_suffix_matches_format() {
-        assert_eq!(endpoint_suffix(WireFormat::Anthropic), "/messages");
+        assert_eq!(endpoint_suffix(WireFormat::AnthropicCompat), "/messages");
         assert_eq!(
             endpoint_suffix(WireFormat::OpenAiCompat),
             "/chat/completions"
@@ -288,7 +287,7 @@ mod tests {
         };
         assert_eq!(
             model_wire_format(&provider, &minimax),
-            WireFormat::Anthropic
+            WireFormat::AnthropicCompat
         );
         assert_eq!(model_wire_format(&provider, &glm), WireFormat::OpenAiCompat);
     }
@@ -335,7 +334,7 @@ mod tests {
         );
         assert_eq!(
             model_wire_format(og, &og.models["minimax-m3"]),
-            WireFormat::Anthropic
+            WireFormat::AnthropicCompat
         );
     }
 }
