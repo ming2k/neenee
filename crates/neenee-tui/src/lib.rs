@@ -51,7 +51,7 @@ pub mod diff;
 pub mod frame;
 pub mod grid;
 pub mod layout;
-mod text;
+pub mod text;
 pub mod widgets;
 
 pub use cell::{Cell, Color, Modifier, Style};

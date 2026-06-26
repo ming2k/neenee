@@ -69,7 +69,11 @@ pub fn draw_permissions_manager(
         }
     }
 
-    let follow = if rules.is_empty() { None } else { Some(modal_index) };
+    let follow = if rules.is_empty() {
+        None
+    } else {
+        Some(modal_index)
+    };
     render_body(frame, f.body, body, scroll, follow, false, theme);
 
     // ── Footer ──

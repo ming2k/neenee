@@ -212,9 +212,12 @@ impl<W: io::Write> Terminal<W> {
 
 /// A test terminal: owns a back grid the tests can render into and then
 /// inspect, without any real I/O. Mirrors the `Terminal<TestBackend>` pattern
-/// ratatui tests used. The grid is accessible via [`TestTerminal::buffer`].
+/// ratatui tests used. The grid is accessible via [`TestTerminal::buffer`], and
+/// the last caret position the render closure requested via
+/// [`TestTerminal::cursor`].
 pub struct TestTerminal {
     back: Grid,
+    cursor: CursorState,
 }
 
 impl TestTerminal {
@@ -222,6 +225,7 @@ impl TestTerminal {
     pub fn new(width: u16, height: u16) -> Self {
         Self {
             back: Grid::new(width, height),
+            cursor: CursorState::default(),
         }
     }
 
@@ -232,10 +236,16 @@ impl TestTerminal {
     {
         let mut frame = Frame::new(&mut self.back);
         render(&mut frame);
+        self.cursor = frame.take_cursor();
     }
 
     /// Read the rendered grid (the "buffer" the tests inspect).
     pub fn buffer(&self) -> &Grid {
         &self.back
+    }
+
+    /// The caret position the last draw closure requested (or `Hidden`).
+    pub fn cursor(&self) -> CursorState {
+        self.cursor
     }
 }

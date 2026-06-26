@@ -1021,18 +1021,9 @@ fn draw_diff_content(
         let highlight_frags = wrapped.len() <= 1;
 
         let (first_old, first_new) = match line.op {
-            DiffOp::Context => (
-                fmt_no(line.old_no, gutter_w),
-                fmt_no(line.new_no, gutter_w),
-            ),
-            DiffOp::Remove => (
-                fmt_no(line.old_no, gutter_w),
-                fmt_no(None, gutter_w),
-            ),
-            DiffOp::Add => (
-                fmt_no(None, gutter_w),
-                fmt_no(line.new_no, gutter_w),
-            ),
+            DiffOp::Context => (fmt_no(line.old_no, gutter_w), fmt_no(line.new_no, gutter_w)),
+            DiffOp::Remove => (fmt_no(line.old_no, gutter_w), fmt_no(None, gutter_w)),
+            DiffOp::Add => (fmt_no(None, gutter_w), fmt_no(line.new_no, gutter_w)),
             DiffOp::Ellipsis => unreachable!(),
         };
         let blank_col = fmt_no(None, gutter_w);

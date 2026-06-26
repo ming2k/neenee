@@ -14,15 +14,91 @@ use super::design::{
     USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_RIGHT_PAD_COLS, USER_MESSAGE_TEXT_GAP_COLS,
     USER_MESSAGE_TRANSITION_ROWS,
 };
-use super::markdown_table::{build_table_render, push_table_segment};
+use super::markdown_table::{TableRowInfo, build_table_render, push_table_segment};
 use super::text_layout::{
-    WrappedLine, block_selection_range, bold_delim_local_ranges, code_gutter_line,
-    line_selection, line_spans_rich, padded_tail, visible_width, wrap_text,
+    WrappedLine, block_selection_range, bold_delim_local_ranges, code_gutter_line, line_selection,
+    line_spans_rich, markup_hidden_ranges, padded_tail, visible_width, wrap_text,
 };
 use super::{TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, Theme};
 
 fn display_width_u16(s: &str) -> u16 {
     s.width() as u16
+}
+
+fn table_line_hidden_ranges(line_text: &str, info: &TableRowInfo) -> Vec<(usize, usize)> {
+    let mut hidden = Vec::new();
+    for ci in 0..info.col_content_spans.len() {
+        let (clo, chi) = info.col_content_spans[ci];
+        if chi <= clo {
+            continue;
+        }
+        let offset = info.col_offsets.get(ci).copied().unwrap_or(0);
+        let code_ranges = info
+            .col_code_ranges
+            .get(ci)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let bold_ranges = info
+            .col_bold_ranges
+            .get(ci)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        hidden.extend(
+            markup_hidden_ranges(&line_text[clo..chi], offset, code_ranges, bold_ranges)
+                .into_iter()
+                .map(|(lo, hi)| (clo + lo, clo + hi)),
+        );
+    }
+    hidden
+}
+
+fn visible_width_window(
+    text: &str,
+    start: usize,
+    end: usize,
+    hidden_ranges: &[(usize, usize)],
+) -> usize {
+    let local_hidden: Vec<(usize, usize)> = hidden_ranges
+        .iter()
+        .filter_map(|&(lo, hi)| {
+            let clipped_lo = lo.max(start);
+            let clipped_hi = hi.min(end);
+            (clipped_lo < clipped_hi).then(|| (clipped_lo - start, clipped_hi - start))
+        })
+        .collect();
+    visible_width(&text[start..end], &local_hidden)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::document::TableAlignment;
+
+    #[test]
+    fn table_markup_hidden_ranges_drive_hitbox_widths() {
+        let table = build_table_render(
+            &["a".to_string(), "b".to_string()],
+            &[vec!["`中`".to_string(), "**ab**".to_string()]],
+            &[TableAlignment::None, TableAlignment::None],
+            80,
+        );
+        let row_idx = table
+            .lines
+            .iter()
+            .position(|line| line.contains("`中`"))
+            .expect("data row should render");
+        let line = &table.lines[row_idx];
+        let info = table.line_info[row_idx]
+            .as_ref()
+            .expect("data row should carry row info");
+        let hidden = table_line_hidden_ranges(line, info);
+
+        assert_eq!(visible_width_window(line, 0, line.len(), &hidden), 11);
+        for &(lo, hi) in &info.col_spans {
+            assert_eq!(visible_width_window(line, lo, hi, &hidden), 2);
+            assert!(line[lo..hi].width() > 2, "raw markup width must be larger");
+        }
+    }
 }
 
 /// Render the blocks of a single message inside the given area.
@@ -391,7 +467,10 @@ pub(super) fn draw_message_body(
                         Style::default()
                     };
 
-                    let used = indent + line_text.width();
+                    let hidden_for_line = row_info
+                        .map(|info| table_line_hidden_ranges(line_text, info))
+                        .unwrap_or_default();
+                    let used = indent + visible_width(line_text, &hidden_for_line);
                     let mut spans = vec![Span::styled(" ".repeat(indent), pad_style)];
                     // On data lines the `│` rules and inter-cell padding are
                     // border decoration; only the padded cell text (col_spans)
@@ -404,10 +483,19 @@ pub(super) fn draw_message_body(
                         let mut pos = 0usize;
                         for i in 0..ncols.min(info.col_spans.len()) {
                             let (lo, hi) = info.col_spans[i];
-                            let (clo, chi) = info.col_content_spans.get(i).copied().unwrap_or((lo, hi));
+                            let (clo, chi) =
+                                info.col_content_spans.get(i).copied().unwrap_or((lo, hi));
                             let offset = info.col_offsets.get(i).copied().unwrap_or(0);
-                            let code_ranges = info.col_code_ranges.get(i).map(Vec::as_slice).unwrap_or(&[]);
-                            let bold_ranges = info.col_bold_ranges.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                            let code_ranges = info
+                                .col_code_ranges
+                                .get(i)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            let bold_ranges = info
+                                .col_bold_ranges
+                                .get(i)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
 
                             // Border / inter-cell separator before this cell
                             if lo > pos {
@@ -517,8 +605,10 @@ pub(super) fn draw_message_body(
                                 if hi <= lo {
                                     continue;
                                 }
-                                let col_start = line_text[..lo].width();
-                                let col_w = line_text[lo..hi].width();
+                                let col_start =
+                                    visible_width_window(line_text, 0, lo, &hidden_for_line);
+                                let col_w =
+                                    visible_width_window(line_text, lo, hi, &hidden_for_line);
                                 let rect = Rect::new(
                                     area.x + indent as u16 + col_start as u16,
                                     *current_y,
@@ -555,7 +645,7 @@ pub(super) fn draw_message_body(
                                 text: line_text.clone(),
                                 prefix_cols: indent as u16,
                                 rect: line_rect,
-                                hidden_ranges: Vec::new(),
+                                hidden_ranges: hidden_for_line.clone(),
                             });
                         }
                     }
@@ -711,8 +801,9 @@ pub(super) fn draw_message_body(
                 // actual heading text instead of bleeding left into the indent
                 // whitespace (and, for wrapped headings, underlining the whole
                 // continuation row's leading blanks).
-                let prefix_style =
-                    Style::default().fg(theme.heading()).add_modifier(Modifier::BOLD);
+                let prefix_style = Style::default()
+                    .fg(theme.heading())
+                    .add_modifier(Modifier::BOLD);
                 let continuation = " ".repeat(prefix_cols as usize);
                 let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
@@ -748,8 +839,7 @@ pub(super) fn draw_message_body(
                     let full_rect = Rect::new(area.x, *current_y, area.width, 1);
                     let hidden_for_line =
                         bold_delim_local_ranges(&wl.text, wl.start_byte, bold_ranges);
-                    let text_cols =
-                        prefix_cols + visible_width(&wl.text, &hidden_for_line) as u16;
+                    let text_cols = prefix_cols + visible_width(&wl.text, &hidden_for_line) as u16;
                     let render_rect = if *level == 1 {
                         Rect::new(area.x, *current_y, text_cols.min(area.width), 1)
                     } else {

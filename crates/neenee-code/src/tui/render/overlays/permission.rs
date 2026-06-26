@@ -138,7 +138,15 @@ pub fn draw_question_modal(
     frame.render_widget(Paragraph::new(header_lines), header_rect);
 
     let follow = highlighted_option_row_index(question, highlighted);
-    render_body(frame, options_rect, option_lines, scroll, follow, true, theme);
+    render_body(
+        frame,
+        options_rect,
+        option_lines,
+        scroll,
+        follow,
+        true,
+        theme,
+    );
 
     if let Some(fo) = f.footer {
         frame.render_widget(

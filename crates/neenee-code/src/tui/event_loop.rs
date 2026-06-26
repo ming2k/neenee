@@ -31,7 +31,8 @@ use crate::tui::interaction::{self, ClickTarget};
 use crate::tui::layout::{InteractiveTarget, InteractiveTargetKind, LayoutMap};
 use crate::tui::render;
 use crate::tui::selection::{
-    CellDragInfo, SelectionState, floor_char_boundary, get_selected_text, inclusive_end,
+    CellDragInfo, SelectionState, floor_grapheme_boundary, get_selected_text,
+    inclusive_grapheme_end,
 };
 use crate::tui::step_interaction::StepKind;
 use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
@@ -509,9 +510,12 @@ pub(super) async fn run_app_loop(
                     // Activity) so the footer layout doesn't shift when the
                     // overlay opens or closes; the recess pass darkens it in
                     // place with the rest of the surface. The caret is hidden
-                    // whenever any modal owns the keyboard.
+                    // whenever any modal owns the keyboard, or while a text
+                    // selection is active.
                     let compose_focused = app.focus_zone.is_compose();
-                    let show_caret = compose_focused && app.active_modal == Modal::None;
+                    let show_caret = compose_focused
+                        && app.active_modal == Modal::None
+                        && !app.selection.is_active();
                     render::draw_composer(
                         f,
                         input_rect,
@@ -764,9 +768,13 @@ pub(super) async fn run_app_loop(
         // where keys actually land. While a modal is open the modal itself
         // owns the caret (and may hide it for non-edit modals like Help); in
         // Browse zone the input box is blurred so the caret is hidden too.
+        // Active selections also hide the terminal cursor; otherwise a block
+        // cursor can draw over CJK selection backgrounds and look like a
+        // duplicated input glyph.
         // Toggled only when the desired state changes to avoid spamming the
         // terminal with redundant escape codes every frame.
-        let cursor_should_hide = app.active_modal == Modal::None && app.focus_zone.is_browse();
+        let cursor_should_hide = app.active_modal == Modal::None
+            && (app.focus_zone.is_browse() || app.selection.is_active());
         if cursor_should_hide != app.cursor_hidden {
             if cursor_should_hide {
                 let _ = terminal.hide_cursor();
@@ -951,7 +959,7 @@ pub(super) async fn run_app_loop(
                                 images,
                             });
                         }
-                    } else if let Some((start, end)) = app.selection.normalized_range() {
+                    } else if let Some((start, end)) = app.selection.active_normalized_range() {
                         // Enter on a selected step: navigate into a subagent
                         // task, otherwise toggle that step's expansion.
                         if start.message_idx == end.message_idx {
@@ -2327,8 +2335,7 @@ pub(super) async fn run_app_loop(
                                 // edits rather than navigating steps.
                                 app.focus_zone = input::FocusZone::Compose;
                                 app.focused_target = None;
-                                app.selection = SelectionState::start_range(cursor);
-                                app.drag.start(cursor);
+                                app.drag.begin_range(&mut app.selection, cursor);
                             }
                             ClickTarget::StepSummary { message_idx, kind } => {
                                 // Clicked a step summary: navigate into a subagent
@@ -2338,15 +2345,18 @@ pub(super) async fn run_app_loop(
                                 let mut messages = runtime.messages.lock().await;
                                 match kind {
                                     StepKind::ToolStep => {
-                                        let enter_id =
-                                            resolve_focused_mut(&mut messages, &app.focus_stack, mi)
-                                                .and_then(|message| {
-                                                    if message.is_subagent_task() {
-                                                        message.tool_step_call_id().map(String::from)
-                                                    } else {
-                                                        None
-                                                    }
-                                                });
+                                        let enter_id = resolve_focused_mut(
+                                            &mut messages,
+                                            &app.focus_stack,
+                                            mi,
+                                        )
+                                        .and_then(|message| {
+                                            if message.is_subagent_task() {
+                                                message.tool_step_call_id().map(String::from)
+                                            } else {
+                                                None
+                                            }
+                                        });
                                         if let Some(id) = enter_id {
                                             drop(messages);
                                             app.enter_subagent(id);
@@ -2377,8 +2387,8 @@ pub(super) async fn run_app_loop(
                                 // can never cross a `│` border into an adjacent
                                 // cell.  Within the cell the user has free
                                 // substring selection — no auto-full-select.
-                                app.selection = SelectionState::None;
-                                app.drag.start_in_cell(
+                                app.drag.begin_cell(
+                                    &mut app.selection,
                                     cursor,
                                     CellDragInfo {
                                         message_idx,
@@ -2394,8 +2404,7 @@ pub(super) async fn run_app_loop(
                                 // A plain click does NOT select — it only arms a
                                 // drag. A zero-length range is created so an
                                 // immediate drag extends it normally.
-                                app.selection = SelectionState::start_range(cursor);
-                                app.drag.start(cursor);
+                                app.drag.begin_range(&mut app.selection, cursor);
                                 app.focused_target = None;
                                 app.focus_zone = input::FocusZone::Browse;
                             }
@@ -2438,34 +2447,11 @@ pub(super) async fn run_app_loop(
                     app.drag.cancel();
                 }
                 input::InputAction::SelectionUpdate { x, y } => {
-                    // A cell drag is clamped to `│` boundaries: the pointer
-                    // may move anywhere but byte offsets are clamped to the
-                    // origin cell's content range, so the selection can never
-                    // cross a `│` border. The user gets free substring
-                    // selection within the cell — not auto-full-select.
-                    if let Some(ci) = &app.drag.cell_info {
-                        // Arm a zero-length range on the first drag tick so
-                        // the selection reads as a Range from the start.
-                        if matches!(app.selection, SelectionState::None) {
-                            if let Some(anchor) = app.drag.anchor {
-                                app.selection = SelectionState::start_range(anchor);
-                            }
-                        }
-                        if let Some(cursor) = app.layout_map.cursor_at(x, y) {
-                            app.selection.update_head(ci.clamp_cursor(cursor));
-                        }
-                    } else if let Some(cursor) = app.layout_map.cursor_at(x, y) {
-                        app.selection.update_head(cursor);
-                    }
+                    app.drag
+                        .update_from_point(&mut app.selection, &app.layout_map, x, y);
                 }
                 input::InputAction::SelectionEnd => {
-                    app.drag.end();
-                    // If selection is empty, clear it
-                    if let Some((a, b)) = app.selection.normalized_range() {
-                        if a == b {
-                            app.selection = SelectionState::None;
-                        }
-                    }
+                    app.drag.finish(&mut app.selection);
                 }
                 input::InputAction::SelectBlock { x, y } => {
                     if let Some((mi, bi)) = input::resolve_block(&app.layout_map, x, y) {
@@ -2498,7 +2484,8 @@ pub(super) async fn run_app_loop(
                             app.hovered_step = is_step.then_some(mi);
                         }
                     } else {
-                        app.hovered_step = match interaction::classify_click(&app.layout_map, x, y) {
+                        app.hovered_step = match interaction::classify_click(&app.layout_map, x, y)
+                        {
                             ClickTarget::StepSummary { message_idx, .. } => Some(message_idx),
                             _ => None,
                         };
@@ -2609,21 +2596,57 @@ pub(super) fn extract_selection_text(
         }
     };
     if !on_input {
-        return get_selected_text(sel, messages, &|mi, bi| layout_map.table_grid(mi, bi), cell_info);
+        return get_selected_text(
+            sel,
+            messages,
+            &|mi, bi| layout_map.table_grid(mi, bi),
+            cell_info,
+        );
     }
     match sel {
         SelectionState::Block { .. } => Some(input.to_string()),
-        SelectionState::Range { anchor, head } => {
-            let (start, end) = if anchor.byte_offset <= head.byte_offset {
-                (anchor.byte_offset, head.byte_offset)
-            } else {
-                (head.byte_offset, anchor.byte_offset)
-            };
-            let start = floor_char_boundary(input, start);
-            let end = inclusive_end(input, end);
+        SelectionState::Range { .. } => {
+            let (start, end) = sel.active_normalized_range()?;
+            let start = floor_grapheme_boundary(input, start.byte_offset);
+            let end = inclusive_grapheme_end(input, end.byte_offset);
             (start < end).then(|| input[start..end].to_string())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod selection_text_tests {
+    use super::*;
+    use crate::tui::layout::{LayoutMap, SemanticCursor};
+    use crate::tui::render::INPUT_MSG_IDX;
+    use crate::tui::selection::SelectionState;
+
+    #[test]
+    fn input_collapsed_selection_copies_nothing() {
+        let cursor = SemanticCursor::new(INPUT_MSG_IDX, 0, 0);
+        let sel = SelectionState::Range {
+            anchor: cursor,
+            head: cursor,
+        };
+
+        assert_eq!(
+            extract_selection_text(&sel, &[], "中文", &LayoutMap::new(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn input_wide_glyph_drag_copies_one_grapheme() {
+        let sel = SelectionState::Range {
+            anchor: SemanticCursor::new(INPUT_MSG_IDX, 0, 0),
+            head: SemanticCursor::new(INPUT_MSG_IDX, 0, 1),
+        };
+
+        assert_eq!(
+            extract_selection_text(&sel, &[], "中文", &LayoutMap::new(), None),
+            Some("中".to_string())
+        );
     }
 }
 

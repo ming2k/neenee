@@ -2,10 +2,10 @@
 //! wrapping with vertical scroll to keep the caret visible, and per-row
 //! layout-map recording for semantic selection / copy.
 
+use neenee_tui::text::{cursor_column, str_len};
 use neenee_tui::{
     Frame, Paragraph, Rect, Style, {Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::tui::layout::{BlockRegion, LayoutMap};
 use crate::tui::selection::SelectionState;
@@ -132,14 +132,15 @@ pub fn draw_composer(
     for (i, wl) in wrapped.iter().enumerate() {
         if byte_cursor <= wl.end_byte {
             cursor_line = i;
-            // Floor to a char boundary before slicing: a masked text (e.g.
-            // `•••`) paired with a byte cursor from the unmasked string can
-            // land inside a multi-byte codepoint, which would panic `[..local]`.
-            let local = crate::tui::selection::floor_char_boundary(
-                &wl.text,
-                byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len()),
-            );
-            cursor_col = wl.text[..local].width();
+            // One authoritative byte-offset → screen-column mapping. It walks
+            // the wrapped line's text as graphemes using the same width
+            // primitive the grid paints with, floors a mid-grapheme byte
+            // cursor (a masked `•••` field paired with an unmasked cursor)
+            // down to a safe boundary, and — crucially — keeps
+            // `text.len()` as a valid caret spot so the caret lands flush
+            // against the final glyph instead of one grapheme short.
+            let local_byte = byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len());
+            cursor_col = cursor_column(&wl.text, local_byte);
             break;
         }
     }
@@ -197,7 +198,7 @@ pub fn draw_composer(
         let text_fg = theme.fg();
         let base_text = Style::default().bg(panel_bg).fg(text_fg);
         for (i, wl) in wrapped[start..end].iter().enumerate() {
-            let used = COMPOSER_PROMPT_PREFIX_COLS + wl.text.width();
+            let used = COMPOSER_PROMPT_PREFIX_COLS + str_len(&wl.text);
             let mut spans = if start + i == 0 {
                 vec![prompt_glyph.clone(), prompt_gap.clone()]
             } else {

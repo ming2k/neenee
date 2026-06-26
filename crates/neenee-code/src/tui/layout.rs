@@ -4,7 +4,8 @@
 //! This allows mouse events to be resolved back to semantic positions.
 
 use neenee_tui::Rect;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub const TOOL_STEP_BLOCK_IDX: usize = usize::MAX;
 pub const THINKING_BLOCK_IDX: usize = usize::MAX - 1;
@@ -16,7 +17,9 @@ pub struct SemanticCursor {
     pub message_idx: usize,
     /// Index into the message's block list.
     pub block_idx: usize,
-    /// Byte offset inside the block's raw text.
+    /// Byte offset inside the block's raw text. Hit-testing may place this
+    /// inside a grapheme cluster; selection/copy consumers snap it to grapheme
+    /// boundaries before slicing.
     pub byte_offset: usize,
 }
 
@@ -173,22 +176,23 @@ impl LayoutMap {
 
     /// Resolve a screen point to the table cell it lies inside, if any.
     pub fn table_cell_at(&self, x: u16, y: u16) -> Option<&TableCellHit> {
-        self.table_cell_hits
-            .iter()
-            .find(|h| {
-                h.rect.x <= x
-                    && x < h.rect.x + h.rect.width
-                    && h.rect.y <= y
-                    && y < h.rect.y + h.rect.height
-            })
+        self.table_cell_hits.iter().find(|h| {
+            h.rect.x <= x
+                && x < h.rect.x + h.rect.width
+                && h.rect.y <= y
+                && y < h.rect.y + h.rect.height
+        })
     }
 
     /// Find the semantic cursor at a given screen coordinate.
     ///
     /// The column is resolved against the region's actual text using Unicode
     /// display width, so multi-byte and wide (CJK) characters map to the
-    /// correct byte offset. The result always lies on a char boundary and is
-    /// clamped to the region's byte range.
+    /// correct byte offset. For non-leading columns of a wide grapheme, the
+    /// result intentionally sits inside that grapheme: a collapsed click still
+    /// compares equal to itself, while an actual drag can distinguish "moved
+    /// across this glyph" without jumping to the next glyph. Consumers that
+    /// slice text must snap to grapheme boundaries first.
     pub fn cursor_at(&self, x: u16, y: u16) -> Option<SemanticCursor> {
         let region = self.region_at(x, y)?;
 
@@ -203,7 +207,7 @@ impl LayoutMap {
         // keeping the screen-column → byte-offset mapping in lockstep with
         // what the user actually sees.
         let mut acc_width = 0usize;
-        for (byte_idx, ch) in region.text.char_indices() {
+        for (byte_idx, grapheme) in region.text.grapheme_indices(true) {
             if region
                 .hidden_ranges
                 .iter()
@@ -211,12 +215,21 @@ impl LayoutMap {
             {
                 continue;
             }
-            let w = ch.width().unwrap_or(0).max(1);
+            let w = if grapheme == "\n" {
+                0
+            } else {
+                grapheme.width().max(1)
+            };
             if col < acc_width + w {
+                let target_byte = if col == acc_width || grapheme.len() <= 1 {
+                    byte_idx
+                } else {
+                    byte_idx + 1
+                };
                 return Some(SemanticCursor::new(
                     region.message_idx,
                     region.block_idx,
-                    region.start_byte + byte_idx,
+                    region.start_byte + target_byte,
                 ));
             }
             acc_width += w;
@@ -316,12 +329,14 @@ mod tests {
         let mut map = LayoutMap::new();
         map.push(region("😀😃a", 0, 0, Rect::new(0, 0, 20, 1)));
 
-        // Both columns of 😀 resolve to byte 0.
+        // The leading column resolves to the glyph start; the trailing column
+        // resolves inside the glyph so inclusive selection can cover exactly
+        // this glyph without spilling into the next one.
         assert_eq!(map.cursor_at(0, 0).unwrap().byte_offset, 0);
-        assert_eq!(map.cursor_at(1, 0).unwrap().byte_offset, 0);
+        assert_eq!(map.cursor_at(1, 0).unwrap().byte_offset, 1);
         // 😃 starts at byte 4 (columns 2-3).
         assert_eq!(map.cursor_at(2, 0).unwrap().byte_offset, 4);
-        assert_eq!(map.cursor_at(3, 0).unwrap().byte_offset, 4);
+        assert_eq!(map.cursor_at(3, 0).unwrap().byte_offset, 5);
         // 'a' at byte 8, column 4.
         assert_eq!(map.cursor_at(4, 0).unwrap().byte_offset, 8);
         // Past the end clamps to end_byte — always a char boundary.

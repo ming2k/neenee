@@ -431,10 +431,8 @@ mod tests {
     fn collapse_inserts_ellipsis_when_hunks_are_far_apart() {
         // Two changes separated by 8 context lines — just over the 6-line
         // overlap window (2*COLLAPSE_CONTEXT), so an ellipsis is inserted.
-        let old =
-            "a\nCHANGE1\nc\nd\ne\nf\ng\nh\ni\nj\nCHANGE2\nz";
-        let new =
-            "a\nchange1\nc\nd\ne\nf\ng\nh\ni\nj\nchange2\nz";
+        let old = "a\nCHANGE1\nc\nd\ne\nf\ng\nh\ni\nj\nCHANGE2\nz";
+        let new = "a\nchange1\nc\nd\ne\nf\ng\nh\ni\nj\nchange2\nz";
         let diff = line_diff(old, new, 0);
         let collapsed = collapse_context_runs(&diff);
 
@@ -442,7 +440,10 @@ mod tests {
             .iter()
             .filter(|l| l.op == DiffOp::Ellipsis)
             .count();
-        assert_eq!(ellipsis_count, 1, "gap > 2*COLLAPSE_CONTEXT triggers ellipsis");
+        assert_eq!(
+            ellipsis_count, 1,
+            "gap > 2*COLLAPSE_CONTEXT triggers ellipsis"
+        );
 
         let has_remove = collapsed.iter().any(|l| l.op == DiffOp::Remove);
         let has_add = collapsed.iter().any(|l| l.op == DiffOp::Add);

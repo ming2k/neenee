@@ -7,6 +7,6 @@ license = "MIT"
 
 [dependencies]
 crossterm = { workspace = true }
-unicode-width = { workspace = true }
+unicode-width.workspace = true
 unicode-segmentation = { workspace = true }
 bitflags = "2"

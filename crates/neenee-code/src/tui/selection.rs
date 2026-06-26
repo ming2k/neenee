@@ -5,8 +5,14 @@
 //! so copying always returns the *original* text, not terminal-wrapped output.
 
 use crate::tui::document::{Block, TranscriptMessage};
-use crate::tui::layout::SemanticCursor;
+use crate::tui::layout::{LayoutMap, SemanticCursor};
 use std::borrow::Cow;
+
+/// Re-exported grapheme-boundary primitives so the rest of the crate keeps the
+/// existing `crate::tui::selection::…` import path. The implementations live in
+/// the engine ([`neenee_tui::text`]), the single owner of grapheme/width
+/// measurement.
+pub(crate) use neenee_tui::text::{floor_grapheme_boundary, inclusive_grapheme_end};
 
 /// Return the original text of one logical table cell. `cell_idx` is row-major
 /// (`row * ncols + col`, header is row 0). Falls back to an empty string for
@@ -126,7 +132,7 @@ impl SelectionState {
     }
 
     /// Update the head of a range selection.
-    pub fn update_head(&mut self, head: SemanticCursor) {
+    fn update_head(&mut self, head: SemanticCursor) {
         if let SelectionState::Range { .. } = self {
             *self = SelectionState::Range {
                 anchor: match self {
@@ -139,6 +145,10 @@ impl SelectionState {
     }
 
     /// Normalize the range so that start <= end.
+    ///
+    /// This preserves collapsed ranges because they are meaningful while a
+    /// mouse drag is armed. Use [`Self::active_normalized_range`] when callers
+    /// need a visible/copyable range.
     pub fn normalized_range(&self) -> Option<(SemanticCursor, SemanticCursor)> {
         match self {
             SelectionState::Range { anchor, head } => {
@@ -156,6 +166,27 @@ impl SelectionState {
                 SemanticCursor::new(*message_idx, *block_idx, usize::MAX),
             )),
             SelectionState::TableCell { .. } | SelectionState::None => None,
+        }
+    }
+
+    /// Normalize only visible/copyable selections. Collapsed ranges are a drag
+    /// anchor, not selected content, so they deliberately return `None`.
+    pub fn active_normalized_range(&self) -> Option<(SemanticCursor, SemanticCursor)> {
+        if !self.is_active() {
+            return None;
+        }
+        self.normalized_range()
+    }
+
+    /// Whether the state represents a visible/copyable selection rather than
+    /// merely an armed caret. A collapsed range (`anchor == head`) is how mouse
+    /// down starts a drag, but it must not paint selection, copy text, or leave
+    /// the terminal block cursor visible over the input.
+    pub fn is_active(&self) -> bool {
+        match self {
+            SelectionState::None => false,
+            SelectionState::Range { anchor, head } => anchor != head,
+            SelectionState::Block { .. } | SelectionState::TableCell { .. } => true,
         }
     }
 }
@@ -197,12 +228,8 @@ pub fn get_selected_text<'a>(
                 text.into_owned()
             })
         }
-        SelectionState::Range { anchor, head } => {
-            let (start, end) = if anchor <= head {
-                (*anchor, *head)
-            } else {
-                (*head, *anchor)
-            };
+        SelectionState::Range { .. } => {
+            let (start, end) = state.active_normalized_range()?;
 
             if start.message_idx == end.message_idx {
                 // Cell-bounded range: extract a substring of the cell's
@@ -249,30 +276,11 @@ pub fn get_selected_text<'a>(
     }
 }
 
-/// Snap a byte offset down to the nearest char boundary, clamped to the text.
-pub(crate) fn floor_char_boundary(text: &str, offset: usize) -> usize {
-    let mut i = offset.min(text.len());
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// Return the end (exclusive) of the character that starts at or contains
-/// `offset`, so the character under the selection head is included.
-pub(crate) fn inclusive_end(text: &str, offset: usize) -> usize {
-    let start = floor_char_boundary(text, offset);
-    match text[start..].chars().next() {
-        Some(ch) => start + ch.len_utf8(),
-        None => start,
-    }
-}
-
 /// Extract text from a single message between two cursors.
 ///
 /// The end cursor is inclusive: the character it points at is part of the
-/// selection. All offsets are snapped to char boundaries so multi-byte text
-/// can never cause an out-of-boundary slice.
+/// selection. All offsets are snapped to grapheme boundaries so multi-byte text
+/// and multi-codepoint glyphs can never cause an out-of-boundary slice.
 fn extract_within_message<'a>(
     message_idx: usize,
     msg: &'a TranscriptMessage,
@@ -287,12 +295,12 @@ fn extract_within_message<'a>(
         let (text, strip) = block_copy_text(block, message_idx, bi, table_grid);
 
         let byte_start = if bi == start.block_idx {
-            floor_char_boundary(&text, start.byte_offset)
+            floor_grapheme_boundary(&text, start.byte_offset)
         } else {
             0
         };
         let byte_end = if bi == end.block_idx {
-            inclusive_end(&text, end.byte_offset)
+            inclusive_grapheme_end(&text, end.byte_offset)
         } else {
             text.len()
         };
@@ -346,8 +354,10 @@ impl CellDragInfo {
     /// message_idx == self.message_idx, block_idx == self.block_idx).
     pub fn extract_range_text(&self, start_byte: usize, end_byte: usize) -> String {
         let (lo, _hi) = self.cell_byte_range;
-        let cell_start = start_byte.saturating_sub(lo).min(self.cell_text.len());
-        let cell_end = end_byte.saturating_sub(lo).min(self.cell_text.len());
+        let raw_start = start_byte.saturating_sub(lo);
+        let raw_end = end_byte.saturating_sub(lo);
+        let cell_start = floor_grapheme_boundary(&self.cell_text, raw_start);
+        let cell_end = inclusive_grapheme_end(&self.cell_text, raw_end);
         if cell_start < cell_end {
             self.cell_text[cell_start..cell_end].to_string()
         } else {
@@ -377,16 +387,82 @@ impl SelectionDrag {
         self.cell_info = None;
     }
 
+    /// Arm a text-range drag and install the matching collapsed range in the
+    /// selection state. The range becomes active only after a later update moves
+    /// the head away from the anchor.
+    pub fn begin_range(&mut self, selection: &mut SelectionState, cursor: SemanticCursor) {
+        self.start(cursor);
+        *selection = SelectionState::start_range(cursor);
+    }
+
     /// Arm a drag locked to one table cell's `│` boundaries.
-    pub fn start_in_cell(&mut self, cursor: SemanticCursor, cell: CellDragInfo) {
+    fn start_in_cell(&mut self, cursor: SemanticCursor, cell: CellDragInfo) {
         self.active = true;
         self.anchor = Some(cursor);
         self.cell_info = Some(cell);
     }
 
+    /// Arm a cell-bounded drag and install a collapsed range clamped to the
+    /// originating cell. Cell drags use the same Range lifecycle as ordinary
+    /// text drags; the only difference is that updates are clamped.
+    pub fn begin_cell(
+        &mut self,
+        selection: &mut SelectionState,
+        cursor: SemanticCursor,
+        cell: CellDragInfo,
+    ) {
+        let anchor = cell.clamp_cursor(cursor);
+        self.start_in_cell(anchor, cell);
+        *selection = SelectionState::start_range(anchor);
+    }
+
+    /// Extend the current drag to a semantic cursor.
+    pub fn update_to_cursor(&self, selection: &mut SelectionState, cursor: SemanticCursor) {
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        if !matches!(selection, SelectionState::Range { .. }) {
+            *selection = SelectionState::start_range(anchor);
+        }
+        let head = self
+            .cell_info
+            .as_ref()
+            .map_or(cursor, |cell| cell.clamp_cursor(cursor));
+        selection.update_head(head);
+    }
+
+    /// Resolve a screen point through the frame layout and extend the drag if
+    /// the point maps to selectable text.
+    pub fn update_from_point(
+        &self,
+        selection: &mut SelectionState,
+        layout_map: &LayoutMap,
+        x: u16,
+        y: u16,
+    ) {
+        if let Some(cursor) = layout_map.cursor_at(x, y) {
+            self.update_to_cursor(selection, cursor);
+        }
+    }
+
+    /// Mark the low-level mouse drag as released. This is used by the input
+    /// event translator before the event loop applies semantic cleanup.
     pub fn end(&mut self) {
         self.active = false;
-        // Keep anchor + cell_info so the selection remains; cleared externally.
+    }
+
+    /// Finish a semantic drag. Collapsed ranges are cleared; active ranges keep
+    /// their anchor and optional cell context so copy can resolve them.
+    pub fn finish(&mut self, selection: &mut SelectionState) {
+        self.active = false;
+        if selection.is_active() {
+            // Keep anchor + cell_info so a completed cell drag can still copy
+            // through the cell-text mapping.
+        } else {
+            *selection = SelectionState::None;
+            self.anchor = None;
+            self.cell_info = None;
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -413,6 +489,93 @@ mod tests {
         assert_eq!(
             get_selected_text(&sel, &messages, &|_, _| None, None),
             Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn active_selection_excludes_collapsed_range() {
+        let cursor = SemanticCursor::new(0, 0, 0);
+        assert!(!SelectionState::None.is_active());
+        assert!(!SelectionState::start_range(cursor).is_active());
+        assert_eq!(
+            SelectionState::start_range(cursor).active_normalized_range(),
+            None
+        );
+        assert!(
+            SelectionState::Range {
+                anchor: cursor,
+                head: SemanticCursor::new(0, 0, 1),
+            }
+            .is_active()
+        );
+        assert!(
+            SelectionState::Block {
+                message_idx: 0,
+                block_idx: 0,
+            }
+            .is_active()
+        );
+    }
+
+    #[test]
+    fn range_drag_lifecycle_is_collapsed_until_head_moves() {
+        let anchor = SemanticCursor::new(0, 0, 0);
+        let head = SemanticCursor::new(0, 0, 1);
+        let mut drag = SelectionDrag::default();
+        let mut selection = SelectionState::None;
+
+        drag.begin_range(&mut selection, anchor);
+        assert!(drag.active);
+        assert_eq!(selection, SelectionState::start_range(anchor));
+        assert!(!selection.is_active());
+
+        drag.update_to_cursor(&mut selection, head);
+        assert!(selection.is_active());
+        assert_eq!(selection.active_normalized_range(), Some((anchor, head)));
+
+        drag.finish(&mut selection);
+        assert!(!drag.active);
+        assert_eq!(drag.anchor, Some(anchor));
+        assert_eq!(selection.active_normalized_range(), Some((anchor, head)));
+    }
+
+    #[test]
+    fn collapsed_drag_finish_clears_selection_and_context() {
+        let anchor = SemanticCursor::new(0, 0, 0);
+        let mut drag = SelectionDrag::default();
+        let mut selection = SelectionState::None;
+
+        drag.begin_range(&mut selection, anchor);
+        drag.finish(&mut selection);
+
+        assert_eq!(selection, SelectionState::None);
+        assert!(!drag.active);
+        assert_eq!(drag.anchor, None);
+        assert!(drag.cell_info.is_none());
+    }
+
+    #[test]
+    fn cell_drag_uses_range_lifecycle_and_clamps_updates() {
+        let cell = CellDragInfo {
+            message_idx: 2,
+            block_idx: 3,
+            cell_text: "abcdef".to_string(),
+            cell_byte_range: (10, 16),
+        };
+        let mut drag = SelectionDrag::default();
+        let mut selection = SelectionState::None;
+
+        drag.begin_cell(&mut selection, SemanticCursor::new(2, 3, 8), cell);
+        let anchor = SemanticCursor::new(2, 3, 10);
+        assert_eq!(selection, SelectionState::start_range(anchor));
+        assert!(!selection.is_active());
+
+        drag.update_to_cursor(&mut selection, SemanticCursor::new(9, 9, 99));
+        let head = SemanticCursor::new(2, 3, 16);
+        assert_eq!(selection.active_normalized_range(), Some((anchor, head)));
+        assert_eq!(
+            drag.cell_info.as_ref().unwrap().extract_range_text(10, 16),
+            "abcdef"
         );
     }
 
@@ -627,5 +790,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(copied, long);
+    }
+
+    #[test]
+    fn cell_drag_copy_is_grapheme_safe_and_inclusive() {
+        let cell = CellDragInfo {
+            message_idx: 0,
+            block_idx: 0,
+            cell_text: "中文测".to_string(),
+            cell_byte_range: (2, 11),
+        };
+
+        // Offsets are grid-line byte offsets, so subtracting `lo` lands inside
+        // the first and third CJK grapheme. Extraction must not panic, and the
+        // inclusive head includes the grapheme under the drag head.
+        assert_eq!(cell.extract_range_text(3, 8), "中文测");
     }
 }

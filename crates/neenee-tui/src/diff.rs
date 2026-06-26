@@ -319,4 +319,48 @@ mod tests {
         // A second diff against the promoted front is now empty.
         assert!(diff(&back, &front).draws.is_empty());
     }
+
+    #[test]
+    fn wide_glyph_selection_toggle_diffs_head_only() {
+        use crate::grid::Fit;
+        let panel = Color::Rgb(18, 19, 19);
+        let sel = Color::Rgb(38, 48, 44);
+        let w = 6u16;
+        // front: wide glyph UNselected + panel tail
+        let mut front = Grid::new(w, 1);
+        front.put(
+            0,
+            0,
+            Fit::Clip,
+            Style::default().bg(panel).fg(Color::White),
+            "中",
+        );
+        for x in 2..w {
+            front.set(x, 0, Cell::blank_styled(Style::default().bg(panel)));
+        }
+        front.clear_dirty();
+        // back: wide glyph SELECTED + panel tail
+        let mut back = Grid::new(w, 1);
+        back.put(
+            0,
+            0,
+            Fit::Clip,
+            Style::default().bg(sel).fg(Color::White),
+            "中",
+        );
+        for x in 2..w {
+            back.set(x, 0, Cell::blank_styled(Style::default().bg(panel)));
+        }
+        let cmd = diff(&back, &front);
+        // The wide head must be emitted with the SELECTED bg.
+        assert!(cmd.draws.iter().any(|d| matches!(d,
+                Draw::Cells { style, cells, .. }
+                if style.bg == sel && cells.iter().any(|(s, _)| s == "中"))));
+        // No ClearEol may clobber the wide glyph's columns (0..2).
+        for d in &cmd.draws {
+            if let Draw::ClearEol { x, .. } = d {
+                assert!(*x >= 2, "ClearEol at x={x} would clobber the wide glyph");
+            }
+        }
+    }
 }

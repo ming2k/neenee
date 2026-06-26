@@ -43,7 +43,7 @@ use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
     draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
-    draw_permissions_manager, draw_permission_sheet, draw_question_modal, draw_session_modal,
+    draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
     draw_sessions_modal, draw_tool_step_detail_overlay,
 };
 pub use primitives::recess_backdrop;
@@ -1211,10 +1211,289 @@ mod tests {
         });
     }
 
-    /// Sent user messages and the composer must render as solid panels whose
-    /// text keeps a 2-column inner padding on both sides (in the panel bg),
-    /// matching the header. This locks the geometry so a refactor can't quietly
-    /// drop the right-side padding again.
+    /// The caret must land flush against the final glyph at the end of the
+    /// input, measured in display columns — i.e. exactly where the grid painted
+    /// the text. This is the CJK regression: a buggy grapheme-floor returned the
+    /// last grapheme *start*, leaving the caret two columns short of a wide
+    /// glyph (one for ASCII). The caret column must equal the rendered width of
+    /// the text, for both wide and narrow glyphs.
+    #[test]
+    fn draw_composer_caret_flush_against_final_grapheme() {
+        let theme = Theme::default();
+
+        for (label, input, expected_cols) in [
+            ("cjk", "中文", 4usize),
+            ("ascii", "ab", 2),
+            ("mixed", "a中", 3),
+        ] {
+            let mut terminal = neenee_tui::TestTerminal::new(20, 5);
+            terminal.draw(|f| {
+                draw_composer(
+                    f,
+                    Rect::new(0, 0, 20, 4),
+                    input,
+                    input.len(),
+                    true,
+                    true,
+                    &theme,
+                    &mut LayoutMap::new(),
+                    false,
+                    &mut 0,
+                    &SelectionState::None,
+                );
+            });
+            let cursor = match terminal.cursor() {
+                neenee_tui::CursorState::Visible(x, y) => (x, y),
+                other => panic!("{label}: caret should be visible, got {other:?}"),
+            };
+            // The text row sits one line below the box's top `▄` edge, and the
+            // caret follows the `› ` prefix plus the full rendered width.
+            assert_eq!(
+                cursor,
+                (
+                    (COMPOSER_PROMPT_PREFIX_COLS + expected_cols) as u16,
+                    super::design::COMPOSER_TEXT_ROW_OFFSET,
+                ),
+                "{label}: caret not flush with end of {input:?}"
+            );
+        }
+    }
+
+    /// A CJK selection highlight must paint BOTH columns of each wide glyph
+    /// (head + continuation), cover exactly the selected glyphs, and leave the
+    /// trailing pad on the panel background — no extra glyph, no half-highlighted
+    /// wide char. Exercises the full-3-CJK selection the live bug report used.
+    #[test]
+    fn composer_cjk_selection_covers_full_width_glyphs() {
+        use crate::tui::layout::SemanticCursor;
+        let theme = Theme::default();
+        let panel_bg = theme.input_surface();
+        let sel_bg = theme.selected();
+        let input = "中文测"; // 3 wide glyphs = 6 cols (cols 2..8)
+        // Select all three. Head points AT 测 (byte 6); the inclusive-head model
+        // includes the glyph under the head, so the range is [0, 9) = "中文测".
+        let sel = SelectionState::Range {
+            anchor: SemanticCursor::new(INPUT_MSG_IDX, 0, 0),
+            head: SemanticCursor::new(INPUT_MSG_IDX, 0, 6),
+        };
+        let mut terminal = neenee_tui::TestTerminal::new(20, 5);
+        terminal.draw(|f| {
+            draw_composer(
+                f,
+                Rect::new(0, 0, 20, 4),
+                input,
+                input.len(),
+                true,
+                false,
+                &theme,
+                &mut LayoutMap::new(),
+                false,
+                &mut 0,
+                &sel,
+            );
+        });
+        let g = terminal.buffer();
+        let y = super::design::COMPOSER_TEXT_ROW_OFFSET;
+        // Cols: 0='›', 1=gap, 2-7='中文测'(sel), 8+=panel tail.
+        for (col, label, expect_sel) in [
+            (2usize, "中 head", true),
+            (3, "中 cont", true),
+            (4, "文 head", true),
+            (5, "文 cont", true),
+            (6, "测 head", true),
+            (7, "测 cont", true),
+            (8, "tail 0", false),
+            (9, "tail 1", false),
+        ] {
+            let cell = g.get(col as u16, y).unwrap();
+            let want = if expect_sel { sel_bg } else { panel_bg };
+            assert_eq!(
+                cell.bg, want,
+                "{label} at col {col}: bg {:?} expected {:?}",
+                cell.bg, want
+            );
+        }
+        // While a selection is active the caller passes `show_caret = false`
+        // (see the event loop), so no terminal caret is placed on top of the
+        // highlighted glyphs — the "appended flickering character" symptom.
+        assert!(
+            matches!(terminal.cursor(), neenee_tui::CursorState::Hidden),
+            "caret must be hidden while a selection is active"
+        );
+    }
+
+    #[test]
+    fn composer_two_cjk_select_all_has_no_extra_glyph_or_tail_highlight() {
+        use crate::tui::layout::SemanticCursor;
+
+        let theme = Theme::default();
+        let panel_bg = theme.input_surface();
+        let sel_bg = theme.selected();
+        let input = "你好";
+        let sel = SelectionState::Range {
+            anchor: SemanticCursor::new(INPUT_MSG_IDX, 0, 0),
+            head: SemanticCursor::new(INPUT_MSG_IDX, 0, input.len()),
+        };
+        let mut terminal = neenee_tui::TestTerminal::new(16, 5);
+
+        terminal.draw(|f| {
+            draw_composer(
+                f,
+                Rect::new(0, 0, 16, 4),
+                input,
+                input.len(),
+                true,
+                false,
+                &theme,
+                &mut LayoutMap::new(),
+                false,
+                &mut 0,
+                &sel,
+            );
+        });
+
+        let y = super::design::COMPOSER_TEXT_ROW_OFFSET;
+        let buffer = terminal.buffer();
+
+        assert_eq!(buffer.get(2, y).unwrap().symbol(), "你");
+        assert_eq!(buffer.get(2, y).unwrap().width, 2);
+        assert_eq!(buffer.get(3, y).unwrap().symbol(), " ");
+        assert_eq!(buffer.get(3, y).unwrap().width, 0);
+        assert_eq!(buffer.get(4, y).unwrap().symbol(), "好");
+        assert_eq!(buffer.get(4, y).unwrap().width, 2);
+        assert_eq!(buffer.get(5, y).unwrap().symbol(), " ");
+        assert_eq!(buffer.get(5, y).unwrap().width, 0);
+        assert_eq!(
+            buffer.get(6, y).unwrap().symbol(),
+            " ",
+            "tail cell must not contain a duplicate glyph"
+        );
+
+        for col in 2..=5 {
+            assert_eq!(
+                buffer.get(col, y).unwrap().bg,
+                sel_bg,
+                "col {col} should be selected"
+            );
+        }
+        assert_eq!(
+            buffer.get(6, y).unwrap().bg,
+            panel_bg,
+            "tail cell must remain on input panel background"
+        );
+        assert!(
+            matches!(terminal.cursor(), neenee_tui::CursorState::Hidden),
+            "caret must be hidden while a selection is active"
+        );
+    }
+
+    /// Regression for the input-select bug: a click that starts a selection
+    /// (anchor == head, a collapsed range) must highlight NOTHING, and a drag
+    /// through the real click pipeline (layout_map → cursor_at) must highlight
+    /// exactly the dragged glyphs with the correct background. The prior
+    /// `inclusive_grapheme_end`-on-a-point logic lit up one glyph on every
+    /// click and flickered as the drag moved — "an extra changing character
+    /// appears and the selection background misbehaves".
+    #[test]
+    fn composer_collapsed_click_highlights_nothing_drag_highlights_cleanly() {
+        let theme = Theme::default();
+        let panel_bg = theme.input_surface();
+        let sel_bg = theme.selected();
+        let input = "中文测";
+        let rect = Rect::new(0, 0, 20, 4);
+        let text_row = super::design::COMPOSER_TEXT_ROW_OFFSET;
+
+        // Record input regions so cursor_at can resolve real drag positions.
+        let mut layout_map = LayoutMap::new();
+        let mut rec = neenee_tui::TestTerminal::new(20, 5);
+        rec.draw(|f| {
+            draw_composer(
+                f,
+                rect,
+                input,
+                input.len(),
+                true,
+                false,
+                &theme,
+                &mut layout_map,
+                true,
+                &mut 0,
+                &SelectionState::None,
+            );
+        });
+        let anchor = layout_map.cursor_at(rect.x + 2, rect.y + text_row).unwrap();
+        assert_eq!(anchor.byte_offset, 0);
+
+        fn row_bgs(
+            input: &str,
+            rect: Rect,
+            text_row: u16,
+            theme: &Theme,
+            sel: &SelectionState,
+        ) -> Vec<neenee_tui::Color> {
+            let mut t = neenee_tui::TestTerminal::new(20, 5);
+            t.draw(|f| {
+                draw_composer(
+                    f,
+                    rect,
+                    input,
+                    input.len(),
+                    true,
+                    false,
+                    theme,
+                    &mut LayoutMap::new(),
+                    false,
+                    &mut 0,
+                    sel,
+                );
+            });
+            (0..10u16)
+                .map(|c| t.buffer().get(c, text_row).unwrap().bg)
+                .collect()
+        }
+
+        // 1) Collapsed click (anchor == head): no glyph may carry the selection bg.
+        let collapsed = SelectionState::Range {
+            anchor,
+            head: anchor,
+        };
+        for (col, bg) in row_bgs(input, rect, text_row, &theme, &collapsed)
+            .into_iter()
+            .enumerate()
+        {
+            assert_ne!(bg, sel_bg, "collapsed click lit up col {col}");
+            let _ = panel_bg;
+        }
+
+        // 2) Drag onto 测's first column (byte 6): inclusive head selects all
+        //    three glyphs; the trailing pad stays on the panel bg.
+        let head = layout_map.cursor_at(rect.x + 6, rect.y + text_row).unwrap();
+        assert_eq!(head.byte_offset, 6);
+        let drag = SelectionState::Range { anchor, head };
+        let bgs = row_bgs(input, rect, text_row, &theme, &drag);
+        // cols 0,1 = prefix; 2..8 = "中文测" (selected); 8,9 = tail (panel).
+        for col in 2..8usize {
+            assert_eq!(bgs[col], sel_bg, "col {col} should be selected");
+        }
+        for col in 8..10usize {
+            assert_eq!(bgs[col], panel_bg, "col {col} should be panel tail");
+        }
+
+        // 3) Drag to the second visual column of 中. The hit-test cursor maps
+        // both columns of a wide glyph to that glyph's byte start; with an
+        // inclusive head this selects 中 only, not the next glyph.
+        let head = layout_map.cursor_at(rect.x + 3, rect.y + text_row).unwrap();
+        assert_eq!(head.byte_offset, 1);
+        let drag = SelectionState::Range { anchor, head };
+        let bgs = row_bgs(input, rect, text_row, &theme, &drag);
+        for col in 2..4usize {
+            assert_eq!(bgs[col], sel_bg, "col {col} should select 中");
+        }
+        for col in 4..8usize {
+            assert_eq!(bgs[col], panel_bg, "col {col} should remain unselected");
+        }
+    }
+
     #[test]
     fn user_message_and_composer_keep_symmetric_panel_padding() {
         let theme = Theme::default();
@@ -1622,6 +1901,54 @@ mod tests {
                 "each data line must describe exactly 2 cells"
             );
         }
+    }
+
+    /// Inline-code / bold markup delimiters (`` ` ``, `**`) are rendered at zero
+    /// width, so a column holding markup must be sized and wrapped by its
+    /// *visible* width — otherwise the column is inflated, the wrapped text can
+    /// split a `` `…` ``/`**…**` pair across lines, and data-row `│` separators
+    /// drift out of line with the border grid. A plain table and a markup table
+    /// carrying the same visible content must therefore share identical borders
+    /// and the same line count (no spurious wrap).
+    #[test]
+    fn table_markup_columns_size_to_visible_width() {
+        use crate::tui::document::TableAlignment;
+
+        let plain = build_table_render(
+            &vec!["a".to_string(), "b".to_string()],
+            &vec![vec!["bold".to_string(), "code".to_string()]],
+            &vec![TableAlignment::None, TableAlignment::None],
+            80,
+        );
+        let markup = build_table_render(
+            &vec!["a".to_string(), "b".to_string()],
+            &vec![vec!["**bold**".to_string(), "`code`".to_string()]],
+            &vec![TableAlignment::None, TableAlignment::None],
+            80,
+        );
+
+        // Borders are markup-free, so plain and markup grids must match exactly
+        // once columns are sized to visible width.
+        let plain_borders: Vec<&String> =
+            plain.lines.iter().filter(|l| !l.starts_with('│')).collect();
+        let markup_borders: Vec<&String> = markup
+            .lines
+            .iter()
+            .filter(|l| !l.starts_with('│'))
+            .collect();
+        assert_eq!(
+            plain_borders, markup_borders,
+            "markup must not inflate column width"
+        );
+
+        // The markup cell fits its column on a single line (no delimiter split):
+        // same number of data lines as the plain version.
+        let plain_data = plain.lines.iter().filter(|l| l.starts_with('│')).count();
+        let markup_data = markup.lines.iter().filter(|l| l.starts_with('│')).count();
+        assert_eq!(
+            plain_data, markup_data,
+            "markup must not introduce extra wrapped lines"
+        );
     }
 
     #[test]
@@ -2121,8 +2448,7 @@ mod tests {
         let mut heading_rows: Vec<u16> = Vec::new();
         let mut found_body = false;
         for y in 0..buffer.area().height {
-            let row_has_text =
-                (0..width).any(|x| buffer[(x, y)].symbol() != " ");
+            let row_has_text = (0..width).any(|x| buffer[(x, y)].symbol() != " ");
             if !row_has_text {
                 if !heading_rows.is_empty() {
                     found_body = true;

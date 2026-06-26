@@ -3,11 +3,13 @@
 //! lays out character-addressable content.
 
 use neenee_tui::{
+    text::{floor_grapheme_boundary, inclusive_grapheme_end},
     {Color, Modifier, Style}, {Line, Span},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-use crate::tui::selection::{SelectionState, floor_char_boundary, inclusive_end};
+use crate::tui::selection::SelectionState;
 
 /// Produce a run of spaces that fills the rest of a full-width line so a
 /// region reads as a solid colored band (the caller attaches the bg style).
@@ -30,7 +32,7 @@ pub(super) fn block_selection_range(
             block_idx: bi,
         } => (*mi == message_idx && *bi == block_idx).then_some((0, None)),
         SelectionState::Range { .. } => {
-            let (start, end) = selection.normalized_range()?;
+            let (start, end) = selection.active_normalized_range()?;
             let here = (message_idx, block_idx);
             if here < (start.message_idx, start.block_idx)
                 || here > (end.message_idx, end.block_idx)
@@ -68,9 +70,9 @@ pub(super) fn line_selection(
     if s >= wl.end_byte && !(s == wl.start_byte && wl.text.is_empty()) {
         return None;
     }
-    let lo = floor_char_boundary(&wl.text, s.saturating_sub(wl.start_byte));
+    let lo = floor_grapheme_boundary(&wl.text, s.saturating_sub(wl.start_byte));
     let hi = match e {
-        Some(e) if e < wl.end_byte => inclusive_end(&wl.text, e - wl.start_byte),
+        Some(e) if e < wl.end_byte => inclusive_grapheme_end(&wl.text, e - wl.start_byte),
         _ => wl.text.len(),
     };
     (lo < hi).then_some((lo, hi))
@@ -172,6 +174,55 @@ pub(super) fn visible_width(text: &str, hidden_ranges: &[(usize, usize)]) -> usi
         .map(|&(lo, hi)| hi.saturating_sub(lo))
         .sum();
     text.width().saturating_sub(hidden)
+}
+
+/// Visible (markup-elided) display width of a text window. `text` is a slice of
+/// some original cell content beginning at byte `line_start_byte`; `code_ranges`
+/// and `bold_ranges` are absolute byte ranges into that original content. Inline
+/// code backticks and `**` bold markers are rendered at zero width by
+/// [`line_spans_rich`], so the returned width excludes exactly the bytes it
+/// elides — keeping column sizing / padding in sync with what is painted.
+pub(super) fn markup_visible_width(
+    text: &str,
+    line_start_byte: usize,
+    code_ranges: &[(usize, usize)],
+    bold_ranges: &[(usize, usize)],
+) -> usize {
+    let hidden = markup_hidden_ranges(text, line_start_byte, code_ranges, bold_ranges);
+    visible_width(text, &hidden)
+}
+
+/// Byte ranges within the `text` window (local offsets) that the renderer
+/// elides to zero width: `` ` `` code delimiters and `**` bold markers. `text`
+/// is a slice of an original cell beginning at `line_start_byte`; `code_ranges`
+/// and `bold_ranges` are absolute byte offsets into that original content. Used
+/// to budget display columns for both width measurement and markup-aware
+/// wrapping, so neither reserves space for delimiters the renderer hides.
+pub(super) fn markup_hidden_ranges(
+    text: &str,
+    line_start_byte: usize,
+    code_ranges: &[(usize, usize)],
+    bold_ranges: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    let mut hidden = bold_delim_local_ranges(text, line_start_byte, bold_ranges);
+    let bytes = text.as_bytes();
+    let line_end_byte = line_start_byte + text.len();
+    for &(cs, ce) in code_ranges {
+        if ce <= line_start_byte || cs >= line_end_byte {
+            continue;
+        }
+        let lo = cs.saturating_sub(line_start_byte);
+        let hi = (ce - line_start_byte).min(text.len());
+        // Trim one backtick per side, mirroring `line_spans_rich`'s elision of
+        // the leading/trailing delimiter byte.
+        if bytes.get(lo) == Some(&b'`') && hi > lo {
+            hidden.push((lo, lo + 1));
+        }
+        if hi > 0 && bytes.get(hi - 1) == Some(&b'`') && hi - 1 > lo {
+            hidden.push((hi - 1, hi));
+        }
+    }
+    hidden
 }
 
 /// Build a rendered line that, in addition to the prefix / selection behaviour
@@ -481,45 +532,91 @@ pub(super) fn indented_wrapped_lines(
 /// Wrap text into lines that fit within `max_width` display columns.
 /// Returns each line along with the byte range it covers in the original text.
 pub(super) fn wrap_text(text: &str, max_width: usize) -> Vec<WrappedLine> {
+    wrap_impl(text, max_width, &[])
+}
+
+/// Like [`wrap_text`], but characters whose byte offsets fall inside
+/// `hidden_ranges` count as zero display width. Inline code / bold delimiters
+/// are rendered zero-width, so wrapping against the raw width would let them
+/// eat into the column budget and even split a `` `…` ``/`**…**` pair across
+/// lines. Wrapping on the visible width keeps markup intact on one line and
+/// in sync with the rendered width.
+pub(super) fn wrap_text_markup(
+    text: &str,
+    max_width: usize,
+    hidden_ranges: &[(usize, usize)],
+) -> Vec<WrappedLine> {
+    wrap_impl(text, max_width, hidden_ranges)
+}
+
+fn wrap_impl(text: &str, max_width: usize, hidden_ranges: &[(usize, usize)]) -> Vec<WrappedLine> {
     let mut lines = Vec::new();
     let mut current_line = String::new();
     let mut current_width = 0;
     let mut line_start_byte = 0;
 
-    for (byte_idx, ch) in text.char_indices() {
-        let ch_width = ch.width().unwrap_or(0);
+    for (byte_idx, grapheme) in text.grapheme_indices(true) {
+        // Markup delimiter bytes are rendered zero-width, so they neither count
+        // against the column budget nor trigger a wrap.
+        let is_hidden = !hidden_ranges.is_empty()
+            && hidden_ranges
+                .iter()
+                .any(|&(lo, hi)| byte_idx >= lo && byte_idx < hi);
 
-        if ch == '\n' {
+        let g_width = if is_hidden || grapheme == "\n" {
+            0
+        } else {
+            neenee_tui::text::grapheme_width(grapheme) as usize
+        };
+
+        if grapheme == "\n" {
             lines.push(WrappedLine {
                 text: std::mem::take(&mut current_line),
                 start_byte: line_start_byte,
                 end_byte: byte_idx,
             });
-            line_start_byte = byte_idx + 1;
+            line_start_byte = byte_idx + grapheme.len();
             current_width = 0;
             continue;
         }
 
         // Keep closing CJK punctuation with the preceding character. If it
         // would start the next line, move the preceding character with it.
-        if current_width + ch_width > max_width && !current_line.is_empty() {
-            let move_previous = prohibited_line_start(ch)
-                || current_line.chars().last().is_some_and(prohibited_line_end);
-            // Only pop when we know a character will move down with the
-            // wrap; `count() > 1` guarantees `pop()` yields `Some` while
-            // leaving at least one character on the current line.
-            let to_move = (move_previous && current_line.chars().count() > 1)
-                .then(|| current_line.pop())
-                .flatten();
-            if let Some(moved) = to_move {
-                let moved_start = byte_idx - moved.len_utf8();
+        if current_width + g_width > max_width && !current_line.is_empty() {
+            let first_char = grapheme.chars().next().unwrap();
+            let last_char = current_line.chars().last().unwrap();
+
+            let move_previous = prohibited_line_start(first_char) || prohibited_line_end(last_char);
+
+            let mut moved_grapheme = None;
+            if move_previous {
+                if let Some((offset, last_g)) = current_line.grapheme_indices(true).last() {
+                    // Only pop when we know a character will move down with the wrap
+                    // leaving at least one on the current line.
+                    if offset > 0 {
+                        moved_grapheme = Some(last_g.to_string());
+                        current_line.truncate(offset);
+                    }
+                }
+            }
+
+            if let Some(moved) = moved_grapheme {
+                let moved_start = byte_idx - moved.len();
                 lines.push(WrappedLine {
                     text: std::mem::take(&mut current_line),
                     start_byte: line_start_byte,
                     end_byte: moved_start,
                 });
-                current_line.push(moved);
-                current_width = moved.width().unwrap_or(0);
+                current_line.push_str(&moved);
+                let moved_is_hidden = !hidden_ranges.is_empty()
+                    && hidden_ranges
+                        .iter()
+                        .any(|&(lo, hi)| moved_start >= lo && moved_start < hi);
+                current_width = if moved_is_hidden {
+                    0
+                } else {
+                    neenee_tui::text::grapheme_width(&moved) as usize
+                };
                 line_start_byte = moved_start;
             } else {
                 lines.push(WrappedLine {
@@ -532,8 +629,8 @@ pub(super) fn wrap_text(text: &str, max_width: usize) -> Vec<WrappedLine> {
             }
         }
 
-        current_line.push(ch);
-        current_width += ch_width;
+        current_line.push_str(grapheme);
+        current_width += g_width;
     }
 
     if !current_line.is_empty() || line_start_byte < text.len() {
@@ -596,6 +693,31 @@ mod tests {
     use super::line_spans_rich;
     use neenee_tui::{Color, Modifier, Style};
 
+    #[test]
+    fn block_selection_range_is_empty_for_collapsed_selection() {
+        // A collapsed selection (anchor == head) is a caret and must cover no
+        // bytes — otherwise `inclusive_grapheme_end` would expand the single
+        // point to a whole glyph and every click in the input or transcript
+        // would flash one character. This is the shared gate for both surfaces.
+        use super::block_selection_range;
+        use crate::tui::layout::SemanticCursor;
+        use crate::tui::selection::SelectionState;
+
+        let at = SemanticCursor::new(0, 0, 3);
+        let collapsed = SelectionState::Range {
+            anchor: at,
+            head: at,
+        };
+        assert_eq!(block_selection_range(&collapsed, 0, 0), None);
+
+        // A real (non-collapsed) range on the same block still resolves.
+        let real = SelectionState::Range {
+            anchor: SemanticCursor::new(0, 0, 0),
+            head: SemanticCursor::new(0, 0, 6),
+        };
+        assert_eq!(block_selection_range(&real, 0, 0), Some((0, Some(6))));
+    }
+
     /// Rebuild the *visible* text from a line's spans, skipping the prefix.
     fn rendered_content(line: &neenee_tui::Line<'_>) -> String {
         line.spans
@@ -603,6 +725,39 @@ mod tests {
             .skip(1)
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn markup_visible_width_excludes_delimiters() {
+        use super::{markup_hidden_ranges, markup_visible_width};
+        // `code` → backticks elided, only "code" (4) counts.
+        assert_eq!(markup_visible_width("`code`", 0, &[(0, 6)], &[]), 4);
+        // **bold** → `**` elided, only "bold" (4) counts.
+        assert_eq!(markup_visible_width("**bold**", 0, &[], &[(0, 8)]), 4);
+        // `a` is 1 visible col, `**b**` is 1 visible col → 2 total. Raw is 8.
+        assert_eq!(markup_visible_width("`a`**b**", 0, &[(0, 3)], &[(3, 8)]), 2);
+        // Hidden ranges are local byte offsets into the window.
+        assert_eq!(
+            markup_hidden_ranges("`ab`", 0, &[(0, 4)], &[]),
+            vec![(0, 1), (3, 4)]
+        );
+    }
+
+    #[test]
+    fn wrap_text_markup_keeps_delimiters_zero_width() {
+        use super::{markup_visible_width, wrap_text_markup};
+        // Width 4: "**bold**" is 4 visible cols, so it fits on one line with
+        // the `**` markers tagging along at zero cost. Raw width (8) would have
+        // split it under plain `wrap_text`.
+        let lines = wrap_text_markup("**bold**", 4, &[(0, 2), (6, 8)]);
+        assert_eq!(lines.len(), 1, "should not wrap, got {} lines", lines.len());
+        assert_eq!(lines[0].text, "**bold**");
+        assert_eq!(lines[0].start_byte, 0);
+        assert_eq!(
+            markup_visible_width(&lines[0].text, 0, &[], &[(0, 8)]),
+            4,
+            "rendered width must respect the 4-col budget"
+        );
     }
 
     #[test]
