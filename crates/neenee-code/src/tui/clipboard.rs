@@ -308,6 +308,21 @@ async fn read_text() -> Result<Option<String>, ()> {
     .map_err(|_| ())?
 }
 
+/// Adapter implementing [`neenee_server::UiBridge`] by delegating to the TUI's
+/// real clipboard path (arboard / wl-copy / OSC52). Used by the slash-command
+/// dispatcher (ADR-0037 step 3) so it stays frontend-agnostic.
+pub struct TuiClipboard;
+
+#[async_trait::async_trait]
+impl neenee_server::UiBridge for TuiClipboard {
+    async fn copy_to_clipboard(&self, text: &str) -> Result<neenee_server::CopyOutcome, String> {
+        copy(text).await.map(|outcome| match outcome {
+            CopyOutcome::Native => neenee_server::CopyOutcome::Native,
+            CopyOutcome::Osc52 => neenee_server::CopyOutcome::Osc52,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,20 +337,5 @@ mod tests {
     #[tokio::test]
     async fn command_clipboard_receives_utf8_input() {
         copy_with_command("cat", &[], "复制内容").await.unwrap();
-    }
-}
-
-/// Adapter implementing [`neenee_server::UiBridge`] by delegating to the TUI's
-/// real clipboard path (arboard / wl-copy / OSC52). Used by the slash-command
-/// dispatcher (ADR-0037 step 3) so it stays frontend-agnostic.
-pub struct TuiClipboard;
-
-#[async_trait::async_trait]
-impl neenee_server::UiBridge for TuiClipboard {
-    async fn copy_to_clipboard(&self, text: &str) -> Result<neenee_server::CopyOutcome, String> {
-        copy(text).await.map(|outcome| match outcome {
-            CopyOutcome::Native => neenee_server::CopyOutcome::Native,
-            CopyOutcome::Osc52 => neenee_server::CopyOutcome::Osc52,
-        })
     }
 }

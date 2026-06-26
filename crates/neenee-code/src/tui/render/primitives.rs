@@ -287,12 +287,7 @@ fn draw_scrollbar(frame: &mut Frame, body: Rect, scroll: usize, max_scroll: usiz
 /// Index a buffer cell by absolute (x, y) via direct `content` indexing.
 /// The caller guarantees the coordinate lies inside `area`.
 #[allow(deprecated)]
-fn cell_at_index<'a>(
-    buf: &'a mut neenee_tui::Grid,
-    area: Rect,
-    x: u16,
-    y: u16,
-) -> &'a mut neenee_tui::Cell {
+fn cell_at_index(buf: &mut neenee_tui::Grid, area: Rect, x: u16, y: u16) -> &mut neenee_tui::Cell {
     let idx = (y as usize - area.y as usize) * area.width as usize + (x as usize - area.x as usize);
     let cell = &mut buf.content[idx];
     cell.set_skip(false);
