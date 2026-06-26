@@ -1,0 +1,12 @@
+[package]
+name = "neenee-tui"
+version = "0.6.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[dependencies]
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+bitflags = "2"

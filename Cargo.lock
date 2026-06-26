@@ -1942,6 +1942,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "neenee-tui"
+version = "0.6.1"
+dependencies = [
+ "bitflags 2.13.0",
+ "crossterm",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

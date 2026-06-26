@@ -8,6 +8,7 @@ members = [
     "crates/neenee-agent",
     "crates/neenee-code",
     "crates/neenee-server",
+    "crates/neenee-tui",
 ]
 resolver = "2"
 
@@ -37,3 +38,11 @@ inventory = "0.3"
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+# TUI stack. crossterm is the low-level terminal I/O layer (raw mode, input,
+# alt screen, escape-code emission); the shared `crossterm` feature set is
+# pinned once here. `neenee-tui` is the in-house grid + diff rendering engine
+# (ADR-0038) and `neenee-code` consumes it.
+crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.1"
+unicode-segmentation = "1.12"
