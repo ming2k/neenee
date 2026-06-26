@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-11
+
+### Fixed
+
+- **Multi-segment table cell drag selection.** `TableCell` click targets now carry
+  `cell_segments` (per-line render/source mappings) instead of a single `(lo, hi)`
+  byte range, enabling substring selection across wrapped/padded table cell display
+  lines. Previously, any overflow or padding in a cell broke drag-to-select by
+  referencing the wrong byte offsets outside the grid line.
+
 ## [0.7.0] - 2026-07-10
 
 ### Added
@@ -477,7 +487,9 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/ming2k/neenee/releases/tag/v0.7.1
+[0.7.0]: https://github.com/ming2k/neenee/releases/tag/v0.7.0
 [0.6.1]: https://github.com/ming2k/neenee/releases/tag/v0.6.1
 [0.6.0]: https://github.com/ming2k/neenee/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ming2k/neenee/releases/tag/v0.5.0
