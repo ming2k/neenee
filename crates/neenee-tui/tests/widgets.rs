@@ -43,6 +43,24 @@ fn paragraph_writes_styled_text_into_grid() {
 }
 
 #[test]
+fn paragraph_text_without_bg_preserves_existing_surface() {
+    let mut grid = Grid::new(20, 1);
+    let bg = Color::Rgb(7, 8, 9);
+    grid.fill_rect(0, 0, 20, 1, Style::default().bg(bg));
+    let para = Paragraph::new(Line::from(Span::styled(
+        "hello",
+        Style::default().fg(Color::Rgb(255, 0, 0)),
+    )));
+    {
+        let mut frame = Frame::new(&mut grid);
+        frame.render_widget(para, Rect::new(0, 0, 20, 1));
+    }
+    assert_eq!(grid.get(0, 0).unwrap().symbol, "h");
+    assert_eq!(grid.get(0, 0).unwrap().style.bg, bg);
+    assert_eq!(grid.get(4, 0).unwrap().style.bg, bg);
+}
+
+#[test]
 fn paragraph_wraps_long_text() {
     let mut grid = Grid::new(5, 4);
     let para = Paragraph::new("hello world").wrap(Wrap { trim: false });

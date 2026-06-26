@@ -211,13 +211,21 @@ impl Grid {
                     }
                 }
             }
-            // Place the head cell.
+            // Place the head cell. A Reset background means "transparent" for
+            // text writes: preserve the surface already painted under this
+            // cell instead of punching through to the terminal default.
+            let mut cell_style = style;
+            if cell_style.bg == crate::Color::Reset {
+                if let Some(existing) = self.get(cx, cy) {
+                    cell_style.bg = existing.bg;
+                }
+            }
             let head = Cell {
                 symbol: grapheme.to_string(),
                 width: w,
-                fg: style.fg,
-                bg: style.bg,
-                style,
+                fg: cell_style.fg,
+                bg: cell_style.bg,
+                style: cell_style,
             };
             let head_idx = self.index_of(cx, cy);
             self.content[head_idx] = head;
@@ -226,7 +234,7 @@ impl Grid {
             // the glyph's background so the column can never ghost.
             if w >= 2 && cx + 1 < self.width {
                 let trail_idx = self.index_of(cx + 1, cy);
-                self.content[trail_idx] = Cell::wide_continuation(style);
+                self.content[trail_idx] = Cell::wide_continuation(cell_style);
                 self.mark(cx + 1, cy);
             }
             cx += w as u16;

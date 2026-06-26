@@ -131,7 +131,9 @@ impl<W: io::Write> Terminal<W> {
     /// Resize the back and front grids to the current terminal size.
     pub fn resize_to(&mut self, width: u16, height: u16) {
         self.back.resize(width, height);
-        self.front.resize(width, height);
+        self.front = Grid::new(width, height);
+        self.back.mark_all_dirty();
+        self.backend.invalidate();
     }
 
     /// Run the app's draw closure against a fresh frame, then diff → render
@@ -144,7 +146,7 @@ impl<W: io::Write> Terminal<W> {
         if let Ok((w, h)) = crossterm::terminal::size() {
             if self.back.size() != (w, h) {
                 self.back.resize(w, h);
-                self.front.resize(w, h);
+                self.front = Grid::new(w, h);
                 self.back.mark_all_dirty();
                 self.backend.invalidate();
             }

@@ -18,6 +18,7 @@ use neenee_tui::{Cell, Color, Fit, Grid, Pos, Style};
 
 /// The full cycle over a capture buffer. Returns the emitted bytes.
 fn render_cycle(back: &mut Grid, front: &mut Grid, bce: Bce) -> String {
+    crossterm::style::force_color_output(true);
     let cmd = diff::diff(back, front);
     let mut buf = Vec::new();
     {
@@ -208,8 +209,14 @@ fn bce_clear_to_end_uses_clr_eol() {
     // background can be cleared with a single \x1b[K. We verify the backend
     // emits that sequence when handed an explicit ClearEol command.
     use neenee_tui::diff::{Draw, DrawCmd};
+    crossterm::style::force_color_output(true);
     let cmd = DrawCmd {
-        draws: vec![Draw::ClearEol { x: 2, y: 1 }],
+        draws: vec![Draw::ClearEol {
+            x: 2,
+            y: 1,
+            style: Style::default().bg(Color::Rgb(10, 10, 10)),
+            width: 4,
+        }],
     };
     let mut buf = Vec::new();
     {
@@ -218,6 +225,54 @@ fn bce_clear_to_end_uses_clr_eol() {
     }
     let s = String::from_utf8(buf).unwrap();
     assert!(s.contains("\x1b[K"), "clr_eol emitted under bce: {s:?}");
+    assert!(
+        s.contains("\x1b[48;2;10;10;10m"),
+        "clr_eol applies the target background first: {s:?}"
+    );
+}
+
+#[test]
+fn bce_clear_to_end_falls_back_to_spaces_without_bce() {
+    use neenee_tui::diff::{Draw, DrawCmd};
+    crossterm::style::force_color_output(true);
+    let cmd = DrawCmd {
+        draws: vec![Draw::ClearEol {
+            x: 1,
+            y: 0,
+            style: Style::default().bg(Color::Rgb(1, 2, 3)),
+            width: 3,
+        }],
+    };
+    let mut buf = Vec::new();
+    {
+        let mut be = Backend::with_bce(&mut buf, Bce::No);
+        be.render(&cmd).unwrap();
+    }
+    let s = String::from_utf8(buf).unwrap();
+    assert!(!s.contains("\x1b[K"));
+    assert!(s.ends_with("   "));
+}
+
+#[test]
+fn diff_collapses_uniform_blank_tail_to_clear_eol() {
+    let mut back = Grid::new(8, 1);
+    let mut front = Grid::new(8, 1);
+    back.put(0, 0, Fit::Clip, Style::default(), "abcdef");
+    let _ = render_cycle(&mut back, &mut front, Bce::Yes);
+
+    let bg = Style::default().bg(Color::Rgb(7, 8, 9));
+    back.clear_row(0, 2, bg);
+
+    let cmd = diff::diff(&back, &front);
+    assert!(matches!(
+        cmd.draws.as_slice(),
+        [diff::Draw::ClearEol {
+            x: 2,
+            y: 0,
+            style,
+            width: 6,
+        }] if style.bg == Color::Rgb(7, 8, 9)
+    ));
 }
 
 /// A trivial sanity check that the cell-level types compose as documented.

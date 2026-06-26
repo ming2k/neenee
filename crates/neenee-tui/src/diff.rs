@@ -34,11 +34,15 @@ pub enum Draw {
         /// advances the cursor by each symbol's width.
         cells: Vec<(String, u8)>,
     },
-    /// Clear from `(x, y)` to the end of that row. Emitted for a dirty tail
-    /// that resolves to blank/default cells when the backend can use
-    /// `clr_eol` (BCE); the backend decides whether to honor it based on the
-    /// resolved style.
-    ClearEol { x: u16, y: u16 },
+    /// Clear from `(x, y)` to the end of that row with `style`. On BCE
+    /// terminals the backend emits `clr_eol`; without BCE it paints `width`
+    /// explicit styled spaces.
+    ClearEol {
+        x: u16,
+        y: u16,
+        style: Style,
+        width: u16,
+    },
 }
 
 /// A complete diff over a grid: the list of draw commands plus whether the
@@ -110,6 +114,17 @@ fn diff_row(draws: &mut Vec<Draw>, back: &Grid, front: &Grid, y: u16, start: u16
             continue;
         }
 
+        if let Some((tail_style, tail_width)) = blank_tail(back, y, x, w) {
+            flush_run(draws, &mut run_x, &mut run_style, &mut run_cells, y);
+            draws.push(Draw::ClearEol {
+                x,
+                y,
+                style: tail_style,
+                width: tail_width,
+            });
+            break;
+        }
+
         // Cell changed. If the style differs from the run's, flush first.
         if run_x.is_none() {
             run_x = Some(x);
@@ -129,6 +144,23 @@ fn diff_row(draws: &mut Vec<Draw>, back: &Grid, front: &Grid, y: u16, start: u16
     }
 
     flush_run(draws, &mut run_x, &mut run_style, &mut run_cells, y);
+}
+
+/// Return the uniform style and width of a blank tail starting at `x`, if the
+/// desired row from `x..w` is all width-1 spaces with the same style.
+fn blank_tail(back: &Grid, y: u16, x: u16, w: u16) -> Option<(Style, u16)> {
+    let first = back.get(x, y)?;
+    if first.symbol != " " || first.width != 1 {
+        return None;
+    }
+    let style = first.style;
+    for col in x + 1..w {
+        let cell = back.get(col, y)?;
+        if cell.symbol != " " || cell.width != 1 || cell.style != style {
+            return None;
+        }
+    }
+    Some((style, w.saturating_sub(x)))
 }
 
 /// Emit a pending run as a `Draw::Cells` (if non-empty).

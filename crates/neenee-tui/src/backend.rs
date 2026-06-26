@@ -166,8 +166,9 @@ impl<W: Write> Backend<W> {
                         }
                     }
                 }
-                Draw::ClearEol { x, y } => {
+                Draw::ClearEol { x, y, style, width } => {
                     self.move_to(*x, *y)?;
+                    self.apply_style(*style)?;
                     match self.bce {
                         Bce::Yes => {
                             // `\x1b[K` clears from the cursor to EOL with the
@@ -176,11 +177,12 @@ impl<W: Write> Backend<W> {
                         }
                         Bce::No => {
                             // No BCE: paint explicit styled spaces to the edge.
-                            // We don't know the width here without the grid, so
-                            // the backend relies on the diff emitting Cells
-                            // instead of ClearEol when bce is off. This branch
-                            // is a defensive no-op; ClearEol is only produced
-                            // when bce is enabled (see diff hint).
+                            for _ in 0..*width {
+                                self.out.queue(crossterm::style::Print(" "))?;
+                            }
+                            if let Some((cx, _cy)) = self.cur.as_mut() {
+                                *cx = cx.saturating_add(*width);
+                            }
                         }
                     }
                 }
@@ -303,6 +305,7 @@ mod tests {
     /// Capture backend: accumulates the raw bytes emitted so tests can assert
     /// the exact escape sequence without a real terminal.
     fn render_to_string(cmd: &DrawCmd, bce: Bce) -> String {
+        crossterm::style::force_color_output(true);
         let mut buf = Vec::new();
         {
             let mut be = Backend::with_bce(&mut buf, bce);
