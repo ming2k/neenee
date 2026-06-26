@@ -24,7 +24,7 @@
 //! when the cursor lands on a summary, or to [`LayoutMap::table_cell_at`] for
 //! table cells, or falls through to generic content.
 
-use crate::tui::layout::{LayoutMap, SemanticCursor};
+use crate::tui::layout::{LayoutMap, SemanticCursor, TableCellSegment};
 use crate::tui::render::INPUT_MSG_IDX;
 use crate::tui::step_interaction::{self, StepKind};
 
@@ -34,14 +34,9 @@ use crate::tui::step_interaction::{self, StepKind};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickTarget {
     /// Click landed inside the live input (composer) box.
-    InputBox {
-        cursor: SemanticCursor,
-    },
+    InputBox { cursor: SemanticCursor },
     /// Click landed on a step summary (tool step or reasoning trace).
-    StepSummary {
-        message_idx: usize,
-        kind: StepKind,
-    },
+    StepSummary { message_idx: usize, kind: StepKind },
     /// Click landed inside a table cell. Drag selections are clamped to the
     /// cell's `│` boundaries but the user can select a substring of the
     /// original `cell_text`.
@@ -52,15 +47,13 @@ pub enum ClickTarget {
         cursor: SemanticCursor,
         /// Original cell text (from headers/rows, before padding/wrapping).
         cell_text: String,
-        /// `(lo, hi)` byte range of the cell's padded content within the
-        /// grid-line text. Used to clamp drag selections.
-        cell_byte_range: (usize, usize),
+        /// Render/source mappings for every visible line segment belonging to
+        /// this logical cell.
+        cell_segments: Vec<TableCellSegment>,
     },
     /// Click landed on regular content — prose, code, heading, quote, list,
     /// etc. — with a resolved semantic cursor.
-    Content {
-        cursor: SemanticCursor,
-    },
+    Content { cursor: SemanticCursor },
     /// Click landed inside the transcript content rect but did not hit any
     /// region (gap rows between messages, spacing inside expanded steps).
     ContentGap,
@@ -105,7 +98,11 @@ pub fn classify_click(layout_map: &LayoutMap, x: u16, y: u16) -> ClickTarget {
                 cell_idx: hit.cell_idx,
                 cursor,
                 cell_text: hit.cell_text.clone(),
-                cell_byte_range: hit.cell_byte_range,
+                cell_segments: layout_map.table_cell_segments(
+                    hit.message_idx,
+                    hit.block_idx,
+                    hit.cell_idx,
+                ),
             };
         }
 
@@ -114,9 +111,10 @@ pub fn classify_click(layout_map: &LayoutMap, x: u16, y: u16) -> ClickTarget {
 
     // No region hit. Check whether the point falls inside the content band
     // (gap rows between messages / inside expanded steps).
-    if layout_map.transcript_content_rect().is_some_and(|r| {
-        r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-    }) {
+    if layout_map
+        .transcript_content_rect()
+        .is_some_and(|r| r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height)
+    {
         return ClickTarget::ContentGap;
     }
 
@@ -126,7 +124,7 @@ pub fn classify_click(layout_map: &LayoutMap, x: u16, y: u16) -> ClickTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::layout::{BlockRegion, LayoutMap, TableCellHit};
+    use crate::tui::layout::{BlockRegion, LayoutMap, TableCellHit, TableCellSegment};
     use neenee_tui::Rect;
 
     fn push_region(map: &mut LayoutMap, text: &str, msg_idx: usize, block_idx: usize, y: u16) {
@@ -196,15 +194,22 @@ mod tests {
             cell_idx: 0,
             rect: Rect::new(3, 3, 5, 1),
             cell_text: "hello".into(),
-            cell_byte_range: (2, 7),
+            segment: TableCellSegment {
+                rendered_range: (2, 7),
+                content_range: (2, 7),
+                source_range: (0, 5),
+            },
         });
         let result = classify_click(&map, 5, 3);
-        assert!(matches!(result, ClickTarget::TableCell {
-            message_idx: 1,
-            block_idx: 2,
-            cell_idx: 0,
-            ..
-        }));
+        assert!(matches!(
+            result,
+            ClickTarget::TableCell {
+                message_idx: 1,
+                block_idx: 2,
+                cell_idx: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -230,7 +235,11 @@ mod tests {
             block_idx: TOOL_STEP_BLOCK_IDX,
             cell_idx: 0,
             cell_text: String::new(),
-            cell_byte_range: (0, 0),
+            segment: TableCellSegment {
+                rendered_range: (0, 0),
+                content_range: (0, 0),
+                source_range: (0, 0),
+            },
             rect: Rect::new(0, 0, 4, 1),
         });
         assert!(matches!(
@@ -248,7 +257,11 @@ mod tests {
             block_idx: 0,
             cell_idx: 0,
             cell_text: String::new(),
-            cell_byte_range: (0, 0),
+            segment: TableCellSegment {
+                rendered_range: (2, 3),
+                content_range: (2, 3),
+                source_range: (0, 1),
+            },
             rect: Rect::new(2, 0, 1, 1),
         });
         assert!(matches!(

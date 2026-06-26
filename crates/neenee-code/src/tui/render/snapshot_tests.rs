@@ -99,6 +99,7 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
             msg,
             0,
             &selection,
+            None,
             &theme,
             &mut layout_map,
             &mut skip_rows,

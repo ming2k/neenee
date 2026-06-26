@@ -410,6 +410,7 @@ pub(super) async fn run_app_loop(
                     messages: view_messages,
                     scroll: app.scroll,
                     selection: &app.selection,
+                    cell_selection: app.drag.cell_info.as_ref(),
                     activity: &status,
                     spinner_phase: app.spinner_tick,
                     input: &masked_input,
@@ -2379,7 +2380,7 @@ pub(super) async fn run_app_loop(
                                 block_idx,
                                 cursor,
                                 cell_text,
-                                cell_byte_range,
+                                cell_segments,
                                 ..
                             } => {
                                 // A cell drag is clamped to `│` boundaries: the
@@ -2394,7 +2395,7 @@ pub(super) async fn run_app_loop(
                                         message_idx,
                                         block_idx,
                                         cell_text,
-                                        cell_byte_range,
+                                        segments: cell_segments,
                                     },
                                 );
                                 app.focused_target = None;

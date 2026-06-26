@@ -7,8 +7,10 @@ use neenee_tui::{Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::document::{Block, DeliveryStatus, TranscriptMessage};
-use crate::tui::layout::{BlockRegion, LayoutMap, TableCellHit};
-use crate::tui::selection::SelectionState;
+use crate::tui::layout::{BlockRegion, LayoutMap, TableCellHit, TableCellSegment};
+use crate::tui::selection::{
+    CellDragInfo, SelectionState, floor_grapheme_boundary, inclusive_grapheme_end,
+};
 
 use super::design::{
     USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_RIGHT_PAD_COLS, USER_MESSAGE_TEXT_GAP_COLS,
@@ -69,6 +71,52 @@ fn visible_width_window(
     visible_width(&text[start..end], &local_hidden)
 }
 
+fn cell_drag_selected_span(
+    selection: &SelectionState,
+    cell: &CellDragInfo,
+    line_start_byte: usize,
+    line_text: &str,
+) -> Option<(usize, usize)> {
+    let (start, end) = selection.active_normalized_range()?;
+    let sel_start = start.byte_offset;
+    let sel_end = end.byte_offset;
+    let line_end_byte = line_start_byte + line_text.len();
+    let mut out: Option<(usize, usize)> = None;
+
+    for segment in &cell.segments {
+        let segment_start = segment.content_range.0.max(line_start_byte);
+        let segment_end = segment.content_range.1.min(line_end_byte);
+        if segment_start >= segment_end || sel_end < segment_start || sel_start > segment_end {
+            continue;
+        }
+
+        let raw_lo_abs = sel_start.max(segment_start);
+        let raw_hi_abs = if sel_end < segment.content_range.1 {
+            sel_end.min(segment_end)
+        } else {
+            segment_end
+        };
+        if raw_lo_abs > raw_hi_abs {
+            continue;
+        }
+
+        let lo = floor_grapheme_boundary(line_text, raw_lo_abs - line_start_byte);
+        let hi = if sel_end < segment.content_range.1 {
+            inclusive_grapheme_end(line_text, raw_hi_abs - line_start_byte)
+        } else {
+            raw_hi_abs - line_start_byte
+        };
+        if lo < hi {
+            out = Some(match out {
+                Some((old_lo, old_hi)) => (old_lo.min(lo), old_hi.max(hi)),
+                None => (lo, hi),
+            });
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +147,47 @@ mod tests {
             assert!(line[lo..hi].width() > 2, "raw markup width must be larger");
         }
     }
+
+    #[test]
+    fn cell_drag_selection_spans_only_origin_cell_segments() {
+        use crate::tui::layout::{SemanticCursor, TableCellSegment};
+
+        let selection = SelectionState::Range {
+            anchor: SemanticCursor::new(0, 0, 11),
+            head: SemanticCursor::new(0, 0, 100),
+        };
+        let cell = CellDragInfo {
+            message_idx: 0,
+            block_idx: 0,
+            cell_text: "abcdef".to_string(),
+            segments: vec![
+                TableCellSegment {
+                    rendered_range: (10, 13),
+                    content_range: (10, 13),
+                    source_range: (0, 3),
+                },
+                TableCellSegment {
+                    rendered_range: (40, 43),
+                    content_range: (40, 43),
+                    source_range: (3, 6),
+                },
+            ],
+        };
+
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 0, &" ".repeat(20)),
+            Some((11, 13))
+        );
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 30, &" ".repeat(20)),
+            Some((10, 13))
+        );
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 60, &" ".repeat(20)),
+            None,
+            "rows/cells outside the origin cell must not inherit generic range selection"
+        );
+    }
 }
 
 /// Render the blocks of a single message inside the given area.
@@ -112,6 +201,7 @@ pub(super) fn draw_message_body(
     msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
+    cell_selection: Option<&CellDragInfo>,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     skip_rows: &mut usize,
@@ -426,6 +516,11 @@ pub(super) fn draw_message_body(
                     }
                     _ => None,
                 };
+                let cell_drag_for_block = cell_selection.filter(|cell| {
+                    cell.message_idx == mi
+                        && cell.block_idx == bi
+                        && selection.active_normalized_range().is_some()
+                });
 
                 *content_lines += table.lines.len();
                 let mut line_start_byte = 0usize;
@@ -452,7 +547,9 @@ pub(super) fn draw_message_body(
                     // The byte range to highlight on this line: either the
                     // selected cell's column (cell selection), a whole-line /
                     // partial range (block/range selection), or nothing.
-                    let selected_span = if let Some((sr, sc)) = selected_cell {
+                    let selected_span = if let Some(cell) = cell_drag_for_block {
+                        cell_drag_selected_span(selection, cell, start_byte, line_text)
+                    } else if let Some((sr, sc)) = selected_cell {
                         row_info
                             .filter(|info| info.row == sr)
                             .and_then(|info| info.col_spans.get(sc).copied())
@@ -605,6 +702,10 @@ pub(super) fn draw_message_body(
                                 if hi <= lo {
                                     continue;
                                 }
+                                let (clo, chi) =
+                                    info.col_content_spans.get(ci).copied().unwrap_or((lo, hi));
+                                let source_start = info.col_offsets.get(ci).copied().unwrap_or(0);
+                                let source_end = source_start + chi.saturating_sub(clo);
                                 let col_start =
                                     visible_width_window(line_text, 0, lo, &hidden_for_line);
                                 let col_w =
@@ -629,7 +730,11 @@ pub(super) fn draw_message_body(
                                     cell_idx: info.row * ncols + ci,
                                     rect,
                                     cell_text,
-                                    cell_byte_range: (lo, hi),
+                                    segment: TableCellSegment {
+                                        rendered_range: (start_byte + lo, start_byte + hi),
+                                        content_range: (start_byte + clo, start_byte + chi),
+                                        source_range: (source_start, source_end),
+                                    },
                                 });
                             }
                         }

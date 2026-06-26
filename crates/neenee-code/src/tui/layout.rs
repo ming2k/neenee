@@ -117,10 +117,24 @@ pub struct LayoutMap {
 
 /// A clickable region belonging to one logical table cell.
 ///
+/// One rendered line segment belonging to a logical table cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCellSegment {
+    /// Absolute byte range of the padded cell content within the rendered table
+    /// grid. This is the range selection rendering understands.
+    pub rendered_range: (usize, usize),
+    /// Absolute byte range of the actual cell text within the rendered table
+    /// grid, excluding alignment padding. Drag endpoints clamp here so padding
+    /// clicks resolve to the nearest text boundary.
+    pub content_range: (usize, usize),
+    /// Byte range in the original, unwrapped cell text represented by this
+    /// rendered line segment.
+    pub source_range: (usize, usize),
+}
+
 /// `cell_text` is the *original* cell text (from `headers` / `rows`, before
-/// padding/wrapping). `cell_byte_range` is the byte range of the padded cell
-/// content within the grid-line text — used to clamp drag selections to the
-/// cell's `│` boundaries.
+/// padding/wrapping). `segment` maps this visible table line back to that
+/// source text.
 #[derive(Debug, Clone)]
 pub struct TableCellHit {
     pub message_idx: usize,
@@ -129,9 +143,7 @@ pub struct TableCellHit {
     pub rect: Rect,
     /// Original cell text, copied from the `Block::Table` headers/rows.
     pub cell_text: String,
-    /// `(lo, hi)` byte range of the padded cell content within the grid-line
-    /// text rendered on this row. Used to clamp drag selections.
-    pub cell_byte_range: (usize, usize),
+    pub segment: TableCellSegment,
 }
 
 impl LayoutMap {
@@ -182,6 +194,23 @@ impl LayoutMap {
                 && h.rect.y <= y
                 && y < h.rect.y + h.rect.height
         })
+    }
+
+    pub fn table_cell_segments(
+        &self,
+        message_idx: usize,
+        block_idx: usize,
+        cell_idx: usize,
+    ) -> Vec<TableCellSegment> {
+        self.table_cell_hits
+            .iter()
+            .filter(|hit| {
+                hit.message_idx == message_idx
+                    && hit.block_idx == block_idx
+                    && hit.cell_idx == cell_idx
+            })
+            .map(|hit| hit.segment)
+            .collect()
     }
 
     /// Find the semantic cursor at a given screen coordinate.

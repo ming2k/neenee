@@ -5,7 +5,7 @@
 //! so copying always returns the *original* text, not terminal-wrapped output.
 
 use crate::tui::document::{Block, TranscriptMessage};
-use crate::tui::layout::{LayoutMap, SemanticCursor};
+use crate::tui::layout::{LayoutMap, SemanticCursor, TableCellSegment};
 use std::borrow::Cow;
 
 /// Re-exported grapheme-boundary primitives so the rest of the crate keeps the
@@ -332,20 +332,21 @@ pub struct CellDragInfo {
     pub block_idx: usize,
     /// Original cell text (from headers/rows, before padding/wrapping).
     pub cell_text: String,
-    /// `(lo, hi)` byte range of the padded cell content within the grid-line
-    /// text that the anchor cursor falls on. Used to clamp byte offsets.
-    pub cell_byte_range: (usize, usize),
+    /// Render/source mappings for each visible wrapped line of this logical
+    /// cell. Selection highlighting stays in rendered table byte space; copy
+    /// maps those byte offsets back through these segments.
+    pub segments: Vec<TableCellSegment>,
 }
 
 impl CellDragInfo {
-    /// Clamp a cursor's byte offset into the cell's content range. If the
-    /// cursor lands on a different line, it is clamped to `[lo, hi]`.
+    /// Clamp a cursor's byte offset into the cell's rendered text content. If
+    /// the pointer lands in alignment padding or outside this logical cell, it
+    /// resolves to the nearest content boundary.
     pub fn clamp_cursor(&self, cursor: SemanticCursor) -> SemanticCursor {
-        let (lo, hi) = self.cell_byte_range;
         SemanticCursor::new(
             self.message_idx,
             self.block_idx,
-            cursor.byte_offset.clamp(lo, hi),
+            self.clamp_rendered_offset(cursor.byte_offset),
         )
     }
 
@@ -353,16 +354,84 @@ impl CellDragInfo {
     /// `anchor` and `head` are the clamped cursors (both should be
     /// message_idx == self.message_idx, block_idx == self.block_idx).
     pub fn extract_range_text(&self, start_byte: usize, end_byte: usize) -> String {
-        let (lo, _hi) = self.cell_byte_range;
-        let raw_start = start_byte.saturating_sub(lo);
-        let raw_end = end_byte.saturating_sub(lo);
-        let cell_start = floor_grapheme_boundary(&self.cell_text, raw_start);
-        let cell_end = inclusive_grapheme_end(&self.cell_text, raw_end);
+        let source_start = self.source_offset_for_rendered(start_byte);
+        let source_end = self.source_offset_for_rendered(end_byte);
+        let cell_start = floor_grapheme_boundary(&self.cell_text, source_start);
+        let cell_end = inclusive_grapheme_end(&self.cell_text, source_end);
         if cell_start < cell_end {
             self.cell_text[cell_start..cell_end].to_string()
         } else {
             String::new()
         }
+    }
+
+    fn sorted_segments(&self) -> Vec<TableCellSegment> {
+        let mut segments = self.segments.clone();
+        segments.sort_by_key(|seg| (seg.content_range.0, seg.content_range.1));
+        segments
+    }
+
+    fn clamp_rendered_offset(&self, byte_offset: usize) -> usize {
+        let segments = self.sorted_segments();
+        let Some(first) = segments.first() else {
+            return 0;
+        };
+        if byte_offset <= first.content_range.0 {
+            return first.content_range.0;
+        }
+
+        let mut previous: Option<TableCellSegment> = None;
+        for seg in &segments {
+            let (render_lo, render_hi) = seg.rendered_range;
+            let (content_lo, content_hi) = seg.content_range;
+            if byte_offset < render_lo {
+                if let Some(prev) = previous {
+                    let prev_distance = byte_offset.saturating_sub(prev.rendered_range.1);
+                    let next_distance = render_lo.saturating_sub(byte_offset);
+                    return if prev_distance <= next_distance {
+                        prev.content_range.1
+                    } else {
+                        content_lo
+                    };
+                }
+                return content_lo;
+            }
+            if byte_offset <= render_hi {
+                return byte_offset.clamp(content_lo, content_hi);
+            }
+            previous = Some(*seg);
+        }
+
+        segments
+            .last()
+            .map(|seg| seg.content_range.1)
+            .unwrap_or(first.content_range.0)
+    }
+
+    fn source_offset_for_rendered(&self, byte_offset: usize) -> usize {
+        let segments = self.sorted_segments();
+        let Some(first) = segments.first() else {
+            return 0;
+        };
+        if byte_offset <= first.content_range.0 {
+            return first.source_range.0.min(self.cell_text.len());
+        }
+
+        for seg in &segments {
+            let (content_lo, content_hi) = seg.content_range;
+            let (source_lo, source_hi) = seg.source_range;
+            if byte_offset <= content_hi {
+                let in_segment = byte_offset.saturating_sub(content_lo);
+                return (source_lo + in_segment)
+                    .min(source_hi)
+                    .min(self.cell_text.len());
+            }
+        }
+
+        segments
+            .last()
+            .map(|seg| seg.source_range.1.min(self.cell_text.len()))
+            .unwrap_or(0)
     }
 }
 
@@ -560,7 +629,11 @@ mod tests {
             message_idx: 2,
             block_idx: 3,
             cell_text: "abcdef".to_string(),
-            cell_byte_range: (10, 16),
+            segments: vec![TableCellSegment {
+                rendered_range: (8, 18),
+                content_range: (10, 16),
+                source_range: (0, 6),
+            }],
         };
         let mut drag = SelectionDrag::default();
         let mut selection = SelectionState::None;
@@ -798,12 +871,70 @@ mod tests {
             message_idx: 0,
             block_idx: 0,
             cell_text: "中文测".to_string(),
-            cell_byte_range: (2, 11),
+            segments: vec![TableCellSegment {
+                rendered_range: (2, 11),
+                content_range: (2, 11),
+                source_range: (0, 9),
+            }],
         };
 
         // Offsets are grid-line byte offsets, so subtracting `lo` lands inside
         // the first and third CJK grapheme. Extraction must not panic, and the
         // inclusive head includes the grapheme under the drag head.
         assert_eq!(cell.extract_range_text(3, 8), "中文测");
+    }
+
+    #[test]
+    fn cell_drag_copy_maps_rendered_padding_to_source_text() {
+        let cell = CellDragInfo {
+            message_idx: 0,
+            block_idx: 0,
+            cell_text: "abcdef".to_string(),
+            segments: vec![TableCellSegment {
+                rendered_range: (20, 30),
+                content_range: (22, 28),
+                source_range: (0, 6),
+            }],
+        };
+
+        assert_eq!(
+            cell.clamp_cursor(SemanticCursor::new(9, 9, 20)),
+            SemanticCursor::new(0, 0, 22)
+        );
+        assert_eq!(
+            cell.clamp_cursor(SemanticCursor::new(9, 9, 29)),
+            SemanticCursor::new(0, 0, 28)
+        );
+        assert_eq!(cell.extract_range_text(22, 24), "abc");
+    }
+
+    #[test]
+    fn cell_drag_clamps_between_wrapped_segments_to_nearest_boundary() {
+        let cell = CellDragInfo {
+            message_idx: 0,
+            block_idx: 0,
+            cell_text: "abcdef".to_string(),
+            segments: vec![
+                TableCellSegment {
+                    rendered_range: (10, 13),
+                    content_range: (10, 13),
+                    source_range: (0, 3),
+                },
+                TableCellSegment {
+                    rendered_range: (40, 43),
+                    content_range: (40, 43),
+                    source_range: (3, 6),
+                },
+            ],
+        };
+
+        assert_eq!(
+            cell.clamp_cursor(SemanticCursor::new(9, 9, 15)),
+            SemanticCursor::new(0, 0, 13)
+        );
+        assert_eq!(
+            cell.clamp_cursor(SemanticCursor::new(9, 9, 39)),
+            SemanticCursor::new(0, 0, 40)
+        );
     }
 }

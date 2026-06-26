@@ -16,7 +16,7 @@ use super::{Disclosure, Interaction, summary_text_color};
 
 use crate::tui::document::{Block, TranscriptMessage};
 use crate::tui::layout::{BlockRegion, LayoutMap};
-use crate::tui::selection::SelectionState;
+use crate::tui::selection::{CellDragInfo, SelectionState};
 
 use crate::tui::render::message_body::draw_message_body;
 use crate::tui::render::text_layout::{
@@ -1347,6 +1347,7 @@ pub fn draw_tool_step(
     msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
+    cell_selection: Option<&CellDragInfo>,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     skip_rows: &mut usize,
@@ -1407,6 +1408,7 @@ pub fn draw_tool_step(
             msg,
             mi,
             selection,
+            cell_selection,
             theme,
             layout_map,
             skip_rows,
@@ -1569,6 +1571,7 @@ pub fn draw_tool_step(
                         child,
                         usize::MAX,
                         selection,
+                        cell_selection,
                         theme,
                         layout_map,
                         skip_rows,
@@ -1740,6 +1743,7 @@ pub fn draw_reasoning_trace(
     msg: &TranscriptMessage,
     mi: usize,
     selection: &SelectionState,
+    cell_selection: Option<&CellDragInfo>,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     skip_rows: &mut usize,
@@ -1761,6 +1765,7 @@ pub fn draw_reasoning_trace(
             msg,
             mi,
             selection,
+            cell_selection,
             theme,
             layout_map,
             skip_rows,
