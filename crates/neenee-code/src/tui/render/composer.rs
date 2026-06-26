@@ -41,8 +41,8 @@ fn composer_wrapped(input: &str, text_width: usize, byte_cursor: usize) -> Vec<W
     }
     // Always keep at least one row so an empty input box still records a
     // layout-map region: without it a click inside the empty box can't
-    // resolve to a cursor and the click handler never switches keyboard
-    // focus back to Compose (it stays stuck in Browse).
+    // resolve to a cursor and the click handler can't clear a focused step
+    // to hand typing back to the prompt.
     if wrapped.is_empty() {
         wrapped.push(WrappedLine {
             text: String::new(),
@@ -64,11 +64,10 @@ pub(super) fn input_row_count(input: &str, text_width: usize, byte_cursor: usize
 
 /// Draw the flat input box panel at the bottom of the screen.
 ///
-/// `focused` reflects whether the prompt currently owns keyboard focus (the
-/// Compose zone). When `false` the panel is rendered with the dimmer
-/// "read-only" palette and the caret is hidden, so the user can see at a
-/// glance that keys will route to the conversation stream instead of the
-/// input box.
+/// `focused` selects the panel palette. The live composer always passes
+/// `true` (the input box owns typing even while a transcript step is focused);
+/// `false` renders the dimmer "read-only" palette and is used where the box is
+/// shown purely for layout (e.g. behind a takeover) rather than for editing.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_composer(
     frame: &mut Frame,
@@ -88,10 +87,10 @@ pub fn draw_composer(
     // continuations. The top and bottom edges are half-block rows so the panel
     // floats a half row off the app background.
     //
-    // `focused` drives only the palette: when the prompt is blurred (Browse
-    // zone) the panel drops to the dimmer `user_panel_bg` and the prompt glyph
-    // uses `text_muted`, matching the already-sent user-message styling so the
-    // live box visibly recedes. The caret is gated separately by `show_caret`:
+    // `focused` drives only the palette: when `false` the panel drops to the
+    // dimmer `user_panel_bg` and the prompt glyph uses `text_muted`, matching
+    // the already-sent user-message styling so the box visibly recedes. The
+    // live composer passes `true`. The caret is gated separately by `show_caret`:
     // it is suppressed whenever a modal owns the keyboard (the full-screen
     // modal backdrop already signals "typing lands elsewhere"), so the panel
     // never shows a live caret inside a surface that no longer accepts input.
@@ -257,9 +256,8 @@ pub fn draw_composer(
 
     // Position the caret relative to the visible slice, after the `> ` /
     // indent prefix. Gated by `show_caret` rather than `focused`: the caret is
-    // hidden whenever keyboard focus is elsewhere (Browse zone, or any modal
-    // that takes over input), so it never sits inside a box that doesn't
-    // accept keypresses.
+    // hidden whenever a modal takes over input or a selection is active, so it
+    // never sits inside a box that doesn't accept keypresses.
     if show_caret {
         let visible_cursor_line = cursor_line.saturating_sub(scroll);
         let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;

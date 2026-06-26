@@ -17,7 +17,7 @@ use neenee_tui::{
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 
 use super::text_layout::wrap_text;
-use super::{TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET, Theme};
+use super::Theme;
 
 /// Severity presentation: the leading glyph and its color.
 ///
@@ -54,18 +54,13 @@ pub(super) fn draw_notice(
     };
     let (glyph, color) = severity_presentation(severity, theme);
 
-    // Prefix mirrors the prose indent used by `Block::Text` and the attribution
-    // badge: a `TRANSCRIPT_H_INSET` outer gutter (default style) followed by the
-    // severity glyph and a breathing-space, so the glyph clears the left margin
-    // and the wrapped text aligns with body text at `TRANSCRIPT_BODY_PREFIX_COLS`
-    // instead of hugging the gutter.
-    let gutter = " ".repeat(TRANSCRIPT_H_INSET as usize);
+    // The area arrives already inset by `draw_transcript`, so there is no
+    // outer gutter to prepend. The first line leads with the severity glyph +
+    // a space (2 cols); continuation lines indent by that same 2 cols so they
+    // align under the text. Wrap width reserves those 2 leading cols.
     let glyph_segment = format!("{glyph} ");
-    let prefix_cols = (TRANSCRIPT_H_INSET + 2) as usize;
-    let body_wrap_width = area
-        .width
-        .saturating_sub(TRANSCRIPT_BODY_RIGHT_INSET + prefix_cols as u16)
-        .max(1) as usize;
+    let indent_cols = 2usize;
+    let body_wrap_width = area.width.saturating_sub(indent_cols as u16).max(1) as usize;
 
     let lines = wrap_text(&msg.raw, body_wrap_width);
     *content_lines += lines.len();
@@ -83,13 +78,12 @@ pub(super) fn draw_notice(
 
         let line = if idx == 0 {
             Line::from(vec![
-                Span::styled(gutter.clone(), Style::default()),
                 Span::styled(glyph_segment.clone(), glyph_style),
                 Span::styled(wl.text.clone(), base),
             ])
         } else {
             Line::from(vec![
-                Span::styled(" ".repeat(prefix_cols), Style::default()),
+                Span::styled(" ".repeat(indent_cols), Style::default()),
                 Span::styled(wl.text.clone(), base),
             ])
         };

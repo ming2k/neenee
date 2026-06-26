@@ -6,12 +6,10 @@
 pub(super) const TRANSCRIPT_H_INSET: u16 = 2;
 
 /// Extra leading whitespace applied to prose after the transcript-area gutter.
+/// Now that the horizontal gutter is applied once at the stream entry point,
+/// this is the *only* indent prose-like content adds on top of the already-
+/// inset rect.
 pub(super) const TRANSCRIPT_BODY_LEADING_INDENT: u16 = 2;
-/// Left prefix used by prose-like content: transcript gutter + body indent.
-pub(super) const TRANSCRIPT_BODY_PREFIX_COLS: u16 =
-    TRANSCRIPT_H_INSET + TRANSCRIPT_BODY_LEADING_INDENT;
-/// Right-side slack reserved when wrapping prose-like content.
-pub(super) const TRANSCRIPT_BODY_RIGHT_INSET: u16 = TRANSCRIPT_H_INSET;
 
 /// Minimum readable width for compact expandable step header rows.
 pub(super) const STEP_MIN_WIDTH: usize = 8;
@@ -73,8 +71,12 @@ pub(super) const COMPOSER_PROMPT_PREFIX_COLS: usize = 2;
 pub(super) const COMPOSER_TEXT_ROW_OFFSET: u16 = 1;
 
 /// User message panels mirror the composer: outer gutter, gap, text, then
-/// trailing fill.
-pub(super) const USER_MESSAGE_OUTER_GUTTER_COLS: usize = TRANSCRIPT_H_INSET as usize;
+/// User message panels used to reserve their own outer gutter matching
+/// [`TRANSCRIPT_H_INSET`]. Now that the horizontal inset is applied once at
+/// the stream entry point (`draw_transcript` → `band`), the outer gutter is
+/// redundant: the `band` rect already excludes it. Set to 0 so the panel
+/// background starts at the band edge, with only the inner text gap remaining.
+pub(super) const USER_MESSAGE_OUTER_GUTTER_COLS: usize = 0;
 /// Inner left padding (in `user_panel_bg`) between the outer gutter and the
 /// text. Matches the composer's prompt prefix so sent messages and the input
 /// box share the same left margin.

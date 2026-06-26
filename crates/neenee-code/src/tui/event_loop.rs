@@ -178,9 +178,9 @@ pub(super) async fn run_app_loop(
                 app.modal_index = 0;
                 app.permission_scroll = 0;
                 app.permission_show_details = false;
-                // A permission prompt is urgent: hand keyboard focus to the
-                // sheet so the next keypress decides it, not the transcript.
-                app.focus_zone = input::FocusZone::Compose;
+                // A permission prompt is urgent: clear any focused transcript
+                // step so the next keypress decides the sheet, not the step.
+                app.focused_target = None;
             } else if app.pending_permission.is_none() && app.active_modal == Modal::Permission {
                 app.active_modal = Modal::None;
                 app.modal_index = 0;
@@ -208,7 +208,7 @@ pub(super) async fn run_app_loop(
                         app.question_scroll = 0;
                         app.active_modal = Modal::Question;
                         app.modal_index = 0;
-                        app.focus_zone = input::FocusZone::Compose;
+                        app.focused_target = None;
                     } else {
                         app.question = None;
                         if app.active_modal == Modal::Question {
@@ -451,8 +451,7 @@ pub(super) async fn run_app_loop(
                         current_provider: &app.current_provider,
                         current_model: &app.current_model,
                         messages: view_messages,
-                        focus_zone: app.focus_zone,
-                        shell_active: app.focus_zone.is_compose()
+                        shell_active: app.focused_target.is_none()
                             && app.active_modal == Modal::None
                             && app.input.starts_with('!'),
                         auto_approve: app.auto_approve,
@@ -510,19 +509,18 @@ pub(super) async fn run_app_loop(
                     // (Help / ToolStepDetail / Session /
                     // Activity) so the footer layout doesn't shift when the
                     // overlay opens or closes; the recess pass darkens it in
-                    // place with the rest of the surface. The caret is hidden
-                    // whenever any modal owns the keyboard, or while a text
-                    // selection is active.
-                    let compose_focused = app.focus_zone.is_compose();
-                    let show_caret = compose_focused
-                        && app.active_modal == Modal::None
-                        && !app.selection.is_active();
+                    // place with the rest of the surface. The input box always
+                    // owns typing (a focused transcript step does not capture
+                    // it), so the composer renders active; the caret is hidden
+                    // only while a modal owns the keyboard or a text selection
+                    // is active.
+                    let show_caret = app.active_modal == Modal::None && !app.selection.is_active();
                     render::draw_composer(
                         f,
                         input_rect,
                         &app.input,
                         app.byte_cursor(),
-                        compose_focused,
+                        true,
                         show_caret,
                         &app.theme,
                         &mut layout_map,
@@ -767,15 +765,15 @@ pub(super) async fn run_app_loop(
 
         // Cursor visibility follows the focus zone so the caret only shows up
         // where keys actually land. While a modal is open the modal itself
-        // owns the caret (and may hide it for non-edit modals like Help); in
-        // Browse zone the input box is blurred so the caret is hidden too.
-        // Active selections also hide the terminal cursor; otherwise a block
-        // cursor can draw over CJK selection backgrounds and look like a
-        // duplicated input glyph.
+        // owns the caret (and may hide it for non-edit modals like Help). The
+        // input box always owns typing — a focused transcript step does not
+        // blur it — so the caret stays visible while navigating steps. Active
+        // selections hide the terminal cursor; otherwise a block cursor can
+        // draw over CJK selection backgrounds and look like a duplicated input
+        // glyph.
         // Toggled only when the desired state changes to avoid spamming the
         // terminal with redundant escape codes every frame.
-        let cursor_should_hide = app.active_modal == Modal::None
-            && (app.focus_zone.is_browse() || app.selection.is_active());
+        let cursor_should_hide = app.active_modal == Modal::None && app.selection.is_active();
         if cursor_should_hide != app.cursor_hidden {
             if cursor_should_hide {
                 let _ = terminal.hide_cursor();
@@ -871,17 +869,10 @@ pub(super) async fn run_app_loop(
                     in_subagent_view,
                     in_side_view: app.in_side_view,
                     has_focused_target: app.focused_target.is_some(),
-                    focus_zone: app.focus_zone,
                     has_queued: !app.pending_dispatch.is_empty(),
                 },
                 &mut app.drag,
             );
-            if !app.input.is_empty() {
-                app.focused_target = None;
-                // Non-empty input implies the user is composing; make the zone
-                // match so key bindings resolve to the input box.
-                app.focus_zone = input::FocusZone::Compose;
-            }
 
             match action {
                 input::InputAction::None => {}
@@ -1700,22 +1691,19 @@ pub(super) async fn run_app_loop(
                     app.selection = SelectionState::None;
                 }
                 input::InputAction::FocusNextTarget => {
+                    // Ctrl+↓ (or ↓ while focused): advance to the next step.
+                    // From no focus this lands on the first (oldest) step.
                     app.focus_interactive_target(1);
                 }
                 input::InputAction::FocusPrevTarget => {
+                    // Ctrl+↑ (or ↑ while focused): step back. From no focus this
+                    // lands on the last (nearest-to-prompt) step.
                     app.focus_interactive_target(-1);
                 }
-                input::InputAction::EnterBrowseZone { backward } => {
-                    // Hand keyboard focus from the input box over to the
-                    // conversation stream. Direction picks the closest step:
-                    // forward (Tab) selects the first one, backward (Shift+Tab)
-                    // selects the last one.
-                    app.focus_zone = input::FocusZone::Browse;
-                    let dir: i8 = if backward { -1 } else { 1 };
-                    app.focus_interactive_target(dir);
-                }
-                input::InputAction::ReturnToComposeZone => {
-                    app.focus_zone = input::FocusZone::Compose;
+                input::InputAction::ClearFocusedTarget => {
+                    // Esc: drop the focus highlight, returning every key to its
+                    // ordinary input-box meaning.
+                    app.focused_target = None;
                 }
                 input::InputAction::ActivateFocusedTarget => {
                     if let Some(target) = app.focused_target {
@@ -2318,9 +2306,8 @@ pub(super) async fn run_app_loop(
                             app.toggle_step_pinned(&mut messages, mi);
                             drop(messages);
                         }
-                        // Activating a step via click implies keyboard focus
-                        // follows it as well.
-                        app.focus_zone = input::FocusZone::Browse;
+                        // Clicking the sticky header focuses that step (set
+                        // above), so keyboard navigation can continue from it.
                         app.selection = SelectionState::None;
                         app.drag.cancel();
                     } else {
@@ -2331,10 +2318,9 @@ pub(super) async fn run_app_loop(
                         // only needs a single match.
                         match interaction::classify_click(&app.layout_map, x, y) {
                             ClickTarget::InputBox { cursor } => {
-                                // Click inside the live input box: hand keyboard
-                                // focus back to the prompt so the next keypress
-                                // edits rather than navigating steps.
-                                app.focus_zone = input::FocusZone::Compose;
+                                // Click inside the live input box: clear any
+                                // focused step so the next keypress edits rather
+                                // than acting on a step.
                                 app.focused_target = None;
                                 app.drag.begin_range(&mut app.selection, cursor);
                             }
@@ -2371,7 +2357,6 @@ pub(super) async fn run_app_loop(
                                         drop(messages);
                                     }
                                 }
-                                app.focus_zone = input::FocusZone::Browse;
                                 app.selection = SelectionState::None;
                                 app.drag.cancel();
                             }
@@ -2399,7 +2384,6 @@ pub(super) async fn run_app_loop(
                                     },
                                 );
                                 app.focused_target = None;
-                                app.focus_zone = input::FocusZone::Browse;
                             }
                             ClickTarget::Content { cursor } => {
                                 // A plain click does NOT select — it only arms a
@@ -2407,14 +2391,11 @@ pub(super) async fn run_app_loop(
                                 // immediate drag extends it normally.
                                 app.drag.begin_range(&mut app.selection, cursor);
                                 app.focused_target = None;
-                                app.focus_zone = input::FocusZone::Browse;
                             }
                             ClickTarget::ContentGap => {
                                 // Click inside the content band but not on a
-                                // region: switch keyboard focus to the stream so
-                                // the user can navigate with the keyboard, but
-                                // do not start a text selection.
-                                app.focus_zone = input::FocusZone::Browse;
+                                // region: clear any step focus and selection
+                                // without starting a text selection.
                                 app.selection = SelectionState::None;
                                 app.focused_target = None;
                                 app.drag.cancel();

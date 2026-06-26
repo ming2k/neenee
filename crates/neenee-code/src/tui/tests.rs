@@ -577,7 +577,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,
-        focus_zone: input::FocusZone::Compose,
         cursor_hidden: false,
         copy_toast_until: None,
         copy_toast_message: String::new(),

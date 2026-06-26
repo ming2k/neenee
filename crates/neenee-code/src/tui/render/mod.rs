@@ -30,8 +30,8 @@ use design::{
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
     MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
     SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_PREFIX_COLS,
-    TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
+    TRANSCRIPT_H_INSET,
 };
 /// Parse a raw logo file into clamped display lines for the empty-state hero.
 /// Re-exported so the startup loader and the renderer share one clamp rule.
@@ -107,10 +107,12 @@ pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option
 }
 
 /// Inner rect of a transcript-area region after reserving the uniform
-/// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. Use this as the render target
-/// for any solid-background band (step headers/bodies, child tool steps) so
-/// the band sits inside the gutters rather than spanning edge to edge. The
-/// surrounding cells keep `app_bg` from the global frame fill.
+/// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. This is the **single
+/// point** where the horizontal inset is applied — called exactly three times
+/// in `draw_transcript`: once for the content stream (the `band` every
+/// downstream component receives), and once each for the subagent bar and side
+/// banner rects so they align with the content band. Individual components no
+/// longer clip or hand-pad their own gutter; they trust the rect they receive.
 pub(super) fn transcript_band_rect(area: Rect) -> Rect {
     Rect::new(
         area.x + TRANSCRIPT_H_INSET,
@@ -327,7 +329,12 @@ pub fn draw_transcript(
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(SUBAGENT_BAR_ROWS)])
             .split(chunks[0]);
-        (sub[0], Some(sub[1]))
+        (
+            sub[0],
+            // The bar spans the inset band so it aligns with the transcript
+            // content rather than edge-to-edge.
+            Some(transcript_band_rect(sub[1])),
+        )
     } else {
         (chunks[0], None)
     };
@@ -340,10 +347,19 @@ pub fn draw_transcript(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(SIDE_BANNER_ROWS), Constraint::Min(0)])
             .split(transcript_area);
-        draw_side_banner(frame, sub[0], status, theme);
+        // The banner spans the inset band, matching the transcript content.
+        draw_side_banner(frame, transcript_band_rect(sub[0]), status, theme);
         transcript_area = sub[1];
     }
-    let mut current_y = transcript_area.y;
+    // Apply the uniform horizontal inset (`TRANSCRIPT_H_INSET` on each side)
+    // exactly once, here at the transcript-stream entry point. Every
+    // downstream component receives `band` — an already-inset rect — so none
+    // of them re-clips or hand-pads a leading gutter. The empty-state hero is
+    // the sole exception: it centers across the full viewport, so it keeps
+    // `transcript_area` (un-inset). Banners and bars are rendered from their
+    // own layout-split rects before this point, so they are unaffected.
+    let band = transcript_band_rect(transcript_area);
+    let mut current_y = band.y;
     // Account for scroll
     let mut skip_rows = scroll as usize;
     // Total stream height, counted independently of the viewport clip so the
@@ -385,7 +401,7 @@ pub fn draw_transcript(
                     if last_shown_attribution.as_ref() != Some(&attribution) {
                         draw_attribution_badge(
                             frame,
-                            transcript_area,
+                            band,
                             &attribution,
                             &mut skip_rows,
                             &mut current_y,
@@ -401,7 +417,7 @@ pub fn draw_transcript(
             if msg.is_notice() {
                 draw_notice(
                     frame,
-                    transcript_area,
+                    band,
                     msg,
                     &mut skip_rows,
                     &mut current_y,
@@ -411,7 +427,7 @@ pub fn draw_transcript(
             } else if msg.is_subagent_task() {
                 draw_subagent_inline_step(
                     frame,
-                    transcript_area,
+                    band,
                     msg,
                     mi,
                     theme,
@@ -424,7 +440,7 @@ pub fn draw_transcript(
             } else if msg.is_tool_step() {
                 draw_tool_step(
                     frame,
-                    transcript_area,
+                    band,
                     msg,
                     mi,
                     selection,
@@ -440,7 +456,7 @@ pub fn draw_transcript(
             } else if msg.is_thinking() {
                 draw_reasoning_trace(
                     frame,
-                    transcript_area,
+                    band,
                     msg,
                     mi,
                     selection,
@@ -456,7 +472,7 @@ pub fn draw_transcript(
             } else {
                 draw_message_body(
                     frame,
-                    transcript_area,
+                    band,
                     msg,
                     mi,
                     selection,
@@ -485,7 +501,7 @@ pub fn draw_transcript(
                 content_lines += MESSAGE_GAP_ROWS;
                 if skip_rows > 0 {
                     skip_rows = skip_rows.saturating_sub(1);
-                } else if current_y < transcript_area.y + transcript_area.height {
+                } else if current_y < band.y + band.height {
                     current_y += MESSAGE_GAP_ROWS as u16;
                 }
             }
@@ -503,14 +519,13 @@ pub fn draw_transcript(
     // Skipped for the empty-state hero, which owns its own rect and is not
     // part of the interactive transcript surface.
     if !show_empty_state {
-        let band = transcript_band_rect(transcript_area);
-        let content_bottom = current_y.min(transcript_area.y + transcript_area.height);
-        if content_bottom > transcript_area.y {
+        let content_bottom = current_y.min(band.y + band.height);
+        if content_bottom > band.y {
             layout_map.set_transcript_content_rect(Rect::new(
                 band.x,
-                transcript_area.y,
+                band.y,
                 band.width,
-                content_bottom - transcript_area.y,
+                content_bottom - band.y,
             ));
         }
     }
@@ -589,7 +604,7 @@ pub fn draw_transcript(
     // viewport (its summary is scrolled out of view), pin its summary to the
     // line directly under the HUD bar so the user can always collapse it.
     let sticky_info =
-        draw_sticky_summary_if_needed(frame, transcript_area, &sticky_steps, scroll, theme);
+        draw_sticky_summary_if_needed(frame, band, &sticky_steps, scroll, theme);
 
     TranscriptRender {
         input_rect,
@@ -636,9 +651,8 @@ fn draw_attribution_badge(
     if *skip_rows > 0 {
         *skip_rows = skip_rows.saturating_sub(1);
     } else if *current_y < area.y + area.height {
-        let prefix = " ".repeat(TRANSCRIPT_H_INSET as usize);
+        // The area arrives already inset, so the badge starts at the edge.
         let line = Line::from(vec![
-            Span::styled(prefix, Style::default()),
             Span::styled("◆ ", Style::default().fg(theme.dim())),
             Span::styled(label, Style::default().fg(theme.muted())),
         ]);
@@ -1158,9 +1172,8 @@ mod tests {
 
     /// An empty composer must still record a layout-map region for its single
     /// text row. Without it a click inside the empty box can't resolve to a
-    /// cursor, so the click handler never switches keyboard focus back to the
-    /// Compose zone (it stays stuck in Browse). See `draw_composer` /
-    /// `composer_wrapped`.
+    /// cursor, so the click handler can't clear a focused step to hand typing
+    /// back to the prompt. See `draw_composer` / `composer_wrapped`.
     #[test]
     fn draw_composer_records_region_for_empty_input() {
         let theme = Theme::default();
@@ -1568,9 +1581,10 @@ mod tests {
 
         let buffer = terminal.buffer();
 
-        // Find the first user-message text row: col 0,1 are the app_bg outer
-        // gutter, col 2,3 are the left inner pad (user_panel_bg), col 4 starts
-        // the text. Scan for the row whose col 4 is 'x' under user_panel_bg.
+        // Find the first user-message text row. Layout (60-col terminal):
+        //   cols 0,1  = global app_bg (viewport margin)
+        //   cols 2,3  = user_panel_bg inner pad (USER_MESSAGE_TEXT_GAP_COLS)
+        //   col  4+   = text
         let user_row = (0..buffer.area().height)
             .find(|&y| {
                 let c4 = &buffer[(4, y)];
@@ -1578,7 +1592,8 @@ mod tests {
             })
             .expect("user message row exists");
 
-        // Left: 2-col app_bg outer gutter, then 2-col user_panel_bg inner pad.
+        // Left: 2-col app_bg outer gutter (viewport margin + entry inset),
+        // then 2-col user_panel_bg inner pad.
         assert_eq!(buffer[(0, user_row)].bg, app_bg, "left outer gutter");
         assert_eq!(buffer[(1, user_row)].bg, app_bg, "left outer gutter");
         assert_eq!(
@@ -1594,7 +1609,8 @@ mod tests {
         assert_eq!(buffer[(4, user_row)].symbol(), "x", "text starts at col 4");
 
         // Right: 2-col user_panel_bg inner pad, then 2-col app_bg outer gutter.
-        // user_text_width = (60 - 4) - 4 = 52 -> text fills cols 4..56.
+        // user_text_width = (band_w) - (TEXT_GAP + RIGHT_PAD) = (60-4) - 4 = 52
+        // -> text fills cols 4..56.
         assert_eq!(
             buffer[(56, user_row)].symbol(),
             " ",
@@ -2486,8 +2502,13 @@ mod tests {
         );
 
         for &y in &heading_rows {
-            // Indent columns [0, prefix_width) must never be underlined.
-            for x in 0..3u16 {
+            // Indent columns [0, text_start) must never be underlined.
+            // The heading prefix is a hard-coded 3-col indent (see the
+            // `Block::Heading` arm), applied inside the already-inset band:
+            // global viewport margin (0) + entry inset (2*TRANSCRIPT_H_INSET)
+            // + heading prefix (3) = 7. Text starts at col 7.
+            let text_start = (super::TRANSCRIPT_H_INSET + 3) as u16;
+            for x in 0..text_start {
                 let cell = &buffer[(x, y)];
                 assert!(
                     !cell.style.add.contains(underline),
@@ -2504,10 +2525,10 @@ mod tests {
             );
             // And at least the first text column must be underlined (the
             // heading text itself is still underlined).
-            let first_text_cell = &buffer[(3, y)];
+            let first_text_cell = &buffer[(text_start, y)];
             assert!(
                 first_text_cell.style.add.contains(underline),
-                "first heading-text cell at (x=3, y={y}) must be UNDERLINED, \
+                "first heading-text cell at (x={text_start}, y={y}) must be UNDERLINED, \
                  symbol={:?}",
                 first_text_cell.symbol(),
             );

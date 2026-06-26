@@ -5,40 +5,6 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind
 use crate::tui::layout::{LayoutMap, SemanticCursor};
 use crate::tui::selection::SelectionDrag;
 
-/// Which surface currently owns keyboard focus.
-///
-/// The TUI splits keyboard input into two zones so the same key (arrows,
-/// Enter) has a single, unambiguous meaning per zone:
-///
-/// - [`FocusZone::Compose`] — the input box owns the keys. Typing inserts into
-///   the prompt, `↑`/`↓` walk input history or slash suggestions, `Tab`
-///   accepts a slash suggestion (when one is open). `Ctrl+B` switches to
-///   [`FocusZone::Browse`]. This is the default.
-/// - [`FocusZone::Browse`] — the conversation stream owns the keys. `↑` / `↓`
-///   cycle the keyboard-focused step, `Enter` / `Space` activate it, and any
-///   printable character (typically `p` for "prompt") drops back into
-///   [`FocusZone::Compose`] and inserts itself.
-///
-/// Transitions are explicit so the meaning of every key is derivable from the
-/// current zone, and a visible indicator (input border + hint-bar label) tells
-/// the user which zone they are in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FocusZone {
-    #[default]
-    Compose,
-    Browse,
-}
-
-impl FocusZone {
-    pub fn is_compose(self) -> bool {
-        matches!(self, FocusZone::Compose)
-    }
-
-    pub fn is_browse(self) -> bool {
-        matches!(self, FocusZone::Browse)
-    }
-}
-
 pub struct InputContext {
     pub active_modal: super::Modal,
     pub is_responding: bool,
@@ -59,21 +25,18 @@ pub struct InputContext {
     /// Whether the view is inside a `/btw` side conversation (ADR-0017). Esc
     /// and Ctrl+C return to the primary transcript instead of interrupting.
     pub in_side_view: bool,
-    /// Whether a keyboard-focusable step or action target is active.
+    /// Whether a transcript step/action target currently holds keyboard focus.
     ///
-    /// Part of the in-progress keyboard focus-navigation feature (alongside
-    /// `RenderCtx::focused_target`, `InputAction::ActivateFocusedTarget`,
-    /// `Interaction::Focused`, and `LayoutMap::interactive_targets`). The
-    /// activation plumbing is wired but nothing populates this state yet, so it
-    /// reads as dead until the focus-walk keybinding lands. Targeted allow
-    /// rather than a blanket module suppression.
-    #[allow(dead_code)]
+    /// This is the TUI's only navigation state: there is no separate "browse
+    /// mode". When `true`, a step is highlighted in the transcript and the
+    /// keys that would otherwise edit/scroll instead act on that step — `↑`/`↓`
+    /// (and `Ctrl+↑`/`Ctrl+↓`) cycle the focused step, `Enter` activates it,
+    /// and `Esc` clears the focus. When `false` every key has its ordinary
+    /// input-box meaning. Mirrors `App::focused_target.is_some()`.
     pub has_focused_target: bool,
-    /// Which surface (input box vs conversation stream) owns keyboard focus.
-    pub focus_zone: FocusZone,
     /// Whether the send queue holds at least one staged user message. While
-    /// true, `↑` in the compose zone recalls the most-recently-queued
-    /// message instead of walking input history.
+    /// true, `↑` recalls the most-recently-queued message instead of walking
+    /// input history.
     pub has_queued: bool,
 }
 
@@ -165,18 +128,19 @@ pub enum InputAction {
     CtrlC,
     /// Toggle expanded details for semantic tool steps.
     ToggleToolSteps,
-    /// Move keyboard focus to the next activatable target.
+    /// Move keyboard focus to the next activatable target. When no target is
+    /// focused yet, focuses the first (oldest) step. Driven by `Ctrl+↓` and by
+    /// `↓` while a step is already focused.
     FocusNextTarget,
-    /// Move keyboard focus to the previous activatable target.
+    /// Move keyboard focus to the previous activatable target. When no target
+    /// is focused yet, focuses the last (nearest-to-prompt) step. Driven by
+    /// `Ctrl+↑` and by `↑` while a step is already focused.
     FocusPrevTarget,
-    /// Activate the current keyboard-focused target.
+    /// Activate the current keyboard-focused target (`Enter`).
     ActivateFocusedTarget,
-    /// Switch the keyboard focus zone to the conversation stream (Browse).
-    /// Triggered by `Ctrl+B` in Compose. `backward` is reserved for future
-    /// use; currently always `false`.
-    EnterBrowseZone { backward: bool },
-    /// Switch the keyboard focus zone back to the input box (Compose).
-    ReturnToComposeZone,
+    /// Clear the keyboard-focused target, returning every key to its ordinary
+    /// input-box meaning. Triggered by `Esc` while a step is focused.
+    ClearFocusedTarget,
     /// Paste from the system clipboard (image or text). Resolved by the app
     /// loop, which reads the clipboard asynchronously.
     Paste,
@@ -588,11 +552,12 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         if context.permission_confirm_always {
                             InputAction::PermissionBack
-                        } else if context.focus_zone.is_browse() {
-                            // While browsing the transcript behind a permission
-                            // sheet, Esc returns focus to the sheet rather than
-                            // rejecting outright — a second Esc decides it.
-                            InputAction::ReturnToComposeZone
+                        } else if context.has_focused_target {
+                            // A step is focused behind the permission sheet:
+                            // Esc clears the focus and returns to the sheet
+                            // rather than rejecting outright — a second Esc
+                            // decides it.
+                            InputAction::ClearFocusedTarget
                         } else {
                             InputAction::PermissionReject
                         }
@@ -600,6 +565,13 @@ pub fn process_event(
                         InputAction::QuestionCancel
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
+                    } else if context.has_focused_target {
+                        // A transcript step is focused: Esc is the deliberate
+                        // exit that clears the focus and hands every key back to
+                        // the input box. Takes priority over the completion /
+                        // subagent / responding arms so one Esc always lands
+                        // focus on the prompt first.
+                        InputAction::ClearFocusedTarget
                     } else if context.completion_kind != super::CompletionKind::None
                         && context.suggestion_count > 0
                     {
@@ -664,7 +636,7 @@ pub fn process_event(
                 KeyCode::Char('q')
                     if input.is_empty()
                         && context.active_modal == super::Modal::None
-                        && context.focus_zone.is_compose() =>
+                        && !context.has_focused_target =>
                 {
                     InputAction::Quit
                 }
@@ -691,7 +663,7 @@ pub fn process_event(
                     super::Modal::Permissions => InputAction::CloseModal,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
-                        if context.focus_zone.is_browse() {
+                        if context.has_focused_target {
                             return InputAction::ActivateFocusedTarget;
                         }
                         // Slash-only: pressing Enter on a unique prefix
@@ -804,16 +776,23 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
-                // Ctrl+B: switch from Compose to Browse (B = Browse). Dedicated
-                // zone-switch key so Tab is free for completion-only duty.
-                // No-op outside the main prompt (modals, Browse zone).
+                // Ctrl+B: move the caret back one character (readline
+                // `backward-char`). Mirrors Left and sits alongside the
+                // Ctrl+A / Ctrl+E line-motion family. Active wherever free text
+                // is edited; a no-op elsewhere so it never inserts a literal
+                // 'b' or scrolls.
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if context.active_modal == super::Modal::None && context.focus_zone.is_compose()
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Provider
+                            | super::Modal::ModelEditor
+                    ) && *cursor_position > 0
                     {
-                        InputAction::EnterBrowseZone { backward: false }
-                    } else {
-                        InputAction::None
+                        *cursor_position -= 1;
                     }
+                    InputAction::None
                 }
                 // Ctrl+A: move the caret to the start of the current line
                 // (readline convention). Works wherever free text is being
@@ -1030,29 +1009,11 @@ pub fn process_event(
                             }
                         }
                     }
-                    if context.active_modal == super::Modal::None
-                        && context.focus_zone.is_browse()
-                        && c == ' '
-                    {
-                        return InputAction::ActivateFocusedTarget;
-                    }
-                    // Any printable character in the Browse zone drops back to
-                    // the Compose zone and inserts itself, mirroring the
-                    // "type to edit" affordance users expect from modal editors.
-                    // The insertion happens here (process_event owns `input`),
-                    // and the zone switch is signalled back so the renderer
-                    // can update on the next frame.
-                    if context.active_modal == super::Modal::None && context.focus_zone.is_browse()
-                    {
-                        let byte_pos = input
-                            .char_indices()
-                            .map(|(i, _)| i)
-                            .nth(*cursor_position)
-                            .unwrap_or(input.len());
-                        input.insert(byte_pos, c);
-                        *cursor_position += 1;
-                        return InputAction::ReturnToComposeZone;
-                    }
+                    // A focused transcript step does not capture typing: with
+                    // no separate browse mode, printable characters always fall
+                    // through to the input box below (the focus highlight stays
+                    // until Esc / Enter). `Enter` activates the focused step;
+                    // `Space` just inserts a space.
                     if context.active_modal == super::Modal::Provider && c == '*' {
                         // Star a model as a favorite. `*` is chosen over `f`
                         // because every letter collides with the fuzzy filter
@@ -1234,6 +1195,25 @@ pub fn process_event(
                     }
                     InputAction::None
                 }
+                // Ctrl+↑ / Ctrl+↓: the gesture that drives transcript item
+                // focus. From the input box it focuses the step closest to the
+                // prompt (the last interactive target → `FocusPrevTarget` lands
+                // on the last entry when nothing is focused yet); once a step is
+                // focused it cycles like the bare arrows. This keeps the bare
+                // ↑/↓ free for history / caret motion until a step is focused.
+                // No-op while a modal owns focus.
+                KeyCode::Up
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && context.active_modal == super::Modal::None =>
+                {
+                    InputAction::FocusPrevTarget
+                }
+                KeyCode::Down
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && context.active_modal == super::Modal::None =>
+                {
+                    InputAction::FocusNextTarget
+                }
                 KeyCode::Up => match context.active_modal {
                     super::Modal::Provider => InputAction::ModalUp,
                     super::Modal::ModelPicker => InputAction::ModalUp,
@@ -1245,7 +1225,7 @@ pub fn process_event(
                         // scroll the expanded details, otherwise fall through
                         // to a transcript scroll so the history stays readable
                         // even while a prompt is pending.
-                        if context.focus_zone.is_browse() {
+                        if context.has_focused_target {
                             InputAction::FocusPrevTarget
                         } else if context.permission_show_details {
                             InputAction::PermissionDetailsUp
@@ -1259,7 +1239,7 @@ pub fn process_event(
                     super::Modal::Permissions => InputAction::ModalUp,
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
-                        if context.focus_zone.is_browse() {
+                        if context.has_focused_target {
                             InputAction::FocusPrevTarget
                         } else if context.completion_kind != super::CompletionKind::None
                             && context.suggestion_count > 0
@@ -1289,7 +1269,7 @@ pub fn process_event(
                     super::Modal::Sessions => InputAction::ModalDown,
                     super::Modal::Question => InputAction::QuestionDown,
                     super::Modal::Permission => {
-                        if context.focus_zone.is_browse() {
+                        if context.has_focused_target {
                             InputAction::FocusNextTarget
                         } else if context.permission_show_details {
                             InputAction::PermissionDetailsDown
@@ -1303,7 +1283,7 @@ pub fn process_event(
                     super::Modal::Permissions => InputAction::ModalDown,
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
-                        if context.focus_zone.is_browse() {
+                        if context.has_focused_target {
                             InputAction::FocusNextTarget
                         } else if context.completion_kind != super::CompletionKind::None
                             && context.suggestion_count > 0
@@ -1337,15 +1317,14 @@ pub fn process_event(
                     InputAction::ScrollPageDown
                 }
                 KeyCode::Home => {
-                    // Now that focus zones disambiguate editing (Compose)
-                    // from navigating (Browse), Home no longer clashes with
-                    // conversation scrolling:
-                    //   - Permission modal / Browse zone: scroll to the top.
-                    //   - Compose zone / free-text modals: move the input
-                    //     caret to the start of the current line.
+                    // A focused step disambiguates Home from caret motion, so it
+                    // no longer clashes with conversation scrolling:
+                    //   - Permission modal / a step is focused: scroll to top.
+                    //   - Otherwise (free text): move the input caret to the
+                    //     start of the current line.
                     if context.active_modal == super::Modal::Permission
                         || (context.active_modal == super::Modal::None
-                            && context.focus_zone.is_browse())
+                            && context.has_focused_target)
                     {
                         InputAction::ScrollTop
                     } else if matches!(
@@ -1364,7 +1343,7 @@ pub fn process_event(
                 KeyCode::End => {
                     if context.active_modal == super::Modal::Permission
                         || (context.active_modal == super::Modal::None
-                            && context.focus_zone.is_browse())
+                            && context.has_focused_target)
                     {
                         InputAction::ScrollBottom
                     } else if matches!(
@@ -1441,7 +1420,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1483,7 +1461,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1602,7 +1579,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1639,7 +1615,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1675,7 +1650,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1708,7 +1682,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1741,7 +1714,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1778,7 +1750,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1815,7 +1786,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1847,7 +1817,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1920,7 +1889,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1953,7 +1921,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -1982,7 +1949,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2011,7 +1977,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2042,7 +2007,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2075,7 +2039,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2100,7 +2063,6 @@ mod tests {
             in_subagent_view: false,
             in_side_view: false,
             has_focused_target: false,
-            focus_zone: FocusZone::Compose,
             has_queued: false,
         };
         let action = process_event(
@@ -2136,7 +2098,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2163,7 +2124,6 @@ mod tests {
                 in_subagent_view,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -2190,7 +2150,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: true,
-                focus_zone: FocusZone::Browse,
                 has_queued: false,
             },
             &mut drag,
@@ -2220,140 +2179,110 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_b_switches_compose_to_browse() {
-        // Ctrl+B in Compose enters Browse, focusing the first step.
-        let mut input = String::new();
-        let mut cursor = 0;
-        let mut drag = SelectionDrag::default();
-        let action = process_event(
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('b'),
-                KeyModifiers::CONTROL,
-            )),
+    fn ctrl_b_moves_caret_back_one_char() {
+        // Ctrl+B is readline backward-char: it moves the caret left and never
+        // touches focus. (Focus navigation is Ctrl+↑/↓.)
+        let mut input = String::from("abc");
+        let mut cursor = 3;
+        let action = run_key(
             &mut input,
             &mut cursor,
-            InputContext {
-                active_modal: crate::tui::Modal::None,
-                is_responding: false,
-                completion_kind: crate::tui::CompletionKind::None,
-                suggestion_count: 0,
-                has_exact_suggestion: false,
-                suggestion_index: None,
-                permission_confirm_always: false,
-                permission_show_details: false,
-                in_subagent_view: false,
-                in_side_view: false,
-                has_focused_target: false,
-                focus_zone: FocusZone::Compose,
-                has_queued: false,
-            },
-            &mut drag,
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            false,
         );
-        assert_eq!(action, InputAction::EnterBrowseZone { backward: false });
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cursor, 2, "Ctrl+B moves the caret back one character");
     }
 
     #[test]
-    fn tab_in_browse_is_noop() {
-        // Tab / Shift+Tab in Browse are no-ops. Arrows still walk targets.
-        // Return to Compose via any printable char (typically `p`).
+    fn ctrl_arrows_drive_focus() {
+        // Ctrl+↑/↓ enter focus from the input box (no focus yet) and keep
+        // cycling once a step is focused. Bare Tab stays a no-op.
+        let mut input = String::new();
+        let mut cursor = 0;
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Up,
+                KeyModifiers::CONTROL,
+                crate::tui::Modal::None,
+                false,
+            ),
+            InputAction::FocusPrevTarget
+        );
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Down,
+                KeyModifiers::CONTROL,
+                crate::tui::Modal::None,
+                true,
+            ),
+            InputAction::FocusNextTarget
+        );
         assert_eq!(key_with_focus(KeyCode::Tab), InputAction::None);
-        assert_eq!(key_with_focus(KeyCode::BackTab), InputAction::None);
+    }
+
+    #[test]
+    fn arrows_cycle_steps_while_focused() {
+        // With a step focused, bare ↑/↓ cycle the focus instead of walking
+        // history (history resumes once Esc clears the focus).
         assert_eq!(key_with_focus(KeyCode::Up), InputAction::FocusPrevTarget);
         assert_eq!(key_with_focus(KeyCode::Down), InputAction::FocusNextTarget);
     }
 
     #[test]
-    fn enter_and_space_activate_focused_target() {
+    fn enter_activates_focused_target_space_inserts() {
+        // Enter activates the focused step; Space is an ordinary character (it
+        // inserts a space — there is no "space activates" anymore).
         assert_eq!(
             key_with_focus(KeyCode::Enter),
             InputAction::ActivateFocusedTarget
         );
         assert_eq!(
             key_with_focus(KeyCode::Char(' ')),
-            InputAction::ActivateFocusedTarget
+            InputAction::InsertChar(' ')
         );
     }
 
     #[test]
-    fn escape_in_browse_does_not_switch_zone() {
-        // Zone switching uses Ctrl+B (compose → browse) and printable chars
-        // (browse → compose). Esc in Browse is a no-op; Esc still exits
-        // subagent views, interrupts a running turn, and closes modals.
-        assert_eq!(key_with_focus(KeyCode::Esc), InputAction::None);
+    fn escape_clears_focus() {
+        // Esc is the deliberate exit from a focused step, clearing the focus
+        // so every key returns to its ordinary input-box meaning.
+        assert_eq!(
+            key_with_focus(KeyCode::Esc),
+            InputAction::ClearFocusedTarget
+        );
     }
 
     #[test]
-    fn typing_in_browse_returns_to_compose_and_inserts() {
+    fn typing_while_focused_inserts_and_keeps_focus() {
+        // A focused step does not capture typing: printable characters insert
+        // into the prompt as usual and leave the focus highlight in place
+        // (Esc / Enter, not typing, change the focus).
         let action = key_with_focus(KeyCode::Char('a'));
-        assert_eq!(action, InputAction::ReturnToComposeZone);
-
-        // Re-run with access to the input buffer so we can assert the char
-        // was inserted alongside the zone switch.
-        let mut input = String::new();
-        let mut cursor = 0;
-        let mut drag = SelectionDrag::default();
-        let action = process_event(
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-            )),
-            &mut input,
-            &mut cursor,
-            InputContext {
-                active_modal: crate::tui::Modal::None,
-                is_responding: false,
-                completion_kind: crate::tui::CompletionKind::None,
-                suggestion_count: 0,
-                has_exact_suggestion: false,
-                suggestion_index: None,
-                permission_confirm_always: false,
-                permission_show_details: false,
-                in_subagent_view: false,
-                in_side_view: false,
-                has_focused_target: true,
-                focus_zone: FocusZone::Browse,
-                has_queued: false,
-            },
-            &mut drag,
-        );
-        assert_eq!(action, InputAction::ReturnToComposeZone);
-        assert_eq!(input, "a");
-        assert_eq!(cursor, 1);
+        assert_eq!(action, InputAction::InsertChar('a'));
     }
 
     #[test]
-    fn q_in_browse_inserts_instead_of_quitting() {
-        // 'q' is only a quit shortcut in Compose. In Browse it behaves like
-        // any other printable character so the user does not accidentally
-        // exit the program while navigating steps.
+    fn q_while_focused_inserts_instead_of_quitting() {
+        // 'q' only quits when nothing is focused. With a step focused it is an
+        // ordinary character, so navigating never risks an accidental exit.
         let mut input = String::new();
         let mut cursor = 0;
-        let mut drag = SelectionDrag::default();
-        let action = process_event(
-            Event::Key(crossterm::event::KeyEvent::new(
-                KeyCode::Char('q'),
-                KeyModifiers::NONE,
-            )),
+        let action = run_key(
             &mut input,
             &mut cursor,
-            InputContext {
-                active_modal: crate::tui::Modal::None,
-                is_responding: false,
-                completion_kind: crate::tui::CompletionKind::None,
-                suggestion_count: 0,
-                has_exact_suggestion: false,
-                suggestion_index: None,
-                permission_confirm_always: false,
-                permission_show_details: false,
-                in_subagent_view: false,
-                in_side_view: false,
-                has_focused_target: true,
-                focus_zone: FocusZone::Browse,
-                has_queued: false,
-            },
-            &mut drag,
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            crate::tui::Modal::None,
+            true,
         );
-        assert_eq!(action, InputAction::ReturnToComposeZone);
+        assert_eq!(action, InputAction::InsertChar('q'));
         assert_eq!(input, "q");
     }
 
@@ -2404,7 +2333,7 @@ mod tests {
         code: KeyCode,
         modifiers: KeyModifiers,
         modal: crate::tui::Modal,
-        zone: FocusZone,
+        has_focus: bool,
     ) -> InputAction {
         let mut drag = SelectionDrag::default();
         process_event(
@@ -2427,8 +2356,7 @@ mod tests {
                 permission_show_details: false,
                 in_subagent_view: false,
                 in_side_view: false,
-                has_focused_target: false,
-                focus_zone: zone,
+                has_focused_target: has_focus,
                 has_queued: false,
             },
             &mut drag,
@@ -2448,7 +2376,7 @@ mod tests {
             KeyCode::Home,
             KeyModifiers::NONE,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(input, "hello");
@@ -2460,7 +2388,7 @@ mod tests {
             KeyCode::End,
             KeyModifiers::NONE,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(input, "hello");
@@ -2480,7 +2408,7 @@ mod tests {
                 KeyCode::Home,
                 KeyModifiers::NONE,
                 crate::tui::Modal::None,
-                FocusZone::Browse
+                true
             ),
             InputAction::ScrollTop
         );
@@ -2492,7 +2420,7 @@ mod tests {
                 KeyCode::End,
                 KeyModifiers::NONE,
                 crate::tui::Modal::None,
-                FocusZone::Browse
+                true
             ),
             InputAction::ScrollBottom
         );
@@ -2510,7 +2438,7 @@ mod tests {
                 KeyCode::Home,
                 KeyModifiers::NONE,
                 crate::tui::Modal::Permission,
-                FocusZone::Compose
+                false
             ),
             InputAction::ScrollTop
         );
@@ -2521,7 +2449,7 @@ mod tests {
                 KeyCode::End,
                 KeyModifiers::NONE,
                 crate::tui::Modal::Permission,
-                FocusZone::Compose
+                false
             ),
             InputAction::ScrollBottom
         );
@@ -2543,7 +2471,7 @@ mod tests {
                 KeyCode::Home,
                 KeyModifiers::NONE,
                 modal,
-                FocusZone::Compose,
+                false,
             );
             assert_eq!(action, InputAction::None);
             assert_eq!(cursor, 0, "Home should reach line start");
@@ -2554,7 +2482,7 @@ mod tests {
                 KeyCode::End,
                 KeyModifiers::NONE,
                 modal,
-                FocusZone::Compose,
+                false,
             );
             assert_eq!(action, InputAction::None);
             assert_eq!(cursor, 3, "End should reach line end");
@@ -2572,7 +2500,7 @@ mod tests {
             KeyCode::Char('a'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(cursor, 0);
@@ -2584,7 +2512,7 @@ mod tests {
             KeyCode::Char('e'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(cursor, 5);
@@ -2604,7 +2532,7 @@ mod tests {
                 KeyCode::Char('a'),
                 KeyModifiers::CONTROL,
                 crate::tui::Modal::None,
-                FocusZone::Browse
+                true
             ),
             InputAction::None
         );
@@ -2615,7 +2543,7 @@ mod tests {
                 KeyCode::Char('e'),
                 KeyModifiers::CONTROL,
                 crate::tui::Modal::None,
-                FocusZone::Browse
+                true
             ),
             InputAction::None
         );
@@ -2637,7 +2565,7 @@ mod tests {
             KeyCode::Home,
             KeyModifiers::NONE,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 6, "Home should land at start of current line");
 
@@ -2648,7 +2576,7 @@ mod tests {
             KeyCode::End,
             KeyModifiers::NONE,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 11, "End should land at end of current line");
 
@@ -2659,7 +2587,7 @@ mod tests {
             KeyCode::Char('a'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 6);
         // Ctrl+E snaps back to the line end without running off the buffer.
@@ -2669,7 +2597,7 @@ mod tests {
             KeyCode::Char('e'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 11);
     }
@@ -2685,7 +2613,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "hello ");
@@ -2705,7 +2633,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "hello ");
         assert_eq!(cursor, 6);
@@ -2721,7 +2649,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(input, "hello world");
@@ -2740,7 +2668,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "line1\n");
         assert_eq!(cursor, 6);
@@ -2758,7 +2686,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::Question,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::None);
         assert_eq!(input, "abc");
@@ -2775,7 +2703,7 @@ mod tests {
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "orld");
@@ -2794,7 +2722,7 @@ mod tests {
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "keep me\n");
         assert_eq!(cursor, 8);
@@ -2810,7 +2738,7 @@ mod tests {
             KeyCode::Char('k'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "hello");
@@ -2827,7 +2755,7 @@ mod tests {
             KeyCode::Char('k'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "fir\nsecond");
         assert_eq!(cursor, 3);
@@ -2844,7 +2772,7 @@ mod tests {
             KeyCode::Char('d'),
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "hello");
@@ -2861,7 +2789,7 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 10);
         run_key(
@@ -2870,7 +2798,7 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 4);
     }
@@ -2885,7 +2813,7 @@ mod tests {
             KeyCode::Char('f'),
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 3);
         run_key(
@@ -2894,7 +2822,7 @@ mod tests {
             KeyCode::Char('f'),
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 9);
     }
@@ -2911,7 +2839,7 @@ mod tests {
             KeyCode::Left,
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 12, "Ctrl+Left snaps to the start of 'charlie'");
         run_key(
@@ -2920,7 +2848,7 @@ mod tests {
             KeyCode::Left,
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 6, "Ctrl+Left snaps to the start of 'bravo'");
         run_key(
@@ -2929,7 +2857,7 @@ mod tests {
             KeyCode::Right,
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(cursor, 11, "Ctrl+Right snaps to the end of 'bravo'");
     }
@@ -2944,7 +2872,7 @@ mod tests {
             KeyCode::Backspace,
             KeyModifiers::ALT,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(action, InputAction::Backspace);
         assert_eq!(input, "foo bar ");
@@ -2963,7 +2891,7 @@ mod tests {
             KeyCode::Backspace,
             KeyModifiers::CONTROL,
             crate::tui::Modal::None,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "foo bar ");
         assert_eq!(cursor, 8);
@@ -2982,7 +2910,7 @@ mod tests {
             KeyCode::Char('w'),
             KeyModifiers::CONTROL,
             crate::tui::Modal::HistorySearch,
-            FocusZone::Compose,
+            false,
         );
         assert_eq!(input, "fuzzy ");
         assert_eq!(cursor, 6);
@@ -3009,7 +2937,7 @@ mod tests {
                 code,
                 mods,
                 crate::tui::Modal::None,
-                FocusZone::Compose,
+                false,
             );
             assert_eq!(action, InputAction::None);
             assert!(input.is_empty());
@@ -3049,7 +2977,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -3138,7 +3065,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -3166,7 +3092,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -3198,7 +3123,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued,
             },
             &mut drag,
@@ -3249,7 +3173,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: true,
-                focus_zone: FocusZone::Browse,
                 has_queued: true,
             },
             &mut drag,
@@ -3283,7 +3206,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,
@@ -3311,7 +3233,7 @@ mod tests {
                 KeyCode::Char('v'),
                 KeyModifiers::CONTROL,
                 modal,
-                FocusZone::Compose,
+                false,
             );
             assert_eq!(
                 action,
@@ -3335,7 +3257,7 @@ mod tests {
                 KeyCode::Char('v'),
                 KeyModifiers::CONTROL,
                 modal,
-                FocusZone::Compose,
+                false,
             );
             assert_eq!(
                 action,
@@ -3406,7 +3328,6 @@ mod tests {
                 in_subagent_view: false,
                 in_side_view: false,
                 has_focused_target: false,
-                focus_zone: FocusZone::Compose,
                 has_queued: false,
             },
             &mut drag,

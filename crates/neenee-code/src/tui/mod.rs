@@ -14,11 +14,11 @@ pub mod document;
 mod event_loop;
 pub mod fuzzy;
 pub mod input;
+pub mod interaction;
 pub mod layout;
 pub mod providers;
 pub mod question_model;
 pub mod render;
-pub mod interaction;
 pub mod selection;
 pub mod step_interaction;
 mod terminal;
@@ -855,7 +855,6 @@ pub async fn run_tui(
         tool_detail_message_idx: None,
         tool_detail_scroll: 0,
         focused_target: None,
-        focus_zone: input::FocusZone::Compose,
         cursor_hidden: false,
         copy_toast_until: None,
         copy_toast_message: String::new(),

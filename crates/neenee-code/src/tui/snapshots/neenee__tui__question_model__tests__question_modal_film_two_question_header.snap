@@ -1,0 +1,17 @@
+---
+source: crates/neenee-code/src/tui/question_model.rs
+expression: film
+---
+=== open: Question 1/2 ===
+
+
+
+
+          Question 1/2
+
+          first?
+
+            ● x
+            ○ Other
+
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump ·

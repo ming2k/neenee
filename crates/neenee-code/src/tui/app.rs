@@ -24,7 +24,6 @@ use crate::tui::composer_attachments;
 use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
-use crate::tui::input;
 use crate::tui::layout::{InteractiveTarget, LayoutMap};
 use crate::tui::providers::{PROVIDERS, providers_filtered_from};
 use crate::tui::render::Theme;
@@ -442,15 +441,13 @@ pub struct App {
     pub tool_detail_message_idx: Option<usize>,
     /// Scroll offset (rows) of the [`Modal::ToolStepDetail`] overlay.
     pub tool_detail_scroll: u16,
-    /// Keyboard-focused activatable target in the current frame. Mouse support
-    /// is an acceleration path; this is the equivalent keyboard-first path.
+    /// Keyboard-focused activatable target in the current frame, and the TUI's
+    /// only navigation state — there is no separate "browse mode". `None` means
+    /// every key has its ordinary input-box meaning (typing flows into the
+    /// prompt). `Some` means a transcript step is highlighted: `Ctrl+↑`/`Ctrl+↓`
+    /// (or bare `↑`/`↓`) cycle it, `Enter` activates it, and `Esc` clears it.
+    /// Mouse hover/click is an acceleration path onto the same state.
     pub focused_target: Option<InteractiveTarget>,
-    /// Which surface (input box vs conversation stream) currently owns
-    /// keyboard focus. See [`input::FocusZone`] for the full semantics.
-    /// Defaults to [`input::FocusZone::Compose`] so typing flows into the
-    /// prompt box; `Ctrl+B` switches focus to the stream (Browse), and any
-    /// printable key (typically `p`) returns to the prompt (Compose).
-    pub focus_zone: input::FocusZone,
     /// Tracks the last cursor visibility command we sent to the terminal so
     /// we only emit `Hide` / `Show` escape codes when the desired state
     /// actually changes, avoiding per-frame flicker.

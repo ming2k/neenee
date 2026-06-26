@@ -2,8 +2,8 @@
 source: crates/neenee-code/src/tui/render/snapshot_tests.rs
 expression: "render_grid(&m, 80, 24)"
 ---
-  + Run cargo build
++ Run cargo build
 
 backgrounds:
-.=reset  B=#070808
-0: .2 B76
+A=#070808  .=reset
+0: A80

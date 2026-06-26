@@ -27,8 +27,7 @@ use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolSta
 use crate::tui::render::{
     REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo,
     SubagentBarInfo, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
-    TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, TRANSCRIPT_H_INSET, Theme,
-    transcript_band_rect,
+    TRANSCRIPT_BODY_LEADING_INDENT, Theme,
 };
 
 /// Cursor + environment carried through the tool-step body renderers.
@@ -325,7 +324,7 @@ fn draw_listing_content(
     let dir_fg = ctx.theme.info();
     let file_fg = ctx.theme.code_text();
     let sel_range = block_selection_range(selection, mi, block_idx);
-    let wrap_w = inner_w.saturating_sub(indent).max(1);
+    let wrap_w = inner_w.max(1);
 
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
@@ -604,7 +603,7 @@ fn draw_bash_content(
         .fg(ctx.theme.warn())
         .add_modifier(Modifier::BOLD);
     let sel_range = block_selection_range(selection, mi, block_idx);
-    let wrap_w = inner_w.saturating_sub(indent).max(1);
+    let wrap_w = inner_w.max(1);
 
     // `$ command` prompt line(s) — the command may span multiple lines; only
     // the first rendered row carries the `$ ` prompt.
@@ -1152,7 +1151,8 @@ pub fn draw_subagent_inline_step(
         .map(ToolStatus::from_status)
         .unwrap_or(ToolStatus::Running);
 
-    let transcript_area = transcript_band_rect(transcript_area);
+    // `transcript_area` arrives already inset by `draw_transcript`, so no
+    // re-clip is needed here.
     let full_width = transcript_area.width as usize;
     if full_width < STEP_MIN_WIDTH {
         return;
@@ -1241,8 +1241,8 @@ pub fn draw_subagent_inline_step(
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full transcript width inside the app_bg gutters.
 pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, theme: &Theme) {
-    let band = transcript_band_rect(rect);
-    let full_width = band.width as usize;
+    // `rect` arrives already inset by `draw_transcript`.
+    let full_width = rect.width as usize;
     if full_width < STEP_MIN_WIDTH {
         return;
     }
@@ -1279,7 +1279,7 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
             Style::default().bg(bg),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), band);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 /// Render the `/btw` side banner (ADR-0017): a top band reading
@@ -1293,8 +1293,7 @@ pub fn draw_side_banner(
     status: neenee_core::ParentStatus,
     theme: &Theme,
 ) {
-    let band = transcript_band_rect(rect);
-    let full_width = band.width as usize;
+    let full_width = rect.width as usize;
     if full_width < STEP_MIN_WIDTH {
         return;
     }
@@ -1334,7 +1333,7 @@ pub fn draw_side_banner(
             Style::default().bg(bg),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), band);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 /// Render a tool-step message as an expandable step with a summary line,
@@ -1393,12 +1392,9 @@ pub fn draw_tool_step(
         theme,
     );
 
-    // Render into the inset band so content never touches the terminal frame —
-    // it sits inside the uniform 2-cell `app_bg` gutters shared with prose and
-    // code blocks. All helpers below (summary, body, child tool steps) read
-    // `transcript_area.x` / `transcript_area.width` directly, so shrinking here
-    // propagates everywhere.
-    let transcript_area = transcript_band_rect(transcript_area);
+    // `transcript_area` arrives already inset by `draw_transcript` (the
+    // uniform horizontal gutters are applied once at the stream entry point),
+    // so all helpers below read `transcript_area.x` / `.width` directly.
     let full_width = transcript_area.width as usize;
     if full_width < STEP_MIN_WIDTH {
         // Too narrow to draw; fall back to plain block rendering.
@@ -1670,12 +1666,12 @@ fn reasoning_summary_line(
     summary_color: Color,
     full_width: usize,
 ) -> Line<'static> {
-    let marker_prefix_cols = TRANSCRIPT_H_INSET as usize;
+    // No marker prefix: the horizontal gutter is applied once at the stream
+    // entry point, so the marker starts at the area's left edge.
     let marker_text = format!("{} ", marker);
     let summary_text = summary.to_string();
-    let used = marker_prefix_cols + marker_text.width() + summary_text.width();
+    let used = marker_text.width() + summary_text.width();
     Line::from(vec![
-        Span::styled(" ".repeat(marker_prefix_cols), Style::default()),
         Span::styled(
             marker_text,
             Style::default()
@@ -1724,7 +1720,7 @@ fn draw_reasoning_summary(
             start_byte: 0,
             end_byte: 0,
             text: String::new(),
-            prefix_cols: TRANSCRIPT_H_INSET,
+            prefix_cols: 0,
             rect,
             hidden_ranges: Vec::new(),
         });
@@ -1758,7 +1754,7 @@ pub fn draw_reasoning_trace(
     let expanded = msg.thinking_expanded() == Some(true);
     let full_width = transcript_area.width as usize;
 
-    if full_width < (TRANSCRIPT_BODY_PREFIX_COLS + 1) as usize {
+    if full_width < (TRANSCRIPT_BODY_LEADING_INDENT as usize + 1) {
         draw_message_body(
             frame,
             transcript_area,
@@ -1805,11 +1801,11 @@ pub fn draw_reasoning_trace(
     };
 
     if expanded {
-        let body_prefix = " ".repeat(TRANSCRIPT_BODY_PREFIX_COLS as usize);
-        let body_wrap_width = transcript_area
-            .width
-            .saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + TRANSCRIPT_BODY_RIGHT_INSET)
-            as usize;
+        // The leading indent is all that remains now that the horizontal
+        // gutter is applied once at the stream entry point.
+        let body_prefix = " ".repeat(TRANSCRIPT_BODY_LEADING_INDENT as usize);
+        let body_wrap_width =
+            transcript_area.width.saturating_sub(TRANSCRIPT_BODY_LEADING_INDENT) as usize;
 
         advance_plain_blank_rows(
             transcript_area,
@@ -1867,13 +1863,13 @@ pub fn draw_reasoning_trace(
                         ctx.theme.selected(),
                         ctx.theme.code_text(),
                     );
-                    let used = (TRANSCRIPT_BODY_PREFIX_COLS as usize) + wl.text.width();
+                    let used = TRANSCRIPT_BODY_LEADING_INDENT as usize + wl.text.width();
                     let mut line = line;
                     line.spans.push(Span::styled(
                         padded_tail(ctx.full_width, used),
                         Style::default(),
                     ));
-                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_PREFIX_COLS, &[]);
+                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_LEADING_INDENT as u16, &[]);
                 }
             }
         }
@@ -1917,18 +1913,22 @@ pub fn draw_sticky_summary_if_needed(
         .find(|c| c.summary_line < first_visible && c.body_end_line > first_visible)?;
     // Sticky steps are always expanded → the summary reads in its active tone.
     let summary_color = theme.fg();
+    // `transcript_area` arrives already inset by `draw_transcript`, so both
+    // branches pin directly inside it — no re-clip needed.
     let line_rect = if let Some(bg) = step.background {
-        // Pin inside the same inset band the steps render into so the sticky
-        // summary aligns exactly with the (possibly scrolled-away) real summary.
-        let band = transcript_band_rect(transcript_area);
-        let line_rect = Rect::new(band.x, transcript_area.y, band.width, 1);
+        let line_rect = Rect::new(
+            transcript_area.x,
+            transcript_area.y,
+            transcript_area.width,
+            1,
+        );
         frame.render_widget(
             Paragraph::new(tool_summary_line(
                 "-",
                 &step.summary,
                 summary_color,
                 bg,
-                band.width as usize,
+                transcript_area.width as usize,
             )),
             line_rect,
         );

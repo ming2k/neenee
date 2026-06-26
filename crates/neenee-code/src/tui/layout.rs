@@ -108,9 +108,9 @@ pub struct LayoutMap {
     /// The visible transcript content rect for the frame: the horizontal band
     /// (inside the `TRANSCRIPT_H_INSET` gutters) spanning only the rows where
     /// transcript content was actually drawn. A click that doesn't resolve to
-    /// any region but lands inside this rect still switches keyboard focus to
-    /// [`crate::tui::input::FocusZone::Browse`], so gap rows between messages
-    /// behave like the content they separate rather than dead zones. The outer
+    /// any region but lands inside this rect still focuses the nearest
+    /// transcript step, so gap rows between messages behave like the content
+    /// they separate rather than dead zones. The outer
     /// gutters are excluded on purpose: clicks there are not transcript clicks.
     transcript_content_rect: Option<Rect>,
 }

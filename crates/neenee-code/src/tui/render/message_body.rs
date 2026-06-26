@@ -21,7 +21,7 @@ use super::text_layout::{
     WrappedLine, block_selection_range, bold_delim_local_ranges, code_gutter_line, line_selection,
     line_spans_rich, markup_hidden_ranges, padded_tail, visible_width, wrap_text,
 };
-use super::{TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, Theme};
+use super::{TRANSCRIPT_BODY_LEADING_INDENT, Theme};
 
 fn display_width_u16(s: &str) -> u16 {
     s.width() as u16
@@ -233,10 +233,10 @@ pub(super) fn draw_message_body(
                     _ => Style::default().fg(theme.fg()),
                 };
                 let full_width = area.width as usize;
-                let body_wrap_width = area
-                    .width
-                    .saturating_sub(TRANSCRIPT_BODY_PREFIX_COLS + TRANSCRIPT_BODY_RIGHT_INSET)
-                    as usize;
+                // The horizontal gutter is applied once at the stream entry
+                // point, so only the leading indent remains to subtract here.
+                let body_wrap_width =
+                    area.width.saturating_sub(TRANSCRIPT_BODY_LEADING_INDENT) as usize;
                 // User messages render inside their own panel, so they wrap at
                 // the panel's inner width minus symmetric left/right padding
                 // rather than the shared prose width — this keeps the text from
@@ -399,7 +399,7 @@ pub(super) fn draw_message_body(
                         ));
                         Line::from(spans)
                     } else {
-                        let prefix = " ".repeat(TRANSCRIPT_BODY_PREFIX_COLS as usize);
+                        let prefix = " ".repeat(TRANSCRIPT_BODY_LEADING_INDENT as usize);
                         line_spans_rich(
                             &prefix,
                             Style::default(),
@@ -423,7 +423,7 @@ pub(super) fn draw_message_body(
                         let prefix_cols = if is_user {
                             (USER_MESSAGE_OUTER_GUTTER_COLS + USER_MESSAGE_TEXT_GAP_COLS) as u16
                         } else {
-                            TRANSCRIPT_BODY_PREFIX_COLS
+                            TRANSCRIPT_BODY_LEADING_INDENT as u16
                         };
                         let hidden_ranges = if is_user {
                             Vec::new()
@@ -487,8 +487,8 @@ pub(super) fn draw_message_body(
                 // generic line wrapper mangle `│` separators.
                 let indent = 3usize;
                 let full_width = area.width as usize;
-                // `indent` left + 2-col right gutter (`TRANSCRIPT_H_INSET`).
-                let available = full_width.saturating_sub(indent + 2);
+                // The area is already inset; `indent` is the table's left visual indent.
+                let available = full_width.saturating_sub(indent);
                 let table = build_table_render(headers, rows, aligns, available);
                 let ncols = headers.len().max(1);
 
@@ -910,7 +910,7 @@ pub(super) fn draw_message_body(
                     .fg(theme.heading())
                     .add_modifier(Modifier::BOLD);
                 let continuation = " ".repeat(prefix_cols as usize);
-                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols) as usize);
                 *content_lines += lines.len();
                 for (line_index, wl) in lines.iter().enumerate() {
                     if *skip_rows > 0 {
@@ -975,8 +975,8 @@ pub(super) fn draw_message_body(
                 code_ranges,
                 bold_ranges,
             } => {
-                // 5-col `▎` prefix + 2-col right gutter (`TRANSCRIPT_H_INSET`).
-                let lines = wrap_text(content, area.width.saturating_sub(7) as usize);
+                // 5-col `▎` prefix; the area is already inset so no right gutter.
+                let lines = wrap_text(content, area.width.saturating_sub(5) as usize);
                 *content_lines += lines.len();
                 for wl in &lines {
                     if *skip_rows > 0 {
@@ -1027,7 +1027,7 @@ pub(super) fn draw_message_body(
                 if *skip_rows > 0 {
                     *skip_rows = skip_rows.saturating_sub(1);
                 } else if *current_y < area.y + area.height {
-                    let width = area.width.saturating_sub(6) as usize;
+                    let width = area.width.saturating_sub(3) as usize;
                     let text = format!("   {}", "─".repeat(width));
                     let line =
                         Line::from(vec![Span::styled(text, Style::default().fg(theme.dim()))]);
@@ -1063,7 +1063,7 @@ pub(super) fn draw_message_body(
                 let prefix = format!("   {}{} ", indent, marker);
                 let prefix_cols = display_width_u16(&prefix);
                 let continuation = " ".repeat(prefix_cols as usize);
-                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
+                let lines = wrap_text(content, area.width.saturating_sub(prefix_cols) as usize);
                 *content_lines += lines.len();
                 for (line_index, wl) in lines.iter().enumerate() {
                     if *skip_rows > 0 {

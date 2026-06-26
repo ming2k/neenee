@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::document::{TranscriptMessage, estimate_context_tokens};
-use crate::tui::input::FocusZone;
 use crate::tui::layout::LayoutMap;
 
 use super::Theme;
@@ -361,17 +360,12 @@ pub struct HintBarView<'a> {
     pub current_provider: &'a str,
     pub current_model: &'a str,
     pub messages: &'a [TranscriptMessage],
-    /// Which surface owns keyboard focus this frame. Rendered as a colored
-    /// pill at the start of the bar so the user can always tell whether the
-    /// next keypress lands in the input box (Compose) or the conversation
-    /// stream (Browse).
-    pub focus_zone: FocusZone,
-    /// True while the prompt is a `!`-prefixed shell command (Compose zone
-    /// only). Promotes the pill to `[ SHELL ]` in the warning tone so the
-    /// user can tell at a glance the next Enter runs the rest of the line
-    /// directly through the bash tool — no LLM roundtrip. Orthogonal to
-    /// `focus_zone`: Browse always wins, so a stale `!` left in the box
-    /// while navigating the transcript does not flash a misleading SHELL.
+    /// True while the prompt is a `!`-prefixed shell command and no transcript
+    /// step is focused. Renders a `[ SHELL ]` pill at the start of the bar in
+    /// the warning tone so the user can tell at a glance the next Enter runs
+    /// the rest of the line directly through the bash tool — no LLM roundtrip.
+    /// When false the left of the bar is empty: there is no compose/browse
+    /// mode to advertise, the focused-step highlight indicates navigation.
     pub shell_active: bool,
     /// Whether auto-approve mode is active. Renders an extra warning-toned
     /// pill so the elevated, no-prompt state is unmissable.
@@ -389,7 +383,6 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
         current_provider,
         current_model,
         messages,
-        focus_zone,
         shell_active,
         auto_approve,
     } = view;
@@ -398,38 +391,31 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     let accent_bg = theme.raised();
     let full_w = rect.width as usize;
 
-    // --- Focus-zone pill (leftmost). Renders as `[ COMPOSE ]` / `[ BROWSE ]`
-    // / `[ SHELL ]` against the raised element background so it reads as a
-    // surface badge even at a glance. The active state takes a distinct
-    // color so the user can tell which surface the next keypress will land
-    // on without reading the label:
-    //   - BROWSE  → warn tone (keyboard focus is on the transcript stream)
-    //   - SHELL   → warn tone (Compose zone, but the next Enter bypasses
-    //                          the LLM and runs `!…` via the bash tool)
-    //   - COMPOSE → brand tone (default chat-to-LLM prompt)
-    // SHELL is suppressed outside the Compose zone so a stale `!` left in
-    // the box while navigating the transcript does not flash a misleading
-    // badge — Browse always wins.
-    let (zone_label, zone_fg) = if focus_zone.is_browse() {
-        ("BROWSE", theme.warn())
-    } else if shell_active {
-        ("SHELL", theme.warn())
+    // --- Shell pill (leftmost, only when a `!`-prefixed command is staged).
+    // The single left-side surface badge now that there is no compose/browse
+    // mode: in the warning tone, it tells the user at a glance that the next
+    // Enter bypasses the LLM and runs `!…` via the bash tool. Absent during
+    // ordinary chat so the bar stays clean — the focused-step highlight, not a
+    // pill, indicates transcript navigation.
+    let shell_fg = theme.warn();
+    let shell_text = " SHELL ";
+    let shell_pill_width = shell_text.width() + 2; // +2 for the surrounding brackets
+    let zone_spans: Vec<Span<'static>> = if shell_active {
+        vec![
+            Span::styled("[", Style::default().fg(shell_fg).bg(accent_bg)),
+            Span::styled(
+                shell_text,
+                Style::default()
+                    .fg(shell_fg)
+                    .bg(accent_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("]", Style::default().fg(shell_fg).bg(accent_bg)),
+        ]
     } else {
-        ("COMPOSE", theme.brand())
+        Vec::new()
     };
-    let zone_text = format!(" {} ", zone_label);
-    let zone_pill_width = zone_text.width() + 2; // +2 for the surrounding brackets
-    let zone_spans = vec![
-        Span::styled("[", Style::default().fg(zone_fg).bg(accent_bg)),
-        Span::styled(
-            zone_text,
-            Style::default()
-                .fg(zone_fg)
-                .bg(accent_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("]", Style::default().fg(zone_fg).bg(accent_bg)),
-    ];
+    let zone_pill_width = if shell_active { shell_pill_width } else { 0 };
 
     // --- Auto-approve pill (only when active). Mirrors the focus-zone pill
     // styling but in the warning tone so the elevated, no-prompt state is
@@ -454,7 +440,13 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
         Vec::new()
     };
     let auto_segment_width = if auto_approve {
-        HINT_BAR_SEGMENT_GAP + auto_pill_width
+        // The separating gap only exists when a shell pill precedes the
+        // auto-approve pill (see the span assembly below).
+        (if shell_active {
+            HINT_BAR_SEGMENT_GAP
+        } else {
+            0
+        }) + auto_pill_width
     } else {
         0
     };
@@ -464,8 +456,8 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     // terminal is too narrow.
     let context_max = crate::tui::provider_context_window(current_provider);
 
-    // Left side: focus-zone pill and optional auto-approve pill. Computed now
-    // so the gap to the right cluster can hug the right edge.
+    // Left side: optional shell pill and optional auto-approve pill. Computed
+    // now so the gap to the right cluster can hug the right edge.
     let inner = HINT_BAR_INNER_PADDING;
     let left_used = inner + zone_pill_width + auto_segment_width;
 
@@ -516,10 +508,15 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     spans.push(Span::styled(" ".repeat(inner), Style::default().bg(bg)));
     spans.extend(zone_spans);
     if auto_approve {
-        spans.push(Span::styled(
-            " ".repeat(HINT_BAR_SEGMENT_GAP),
-            Style::default().bg(bg),
-        ));
+        // Separate the auto-approve pill from the shell pill with a gap, but
+        // only when the shell pill is actually present; otherwise the pill
+        // sits flush against the inner padding.
+        if shell_active {
+            spans.push(Span::styled(
+                " ".repeat(HINT_BAR_SEGMENT_GAP),
+                Style::default().bg(bg),
+            ));
+        }
         spans.extend(auto_spans);
     }
     spans.push(Span::styled(" ".repeat(gap), Style::default().bg(bg)));
@@ -639,7 +636,6 @@ mod tests {
                     current_provider: "mock",
                     current_model: "mock-model",
                     messages: &messages,
-                    focus_zone: crate::tui::input::FocusZone::Compose,
                     shell_active: false,
                     auto_approve: false,
                 },
@@ -649,31 +645,23 @@ mod tests {
     }
 
     #[test]
-    fn hint_bar_pill_reflects_focus_zone_and_shell_active() {
+    fn hint_bar_pill_shows_shell_only_when_active() {
         let theme = Theme::default();
         let messages: Vec<TranscriptMessage> = vec![];
-        // Helper that draws the bar with a given (focus_zone, shell_active)
-        // pair and returns the pill text — i.e. the bracketed label in the
-        // top-left of the rendered buffer.
-        fn pill_text(
-            terminal: &mut neenee_tui::TestTerminal,
-            focus_zone: crate::tui::input::FocusZone,
-            shell_active: bool,
-        ) -> String {
+        // Helper that draws the bar for a given `shell_active` and returns the
+        // leading bracketed pill text, or "" when the left side is empty.
+        fn pill_text(terminal: &mut neenee_tui::TestTerminal, shell_active: bool) -> String {
             let mut captured = String::new();
             terminal.draw(|f| {
                 let view = HintBarView {
                     current_provider: "",
                     current_model: "",
                     messages: &Vec::<TranscriptMessage>::new(),
-                    focus_zone,
                     shell_active,
                     auto_approve: false,
                 };
                 draw_hint_bar(f, Rect::new(0, 0, 80, 1), view, &Theme::default());
             });
-            // The pill starts at column 0: `[ LABEL ]`. Walk the row and
-            // collect the bracketed region verbatim.
             let buf = terminal.buffer();
             let bw = buf.area().width as usize;
             for x in 0..bw {
@@ -681,36 +669,23 @@ mod tests {
                 captured.push_str(cell.symbol());
             }
             let trimmed = captured.trim_start();
-            let end = trimmed
-                .find(']')
-                .map(|i| i + 1)
-                .unwrap_or_else(|| trimmed.len().min(12));
-            trimmed[..end].trim().to_string()
+            // Only a `[…]` pill that begins the row counts; otherwise the left
+            // side is empty (the model label lives on the right).
+            if trimmed.starts_with('[') {
+                let end = trimmed.find(']').map(|i| i + 1).unwrap_or(trimmed.len());
+                trimmed[..end].trim().to_string()
+            } else {
+                String::new()
+            }
         }
 
         let mut terminal = neenee_tui::TestTerminal::new(80, 1);
         let _ = &messages;
 
-        // Compose zone, no `!` typed → COMPOSE.
-        assert_eq!(
-            pill_text(&mut terminal, crate::tui::input::FocusZone::Compose, false),
-            "[ COMPOSE ]"
-        );
-        // Compose zone, `!`-prefixed input → SHELL promotion.
-        assert_eq!(
-            pill_text(&mut terminal, crate::tui::input::FocusZone::Compose, true),
-            "[ SHELL ]"
-        );
-        // Browse zone always wins even if a stale `!` is in the box, so the
-        // pill does not flash a misleading SHELL while navigating.
-        assert_eq!(
-            pill_text(&mut terminal, crate::tui::input::FocusZone::Browse, true),
-            "[ BROWSE ]"
-        );
-        assert_eq!(
-            pill_text(&mut terminal, crate::tui::input::FocusZone::Browse, false),
-            "[ BROWSE ]"
-        );
+        // No `!` typed → no left pill at all (no compose/browse mode badge).
+        assert_eq!(pill_text(&mut terminal, false), "");
+        // `!`-prefixed input → SHELL pill.
+        assert_eq!(pill_text(&mut terminal, true), "[ SHELL ]");
         let _ = theme;
     }
 }

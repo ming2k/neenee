@@ -39,37 +39,44 @@ model of one agent turn.
    inside one round: declaration, gating, execution, and how outcomes
    re-enter the conversation. This is the structural map the rest of the
    canon is built on.
-3. [Pursuits](pursuits.md) — durable per-session objectives driven by the
+3. [Prompt and message assembly](prompt-assembly.md) — the integrating view of
+   what the model actually reads each turn: the system message recomposed from
+   live state, the user channel carrying genuine input alongside
+   harness-injected steering, tools declared through the native schema surface
+   rather than described in prose, and the provenance discipline that makes the
+   whole assembly auditable. Read after the structural map to see how every
+   mechanism below feeds the model's context.
+4. [Pursuits](pursuits.md) — durable per-session objectives driven by the
    `/pursue` stop-gate (within-turn continuation until the condition is met)
    and the `/repeat` cron scheduler. How the agent keeps working toward an
    objective across rounds and restarts.
-4. [Sub-agents](subagents.md) — the `subagent` tool's isolated child agent.
+5. [Sub-agents](subagents.md) — the `subagent` tool's isolated child agent.
    The reference for isolation: what is shared (the provider), what is fresh
    (history, pursuits, plan state), how events stream back through one
    pipeline, and how a profile admits tools by capability axis.
-5. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
+6. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
    tools. The reference for failure isolation and for how an extension surface
    reuses the same `Tool` trait and execution path as built-ins.
-6. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
+7. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
    to resolve ambiguity. The reference for the oneshot-channel blocking
    pattern the permission broker also uses.
-7. [Skills](skills.md) — on-demand domain expertise: the two-channel model
+8. [Skills](skills.md) — on-demand domain expertise: the two-channel model
    (catalog in the system prompt, body on demand), the source/priority
    cascade, and explicit versus implicit invocation. The reference for the
    extension surface that adds instructions rather than tools.
-8. [Lifecycle hooks](hooks.md) — user-configured actions that fire on the
-    agent's lifecycle events (tool call, turn end, session start, compaction).
-    One event axis with capability implied by the event; the reference for
-    the extension surface that adds practice (format, CI gates, context
-    injection) without touching the core loop.
+9. [Lifecycle hooks](hooks.md) — user-configured actions that fire on the
+   agent's lifecycle events (tool call, turn end, session start, compaction).
+   One event axis with capability implied by the event; the reference for
+   the extension surface that adds practice (format, CI gates, context
+   injection) without touching the core loop.
 
 The harness's [context-relief](harness.md#context-relief) section has two
 deep-dive references, read as a pair:
 
-10. [Context pruning](context-pruning.md) — the cheap, implicit first layer:
+12. [Context pruning](context-pruning.md) — the cheap, implicit first layer:
     clearing stale tool-result bodies while preserving the `tool_call_id`
     chain, gated at ~65% of the window, surfaced only as a `debug` trace.
-11. [Context compaction](context-compaction.md) — the heavier second layer:
+13. [Context compaction](context-compaction.md) — the heavier second layer:
     summarizing older complete turns into a durable checkpoint at ~85%, with
     a model-written anchored summary, deterministic fallback, and the visible
     `Compacted` notice.
@@ -81,6 +88,7 @@ to see how the canon fits together:
 
 ```text
 user message
+  └─ [Prompt]    assemble what the model reads: system message, tool schemas
   └─ [Harness] execute_turn: refresh system prompt (mode, pursuit, skills)
         └─ [Pursuits]  active pursuit injected into the prompt
        └─ [Hooks]     UserPromptSubmit: deny? / prepend context
