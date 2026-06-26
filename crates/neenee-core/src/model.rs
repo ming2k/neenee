@@ -52,6 +52,10 @@ pub struct Model {
     pub reasoning: bool,
     /// Whether the model supports native tool/function calling.
     pub tool_call: bool,
+    /// Whether the model supports vision (image inputs via `image_url`/
+    /// `inline_data`). When `false`, images attached to messages are
+    /// silently stripped before the request hits the wire.
+    pub vision: bool,
     /// Wire protocol used to reach this model. See [`WireFormat`].
     pub format: WireFormat,
 }
@@ -68,6 +72,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -77,6 +82,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 200_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -86,6 +92,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 200_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -95,6 +102,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 200_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     // ── Kimi (Moonshot / opencode-go) ─────────────────────────────────────
@@ -105,6 +113,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -114,6 +123,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -123,6 +133,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
@@ -133,6 +144,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 128_000,
         reasoning: false,
         tool_call: true,
+        vision: true,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -142,6 +154,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 128_000,
         reasoning: false,
         tool_call: true,
+        vision: true,
         format: WireFormat::OpenAiCompat,
     },
     // ── Gemini (Google) ────────────────────────────────────────────────────
@@ -152,6 +165,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: false,
         tool_call: true,
+        vision: true,
         format: WireFormat::Gemini,
     },
     Model {
@@ -161,6 +175,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: false,
         tool_call: true,
+        vision: true,
         format: WireFormat::Gemini,
     },
     // ── DeepSeek (opencode-go / direct) ────────────────────────────────────
@@ -171,6 +186,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -180,6 +196,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     // ── MiMo (Xiaomi / opencode-go, OpenAI format) ─────────────────────────
@@ -190,6 +207,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -199,6 +217,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_048_576,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -208,6 +227,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_048_576,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -217,6 +237,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     // ── MiniMax (opencode-go, Anthropic /messages format) ──────────────────
@@ -227,6 +248,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 512_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::Anthropic,
     },
     Model {
@@ -236,6 +258,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 204_800,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::Anthropic,
     },
     Model {
@@ -245,6 +268,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 204_800,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::Anthropic,
     },
     // ── Qwen (opencode-go, OpenAI /chat/completions format) ────────────────
@@ -258,6 +282,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -267,6 +292,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -276,6 +302,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 1_000_000,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
     Model {
@@ -285,6 +312,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         context_window: 262_144,
         reasoning: true,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     },
 ];
@@ -306,6 +334,7 @@ pub fn fallback_model(_id: &str) -> Model {
         context_window: 0,
         reasoning: false,
         tool_call: true,
+        vision: false,
         format: WireFormat::OpenAiCompat,
     }
 }

@@ -87,3 +87,47 @@ pub(super) const USER_MESSAGE_RIGHT_PAD_COLS: usize = 2;
 /// composer, mirroring the left prompt prefix so the box reads as a balanced
 /// panel.
 pub(super) const COMPOSER_RIGHT_PAD_COLS: usize = 2;
+
+// ── Modal overlays ───────────────────────────────────────────────────────
+// Every centered modal (Activity, Sessions, Provider, Help, …) goes through
+// `modal_frame`, which paints a borderless solid-bg panel and splits it into
+// header / body / footer. These tokens are the single source of truth for
+// spacing *inside* that panel, so every modal indents its content the same
+// way instead of hard-coding whitespace per file.
+
+/// Left/right padding between the panel edge and the header/body/footer.
+/// Applied once by `modal_frame` via `Margin { horizontal, .. }`; section
+/// content never adds its own outer gutter on top of this. Includes room for
+/// the scrollbar track (1 col) plus `SCROLLBAR_GAP` (1 col) on the right.
+pub(super) const MODAL_INNER_H_PADDING: u16 = 3;
+
+/// Empty columns between the body text's right edge and the scrollbar track.
+pub(super) const SCROLLBAR_GAP: u16 = 1;
+
+/// Top/bottom padding between the panel edge and the header/body/footer.
+/// Applied once by `modal_frame` via `Margin { vertical, .. }`.
+pub(super) const MODAL_INNER_V_PADDING: u16 = 1;
+
+/// Leading indent for body content (items, prose) under the header or a
+/// section label, so all sections align across every modal regardless of
+/// which overlay renders them. Added on top of `MODAL_INNER_H_PADDING`.
+pub(super) const MODAL_BODY_LEADING_INDENT: usize = 2;
+
+/// Columns between a header title and a trailing meta value shown beside it
+/// (e.g. the Todos `done/total` counter), so title + meta read as one line.
+pub(super) const MODAL_TITLE_META_GAP: usize = 2;
+
+// ── Left-bar panels (panel_block family) ─────────────────────────────────
+// `panel_block` is a borderless solid-bg panel with a single thick colored
+// left `┃` bar — the severity/identity cue shared by the tool-step detail
+// overlay and the permission sheet. These tokens size the content rect
+// inside it, the left-bar-panel family's counterpart to `modal_frame`'s
+// `MODAL_INNER_H_PADDING` (which insets the borderless modal family).
+
+/// Per-side horizontal inset of `panel_block` content: the thick left `┃`
+/// bar occupies 1 column, and a matching 1-column gutter is reserved on the
+/// right so the panel's content is symmetric and a long line never runs
+/// into either edge. Applied as a symmetric margin by `panel_inner`. The
+/// permission sheet deliberately layers its own `PERMISSION_H_PADDING` on
+/// top for button breathing room, so it computes its own content rect.
+pub(super) const PANEL_BAR_INSET: u16 = 1;

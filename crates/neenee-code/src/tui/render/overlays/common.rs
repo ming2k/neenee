@@ -128,6 +128,11 @@ pub(crate) fn placeholder(message: &str, loaded: bool, muted: Color) -> Line<'st
 /// Build a selectable list row: `▣ name  hint` with the selected row taking
 /// the brand background. `state_on`/`state_off` label the enabled state shown
 /// at the row's right edge; an empty `state_off` hides the badge entirely.
+///
+/// `max_width` caps the total row width (in display columns). When > 0 the
+/// `name` is truncated with `…` so the full row fits within that budget,
+/// leaving room for the mark, hint, and state badge. Pass 0 to disable
+/// truncation (legacy behaviour).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn selectable_row(
     i: usize,
@@ -137,6 +142,7 @@ pub(crate) fn selectable_row(
     enabled: bool,
     state_on: &str,
     state_off: &str,
+    max_width: usize,
     theme: &Theme,
 ) -> Line<'static> {
     let is_selected = i == selected;
@@ -157,9 +163,25 @@ pub(crate) fn selectable_row(
     };
     let mark = if enabled { "●" } else { "○" };
     let state = if enabled { state_on } else { state_off };
+
+    // Compute the fixed overhead (everything except `name`) so we can truncate
+    // the name to fit within `max_width`.
+    let mut overhead = 2; // mark + space
+    if !hint.is_empty() {
+        overhead += 2 + hint.width();
+    }
+    if !state.is_empty() {
+        overhead += 4 + state.width(); // "  [" + state + "]"
+    }
+    let name_text = if max_width > 0 {
+        truncate_ellipsis(name, max_width.saturating_sub(overhead).max(1))
+    } else {
+        name.to_string()
+    };
+
     let mut spans = vec![
         Span::styled(format!("{} ", mark), Style::default().bg(bg).fg(fg)),
-        Span::styled(name.to_string(), Style::default().bg(bg).fg(fg)),
+        Span::styled(name_text, Style::default().bg(bg).fg(fg)),
     ];
     if !hint.is_empty() {
         spans.push(Span::styled(

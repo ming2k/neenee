@@ -778,7 +778,9 @@ impl SessionStore {
         state.data.messages.extend(delta.clone());
         state.data.updated_at = unix_timestamp();
         ensure_event_log_started(&state.event_log, &state.data)?;
-        state.event_log.append(SessionEvent::MessagesAppended { messages: delta })?;
+        state
+            .event_log
+            .append(SessionEvent::MessagesAppended { messages: delta })?;
         Ok(())
     }
 
@@ -2602,8 +2604,8 @@ mod tests {
         // new tail as a `MessagesAppended` event, and a fresh `SessionStore`
         // at the same path must replay it to recover the full history. This
         // is the resume-after-crash contract — the whole point of the feature.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-append-round-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-append-round-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
 
@@ -2653,8 +2655,8 @@ mod tests {
         // Passing a history no longer than the durable baseline (e.g. right
         // after a compaction rewrote the window via `replace_messages`) must
         // not corrupt anything or write a spurious event.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-append-noop-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-append-noop-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         let messages = vec![Message::new(neenee_core::Role::User, "hi")];
@@ -2672,8 +2674,8 @@ mod tests {
         // If the incoming prefix disagrees with the durable state (a bug or a
         // compaction that bypassed `replace_messages`), `append_round` must
         // fall back to a full replace rather than splice a corrupt tail.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-append-diverge-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-append-diverge-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store

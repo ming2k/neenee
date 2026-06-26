@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/neenee-v2.png" alt="neenee logo" width="256">
+  <img src="./assets/logo.png" alt="neenee logo" width="256">
 </p>
 
 <h1 align="center">neenee</h1>
@@ -19,7 +19,7 @@
 
 ## Features
 
-- **Semantic TUI** — Ratatui-based interface with live status, expandable tool steps, and structured diffs.
+- **Semantic TUI** — In-house grid + diff rendering engine (`neenee-tui`), built from scratch to replace ratatui. Retained-mode grid with write-marks-dirty diff, wide-glyph ownership, and `bce`-aware crossterm backend. Live status, expandable tool steps, and structured diffs.
 - **Tool Use** — Full ReAct loop with native and fallback tool-calling; bash, file I/O, grep, glob, web search, and MCP servers.
 - **Autonomous Pursuits** — Set a pursuit with `/pursue <condition>` and the harness keeps the turn going (a stop-gate) until the condition is met. Schedule recurring prompts on a clock with `/repeat`.
 - **Durable Sessions** — Atomic persistence with compaction, resume, and fork.

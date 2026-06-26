@@ -133,7 +133,11 @@ impl<W: io::Write> Terminal<W> {
         self.back.resize(width, height);
         self.front = Grid::new(width, height);
         self.back.mark_all_dirty();
-        self.backend.invalidate();
+        // Best-effort: a resize must reconcile our SGR tracker with the real
+        // terminal. If the write fails we still proceed — the next frame's
+        // full repaint is the fallback and worst case is a transient style
+        // glitch, not a hang.
+        let _ = self.backend.invalidate();
     }
 
     /// Run the app's draw closure against a fresh frame, then diff → render
@@ -148,7 +152,11 @@ impl<W: io::Write> Terminal<W> {
                 self.back.resize(w, h);
                 self.front = Grid::new(w, h);
                 self.back.mark_all_dirty();
-                self.backend.invalidate();
+                // Reconcile the SGR tracker with the real terminal on resize.
+                // `invalidate` emits a real `\x1b[0m`; a failure here only
+                // risks a transient style glitch on the next frame, so we
+                // swallow it rather than aborting the draw.
+                let _ = self.backend.invalidate();
             }
         }
         {

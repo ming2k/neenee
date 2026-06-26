@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/neenee-v2.png" alt="neenee logo" width="256">
+  <img src="./assets/logo.png" alt="neenee logo" width="256">
 </p>
 
 <h1 align="center">妮妮</h1>
@@ -19,7 +19,7 @@
 
 ## 特性
 
-- **语义化终端界面** — 基于 Ratatui，支持实时状态、可展开的工具步骤、结构化 diff 展示。
+- **语义化终端界面** — 自研网格+差分渲染引擎（`neenee-tui`），从零构建以替代 ratatui。保留模式网格、写时脏标记差分、宽字符所有权管理、`bce` 感知的 crossterm 后端。支持实时状态、可展开的工具步骤、结构化 diff 展示。
 - **工具调用** — 完整的 ReAct 循环，支持原生与文本回退两种工具调用协议；内置 bash、文件读写、grep、glob、网页搜索及 MCP 服务器。
 - **自治追踪** — 用 `/pursue <条件>` 设定追踪目标，代理会在同一轮对话内持续工作（停止闸门）直到条件满足；用 `/repeat <cron> <提示>` 按时钟调度周期性提示。
 - **持久会话** — 原子写入、上下文压缩、会话恢复与分叉。

@@ -18,6 +18,7 @@ pub mod layout;
 pub mod providers;
 pub mod question_model;
 pub mod render;
+pub mod interaction;
 pub mod selection;
 pub mod step_interaction;
 mod terminal;
@@ -815,6 +816,7 @@ pub async fn run_tui(
         modal_index: 0,
         session_tab: SessionTab::Model,
         session_scroll: 0,
+        permissions_scroll: 0,
         current_provider: initial_provider,
         current_model: initial_model,
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),

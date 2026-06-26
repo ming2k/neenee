@@ -120,7 +120,10 @@ impl SessionRegistry {
     /// `broadcast::Sender` (multi-subscriber) rather than an `mpsc::Sender`
     /// (single-consumer). The harness fields and dispatch match arms are
     /// already TUI-free.
-    pub async fn create_session(&self, _resume: Option<&str>) -> Result<Arc<SessionHandle>, String> {
+    pub async fn create_session(
+        &self,
+        _resume: Option<&str>,
+    ) -> Result<Arc<SessionHandle>, String> {
         // TODO(server-move): port agent_loop::Harness + run into this crate.
         // The shape is:
         //   1. let session = Arc::new(SessionStore::load_for_project(...));

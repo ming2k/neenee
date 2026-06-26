@@ -392,8 +392,8 @@ mod tests {
     #[test]
     fn put_writes_wide_glyph_with_continuation() {
         let mut g = Grid::new(6, 1);
-        g.put(0, 0, Fit::Clip, Style::default(), "中a");
-        assert_eq!(g.get(0, 0).unwrap().symbol, "中");
+        g.put(0, 0, Fit::Clip, Style::default(), "😀a");
+        assert_eq!(g.get(0, 0).unwrap().symbol, "😀");
         assert_eq!(g.get(0, 0).unwrap().width, 2);
         // Trailing continuation cell: width 0, same (default) bg.
         assert!(g.get(1, 0).unwrap().is_wide_continuation());

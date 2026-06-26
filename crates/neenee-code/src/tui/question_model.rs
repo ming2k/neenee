@@ -794,12 +794,12 @@ mod tests {
 
     #[test]
     fn two_question_reply_carries_one_array_per_question() {
-        // Change q1's selection (second question) and submit; both answers
-        // are present in the reply, in question order.
+        // Open a two-question request and submit without changing selections:
+        // both single-select questions keep their default first option.
+        // The reply carries one answer array per question, in question order.
         let m = QuestionModel::open(two_question_req());
-        let m = m.update(QuestionAction::Select(2)).0; // q0 default selection kept
         let (_, eff) = m.update(QuestionAction::Submit);
-        // q0 single-select keeps default [x]; q1 single-select defaults [y].
+        // q0 single-select defaults [x]; q1 single-select defaults [y].
         assert_eq!(
             eff,
             vec![

@@ -85,9 +85,15 @@ pub enum Modal {
     /// holds the overlay's own scroll offset.
     ToolStepDetail,
     /// Session context modal: a tabbed overview of the live session's model,
-    /// MCP servers, permissions, tools, and skills. Opened with the `/session`
-    /// slash command; the active pane is [`App::session_tab`].
+    /// MCP servers, tools, and skills. Opened with the `/session` slash
+    /// command; the active pane is [`App::session_tab`].
     Session,
+    /// Permissions manager modal: a centered, dismissable overlay listing the
+    /// session's cached "always allow" rules with per-row revoke and a
+    /// clear-all action. Opened with the `/permissions` slash command. This
+    /// is the management surface — distinct from [`Modal::Permission`] (the
+    /// inline real-time approval sheet).
+    Permissions,
     /// Activity overview: the current pursuit (objective + checklist), the live
     /// plan-progress breakdown, and the running turn/round/model/elapsed/
     /// status. Opened by clicking the activity bar. The body scrolls via
@@ -152,6 +158,7 @@ impl Modal {
                 | Modal::ToolStepDetail
                 | Modal::Session
                 | Modal::Sessions
+                | Modal::Permissions
                 | Modal::Activity
         )
     }
@@ -164,18 +171,16 @@ pub enum SessionTab {
     Model,
     Mcp,
     Skills,
-    Permissions,
     Tools,
 }
 
 impl SessionTab {
     /// All panes in tab-strip order. Used by the renderer to build the strip
     /// and by the Left/Right cycle to step through them.
-    pub const ALL: [SessionTab; 5] = [
+    pub const ALL: [SessionTab; 4] = [
         SessionTab::Model,
         SessionTab::Mcp,
         SessionTab::Skills,
-        SessionTab::Permissions,
         SessionTab::Tools,
     ];
 
@@ -185,7 +190,6 @@ impl SessionTab {
             SessionTab::Model => "Model",
             SessionTab::Mcp => "MCP",
             SessionTab::Skills => "Skills",
-            SessionTab::Permissions => "Permissions",
             SessionTab::Tools => "Tools",
         }
     }
@@ -318,6 +322,10 @@ pub struct App {
     /// open and tab change. Clamped (and, for list panes, auto-followed to the
     /// selection) by the renderer each frame.
     pub session_scroll: usize,
+    /// Body scroll offset of the permissions manager modal. Reset to 0 each
+    /// time the modal opens; clamped and auto-followed to the selection by the
+    /// renderer each frame.
+    pub permissions_scroll: usize,
     pub current_provider: String,
     pub current_model: String,
     /// Raw current working directory captured at startup. Used to resolve
@@ -560,6 +568,11 @@ impl App {
         // Clear the history cursor so a subsequent ↓ returns to an empty
         // input rather than to the now-stale history entry.
         self.history_index = None;
+        // Programmatic input replacement, like history navigation: latch the
+        // completion dismissal so a recalled slash command doesn't re-open its
+        // popup until the next real edit (InsertChar/Backspace clears it).
+        self.suggestion_index = None;
+        self.completion_dismissed = true;
         true
     }
 
@@ -890,7 +903,6 @@ impl App {
         };
         match self.session_tab {
             SessionTab::Skills => snapshot.skills.len(),
-            SessionTab::Permissions => snapshot.permissions.len(),
             SessionTab::Tools => snapshot.tools.len(),
             SessionTab::Model | SessionTab::Mcp => 0,
         }
@@ -902,13 +914,6 @@ impl App {
     pub fn session_activate_request(&self) -> Option<AgentRequest> {
         let snapshot = self.session_context.as_ref()?;
         match self.session_tab {
-            SessionTab::Permissions => {
-                let rule = snapshot.permissions.get(self.modal_index)?;
-                Some(AgentRequest::RevokePermission {
-                    tool: rule.tool.clone(),
-                    scope: rule.scope.clone(),
-                })
-            }
             SessionTab::Tools => {
                 let tool = snapshot.tools.get(self.modal_index)?;
                 Some(AgentRequest::ToggleTool {

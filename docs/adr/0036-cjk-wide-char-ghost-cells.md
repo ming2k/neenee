@@ -1,6 +1,8 @@
 # 0036. Heal CJK wide-character "ghost" cells with a whole-row re-emitting backend
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0038 (the in-house grid engine owns wide-glyph
+  trailing cells at write time, so the third-buffer wrapper this ADR
+  introduced is deleted; `ratatui` is removed from the workspace)
 - **Date:** 2026-06-26
 
 ## Context

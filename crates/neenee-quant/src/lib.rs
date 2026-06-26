@@ -17,7 +17,7 @@
 //! self-register: a coding agent should never see a `place_order` tool in its
 //! schema list, and a quant agent should never see `write_file`. Mixing them
 //! would bloat the model's context and invite wrong-domain calls (exactly the
-//! "tools 分配应该不同,不要搞混" requirement).
+//! "separate tool allocation per role" requirement).
 //!
 //! Instead, each tool is exposed as a plain struct with a constructor
 //! ([`MarketDataTool::new`], …). The quant application instantiates exactly
@@ -26,13 +26,13 @@
 //! [`QUANT`](neenee_core::QUANT) profile for the matching admission policy for
 //! quant sub-agents.
 
-pub mod market_data;
 pub mod backtest;
+pub mod market_data;
 pub mod orders;
 
-pub use market_data::MarketDataTool;
 pub use backtest::BacktestTool;
-pub use orders::{PlaceOrderTool, ListPositionsTool};
+pub use market_data::MarketDataTool;
+pub use orders::{ListPositionsTool, PlaceOrderTool};
 
 /// Every quant tool, constructed with defaults. A convenience for a binary
 /// assembling a quant agent: `neenee_quant::default_tools()` returns the full

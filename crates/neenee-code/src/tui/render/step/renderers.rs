@@ -110,6 +110,7 @@ impl<'a, 'f: 'a> RenderCtx<'a, 'f> {
         block_idx: usize,
         wl: &WrappedLine,
         prefix_cols: u16,
+        hidden_ranges: &[(usize, usize)],
     ) {
         if let Some(rect) = self.paint(line) {
             self.layout_map.push(BlockRegion {
@@ -120,6 +121,7 @@ impl<'a, 'f: 'a> RenderCtx<'a, 'f> {
                 text: wl.text.clone(),
                 prefix_cols,
                 rect,
+                hidden_ranges: hidden_ranges.to_vec(),
             });
         }
     }
@@ -215,6 +217,7 @@ fn draw_step_summary(
             text: String::new(),
             prefix_cols: 0,
             rect,
+            hidden_ranges: Vec::new(),
         });
     }
 
@@ -300,7 +303,7 @@ fn draw_code_content(
                 ctx.theme.selected(),
                 ctx.full_width,
             );
-            ctx.paint_text_row(line, mi, block_idx, &block_wl, gutter_indent as u16);
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, gutter_indent as u16, &[]);
         }
     }
 }
@@ -353,7 +356,7 @@ fn draw_listing_content(
             let used = indent + wl.text.width();
             line.spans
                 .push(Span::styled(padded_tail(ctx.full_width, used), pad));
-            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16, &[]);
         }
     }
 }
@@ -439,7 +442,7 @@ fn emit_simple_rows(
         let used = indent + wl.text.width();
         line.spans
             .push(Span::styled(padded_tail(ctx.full_width, used), pad));
-        ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
+        ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16, &[]);
     }
 }
 
@@ -553,6 +556,7 @@ fn draw_grep_content(
                         block_idx,
                         &block_wl,
                         content_cols as u16,
+                        &[],
                     );
                 }
             }
@@ -784,7 +788,7 @@ fn emit_bash_lines(
             let used = indent + wl.text.width();
             line.spans
                 .push(Span::styled(padded_tail(ctx.full_width, used), pad));
-            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16);
+            ctx.paint_text_row(line, mi, block_idx, &block_wl, indent as u16, &[]);
         }
         byte_offset += logical_line.len() + 1;
     }
@@ -825,16 +829,22 @@ fn draw_tool_result(
             );
         }
         ResultKind::Code => {
-            // Prefer the structured payload: its `text` is pure file content
+            // Prefer the structured payload: `Code::text` is pure file content
             // (the model-facing `prefix`/`suffix` framing is ignored here) and
             // `start_line` carries the read `offset` so an offset snippet
-            // numbers from its true file line. Legacy/restored steps without a
-            // payload fall back to the flattened `output` string with
-            // `start_line = 0` (slice-relative 1-based numbering).
+            // numbers from its true file line. `Patch::new` handles the
+            // `write_file` case: a full-file write rendered as a simple code
+            // block with line numbers (no diff gutter — there is no "old" side).
+            // Legacy/restored steps without a payload fall back to the
+            // flattened `output` string with `start_line = 0` (slice-relative
+            // 1-based numbering).
             let (content, start_line) = match structured {
                 Some(neenee_core::ToolOutput::Code {
                     text, start_line, ..
                 }) => (text.as_str(), *start_line),
+                Some(neenee_core::ToolOutput::Patch {
+                    new, start_line, ..
+                }) => (new.as_str(), *start_line),
                 _ => (output, 0),
             };
             draw_code_content(
@@ -884,19 +894,26 @@ fn bash_command_for(structured: Option<&neenee_core::ToolOutput>, arguments: &st
 }
 
 /// Render a red/green line diff inside an expanded edit/write step. Each
-/// [`DiffLine`] is a row in the `code_bg` block: a colored `+`/`-`/` ` sign
-/// gutter then the (wrapped) line text. The diff is a derived view of the
-/// tool's arguments, so rows aren't registered for text selection.
+/// [`DiffLine`] is a row in the `code_bg` block: dual-column line numbers
+/// (old | new, GitHub-style), a colored `+`/`-`/` ` sign, then the
+/// (wrapped) line text. Ellipsis rows centre a `⋮` across both gutter
+/// columns and show a `@@ -N,M +P,Q @@` hunk-range header in the text area
+/// (theme‑info colour). The diff is a derived view of the tool's arguments,
+/// so rows aren't registered for text selection.
 fn draw_diff_content(
     ctx: &mut RenderCtx<'_, '_>,
     diff: &[DiffLine],
     indent: usize,
     inner_w: usize,
 ) {
+    let n = diff.len();
+    if n == 0 {
+        return;
+    }
     let code_bg = ctx.theme.code_bg;
     let gutter_fg = ctx.theme.muted();
-    // Gutter width from the widest 1-based line number, min 2 so single-digit
-    // files still align with a leading space.
+    // Each number column is at least 2 chars wide so single-digit files
+    // align cleanly (GitHub-style: right-aligned old_no | new_no).
     let max_no = diff
         .iter()
         .filter_map(|l| l.old_no.or(l.new_no))
@@ -904,7 +921,9 @@ fn draw_diff_content(
         .unwrap_or(0);
     let gutter_w = max_no.to_string().len().max(2);
     let sign_w = 2usize; // "+ " / "- " / "  "
-    let text_w = inner_w.saturating_sub(gutter_w + 1 + sign_w).max(1);
+    // Dual gutter: old_no(right, gutter_w) + " " + new_no(right, gutter_w).
+    let gutter_cols = 2 * gutter_w + 1;
+    let text_w = inner_w.saturating_sub(gutter_cols + sign_w).max(1);
     // opencode-style banding: the whole row carries a low-chroma tint so
     // added/removed blocks read at a glance, and the exact edited word sits
     // on a brighter tint on top of the row band. Context rows stay on the
@@ -913,35 +932,69 @@ fn draw_diff_content(
     let del_row_bg = Color::Rgb(32, 20, 20);
     let add_hi_bg = Color::Rgb(42, 64, 48);
     let del_hi_bg = Color::Rgb(64, 40, 40);
+    let info_fg = ctx.theme.info();
 
-    for line in diff {
-        let (sign, row_bg, base_fg, hi_bg) = match line.op {
-            DiffOp::Add => ('+', add_row_bg, ctx.theme.ok(), add_hi_bg),
-            DiffOp::Remove => ('-', del_row_bg, ctx.theme.err(), del_hi_bg),
-            DiffOp::Context => (' ', code_bg, ctx.theme.muted(), code_bg),
-            DiffOp::Ellipsis => (' ', code_bg, ctx.theme.muted(), code_bg),
-        };
-        let pad = Style::default().bg(row_bg);
-        let gutter = if line.op == DiffOp::Ellipsis {
-            format!("{:>width$} ", "⋯", width = gutter_w)
-        } else {
-            let no = line.old_no.or(line.new_no).unwrap_or(0);
-            format!("{:>width$} ", no, width = gutter_w)
-        };
+    let mut idx = 0usize;
+    while idx < n {
+        let line = &diff[idx];
 
-        // Ellipsis rows: just the marker, no text or word highlighting.
         if line.op == DiffOp::Ellipsis {
+            // ── hunk-range ellipsis row ──
+            //
+            // Gutter: "⋮" centered across the combined (old | new) space.
+            // Text area: `@@ -prev_old+1,old_cnt +prev_new+1,new_cnt @@`
+            // in the muted info colour.
+
+            // Resolve the boundary line numbers from the neighbours.
+            let next_old = (idx + 1 < n).then(|| &diff[idx + 1]).and_then(|l| l.old_no);
+            let next_new = (idx + 1 < n).then(|| &diff[idx + 1]).and_then(|l| l.new_no);
+
+            // Count how many old/new lines belong to the next change group
+            // (the run from `idx+1` to the next Ellipsis or end). We count
+            // Context+Remove/Add lines for old/new respectively.
+            let (old_cnt, new_cnt) = hunk_size_after(&diff[idx + 1..]);
+
+            // Build the `@@ -old_start,old_cnt +new_start,new_cnt @@` header.
+            let hunk_header = match (next_old, next_new) {
+                (Some(no), Some(nn)) => {
+                    format!("@@ -{},{} +{},{} @@", no, old_cnt, nn, new_cnt)
+                }
+                (Some(no), None) => format!("@@ -{},{} @@", no, old_cnt),
+                (None, Some(nn)) => format!("@@ +{},{} @@", nn, new_cnt),
+                (None, None) => String::new(),
+            };
+
+            // Build the gutter: "⋮" centred across `gutter_cols` cells.
+            let centre = "⋮";
+            // Render the gutter as a single Span of width `gutter_cols`.
+            // `centre` is 1 char (width 1), so pad left/right with spaces.
+            let left_pad = (gutter_cols.saturating_sub(1)) / 2;
+            let right_pad = gutter_cols.saturating_sub(1) - left_pad;
+            let centre_gutter = format!(
+                "{}{}{}",
+                " ".repeat(left_pad),
+                centre,
+                " ".repeat(right_pad),
+            );
+
+            let pad = Style::default().bg(code_bg);
+            let hh_len = hunk_header.len();
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(" ".repeat(indent), pad),
-                Span::styled(gutter, Style::default().bg(row_bg).fg(gutter_fg)),
-                Span::styled("  ", Style::default().bg(row_bg)),
-                Span::styled("⋯", Style::default().bg(row_bg).fg(gutter_fg)),
+                Span::styled(centre_gutter, Style::default().bg(code_bg).fg(gutter_fg)),
+                Span::styled("  ", Style::default().bg(code_bg)),
+                Span::styled(hunk_header, Style::default().bg(code_bg).fg(info_fg)),
             ];
-            let used = indent + gutter_w + 1 + sign_w + 1;
-            spans.push(Span::styled(padded_tail(ctx.full_width, used), pad));
+            let used = indent + gutter_cols + sign_w + hh_len;
+            spans.push(Span::styled(
+                padded_tail(ctx.full_width, used),
+                Style::default().bg(code_bg),
+            ));
+
             *ctx.content_lines += 1;
             if *ctx.skip_rows > 0 {
                 *ctx.skip_rows = ctx.skip_rows.saturating_sub(1);
+                idx += 1;
                 continue;
             }
             if *ctx.y >= ctx.area.y + ctx.area.height {
@@ -951,34 +1004,69 @@ fn draw_diff_content(
             ctx.frame
                 .render_widget(Paragraph::new(Line::from(spans)), line_rect);
             *ctx.y += 1;
+            idx += 1;
             continue;
         }
 
+        let (sign, row_bg, base_fg, hi_bg) = match line.op {
+            DiffOp::Add => ('+', add_row_bg, ctx.theme.ok(), add_hi_bg),
+            DiffOp::Remove => ('-', del_row_bg, ctx.theme.err(), del_hi_bg),
+            DiffOp::Context => (' ', code_bg, ctx.theme.muted(), code_bg),
+            DiffOp::Ellipsis => unreachable!(),
+        };
+        let pad = Style::default().bg(row_bg);
+
         let full = line.text();
         let wrapped = nonempty_wrapped(wrap_text(&full, text_w));
-        // Word-level highlighting only fits cleanly on a single rendered row;
-        // wrapped (overflowing) lines fall back to plain base-color rows.
         let highlight_frags = wrapped.len() <= 1;
 
+        let (first_old, first_new) = match line.op {
+            DiffOp::Context => (
+                fmt_no(line.old_no, gutter_w),
+                fmt_no(line.new_no, gutter_w),
+            ),
+            DiffOp::Remove => (
+                fmt_no(line.old_no, gutter_w),
+                fmt_no(None, gutter_w),
+            ),
+            DiffOp::Add => (
+                fmt_no(None, gutter_w),
+                fmt_no(line.new_no, gutter_w),
+            ),
+            DiffOp::Ellipsis => unreachable!(),
+        };
+        let blank_col = fmt_no(None, gutter_w);
+
         for (i, wl) in wrapped.iter().enumerate() {
+            let is_cont = i > 0;
+            let (old_col, new_col) = if is_cont {
+                (&blank_col, &blank_col)
+            } else {
+                (&first_old, &first_new)
+            };
+            let sign_text = if is_cont {
+                "  "
+            } else {
+                match sign {
+                    '+' => "+ ",
+                    '-' => "- ",
+                    _ => "  ",
+                }
+            };
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(" ".repeat(indent), pad),
-                Span::styled(gutter.clone(), Style::default().bg(row_bg).fg(gutter_fg)),
+                Span::styled(old_col.clone(), Style::default().bg(row_bg).fg(gutter_fg)),
+                Span::styled(" ", Style::default().bg(row_bg)),
+                Span::styled(new_col.clone(), Style::default().bg(row_bg).fg(gutter_fg)),
                 Span::styled(
-                    if i == 0 {
-                        format!("{} ", sign)
-                    } else {
-                        "  ".to_string()
-                    },
-                    // The +/- sign carries the row's accent color and weight so
-                    // the op reads from the gutter even without the row tint.
+                    sign_text,
                     Style::default()
                         .bg(row_bg)
                         .fg(base_fg)
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            if highlight_frags && i == 0 {
+            if highlight_frags && !is_cont {
                 for frag in &line.frags {
                     let style = if frag.changed {
                         Style::default()
@@ -988,7 +1076,8 @@ fn draw_diff_content(
                     } else {
                         Style::default().bg(row_bg).fg(base_fg)
                     };
-                    spans.push(Span::styled(frag.text.clone(), style));
+                    let frag_text = frag.text.trim_end_matches('\n');
+                    spans.push(Span::styled(frag_text.to_string(), style));
                 }
             } else {
                 spans.push(Span::styled(
@@ -996,11 +1085,9 @@ fn draw_diff_content(
                     Style::default().bg(row_bg).fg(base_fg),
                 ));
             }
-            let used = indent + gutter_w + 1 + sign_w + wl.text.width();
+            let used = indent + gutter_cols + sign_w + wl.text.width();
             spans.push(Span::styled(padded_tail(ctx.full_width, used), pad));
             let row = Line::from(spans);
-            // Diff counts per-row and breaks on clip (distinct from the
-            // bulk-counted content renderers), preserved verbatim.
             *ctx.content_lines += 1;
             if *ctx.skip_rows > 0 {
                 *ctx.skip_rows = ctx.skip_rows.saturating_sub(1);
@@ -1013,6 +1100,37 @@ fn draw_diff_content(
             ctx.frame.render_widget(Paragraph::new(row), line_rect);
             *ctx.y += 1;
         }
+        idx += 1;
+    }
+}
+
+/// Count the old/new line contributions of the **first change group** in
+/// `lines`.  The group runs from index 0 up to (but not including) the next
+/// [`DiffOp::Ellipsis`] or the end of the slice.  Returns `(old_cnt, new_cnt)`
+/// where each count includes context and change lines on that side.
+fn hunk_size_after(lines: &[DiffLine]) -> (usize, usize) {
+    let mut old = 0usize;
+    let mut new = 0usize;
+    for l in lines {
+        if l.op == DiffOp::Ellipsis {
+            break;
+        }
+        if l.old_no.is_some() {
+            old += 1;
+        }
+        if l.new_no.is_some() {
+            new += 1;
+        }
+    }
+    (old, new)
+}
+
+/// Format an optional line number as a right-aligned, `width`-wide string.
+/// `None` yields `width` spaces.
+fn fmt_no(no: Option<usize>, width: usize) -> String {
+    match no {
+        Some(n) => format!("{:>width$}", n, width = width),
+        None => format!("{:>width$}", "", width = width),
     }
 }
 
@@ -1094,6 +1212,7 @@ pub fn draw_subagent_inline_step(
             text: String::new(),
             prefix_cols: 0,
             rect,
+            hidden_ranges: Vec::new(),
         });
     }
 
@@ -1120,6 +1239,7 @@ pub fn draw_subagent_inline_step(
                     text: String::new(),
                     prefix_cols: 0,
                     rect,
+                    hidden_ranges: Vec::new(),
                 });
             }
         }
@@ -1612,6 +1732,7 @@ fn draw_reasoning_summary(
             text: String::new(),
             prefix_cols: TRANSCRIPT_H_INSET,
             rect,
+            hidden_ranges: Vec::new(),
         });
     }
 
@@ -1706,6 +1827,7 @@ pub fn draw_reasoning_trace(
             if let Block::Text {
                 content,
                 code_ranges,
+                bold_ranges,
             } = block
             {
                 if emitted_any_block {
@@ -1743,10 +1865,11 @@ pub fn draw_reasoning_trace(
                         wl.start_byte,
                         line_selection(sel_range, &block_wl),
                         code_ranges,
+                        bold_ranges,
                         Style::default().fg(ctx.theme.muted()),
-                        ctx.theme.code_text(),
                         ctx.theme.body(),
                         ctx.theme.selected(),
+                        ctx.theme.code_text(),
                     );
                     let used = (TRANSCRIPT_BODY_PREFIX_COLS as usize) + wl.text.width();
                     let mut line = line;
@@ -1754,7 +1877,7 @@ pub fn draw_reasoning_trace(
                         padded_tail(ctx.full_width, used),
                         Style::default(),
                     ));
-                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_PREFIX_COLS);
+                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_PREFIX_COLS, &[]);
                 }
             }
         }

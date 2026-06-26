@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn wide_glyph_head_emitted_continuation_skipped() {
         let mut back = grid("", 6, 1);
-        back.put(0, 0, crate::grid::Fit::Clip, Style::default(), "中a");
+        back.put(0, 0, crate::grid::Fit::Clip, Style::default(), "😀a");
         let front = Grid::new(6, 1);
 
         let cmd = diff(&back, &front);
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(cmd.draws.len(), 1);
         match &cmd.draws[0] {
             Draw::Cells { cells, .. } => {
-                assert_eq!(cells[0], ("中".to_string(), 2));
+                assert_eq!(cells[0], ("😀".to_string(), 2));
                 assert_eq!(cells[1], ("a".to_string(), 1));
                 assert_eq!(cells.len(), 2);
             }

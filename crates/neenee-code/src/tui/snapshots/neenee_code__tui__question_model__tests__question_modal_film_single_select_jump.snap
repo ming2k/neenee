@@ -7,25 +7,25 @@ expression: film
 
 
 
-         Question
+          Question
 
-         Style
-         Which error handling crate?
+          Style
+          Which error handling crate?
 
-           ● anyhow                                    ▼
+            ● anyhow
 
-         ↑↓ navigate · Space select · Enter submit · 1-9 jump ·
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump ·
 
 === down + space → select 'thiserror' ===
 
 
 
 
-         Question
+          Question
 
-                                                       ▲
-           ○ anyhow
-              Simple
-           ● thiserror                                 ▼
+          Style
+          Which error handling crate?
 
-         ↑↓ navigate · Space select · Enter submit · 1-9 jump ·
+            ● thiserror
+
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump ·

@@ -16,8 +16,8 @@ use super::design::{
 };
 use super::markdown_table::{build_table_render, push_table_segment};
 use super::text_layout::{
-    WrappedLine, block_selection_range, code_gutter_line, line_selection, line_spans_rich,
-    padded_tail, wrap_text,
+    WrappedLine, block_selection_range, bold_delim_local_ranges, code_gutter_line,
+    line_selection, line_spans_rich, padded_tail, visible_width, wrap_text,
 };
 use super::{TRANSCRIPT_BODY_PREFIX_COLS, TRANSCRIPT_BODY_RIGHT_INSET, Theme};
 
@@ -57,6 +57,7 @@ pub(super) fn draw_message_body(
             Block::Text {
                 content,
                 code_ranges,
+                bold_ranges,
             } => {
                 let is_user = msg.role == neenee_core::Role::User;
                 let is_queued = is_user && msg.delivery == DeliveryStatus::Queued;
@@ -240,6 +241,7 @@ pub(super) fn draw_message_body(
                             wl.start_byte,
                             line_selection(sel_range, wl),
                             code_ranges,
+                            bold_ranges,
                             base,
                             theme.code_text(),
                             theme.body(),
@@ -257,6 +259,11 @@ pub(super) fn draw_message_body(
                         } else {
                             TRANSCRIPT_BODY_PREFIX_COLS
                         };
+                        let hidden_ranges = if is_user {
+                            Vec::new()
+                        } else {
+                            bold_delim_local_ranges(&wl.text, wl.start_byte, bold_ranges)
+                        };
                         layout_map.push(BlockRegion {
                             message_idx: mi,
                             block_idx: bi,
@@ -265,6 +272,7 @@ pub(super) fn draw_message_body(
                             text: wl.text.clone(),
                             prefix_cols,
                             rect: line_rect,
+                            hidden_ranges,
                         });
                     }
 
@@ -394,7 +402,14 @@ pub(super) fn draw_message_body(
                     // heavier than the sparse horizontal rules.
                     if let Some(info) = row_info {
                         let mut pos = 0usize;
-                        for &(lo, hi) in &info.col_spans {
+                        for i in 0..ncols.min(info.col_spans.len()) {
+                            let (lo, hi) = info.col_spans[i];
+                            let (clo, chi) = info.col_content_spans.get(i).copied().unwrap_or((lo, hi));
+                            let offset = info.col_offsets.get(i).copied().unwrap_or(0);
+                            let code_ranges = info.col_code_ranges.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                            let bold_ranges = info.col_bold_ranges.get(i).map(Vec::as_slice).unwrap_or(&[]);
+
+                            // Border / inter-cell separator before this cell
                             if lo > pos {
                                 push_table_segment(
                                     &mut spans,
@@ -406,15 +421,64 @@ pub(super) fn draw_message_body(
                                     sel_bg,
                                 );
                             }
-                            push_table_segment(
-                                &mut spans,
-                                line_text,
-                                lo,
-                                hi,
-                                base,
-                                selected_span,
-                                sel_bg,
-                            );
+
+                            // Leading alignment padding
+                            if clo > lo {
+                                push_table_segment(
+                                    &mut spans,
+                                    line_text,
+                                    lo,
+                                    clo,
+                                    base,
+                                    selected_span,
+                                    sel_bg,
+                                );
+                            }
+
+                            // Cell content with inline code / bold styles
+                            if chi > clo {
+                                let cell_sel = selected_span.and_then(|(slo, shi)| {
+                                    if slo < chi && clo < shi {
+                                        let cs = slo.max(clo).saturating_sub(clo);
+                                        let ce = shi.min(chi).saturating_sub(clo);
+                                        if cs < ce { Some((cs, ce)) } else { None }
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                                let content_line = line_spans_rich(
+                                    "",
+                                    Style::default(),
+                                    &line_text[clo..chi],
+                                    offset,
+                                    cell_sel,
+                                    code_ranges,
+                                    bold_ranges,
+                                    base,
+                                    theme.code_text(),
+                                    theme.body(),
+                                    sel_bg,
+                                );
+                                // Skip the empty-prefix span (position 0).
+                                for span in content_line.spans.into_iter().skip(1) {
+                                    spans.push(span);
+                                }
+                            }
+
+                            // Trailing alignment padding
+                            if hi > chi {
+                                push_table_segment(
+                                    &mut spans,
+                                    line_text,
+                                    chi,
+                                    hi,
+                                    base,
+                                    selected_span,
+                                    sel_bg,
+                                );
+                            }
+
                             pos = hi;
                         }
                         if pos < line_text.len() {
@@ -461,11 +525,21 @@ pub(super) fn draw_message_body(
                                     col_w as u16,
                                     1,
                                 );
+                                let cell_text = if info.row == 0 {
+                                    headers.get(ci).cloned().unwrap_or_default()
+                                } else {
+                                    rows.get(info.row.saturating_sub(1))
+                                        .and_then(|r| r.get(ci))
+                                        .cloned()
+                                        .unwrap_or_default()
+                                };
                                 layout_map.push_table_cell_hit(TableCellHit {
                                     message_idx: mi,
                                     block_idx: bi,
                                     cell_idx: info.row * ncols + ci,
                                     rect,
+                                    cell_text,
+                                    cell_byte_range: (lo, hi),
                                 });
                             }
                         }
@@ -481,6 +555,7 @@ pub(super) fn draw_message_body(
                                 text: line_text.clone(),
                                 prefix_cols: indent as u16,
                                 rect: line_rect,
+                                hidden_ranges: Vec::new(),
                             });
                         }
                     }
@@ -607,6 +682,7 @@ pub(super) fn draw_message_body(
                                 text: wl.text.clone(),
                                 prefix_cols: indent as u16,
                                 rect: line_rect,
+                                hidden_ranges: Vec::new(),
                             });
                         }
 
@@ -618,6 +694,7 @@ pub(super) fn draw_message_body(
                 level,
                 content,
                 code_ranges,
+                bold_ranges,
             } => {
                 let prefix = "   ".to_string();
                 let prefix_cols = display_width_u16(&prefix);
@@ -627,6 +704,15 @@ pub(super) fn draw_message_body(
                     Modifier::BOLD
                 };
                 let style = Style::default().fg(theme.heading()).add_modifier(modifier);
+                // The heading *prefix* (leading `   ` indent and continuation
+                // indentation) is decoration, not heading text, so it must not
+                // carry the UNDERLINED modifier. Splitting the prefix off the
+                // UNDERLINED run is what keeps the underline confined to the
+                // actual heading text instead of bleeding left into the indent
+                // whitespace (and, for wrapped headings, underlining the whole
+                // continuation row's leading blanks).
+                let prefix_style =
+                    Style::default().fg(theme.heading()).add_modifier(Modifier::BOLD);
                 let continuation = " ".repeat(prefix_cols as usize);
                 let lines = wrap_text(content, area.width.saturating_sub(prefix_cols + 2) as usize);
                 *content_lines += lines.len();
@@ -644,20 +730,36 @@ pub(super) fn draw_message_body(
                         } else {
                             &continuation
                         },
-                        style,
+                        prefix_style,
                         &wl.text,
                         wl.start_byte,
                         line_selection(sel_range, wl),
                         code_ranges,
+                        bold_ranges,
                         style,
                         theme.code_text(),
                         theme.body(),
                         theme.selected(),
                     );
-                    let line_rect = Rect::new(area.x, *current_y, area.width, 1);
-                    frame.render_widget(Paragraph::new(line), line_rect);
+                    // For H1 headings the terminal UNDERLINED modifier fills
+                    // the entire Paragraph rect, so clamp the render width to
+                    // the actual text extent to prevent the underline from
+                    // bleeding into trailing whitespace.
+                    let full_rect = Rect::new(area.x, *current_y, area.width, 1);
+                    let hidden_for_line =
+                        bold_delim_local_ranges(&wl.text, wl.start_byte, bold_ranges);
+                    let text_cols =
+                        prefix_cols + visible_width(&wl.text, &hidden_for_line) as u16;
+                    let render_rect = if *level == 1 {
+                        Rect::new(area.x, *current_y, text_cols.min(area.width), 1)
+                    } else {
+                        full_rect
+                    };
+                    frame.render_widget(Paragraph::new(line), render_rect);
 
                     if record_layout {
+                        // Layout map always uses full width for hit-testing
+                        // and selection across the entire line.
                         layout_map.push(BlockRegion {
                             message_idx: mi,
                             block_idx: bi,
@@ -665,7 +767,8 @@ pub(super) fn draw_message_body(
                             end_byte: wl.end_byte,
                             text: wl.text.clone(),
                             prefix_cols,
-                            rect: line_rect,
+                            rect: full_rect,
+                            hidden_ranges: hidden_for_line,
                         });
                     }
 
@@ -675,6 +778,7 @@ pub(super) fn draw_message_body(
             Block::Quote {
                 content,
                 code_ranges,
+                bold_ranges,
             } => {
                 // 5-col `▎` prefix + 2-col right gutter (`TRANSCRIPT_H_INSET`).
                 let lines = wrap_text(content, area.width.saturating_sub(7) as usize);
@@ -696,6 +800,7 @@ pub(super) fn draw_message_body(
                         wl.start_byte,
                         line_selection(sel_range, wl),
                         code_ranges,
+                        bold_ranges,
                         base,
                         theme.code_text(),
                         theme.body(),
@@ -705,6 +810,8 @@ pub(super) fn draw_message_body(
                     frame.render_widget(Paragraph::new(line), line_rect);
 
                     if record_layout {
+                        let hidden_for_line =
+                            bold_delim_local_ranges(&wl.text, wl.start_byte, bold_ranges);
                         layout_map.push(BlockRegion {
                             message_idx: mi,
                             block_idx: bi,
@@ -713,6 +820,7 @@ pub(super) fn draw_message_body(
                             text: wl.text.clone(),
                             prefix_cols: 5,
                             rect: line_rect,
+                            hidden_ranges: hidden_for_line,
                         });
                     }
 
@@ -745,6 +853,7 @@ pub(super) fn draw_message_body(
             Block::ListItem {
                 content,
                 code_ranges,
+                bold_ranges,
                 ordered,
                 depth,
                 checked,
@@ -782,6 +891,7 @@ pub(super) fn draw_message_body(
                         wl.start_byte,
                         line_selection(sel_range, wl),
                         code_ranges,
+                        bold_ranges,
                         base,
                         theme.code_text(),
                         theme.body(),
@@ -791,6 +901,8 @@ pub(super) fn draw_message_body(
                     frame.render_widget(Paragraph::new(line), line_rect);
 
                     if record_layout {
+                        let hidden_for_line =
+                            bold_delim_local_ranges(&wl.text, wl.start_byte, bold_ranges);
                         layout_map.push(BlockRegion {
                             message_idx: mi,
                             block_idx: bi,
@@ -799,6 +911,7 @@ pub(super) fn draw_message_body(
                             text: wl.text.clone(),
                             prefix_cols,
                             rect: line_rect,
+                            hidden_ranges: hidden_for_line,
                         });
                     }
 

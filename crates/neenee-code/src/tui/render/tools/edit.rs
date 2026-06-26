@@ -1,6 +1,9 @@
-//! Presenters for `edit_file` and `write_file`. Both render a red/green line
-//! diff in the expanded body (derived from their arguments) and a `+N -M`
-//! line-count suffix in the collapsed summary.
+//! Presenters for `edit_file` and `write_file`.
+//!
+//! `edit_file` renders a red/green line diff (old vs new) in the expanded body.
+//! `write_file` is a full-file write — no "old" side to diff against — so it
+//! renders as a simple line-numbered code block. Both show a `+N -M` line-count
+//! suffix in the collapsed summary.
 
 use super::diff::line_diff_counts;
 use super::{ResultKind, ToolPresenter, ToolView};
@@ -47,6 +50,6 @@ impl ToolPresenter for WritePresenter {
     }
 
     fn result_kind(&self) -> ResultKind {
-        ResultKind::Diff
+        ResultKind::Code
     }
 }

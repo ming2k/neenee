@@ -44,5 +44,5 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # pinned once here. `neenee-tui` is the in-house grid + diff rendering engine
 # (ADR-0038) and `neenee-code` consumes it.
 crossterm = { version = "0.29", features = ["event-stream"] }
-unicode-width = "0.1"
+unicode-width = "0.2"
 unicode-segmentation = "1.12"

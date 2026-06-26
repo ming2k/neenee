@@ -27,12 +27,13 @@ use crate::tui::completion::CompletionKind;
 use crate::tui::composer_attachments;
 use crate::tui::document::{TranscriptMessage, UserMessageOrigin};
 use crate::tui::input::{self};
+use crate::tui::interaction::{self, ClickTarget};
 use crate::tui::layout::{InteractiveTarget, InteractiveTargetKind, LayoutMap};
 use crate::tui::render;
 use crate::tui::selection::{
-    SelectionState, floor_char_boundary, get_selected_text, inclusive_end,
+    CellDragInfo, SelectionState, floor_char_boundary, get_selected_text, inclusive_end,
 };
-use crate::tui::step_interaction;
+use crate::tui::step_interaction::StepKind;
 use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
 
 use neenee_core::AgentResponse;
@@ -683,6 +684,13 @@ pub(super) async fn run_app_loop(
                     app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.session_scroll,
+                    &app.theme,
+                ),
+                Modal::Permissions => render::draw_permissions_manager(
+                    f,
+                    app.session_context.as_ref(),
+                    app.modal_index,
+                    &mut app.permissions_scroll,
                     &app.theme,
                 ),
                 Modal::Activity => {
@@ -1349,6 +1357,10 @@ pub(super) async fn run_app_loop(
                     app.stashed_input.clear();
                     app.input_scroll = 0;
                     app.suggestion_index = None;
+                    // A programmatic input replacement — latch the dismissal so
+                    // a slash-command selection doesn't flash its completion
+                    // popup until the next real edit.
+                    app.completion_dismissed = true;
                     app.modal_index = 0;
                     app.active_modal = Modal::None;
                 }
@@ -1378,6 +1390,35 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                     app.session_scroll = 0;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::OpenPermissions => {
+                    // The permissions manager modal. Reached via the
+                    // `/permissions` slash command (intercepted locally, never
+                    // sent to the backend). Kick off a snapshot request so the
+                    // rule list populates; `/permissions clear` still goes to
+                    // the backend via SendSlash.
+                    app.active_modal = Modal::Permissions;
+                    app.modal_index = 0;
+                    app.permissions_scroll = 0;
+                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::PermissionsActivate => {
+                    // Revoke the selected "always allow" rule. The harness
+                    // replies with a fresh snapshot so the list re-renders.
+                    if let Some(snapshot) = app.session_context.as_ref() {
+                        if let Some(rule) = snapshot.permissions.get(app.modal_index) {
+                            let _ = app.tx.send(AgentRequest::RevokePermission {
+                                tool: rule.tool.clone(),
+                                scope: rule.scope.clone(),
+                            });
+                        }
+                    }
+                }
+                input::InputAction::PermissionsClearAll => {
+                    // Clear every cached rule. The harness replies with a fresh
+                    // (empty) snapshot.
+                    let _ = app.tx.send(AgentRequest::ClearAllPermissions);
+                    app.modal_index = 0;
                 }
                 input::InputAction::SessionTabCycle { forward } => {
                     app.session_tab = app.session_tab.cycle(forward);
@@ -1564,6 +1605,7 @@ pub(super) async fn run_app_loop(
                         app.focused_messages(),
                         &app.input,
                         &app.layout_map,
+                        app.drag.cell_info.as_ref(),
                     ) {
                         clipboard_ops::spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
                     }
@@ -1574,6 +1616,7 @@ pub(super) async fn run_app_loop(
                         app.focused_messages(),
                         &app.input,
                         &app.layout_map,
+                        app.drag.cell_info.as_ref(),
                     ) {
                         clipboard_ops::spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
                     } else if app.active_modal == Modal::HistorySearch {
@@ -1610,6 +1653,9 @@ pub(super) async fn run_app_loop(
                         // ambiguity. Pending-image reminders skip their
                         // per-frame refresh while the quit window is armed
                         // so this toast keeps the floor.
+                        app.input.clear();
+                        app.cursor_position = 0;
+                        app.input_scroll = 0;
                         app.copy_toast_message = "input cleared — Ctrl+C again to exit".to_string();
                         app.copy_toast_failed = false;
                         app.copy_toast_until = Some(
@@ -1709,10 +1755,14 @@ pub(super) async fn run_app_loop(
                 input::InputAction::Paste => {
                     // Ctrl+V: read the system clipboard off the event loop.
                     // The result is delivered back through `paste_rx` and
-                    // applied on a later frame (image -> attach, text -> insert).
-                    if app.active_modal == Modal::None {
-                        clipboard_ops::spawn_clipboard_paste(&paste_tx);
-                    }
+                    // applied on a later frame (image -> attach, text ->
+                    // insert on the main prompt, or inline splice into the
+                    // focused modal field). `apply_clipboard_paste` branches
+                    // on the active modal at apply time, so a paste spawned
+                    // inside a modal that the user closed before the read
+                    // returned lands in the main prompt rather than being
+                    // dropped.
+                    clipboard_ops::spawn_clipboard_paste(&paste_tx);
                 }
                 input::InputAction::BracketedPaste(text) => {
                     // Terminal-level paste (bracketed paste mode). The payload
@@ -1837,6 +1887,14 @@ pub(super) async fn run_app_loop(
                         app.history_index = Some(new_idx);
                         app.input = app.input_history[new_idx].clone();
                         app.cursor_position = app.input.chars().count();
+                        // History navigation is a programmatic input replacement,
+                        // not an edit — so it latches `completion_dismissed` like
+                        // a slash-command accept rather than re-enabling the popup
+                        // the way InsertChar/Backspace do. This keeps a recalled
+                        // slash command from flashing its completion menu until
+                        // the next real keystroke clears the latch.
+                        app.suggestion_index = None;
+                        app.completion_dismissed = true;
                     }
                 }
                 input::InputAction::RecallQueued => {
@@ -1856,6 +1914,9 @@ pub(super) async fn run_app_loop(
                             app.history_index = Some(new_idx);
                             app.input = app.input_history[new_idx].clone();
                             app.cursor_position = app.input.chars().count();
+                            // Same programmatic-replacement latch as HistoryPrev.
+                            app.suggestion_index = None;
+                            app.completion_dismissed = true;
                         } else {
                             // Walked past the newest entry: restore the draft
                             // the user was composing before the first ↑,
@@ -1863,6 +1924,12 @@ pub(super) async fn run_app_loop(
                             app.history_index = None;
                             app.input = std::mem::take(&mut app.history_draft);
                             app.cursor_position = app.input.chars().count();
+                            // The restored draft may be a partial slash/path
+                            // the user was mid-edit on, but it still arrived
+                            // via navigation rather than a keystroke, so hold
+                            // the latch until the next edit.
+                            app.suggestion_index = None;
+                            app.completion_dismissed = true;
                         }
                     }
                 }
@@ -1921,6 +1988,20 @@ pub(super) async fn run_app_loop(
                             app.modal_index - 1
                         };
                     }
+                    Modal::Permissions => {
+                        let count = app
+                            .session_context
+                            .as_ref()
+                            .map(|s| s.permissions.len())
+                            .unwrap_or(0);
+                        app.modal_index = if count == 0 {
+                            0
+                        } else if app.modal_index == 0 {
+                            count - 1
+                        } else {
+                            app.modal_index - 1
+                        };
+                    }
                     Modal::Help
                     | Modal::ToolStepDetail
                     | Modal::Question
@@ -1949,6 +2030,15 @@ pub(super) async fn run_app_loop(
                     }
                     Modal::Sessions => {
                         let count = app.sessions_overview.len().max(1);
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::Permissions => {
+                        let count = app
+                            .session_context
+                            .as_ref()
+                            .map(|s| s.permissions.len())
+                            .unwrap_or(0)
+                            .max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::Help
@@ -2224,84 +2314,109 @@ pub(super) async fn run_app_loop(
                         app.focus_zone = input::FocusZone::Browse;
                         app.selection = SelectionState::None;
                         app.drag.cancel();
-                    } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        if cursor.message_idx == crate::tui::render::INPUT_MSG_IDX {
-                            // Click inside the live input box: hand keyboard
-                            // focus back to the prompt so the next keypress
-                            // edits rather than navigating steps.
-                            app.focus_zone = input::FocusZone::Compose;
-                            app.focused_target = None;
-                            app.selection = SelectionState::start_range(cursor);
-                            app.drag.start(cursor);
-                        } else if let Some((mi, kind)) = step_interaction::summary_at(&cursor) {
-                            // Clicked a step summary: navigate into a subagent
-                            // task, otherwise toggle that step's disclosure.
-                            app.focused_target = Some(kind.focus_target(mi));
-                            let mut messages = runtime.messages.lock().await;
-                            match kind {
-                                step_interaction::StepKind::ToolStep => {
-                                    let enter_id =
-                                        resolve_focused_mut(&mut messages, &app.focus_stack, mi)
-                                            .and_then(|message| {
-                                                if message.is_subagent_task() {
-                                                    message.tool_step_call_id().map(String::from)
-                                                } else {
-                                                    None
-                                                }
-                                            });
-                                    if let Some(id) = enter_id {
-                                        drop(messages);
-                                        app.enter_subagent(id);
-                                    } else {
+                    } else {
+                        // ── Unified content hit-test cascade ──
+                        // interaction::classify_click runs the full priority
+                        // chain (input box → step summary → table cell →
+                        // generic content → gap → dead) so the event loop
+                        // only needs a single match.
+                        match interaction::classify_click(&app.layout_map, x, y) {
+                            ClickTarget::InputBox { cursor } => {
+                                // Click inside the live input box: hand keyboard
+                                // focus back to the prompt so the next keypress
+                                // edits rather than navigating steps.
+                                app.focus_zone = input::FocusZone::Compose;
+                                app.focused_target = None;
+                                app.selection = SelectionState::start_range(cursor);
+                                app.drag.start(cursor);
+                            }
+                            ClickTarget::StepSummary { message_idx, kind } => {
+                                // Clicked a step summary: navigate into a subagent
+                                // task, otherwise toggle that step's disclosure.
+                                let mi = message_idx;
+                                app.focused_target = Some(kind.focus_target(mi));
+                                let mut messages = runtime.messages.lock().await;
+                                match kind {
+                                    StepKind::ToolStep => {
+                                        let enter_id =
+                                            resolve_focused_mut(&mut messages, &app.focus_stack, mi)
+                                                .and_then(|message| {
+                                                    if message.is_subagent_task() {
+                                                        message.tool_step_call_id().map(String::from)
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
+                                        if let Some(id) = enter_id {
+                                            drop(messages);
+                                            app.enter_subagent(id);
+                                        } else {
+                                            app.toggle_step_pinned(&mut messages, mi);
+                                            drop(messages);
+                                        }
+                                    }
+                                    StepKind::Thinking => {
                                         app.toggle_step_pinned(&mut messages, mi);
                                         drop(messages);
                                     }
                                 }
-                                step_interaction::StepKind::Thinking => {
-                                    app.toggle_step_pinned(&mut messages, mi);
-                                    drop(messages);
-                                }
+                                app.focus_zone = input::FocusZone::Browse;
+                                app.selection = SelectionState::None;
+                                app.drag.cancel();
                             }
-                            app.focus_zone = input::FocusZone::Browse;
-                            app.selection = SelectionState::None;
-                            app.drag.cancel();
-                        } else {
-                            // Inside a table cell, a press places the cursor
-                            // and starts a drag confined to that cell: the
-                            // selection can roam across the cell's wrapped
-                            // lines but never crosses `│` borders. A plain
-                            // click (no drag) leaves nothing selected.
-                            if let Some((mi, bi, cell)) = app.layout_map.table_cell_at(x, y) {
-                                app.selection = SelectionState::start_range(cursor);
-                                app.drag.start_in_cell(cursor, (mi, bi, cell));
-                            } else {
+                            ClickTarget::TableCell {
+                                message_idx,
+                                block_idx,
+                                cursor,
+                                cell_text,
+                                cell_byte_range,
+                                ..
+                            } => {
+                                // A cell drag is clamped to `│` boundaries: the
+                                // pointer may wander anywhere but the selection
+                                // can never cross a `│` border into an adjacent
+                                // cell.  Within the cell the user has free
+                                // substring selection — no auto-full-select.
+                                app.selection = SelectionState::None;
+                                app.drag.start_in_cell(
+                                    cursor,
+                                    CellDragInfo {
+                                        message_idx,
+                                        block_idx,
+                                        cell_text,
+                                        cell_byte_range,
+                                    },
+                                );
+                                app.focused_target = None;
+                                app.focus_zone = input::FocusZone::Browse;
+                            }
+                            ClickTarget::Content { cursor } => {
+                                // A plain click does NOT select — it only arms a
+                                // drag. A zero-length range is created so an
+                                // immediate drag extends it normally.
                                 app.selection = SelectionState::start_range(cursor);
                                 app.drag.start(cursor);
+                                app.focused_target = None;
+                                app.focus_zone = input::FocusZone::Browse;
                             }
-                            app.focused_target = None;
-                            // Clicking anywhere in the conversation content
-                            // hands keyboard focus to the stream (Browse), so
-                            // the click location always determines the zone.
-                            app.focus_zone = input::FocusZone::Browse;
+                            ClickTarget::ContentGap => {
+                                // Click inside the content band but not on a
+                                // region: switch keyboard focus to the stream so
+                                // the user can navigate with the keyboard, but
+                                // do not start a text selection.
+                                app.focus_zone = input::FocusZone::Browse;
+                                app.selection = SelectionState::None;
+                                app.focused_target = None;
+                                app.drag.cancel();
+                            }
+                            ClickTarget::Dead => {
+                                // Click outside all known areas (outer gutters,
+                                // below content). Fully inert.
+                                app.selection = SelectionState::None;
+                                app.focused_target = None;
+                                app.drag.cancel();
+                            }
                         }
-                    } else {
-                        // The click missed every registered region. If it
-                        // still lands inside the transcript content rect —
-                        // e.g. on a gap row between messages or a spacing row
-                        // inside an expanded step — treat it as a browse-focus
-                        // gesture: switch keyboard focus to the stream so the
-                        // user can immediately navigate with the keyboard,
-                        // without starting a text selection (there is no
-                        // cursor to anchor one). Clicks in the outer gutters
-                        // or below all content stay inert.
-                        if app.layout_map.transcript_content_rect().is_some_and(|r| {
-                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
-                        }) {
-                            app.focus_zone = input::FocusZone::Browse;
-                        }
-                        app.selection = SelectionState::None;
-                        app.focused_target = None;
-                        app.drag.cancel();
                     }
                 }
                 input::InputAction::RightClick { x, y } => {
@@ -2309,29 +2424,37 @@ pub(super) async fn run_app_loop(
                     // detail overlay. For permission-denied steps this is the
                     // fastest way to surface the "Permission denied" message
                     // and the terminated-turn feedback.
-                    if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        if let Some((mi, step_interaction::StepKind::ToolStep)) =
-                            step_interaction::summary_at(&cursor)
-                        {
-                            app.focused_target = Some(InteractiveTarget::tool_step(mi));
-                            app.tool_detail_message_idx = Some(mi);
-                            app.tool_detail_scroll = 0;
-                            app.active_modal = Modal::ToolStepDetail;
-                        }
+                    if let ClickTarget::StepSummary {
+                        message_idx,
+                        kind: StepKind::ToolStep,
+                    } = interaction::classify_click(&app.layout_map, x, y)
+                    {
+                        app.focused_target = Some(InteractiveTarget::tool_step(message_idx));
+                        app.tool_detail_message_idx = Some(message_idx);
+                        app.tool_detail_scroll = 0;
+                        app.active_modal = Modal::ToolStepDetail;
                     }
                     app.selection = SelectionState::None;
                     app.drag.cancel();
                 }
                 input::InputAction::SelectionUpdate { x, y } => {
-                    // Keep a cell-confined drag from leaking past `│` borders.
-                    let (x, y) = if let Some(cell) = app.drag.cell_constraint {
-                        app.layout_map
-                            .clamp_to_table_cell(cell, x, y)
-                            .unwrap_or((x, y))
-                    } else {
-                        (x, y)
-                    };
-                    if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
+                    // A cell drag is clamped to `│` boundaries: the pointer
+                    // may move anywhere but byte offsets are clamped to the
+                    // origin cell's content range, so the selection can never
+                    // cross a `│` border. The user gets free substring
+                    // selection within the cell — not auto-full-select.
+                    if let Some(ci) = &app.drag.cell_info {
+                        // Arm a zero-length range on the first drag tick so
+                        // the selection reads as a Range from the start.
+                        if matches!(app.selection, SelectionState::None) {
+                            if let Some(anchor) = app.drag.anchor {
+                                app.selection = SelectionState::start_range(anchor);
+                            }
+                        }
+                        if let Some(cursor) = app.layout_map.cursor_at(x, y) {
+                            app.selection.update_head(ci.clamp_cursor(cursor));
+                        }
+                    } else if let Some(cursor) = app.layout_map.cursor_at(x, y) {
                         app.selection.update_head(cursor);
                     }
                 }
@@ -2374,10 +2497,11 @@ pub(super) async fn run_app_loop(
                                 .unwrap_or(false);
                             app.hovered_step = is_step.then_some(mi);
                         }
-                    } else if let Some(cursor) = input::resolve_cursor(&app.layout_map, x, y) {
-                        app.hovered_step = step_interaction::hovered_summary(&cursor);
                     } else {
-                        app.hovered_step = None;
+                        app.hovered_step = match interaction::classify_click(&app.layout_map, x, y) {
+                            ClickTarget::StepSummary { message_idx, .. } => Some(message_idx),
+                            _ => None,
+                        };
                     }
                 }
             }
@@ -2462,12 +2586,14 @@ pub(super) fn focused_messages_mut<'a>(
 }
 
 /// Extract selected text from either transcript messages or the live input box,
-/// depending on which the semantic selection covers.
+/// depending on which the semantic selection covers. `cell_info` supplies the
+/// cell context when the selection is a [`Range`] bounded inside a table cell.
 pub(super) fn extract_selection_text(
     sel: &SelectionState,
     messages: &[crate::tui::document::TranscriptMessage],
     input: &str,
     layout_map: &crate::tui::layout::LayoutMap,
+    cell_info: Option<&CellDragInfo>,
 ) -> Option<String> {
     let on_input = match sel {
         SelectionState::None => false,
@@ -2483,7 +2609,7 @@ pub(super) fn extract_selection_text(
         }
     };
     if !on_input {
-        return get_selected_text(sel, messages, &|mi, bi| layout_map.table_grid(mi, bi));
+        return get_selected_text(sel, messages, &|mi, bi| layout_map.table_grid(mi, bi), cell_info);
     }
     match sel {
         SelectionState::Block { .. } => Some(input.to_string()),

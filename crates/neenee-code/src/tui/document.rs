@@ -108,8 +108,8 @@ pub enum NoticeSeverity {
     Error,
 }
 
-/// Table column text alignment, mirrored from pulldown-cmark so the `Block`
-/// type does not leak the parser dependency.
+/// Table column text alignment for GFM tables parsed by the in-house parser,
+/// kept as a separate type so the `Block` definition stays dependency-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableAlignment {
     None,
@@ -119,11 +119,10 @@ pub enum TableAlignment {
 }
 
 /// A byte range `[start, end)` within a prose block's `content` that should be
-/// rendered as inline code. `pulldown-cmark` delivers inline code via
-/// `Event::Code` with its backtick delimiters stripped; the parser re-wraps the
-/// run as `` `…` `` into the flattened `content` and records the range here so
-/// the renderer can paint it on the code surface without disturbing the
-/// byte-addressable copy/selection model (which still sees plain text).
+/// rendered as inline code. The in-house parser keeps the backtick delimiters
+/// in the flattened `content` and records the range here so the renderer can
+/// paint it on the code surface without disturbing the byte-addressable
+/// copy/selection model (which still sees plain text).
 ///
 /// Ranges always cover the full `` `…` `` span including both backticks, and
 /// are clamped to `content.len()`. An empty vector means "no inline code".
@@ -137,6 +136,8 @@ pub enum Block {
         content: String,
         /// Byte ranges of inline-code runs within `content` (see [`CodeRange`]).
         code_ranges: Vec<CodeRange>,
+        /// Byte ranges of strong/bold text runs within `content`.
+        bold_ranges: Vec<CodeRange>,
     },
     /// Inline or fenced code.
     Code {
@@ -149,12 +150,16 @@ pub enum Block {
         content: String,
         /// Byte ranges of inline-code runs within `content`.
         code_ranges: Vec<CodeRange>,
+        /// Byte ranges of strong/bold text runs within `content`.
+        bold_ranges: Vec<CodeRange>,
     },
     /// A list item, preserving its marker and nesting level.
     ListItem {
         content: String,
         /// Byte ranges of inline-code runs within `content`.
         code_ranges: Vec<CodeRange>,
+        /// Byte ranges of strong/bold text runs within `content`.
+        bold_ranges: Vec<CodeRange>,
         ordered: Option<u64>,
         depth: usize,
         checked: Option<bool>,
@@ -164,6 +169,8 @@ pub enum Block {
         content: String,
         /// Byte ranges of inline-code runs within `content`.
         code_ranges: Vec<CodeRange>,
+        /// Byte ranges of strong/bold text runs within `content`.
+        bold_ranges: Vec<CodeRange>,
     },
     /// A GFM-style table, kept as a semantic unit so columns stay aligned and
     /// copy yields the rendered grid rather than re-wrapped prose.
@@ -1007,6 +1014,7 @@ impl TranscriptMessage {
             let mut blocks = vec![Block::Text {
                 content: display_args,
                 code_ranges: Vec::new(),
+                bold_ranges: Vec::new(),
             }];
             if let Some(out) = output {
                 self.raw.push_str("\n\n");
@@ -1014,6 +1022,7 @@ impl TranscriptMessage {
                 blocks.push(Block::Text {
                     content: out.clone(),
                     code_ranges: Vec::new(),
+                    bold_ranges: Vec::new(),
                 });
             }
             self.blocks = blocks;
@@ -1136,306 +1145,491 @@ fn parse_blocks_plain(text: &str) -> Vec<Block> {
     vec![Block::Text {
         content: text.to_string(),
         code_ranges: Vec::new(),
+        bold_ranges: Vec::new(),
     }]
 }
 
+
 fn parse_blocks_markdown(text: &str) -> Vec<Block> {
-    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-
     let mut blocks = Vec::new();
-    let mut paragraph = String::new();
-    // Inline-code byte ranges being accumulated into the *current* prose
-    // target. `push_code_range` routes the range to whichever accumulator is
-    // active (table cell → heading → list item → blockquote → paragraph), so
-    // the captured offsets stay aligned with the flattened text the parser
-    // rebuilds on every `append_text`. Cleared alongside its target.
-    let mut heading_code: Vec<CodeRange> = Vec::new();
-    let mut paragraph_code: Vec<CodeRange> = Vec::new();
-    let mut heading: Option<(u8, String)> = None;
-    let mut code_lang: Option<String> = None;
-    let mut code_content = String::new();
-    let mut in_code = false;
-    let mut quotes = Vec::<String>::new();
-    let mut quotes_code: Vec<Vec<CodeRange>> = Vec::new();
-    let mut lists = Vec::<ListState>::new();
-    let mut items = Vec::<ListAccumulator>::new();
-    let mut table = None::<TableAccumulator>;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut i = 0;
 
-    let options = Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES;
-    for event in Parser::new_ext(text, options) {
-        match event {
-            Event::Start(tag) => match tag {
-                Tag::Paragraph => {
-                    paragraph.clear();
-                    paragraph_code.clear();
-                }
-                Tag::Heading { level, .. } => {
-                    heading = Some((heading_level(level), String::new()));
-                    heading_code.clear();
-                }
-                Tag::CodeBlock(lang) => {
-                    in_code = true;
-                    code_lang = match &lang {
-                        pulldown_cmark::CodeBlockKind::Fenced(l) => Some(l.to_string()),
-                        _ => None,
-                    };
-                    code_content.clear();
-                }
-                Tag::BlockQuote(_) => {
-                    quotes.push(String::new());
-                    quotes_code.push(Vec::new());
-                }
-                Tag::List(start) => lists.push(ListState { next: start }),
-                Tag::Item => {
-                    let ordered = lists.last_mut().and_then(|list| {
-                        let current = list.next?;
-                        list.next = Some(current + 1);
-                        Some(current)
-                    });
-                    items.push(ListAccumulator {
-                        content: String::new(),
-                        code_ranges: Vec::new(),
-                        ordered,
-                        depth: lists.len().saturating_sub(1),
-                        checked: None,
-                    });
-                }
-                Tag::Table(aligns) => {
-                    table = Some(TableAccumulator {
-                        aligns: aligns.into_iter().map(table_alignment).collect(),
-                        ..TableAccumulator::default()
-                    })
-                }
-                Tag::TableHead => {
-                    if let Some(table) = &mut table {
-                        table.in_head = true;
-                        table.start_row();
-                    }
-                }
-                Tag::TableRow => {
-                    if let Some(table) = &mut table {
-                        table.in_head = false;
-                        table.start_row();
-                    }
-                }
-                Tag::TableCell => {
-                    if let Some(table) = &mut table {
-                        table.start_cell();
-                    }
-                }
-                _ => {}
-            },
-            Event::End(tag) => match tag {
-                TagEnd::Paragraph => {
-                    if items.is_empty() && quotes.is_empty() && table.is_none() {
-                        let trimmed_len = paragraph.trim_end().len();
-                        push_block(
-                            &mut blocks,
-                            Block::Text {
-                                content: paragraph[..trimmed_len].to_string(),
-                                code_ranges: clamp_ranges(&paragraph_code, trimmed_len),
-                            },
-                        );
-                    }
-                    paragraph.clear();
-                    paragraph_code.clear();
-                }
-                TagEnd::Heading(_) => {
-                    if let Some((level, content)) = heading.take() {
-                        let trimmed_len = content.trim_end().len();
-                        push_block(
-                            &mut blocks,
-                            Block::Heading {
-                                level,
-                                content: content[..trimmed_len].to_string(),
-                                code_ranges: clamp_ranges(&heading_code, trimmed_len),
-                            },
-                        );
-                    }
-                    heading_code.clear();
-                }
-                TagEnd::CodeBlock => {
-                    in_code = false;
-                    let content = code_content
-                        .strip_prefix('\n')
-                        .unwrap_or(&code_content)
-                        .trim_end_matches('\n');
-                    push_block(
-                        &mut blocks,
-                        Block::Code {
-                            language: code_lang.take(),
-                            content: content.to_string(),
-                        },
-                    );
-                }
-                TagEnd::BlockQuote(_) => {
-                    let code = quotes_code.pop().unwrap_or_default();
-                    if let Some(content) = quotes.pop() {
-                        let trimmed_len = content.trim_end().len();
-                        push_block(
-                            &mut blocks,
-                            Block::Quote {
-                                content: content[..trimmed_len].to_string(),
-                                code_ranges: clamp_ranges(&code, trimmed_len),
-                            },
-                        );
-                    }
-                }
-                TagEnd::Item => {
-                    if let Some(item) = items.pop() {
-                        let trimmed_len = item.content.trim_end().len();
-                        push_block(
-                            &mut blocks,
-                            Block::ListItem {
-                                content: item.content[..trimmed_len].to_string(),
-                                code_ranges: clamp_ranges(&item.code_ranges, trimmed_len),
-                                ordered: item.ordered,
-                                depth: item.depth,
-                                checked: item.checked,
-                            },
-                        );
-                    }
-                }
-                TagEnd::List(_) => {
-                    lists.pop();
-                }
-                TagEnd::TableCell => {
-                    if let Some(table) = &mut table {
-                        table.end_cell();
-                    }
-                }
-                TagEnd::TableHead | TagEnd::TableRow => {
-                    if let Some(table) = &mut table {
-                        table.end_row();
-                    }
-                }
-                TagEnd::Table => {
-                    if let Some(table) = table.take() {
-                        let rendered = table.render();
-                        if !rendered.is_empty() {
-                            push_block(
-                                &mut blocks,
-                                Block::Table {
-                                    headers: table.header,
-                                    rows: table.rows,
-                                    aligns: table.aligns,
-                                    rendered,
-                                },
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            },
-            Event::Text(t) => {
-                if in_code {
-                    code_content.push_str(&t);
-                } else {
-                    append_text(
-                        &t,
-                        &mut heading,
-                        &mut items,
-                        &mut quotes,
-                        &mut table,
-                        &mut paragraph,
-                    );
-                }
-            }
-            Event::Code(t) => {
-                // Inline code: pulldown-cmark strips the backtick delimiters,
-                // so the span arrives as bare text. Inside a fenced block we
-                // already re-wrap it; the common prose case must do the same,
-                // otherwise `the \`read_file\` tool` would be flattened to
-                // `the read_file tool` and the inline-code quote marks would
-                // be lost from the rendered/copied paragraph.
-                let wrapped = format!("`{t}`");
-                if in_code {
-                    code_content.push_str(&wrapped);
-                } else {
-                    append_code(
-                        &wrapped,
-                        &mut heading,
-                        &mut heading_code,
-                        &mut items,
-                        &mut quotes,
-                        &mut quotes_code,
-                        &mut table,
-                        &mut paragraph,
-                        &mut paragraph_code,
-                    );
-                }
-            }
-            Event::Html(h) | Event::InlineHtml(h) => {
-                if in_code {
-                    code_content.push_str(&h);
-                } else {
-                    append_text(
-                        &h,
-                        &mut heading,
-                        &mut items,
-                        &mut quotes,
-                        &mut table,
-                        &mut paragraph,
-                    );
-                }
-            }
-            Event::SoftBreak => {
-                if in_code {
-                    code_content.push('\n');
-                } else {
-                    append_text(
-                        " ",
-                        &mut heading,
-                        &mut items,
-                        &mut quotes,
-                        &mut table,
-                        &mut paragraph,
-                    );
-                }
-            }
-            Event::HardBreak => {
-                if in_code {
-                    code_content.push('\n');
-                } else {
-                    append_text(
-                        "\n",
-                        &mut heading,
-                        &mut items,
-                        &mut quotes,
-                        &mut table,
-                        &mut paragraph,
-                    );
-                }
-            }
-            Event::Rule => {
-                push_block(&mut blocks, Block::Rule);
-            }
-            Event::TaskListMarker(checked) => {
-                if let Some(item) = items.last_mut() {
-                    item.checked = Some(checked);
-                }
-            }
-            _ => {}
+    // Accumulator for a paragraph: the prose lines (already stripped of their
+    // block-prefix), joined with soft-break→space / hard-break→`\n` rules.
+    // Once a paragraph is flushed we scan the resulting string for inline
+    // `code` / `**bold**` runs and record their byte ranges.
+    let mut para: Vec<String> = Vec::new();
+    let mut para_hard: Vec<bool> = Vec::new(); // hard-break before this line?
+
+    // (List items are pushed directly during the list run — adjacent items
+    // share no Break thanks to push_block's ListItem-pair rule.)
+
+    let flush_para = |para: &mut Vec<String>,
+                      para_hard: &mut Vec<bool>,
+                      blocks: &mut Vec<Block>| {
+        if para.is_empty() {
+            return;
         }
-    }
-
-    if !paragraph.trim().is_empty() {
-        let trimmed_len = paragraph.trim_end().len();
+        // Join lines: a soft break inserts a space; a hard break (the *previous*
+        // line ended with a two-space marker) inserts a literal "\n".
+        let mut content = String::new();
+        for (idx, line) in para.iter().enumerate() {
+            if idx > 0 {
+                content.push(if para_hard[idx - 1] { '\n' } else { ' ' });
+            }
+            content.push_str(line);
+        }
+        let (code_ranges, bold_ranges) = scan_inline(&content);
+        let trimmed_len = content.trim_end().len();
+        let content = content[..trimmed_len].to_string();
         push_block(
-            &mut blocks,
+            blocks,
             Block::Text {
-                content: paragraph[..trimmed_len].to_string(),
-                code_ranges: clamp_ranges(&paragraph_code, trimmed_len),
+                content,
+                code_ranges: clamp_ranges(&code_ranges, trimmed_len),
+                bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
             },
         );
+        para.clear();
+        para_hard.clear();
+    };
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+
+        // --- Fenced code block ------------------------------------------------
+        if let Some(rest) = trimmed.strip_prefix("```") {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            let lang = rest.trim().to_string();
+            let language = if lang.is_empty() { None } else { Some(lang) };
+            let mut content = String::new();
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(lines[i]);
+                i += 1;
+            }
+            // skip closing fence (if present)
+            if i < lines.len() {
+                i += 1;
+            }
+            push_block(
+                &mut blocks,
+                Block::Code {
+                    language,
+                    content,
+                },
+            );
+            continue;
+        }
+
+        // --- Horizontal rule --------------------------------------------------
+        if is_rule(trimmed) {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            push_block(&mut blocks, Block::Rule);
+            i += 1;
+            continue;
+        }
+
+        // --- Heading ----------------------------------------------------------
+        if let Some((level, content_line)) = parse_heading(trimmed) {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            let (code_ranges, bold_ranges) = scan_inline(content_line);
+            let trimmed_len = content_line.trim_end().len();
+            push_block(
+                &mut blocks,
+                Block::Heading {
+                    level,
+                    content: content_line[..trimmed_len].to_string(),
+                    code_ranges: clamp_ranges(&code_ranges, trimmed_len),
+                    bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
+                },
+            );
+            i += 1;
+            continue;
+        }
+
+        // --- Blockquote -------------------------------------------------------
+        if let Some(content_line) = parse_quote(trimmed) {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            // Collect consecutive quote lines.
+            let mut q_lines: Vec<String> = Vec::new();
+            let mut q_hard: Vec<bool> = Vec::new();
+            q_lines.push(content_line.to_string());
+            q_hard.push(false);
+            i += 1;
+            while i < lines.len() {
+                let t = lines[i].trim_start();
+                if let Some(c) = parse_quote(t) {
+                    let hard = line_ends_hard(q_lines.last().unwrap());
+                    q_hard.push(hard);
+                    q_lines.push(c.to_string());
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let mut content = String::new();
+            for (idx, l) in q_lines.iter().enumerate() {
+                if idx > 0 {
+                    content.push(if q_hard[idx] { '\n' } else { ' ' });
+                }
+                content.push_str(l);
+            }
+            let (code_ranges, bold_ranges) = scan_inline(&content);
+            let trimmed_len = content.trim_end().len();
+            push_block(
+                &mut blocks,
+                Block::Quote {
+                    content: content[..trimmed_len].to_string(),
+                    code_ranges: clamp_ranges(&code_ranges, trimmed_len),
+                    bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
+                },
+            );
+            continue;
+        }
+
+        // --- List item --------------------------------------------------------
+        if parse_list_item(trimmed).is_some() {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            // Collect consecutive list items as a group; push_block's
+            // ListItem↔ListItem rule keeps them tight (no Break between).
+            while i < lines.len() {
+                let t = lines[i].trim_start();
+                if let Some((m, c, ch)) = parse_list_item(t) {
+                    let (code_ranges, bold_ranges) = scan_inline(c);
+                    let trimmed_len = c.trim_end().len();
+                    push_block(
+                        &mut blocks,
+                        Block::ListItem {
+                            content: c[..trimmed_len].to_string(),
+                            code_ranges: clamp_ranges(&code_ranges, trimmed_len),
+                            bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
+                            ordered: m,
+                            depth: 0,
+                            checked: ch,
+                        },
+                    );
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // --- Table (GFM: | ... | lines with a separator row) ------------------
+        if trimmed.starts_with('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim()) {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            let mut table = TableAccumulator::default();
+            // Header row
+            let header_cells = split_table_row(trimmed);
+            table.header = header_cells.clone();
+            // Alignment from separator
+            table.aligns = parse_table_aligns(lines[i + 1].trim());
+            i += 2;
+            // Body rows
+            while i < lines.len() {
+                let t = lines[i].trim();
+                if t.starts_with('|') && !is_table_separator(t) {
+                    let cells = split_table_row(t);
+                    table.rows.push(cells);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            // GFM tables define the column count from the header: a body row
+            // with fewer cells is padded with empty cells, and a row with more
+            // is truncated. Normalizing here establishes the invariant that
+            // every row in `Block::Table` has exactly `headers.len()` cells, so
+            // every consumer (live renderer, selection copy, hit-testing) can
+            // index a row by column without per-access bounds checks. Without
+            // this, a ragged body row panicked the adaptive renderer (index out
+            // of bounds in `build_table_render`).
+            normalize_table_rows(&table.header, &mut table.rows);
+            let rendered = table.render();
+            if !rendered.is_empty() {
+                push_block(
+                    &mut blocks,
+                    Block::Table {
+                        headers: table.header,
+                        rows: table.rows,
+                        aligns: table.aligns,
+                        rendered,
+                    },
+                );
+            }
+            continue;
+        }
+
+        // --- Blank line: paragraph break -------------------------------------
+        if trimmed.is_empty() {
+            flush_para(&mut para, &mut para_hard, &mut blocks);
+            i += 1;
+            continue;
+        }
+
+        // --- Ordinary prose line ---------------------------------------------
+        // A trailing two-space (or tab) marker is a hard line break. Strip it
+        // from the stored text; the `para_hard` flag records that this line
+        // ends in a hard break so the join inserts a literal "\n" before the
+        // *next* line.
+        let hard = line_ends_hard(line);
+        let stored = trimmed.trim_end_matches([' ', '\t']);
+        para.push(stored.to_string());
+        para_hard.push(hard);
+        i += 1;
     }
+
+    flush_para(&mut para, &mut para_hard, &mut blocks);
+
+    // Strip trailing Breaks (a trailing blank line should not produce one).
     while matches!(blocks.last(), Some(Block::Break)) {
         blocks.pop();
     }
     blocks
+}
+
+/// Whether a line is a thematic break (`---`, `***`, `___` with ≥3 same chars).
+fn is_rule(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() < 3 {
+        return false;
+    }
+    let c = s.chars().next().unwrap();
+    if c != '-' && c != '*' && c != '_' {
+        return false;
+    }
+    s.chars().all(|ch| ch == c) && s.chars().count() >= 3
+}
+
+/// Parse a heading line `# title` … `###### title`. Returns `(level, content)`
+/// where `content` still carries any inline formatting markers.
+fn parse_heading(s: &str) -> Option<(u8, &str)> {
+    let hashes = s.bytes().take_while(|&b| b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &s[hashes..];
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    if rest.is_empty() && !s[..hashes].chars().all(|c| c == '#') {
+        return None;
+    }
+    Some((hashes as u8, rest))
+}
+
+/// Parse a blockquote line `> text`. Supports `> text` and `>text`.
+fn parse_quote(s: &str) -> Option<&str> {
+    s.strip_prefix('>').map(|rest| {
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        rest
+    })
+}
+
+/// Parse a list-item line. Returns `(ordered_marker, content, checked)`.
+/// `ordered_marker` is `Some(n)` for `N. `, `None` for bullet (`-`/`*`/`+ `).
+/// `checked` is `Some(bool)` for task-list items `- [x]`/`- [ ]`.
+fn parse_list_item(s: &str) -> Option<(Option<u64>, &str, Option<bool>)> {
+    // Task list: - [x] / - [ ] / * [x] / + [ ]
+    if let Some(after_bullet) = strip_bullet(s) {
+        let after = after_bullet.trim_start_matches(' ');
+        if let Some(rest) = after.strip_prefix("[") {
+            let rest_first = rest.chars().next();
+            let checked = match rest_first {
+                Some('x') | Some('X') => Some(true),
+                Some(' ') => Some(false),
+                _ => None,
+            };
+            if checked.is_some() {
+                if let Some(content) = rest[1..].strip_prefix("]") {
+                    return Some((None, content.trim_start(), checked));
+                }
+            }
+        }
+        return Some((None, after, None));
+    }
+    // Ordered list: 1. / 2. …
+    if let Some((num, rest)) = parse_ordered(s) {
+        let rest = rest.trim_start_matches(' ');
+        // Ordered task list: 1. [x] (rare, but handle it)
+        if let Some(r) = rest.strip_prefix("[") {
+            let checked = match r.chars().next() {
+                Some('x') | Some('X') => Some(true),
+                Some(' ') => Some(false),
+                _ => None,
+            };
+            if checked.is_some() {
+                if let Some(content) = r[1..].strip_prefix("]") {
+                    return Some((Some(num), content.trim_start(), checked));
+                }
+            }
+        }
+        return Some((Some(num), rest, None));
+    }
+    None
+}
+
+/// Strip a bullet prefix (`-`/`*`/`+`), returning the remainder.
+fn strip_bullet(s: &str) -> Option<&str> {
+    if let Some(rest) = s.strip_prefix("- ") {
+        Some(rest)
+    } else if let Some(rest) = s.strip_prefix("* ") {
+        Some(rest)
+    } else if let Some(rest) = s.strip_prefix("+ ") {
+        Some(rest)
+    } else if let Some(rest) = s.strip_prefix("-\t") {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+/// Parse an ordered-list marker `N. ` or `N) `, returning `(N, remainder)`.
+fn parse_ordered(s: &str) -> Option<(u64, &str)> {
+    let digits_end = s.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits_end == 0 {
+        return None;
+    }
+    let rest = &s[digits_end..];
+    if let Some(after) = rest.strip_prefix(". ") {
+        let n: u64 = s[..digits_end].parse().ok()?;
+        return Some((n, after));
+    }
+    if let Some(after) = rest.strip_prefix(") ") {
+        let n: u64 = s[..digits_end].parse().ok()?;
+        return Some((n, after));
+    }
+    None
+}
+
+/// Whether a line ends with a hard break (≥2 trailing spaces). The two-space
+/// marker is stripped from the content before this is called on the stored
+/// string, so we check the *original* line; callers pass the raw line.
+fn line_ends_hard(line: &str) -> bool {
+    line.ends_with("  ") || line.ends_with("\t")
+}
+
+/// Is this line a GFM table separator (`| --- | :--: | ---: |`)?
+fn is_table_separator(s: &str) -> bool {
+    if !s.contains('-') {
+        return false;
+    }
+    let stripped = s.trim_matches('|').trim();
+    if stripped.is_empty() {
+        return false;
+    }
+    // Each cell must contain at least one `-`, only `-`,`:`,and spaces.
+    stripped.split('|').all(|cell| {
+        let c = cell.trim();
+        !c.is_empty()
+            && c.contains('-')
+            && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+    })
+}
+
+/// Parse alignment markers from a separator row into `TableAlignment`s.
+fn parse_table_aligns(sep: &str) -> Vec<TableAlignment> {
+    sep.trim_matches('|')
+        .split('|')
+        .map(|cell| {
+            let c = cell.trim();
+            let left = c.starts_with(':');
+            let right = c.ends_with(':');
+            match (left, right) {
+                (true, true) => TableAlignment::Center,
+                (true, false) => TableAlignment::Left,
+                (false, true) => TableAlignment::Right,
+                (false, false) => TableAlignment::None,
+            }
+        })
+        .collect()
+}
+
+/// Split a `| a | b | c |` row into trimmed cell strings.
+fn split_table_row(line: &str) -> Vec<String> {
+    let line = line.trim();
+    // Strip leading/trailing `|`.
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let line = line.strip_suffix('|').unwrap_or(line);
+    line.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Scan a prose string for inline `` `code` `` and `**bold**` runs, returning
+/// `(code_ranges, bold_ranges)` as byte offsets `[start, end)` into `content`.
+/// Delimiters are *kept* in `content` (the caller owns the string), so the
+/// ranges cover the full marker-inclusive span — matching the contract that
+/// copy/selection see plain text and rendering paints over the quoted region.
+pub(crate) fn scan_inline(content: &str) -> (Vec<CodeRange>, Vec<CodeRange>) {
+    let bytes = content.as_bytes();
+    let mut code_ranges = Vec::new();
+    let mut bold_ranges = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        // Inline code: a run of backticks, closed by the same number.
+        if bytes[i] == b'`' {
+            let tick_count = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+            let close_start = i + tick_count;
+            // Find a matching-length closing fence.
+            if let Some(rel) = find_backtick_run(&content[close_start..], tick_count) {
+                let end = close_start + rel + tick_count;
+                code_ranges.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        // Bold: `**…**`.
+        if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            if let Some(rel) = content[i + 2..].find("**") {
+                let end = i + 2 + rel + 2;
+                bold_ranges.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    (code_ranges, bold_ranges)
+}
+
+/// Find the byte offset of a run of exactly `n` backticks within `s`.
+fn find_backtick_run(s: &str, n: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + n <= bytes.len() {
+        if bytes[i..i + n].iter().all(|&b| b == b'`') {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+
+/// Enforce the GFM table column-count invariant: the number of columns is
+/// fixed by the header row, so every body row is normalized to exactly that
+/// width — short rows are padded with empty cells, over-wide rows truncated.
+/// Establishing this once at parse time lets every consumer index rows by
+/// column without per-access bounds checks.
+fn normalize_table_rows(header: &[String], rows: &mut [Vec<String>]) {
+    let ncols = header.len();
+    if ncols == 0 {
+        // Degenerate: no columns to normalize against. Such a table yields an
+        // empty render and is dropped by the caller, so the rows are unused.
+        return;
+    }
+    for row in rows {
+        if row.len() > ncols {
+            row.truncate(ncols);
+        } else if row.len() < ncols {
+            row.resize(ncols, String::new());
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1443,39 +1637,9 @@ struct TableAccumulator {
     aligns: Vec<TableAlignment>,
     header: Vec<String>,
     rows: Vec<Vec<String>>,
-    row: Vec<String>,
-    cell: String,
-    in_head: bool,
 }
 
 impl TableAccumulator {
-    fn start_row(&mut self) {
-        self.row.clear();
-    }
-
-    fn end_row(&mut self) {
-        if !self.cell.is_empty() {
-            self.end_cell();
-        }
-        if self.row.is_empty() {
-            return;
-        }
-        let row = std::mem::take(&mut self.row);
-        if self.in_head {
-            self.header = row;
-        } else {
-            self.rows.push(row);
-        }
-    }
-
-    fn start_cell(&mut self) {
-        self.cell.clear();
-    }
-
-    fn end_cell(&mut self) {
-        self.row.push(std::mem::take(&mut self.cell));
-    }
-
     /// Render the table as a GFM-style aligned grid using box-drawing borders.
     ///
     /// Columns are sized to their widest cell (intrinsic width) so vertical
@@ -1490,28 +1654,17 @@ impl TableAccumulator {
         let width = |cell: &str| display_width(cell);
 
         // Per-column intrinsic width: max of header and every body cell.
+        // Rows are pre-normalized to `ncols` cells by `normalize_table_rows`,
+        // so iterating in full here touches exactly one cell per column.
         let mut widths = vec![0usize; ncols];
-        for (i, h) in self.header.iter().enumerate().take(ncols) {
+        for (i, h) in self.header.iter().enumerate() {
             widths[i] = widths[i].max(width(h));
         }
         for row in &self.rows {
-            for (i, cell) in row.iter().enumerate().take(ncols) {
+            for (i, cell) in row.iter().enumerate() {
                 widths[i] = widths[i].max(width(cell));
             }
         }
-
-        // Pad missing body cells up to the column count so the grid stays rectangular.
-        let body_rows: Vec<Vec<String>> = self
-            .rows
-            .iter()
-            .map(|row| {
-                let mut padded = row.clone();
-                if padded.len() < ncols {
-                    padded.resize(ncols, String::new());
-                }
-                padded
-            })
-            .collect();
 
         let join_borders = |sep: &str| -> String {
             widths
@@ -1526,7 +1679,7 @@ impl TableAccumulator {
         out.push_str(&format_row(&self.header, &widths, &self.aligns));
         out.push('\n');
         out.push_str(&format!("├{}┤\n", join_borders("┼")));
-        for row in &body_rows {
+        for row in &self.rows {
             out.push_str(&format_row(row, &widths, &self.aligns));
             out.push('\n');
         }
@@ -1562,94 +1715,11 @@ fn pad_cell(cell: &str, width: usize, align: TableAlignment) -> String {
     }
 }
 
-fn table_alignment(a: pulldown_cmark::Alignment) -> TableAlignment {
-    match a {
-        pulldown_cmark::Alignment::None => TableAlignment::None,
-        pulldown_cmark::Alignment::Left => TableAlignment::Left,
-        pulldown_cmark::Alignment::Center => TableAlignment::Center,
-        pulldown_cmark::Alignment::Right => TableAlignment::Right,
-    }
-}
 
 fn display_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
-struct ListAccumulator {
-    content: String,
-    code_ranges: Vec<CodeRange>,
-    ordered: Option<u64>,
-    depth: usize,
-    checked: Option<bool>,
-}
-
-struct ListState {
-    next: Option<u64>,
-}
-
-fn append_text(
-    text: &str,
-    heading: &mut Option<(u8, String)>,
-    items: &mut [ListAccumulator],
-    quotes: &mut [String],
-    table: &mut Option<TableAccumulator>,
-    paragraph: &mut String,
-) {
-    if let Some(table) = table {
-        table.cell.push_str(text);
-    } else if let Some((_, content)) = heading {
-        content.push_str(text);
-    } else if let Some(item) = items.last_mut() {
-        item.content.push_str(text);
-    } else if let Some(quote) = quotes.last_mut() {
-        quote.push_str(text);
-    } else {
-        paragraph.push_str(text);
-    }
-}
-
-/// Append a re-wrapped inline-code span (`` `…` ``) to whichever prose
-/// accumulator is currently active, mirroring [`append_text`] for routing, and
-/// record the span's byte range `[start, end)` against the flattened content of
-/// that target so the renderer can paint it on the code surface. The range
-/// covers the full `` `…` `` span including both backticks.
-///
-/// Tables do not record inline-code ranges (their cell text is rendered through
-/// the dedicated table renderer, which treats the whole cell as uniform prose);
-/// the backticks are still appended to the cell so copy yields the original
-/// markdown.
-#[allow(clippy::too_many_arguments)]
-fn append_code(
-    wrapped: &str,
-    heading: &mut Option<(u8, String)>,
-    heading_code: &mut Vec<CodeRange>,
-    items: &mut [ListAccumulator],
-    quotes: &mut [String],
-    quotes_code: &mut [Vec<CodeRange>],
-    table: &mut Option<TableAccumulator>,
-    paragraph: &mut String,
-    paragraph_code: &mut Vec<CodeRange>,
-) {
-    if let Some(table) = table {
-        table.cell.push_str(wrapped);
-    } else if let Some((_, content)) = heading {
-        let start = content.len();
-        content.push_str(wrapped);
-        heading_code.push((start, content.len()));
-    } else if let Some(item) = items.last_mut() {
-        let start = item.content.len();
-        item.content.push_str(wrapped);
-        item.code_ranges.push((start, item.content.len()));
-    } else if let (Some(quote), Some(code)) = (quotes.last_mut(), quotes_code.last_mut()) {
-        let start = quote.len();
-        quote.push_str(wrapped);
-        code.push((start, quote.len()));
-    } else {
-        let start = paragraph.len();
-        paragraph.push_str(wrapped);
-        paragraph_code.push((start, paragraph.len()));
-    }
-}
 
 /// Drop ranges that fall entirely past `len` and clamp the end of any range
 /// that straddles it (trim_end can only shrink trailing whitespace, so in
@@ -1670,9 +1740,7 @@ fn push_block(blocks: &mut Vec<Block>, block: Block) {
     let needs_gap = blocks.last().is_some_and(|previous| {
         !matches!(
             (previous, &block),
-            (Block::Break, _)
-                | (Block::Heading { .. }, Block::Text { .. })
-                | (Block::ListItem { .. }, Block::ListItem { .. })
+            (Block::Break, _) | (Block::ListItem { .. }, Block::ListItem { .. })
         )
     });
     if needs_gap {
@@ -1681,16 +1749,6 @@ fn push_block(blocks: &mut Vec<Block>, block: Block) {
     blocks.push(block);
 }
 
-fn heading_level(level: pulldown_cmark::HeadingLevel) -> u8 {
-    match level {
-        pulldown_cmark::HeadingLevel::H1 => 1,
-        pulldown_cmark::HeadingLevel::H2 => 2,
-        pulldown_cmark::HeadingLevel::H3 => 3,
-        pulldown_cmark::HeadingLevel::H4 => 4,
-        pulldown_cmark::HeadingLevel::H5 => 5,
-        pulldown_cmark::HeadingLevel::H6 => 6,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1717,11 +1775,10 @@ mod tests {
 
     #[test]
     fn inline_code_keeps_its_backtick_quotes_in_prose() {
-        // pulldown-cmark emits an inline-code span as `Event::Code` with the
-        // backtick delimiters already stripped. The block parser must re-wrap
-        // it, otherwise inline code in a paragraph / heading / list item /
-        // quote would be flattened into the surrounding plain text and the
-        // quote marks lost from the rendered (and copied) content.
+        // Inline code keeps its backtick delimiters in the flattened content
+        // so the rendered/copied paragraph still shows the quotes, and the
+        // renderer can paint the span on the code surface. This holds across
+        // paragraph / heading / list item / quote contexts.
         let blocks = parse_blocks("Call the `read_file` tool.");
         assert!(matches!(
             &blocks[0],
@@ -1787,6 +1844,7 @@ mod tests {
         let Block::Text {
             content,
             code_ranges,
+            ..
         } = &blocks[0]
         else {
             panic!("expected Text block, got {:?}", blocks[0]);
@@ -1831,6 +1889,7 @@ mod tests {
         let Block::Quote {
             content,
             code_ranges,
+            ..
         } = &blocks[0]
         else {
             panic!("expected Quote block, got {:?}", blocks[0]);
@@ -1898,17 +1957,29 @@ mod tests {
     }
 
     #[test]
+    fn headings_are_visually_separated_from_following_body_text() {
+        let blocks = parse_blocks("# Result\nFirst paragraph.");
+
+        assert!(matches!(&blocks[0], Block::Heading { content, .. } if content == "Result"));
+        assert!(
+            matches!(&blocks[1], Block::Break),
+            "heading-to-text boundaries should render with a blank row"
+        );
+        assert!(matches!(&blocks[2], Block::Text { content, .. } if content == "First paragraph."));
+    }
+
+    #[test]
     fn markdown_soft_breaks_flow_but_hard_breaks_are_preserved() {
-        let soft = parse_blocks("第一行\n第二行");
+        let soft = parse_blocks("alpha bravo\ncharlie delta");
         assert!(matches!(
             &soft[0],
-            Block::Text { content, .. } if content == "第一行 第二行"
+            Block::Text { content, .. } if content == "alpha bravo charlie delta"
         ));
 
-        let hard = parse_blocks("第一行  \n第二行");
+        let hard = parse_blocks("alpha bravo  \ncharlie delta");
         assert!(matches!(
             &hard[0],
-            Block::Text { content, .. } if content == "第一行\n第二行"
+            Block::Text { content, .. } if content == "alpha bravo\ncharlie delta"
         ));
     }
 
@@ -2000,6 +2071,34 @@ mod tests {
             "got: {}",
             data_lines[1]
         );
+    }
+
+    /// GFM fixes the table column count from the header, so every body row in
+    /// a `Block::Table` must be normalized to exactly `headers.len()` cells:
+    /// short rows padded with empty strings, over-wide rows truncated. This is
+    /// the invariant the live renderer indexes against; a ragged row used to
+    /// panic `build_table_render` with an out-of-bounds index.
+    #[test]
+    fn table_normalizes_ragged_body_rows_to_header_width() {
+        // 2-column header; body rows have 2, 1, and 3 cells respectively.
+        let blocks = parse_blocks("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 |\n| 4 | 5 | 6 |");
+        let (headers, rows) = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { headers, rows, .. } => Some((headers.clone(), rows.clone())),
+                _ => None,
+            })
+            .expect("table block present");
+        let ncols = headers.len();
+        assert_eq!(ncols, 2, "header defines 2 columns");
+        assert!(
+            rows.iter().all(|row| row.len() == ncols),
+            "every body row must be normalized to {ncols} cells, got {rows:?}"
+        );
+        // Short rows are padded with empty cells, the over-wide row truncated.
+        assert_eq!(rows[0], vec!["1".to_string(), "2".to_string()]);
+        assert_eq!(rows[1], vec!["3".to_string(), String::new()]);
+        assert_eq!(rows[2], vec!["4".to_string(), "5".to_string()]);
     }
 
     #[test]

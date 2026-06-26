@@ -78,6 +78,14 @@ pub struct BlockRegion {
     pub prefix_cols: u16,
     /// Screen rectangle (inclusive start, exclusive end in x; y is absolute row).
     pub rect: Rect,
+    /// Byte ranges within `text` that are rendered as zero-width (visually
+    /// elided) — e.g. the `**` bold marker delimiters. [`Self::text`] still
+    /// holds the original bytes (so copy, which resolves against the block's
+    /// raw `content`, yields the exact `**bold**` source), but these ranges
+    /// occupy no display columns, so [`LayoutMap::cursor_at`] must skip them
+    /// when mapping a screen column back to a byte offset. Empty for blocks
+    /// with no elided markup.
+    pub hidden_ranges: Vec<(usize, usize)>,
 }
 
 /// Records the layout of rendered blocks for a single frame.
@@ -105,12 +113,22 @@ pub struct LayoutMap {
 }
 
 /// A clickable region belonging to one logical table cell.
+///
+/// `cell_text` is the *original* cell text (from `headers` / `rows`, before
+/// padding/wrapping). `cell_byte_range` is the byte range of the padded cell
+/// content within the grid-line text — used to clamp drag selections to the
+/// cell's `│` boundaries.
 #[derive(Debug, Clone)]
 pub struct TableCellHit {
     pub message_idx: usize,
     pub block_idx: usize,
     pub cell_idx: usize,
     pub rect: Rect,
+    /// Original cell text, copied from the `Block::Table` headers/rows.
+    pub cell_text: String,
+    /// `(lo, hi)` byte range of the padded cell content within the grid-line
+    /// text rendered on this row. Used to clamp drag selections.
+    pub cell_byte_range: (usize, usize),
 }
 
 impl LayoutMap {
@@ -154,7 +172,7 @@ impl LayoutMap {
     }
 
     /// Resolve a screen point to the table cell it lies inside, if any.
-    pub fn table_cell_at(&self, x: u16, y: u16) -> Option<(usize, usize, usize)> {
+    pub fn table_cell_at(&self, x: u16, y: u16) -> Option<&TableCellHit> {
         self.table_cell_hits
             .iter()
             .find(|h| {
@@ -163,39 +181,6 @@ impl LayoutMap {
                     && h.rect.y <= y
                     && y < h.rect.y + h.rect.height
             })
-            .map(|h| (h.message_idx, h.block_idx, h.cell_idx))
-    }
-
-    /// Clamp a screen point so it stays inside the hit boxes of the given
-    /// table cell. This lets a drag selection roam freely within one cell —
-    /// across its wrapped lines and full column width — without ever crossing
-    /// a `│` border into a neighbour. Returns `None` if the cell has no
-    /// recorded hit boxes for the current frame.
-    pub fn clamp_to_table_cell(
-        &self,
-        cell: (usize, usize, usize),
-        x: u16,
-        y: u16,
-    ) -> Option<(u16, u16)> {
-        let hits: Vec<&TableCellHit> = self
-            .table_cell_hits
-            .iter()
-            .filter(|h| (h.message_idx, h.block_idx, h.cell_idx) == cell)
-            .collect();
-        if hits.is_empty() {
-            return None;
-        }
-
-        // Prefer the hit box on the same row as `y`; otherwise snap to the
-        // nearest cell row so vertical overflow stays within the cell.
-        let on_row = hits.iter().find(|h| h.rect.y == y).or_else(|| {
-            hits.iter()
-                .min_by_key(|h| (h.rect.y as i32 - y as i32).abs())
-        })?;
-        let row_y = on_row.rect.y;
-        let max_x = on_row.rect.x + on_row.rect.width.saturating_sub(1);
-        let clamped_x = x.max(on_row.rect.x).min(max_x);
-        Some((clamped_x, row_y))
     }
 
     /// Find the semantic cursor at a given screen coordinate.
@@ -204,7 +189,7 @@ impl LayoutMap {
     /// display width, so multi-byte and wide (CJK) characters map to the
     /// correct byte offset. The result always lies on a char boundary and is
     /// clamped to the region's byte range.
-    pub fn hit_test(&self, x: u16, y: u16) -> Option<SemanticCursor> {
+    pub fn cursor_at(&self, x: u16, y: u16) -> Option<SemanticCursor> {
         let region = self.region_at(x, y)?;
 
         let col_in_rect = x.saturating_sub(region.rect.x);
@@ -212,9 +197,20 @@ impl LayoutMap {
 
         // Walk the rendered text, accumulating display width until we reach
         // the clicked column. The cursor lands at the start of the character
-        // occupying that column.
+        // occupying that column. Bytes that fall inside a `hidden_ranges`
+        // entry are visually elided (zero-width, e.g. `**` bold markers), so
+        // they advance the byte cursor but contribute no display columns —
+        // keeping the screen-column → byte-offset mapping in lockstep with
+        // what the user actually sees.
         let mut acc_width = 0usize;
         for (byte_idx, ch) in region.text.char_indices() {
+            if region
+                .hidden_ranges
+                .iter()
+                .any(|&(lo, hi)| byte_idx >= lo && byte_idx < hi)
+            {
+                continue;
+            }
             let w = ch.width().unwrap_or(0).max(1);
             if col < acc_width + w {
                 return Some(SemanticCursor::new(
@@ -281,63 +277,64 @@ mod tests {
             text: text.to_string(),
             prefix_cols,
             rect,
+            hidden_ranges: Vec::new(),
         }
     }
 
     #[test]
-    fn test_hit_test_basic() {
+    fn test_cursor_at_basic() {
         let mut map = LayoutMap::new();
         map.push(region("hello", 0, 0, Rect::new(0, 0, 10, 1)));
 
-        let cursor = map.hit_test(2, 0).unwrap();
+        let cursor = map.cursor_at(2, 0).unwrap();
         assert_eq!(cursor.message_idx, 0);
         assert_eq!(cursor.block_idx, 0);
         assert_eq!(cursor.byte_offset, 2);
     }
 
     #[test]
-    fn test_hit_test_miss() {
+    fn test_cursor_at_miss() {
         let map = LayoutMap::new();
-        assert!(map.hit_test(0, 0).is_none());
+        assert!(map.cursor_at(0, 0).is_none());
     }
 
     #[test]
-    fn hit_test_subtracts_prefix_columns() {
+    fn cursor_at_subtracts_prefix_columns() {
         let mut map = LayoutMap::new();
         map.push(region("hello", 0, 3, Rect::new(0, 0, 20, 1)));
 
         // Column 3 is the first text column.
-        assert_eq!(map.hit_test(3, 0).unwrap().byte_offset, 0);
-        assert_eq!(map.hit_test(5, 0).unwrap().byte_offset, 2);
+        assert_eq!(map.cursor_at(3, 0).unwrap().byte_offset, 0);
+        assert_eq!(map.cursor_at(5, 0).unwrap().byte_offset, 2);
         // Inside the prefix clamps to the line start.
-        assert_eq!(map.hit_test(1, 0).unwrap().byte_offset, 0);
+        assert_eq!(map.cursor_at(1, 0).unwrap().byte_offset, 0);
     }
 
     #[test]
-    fn hit_test_handles_wide_and_multibyte_chars() {
-        // "你好a" — 你/好 are 3 bytes, 2 columns each.
+    fn cursor_at_handles_wide_and_multibyte_chars() {
+        // "😀😃a" — 😀/😃 are 4 bytes, 2 columns each.
         let mut map = LayoutMap::new();
-        map.push(region("你好a", 0, 0, Rect::new(0, 0, 20, 1)));
+        map.push(region("😀😃a", 0, 0, Rect::new(0, 0, 20, 1)));
 
-        // Both columns of 你 resolve to byte 0.
-        assert_eq!(map.hit_test(0, 0).unwrap().byte_offset, 0);
-        assert_eq!(map.hit_test(1, 0).unwrap().byte_offset, 0);
-        // 好 starts at byte 3 (columns 2-3).
-        assert_eq!(map.hit_test(2, 0).unwrap().byte_offset, 3);
-        assert_eq!(map.hit_test(3, 0).unwrap().byte_offset, 3);
-        // 'a' at byte 6, column 4.
-        assert_eq!(map.hit_test(4, 0).unwrap().byte_offset, 6);
+        // Both columns of 😀 resolve to byte 0.
+        assert_eq!(map.cursor_at(0, 0).unwrap().byte_offset, 0);
+        assert_eq!(map.cursor_at(1, 0).unwrap().byte_offset, 0);
+        // 😃 starts at byte 4 (columns 2-3).
+        assert_eq!(map.cursor_at(2, 0).unwrap().byte_offset, 4);
+        assert_eq!(map.cursor_at(3, 0).unwrap().byte_offset, 4);
+        // 'a' at byte 8, column 4.
+        assert_eq!(map.cursor_at(4, 0).unwrap().byte_offset, 8);
         // Past the end clamps to end_byte — always a char boundary.
-        assert_eq!(map.hit_test(15, 0).unwrap().byte_offset, 7);
+        assert_eq!(map.cursor_at(15, 0).unwrap().byte_offset, 9);
     }
 
     #[test]
-    fn hit_test_respects_wrapped_line_offsets() {
+    fn cursor_at_respects_wrapped_line_offsets() {
         // Second wrapped line of a block starting at byte 10.
         let mut map = LayoutMap::new();
         map.push(region("world", 10, 3, Rect::new(0, 4, 20, 1)));
 
-        assert_eq!(map.hit_test(4, 4).unwrap().byte_offset, 11);
+        assert_eq!(map.cursor_at(4, 4).unwrap().byte_offset, 11);
     }
 
     #[test]
@@ -351,6 +348,7 @@ mod tests {
             text: String::new(),
             prefix_cols: 0,
             rect: Rect::new(0, 5, 10, 1),
+            hidden_ranges: Vec::new(),
         });
         map.push(BlockRegion {
             message_idx: 2,
@@ -360,6 +358,7 @@ mod tests {
             text: String::new(),
             prefix_cols: 0,
             rect: Rect::new(0, 6, 10, 1),
+            hidden_ranges: Vec::new(),
         });
         map.push(BlockRegion {
             message_idx: 3,
@@ -369,6 +368,7 @@ mod tests {
             text: String::new(),
             prefix_cols: 0,
             rect: Rect::new(0, 7, 10, 1),
+            hidden_ranges: Vec::new(),
         });
 
         assert_eq!(

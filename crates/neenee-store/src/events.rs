@@ -247,8 +247,8 @@ mod tests {
         // tag and round-trip through the log. A `MessagesReplaced` seeds the
         // window, then a `MessagesAppended` extends it — the exact interleave
         // `append_round` produces inside a real turn.
-        let dir = std::env::temp_dir()
-            .join(format!("neenee-events-append-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("neenee-events-append-{}", uuid::Uuid::new_v4()));
         let log = EventLog::new(dir.join("events.jsonl"));
 
         log.append(SessionEvent::MessagesReplaced {

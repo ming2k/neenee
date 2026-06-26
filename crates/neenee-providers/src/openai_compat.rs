@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use neenee_core::{Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall};
+use neenee_core::{Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall, model::resolve as resolve_model};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -67,12 +67,38 @@ impl OpenAiCompatProvider {
         // Recover from a poisoned mutex: a previous panic in the critical
         // section should not take down this request too.
         let tools = self.tools.lock().unwrap_or_else(|error| error.into_inner());
+
+        // If the model doesn't support vision, strip inline images so the API
+        // doesn't reject the request with "unknown variant `image_url`". The
+        // text content is preserved — the model just doesn't see the pixels.
+        let model = resolve_model(&self.model);
+        let messages: Vec<Message> = if model.vision {
+            messages
+        } else {
+            messages
+                .into_iter()
+                .map(|mut m| {
+                    if m.images.is_some() {
+                        tracing::debug!(
+                            target: "neenee_core::provider",
+                            provider = %self.id,
+                            model = %self.model,
+                            vision = false,
+                            "stripping images from message — model does not support vision",
+                        );
+                        m.images = None;
+                    }
+                    m
+                })
+                .collect()
+        };
+
         // OpenAI rejects any `tool` message whose `tool_call_id` does not match
         // a `tool_call` on a preceding assistant message. Drop orphan tool
         // results (e.g. from text-fallback calls or older saved sessions) so the
         // request can never fail with "tool_call_id is not found".
         let mut known_ids = std::collections::HashSet::new();
-        let messages: Vec<Message> = messages
+        let mut messages: Vec<Message> = messages
             .into_iter()
             .filter(|message| {
                 if !valid_provider_message(message) {
@@ -95,6 +121,40 @@ impl OpenAiCompatProvider {
                 }
             })
             .collect();
+
+        // Every assistant `tool_calls` must be followed by a corresponding
+        // `tool` result message.  Collect the ids that *did* get a result,
+        // then strip unanswered calls from every assistant message so the
+        // request is always valid — whether the turn was interrupted, the
+        // session was mid-tool when saved, or older turns lost their results.
+        let answered: std::collections::HashSet<String> = messages
+            .iter()
+            .filter_map(|m| {
+                if m.role == Role::Tool {
+                    m.tool_call_id.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        messages.retain_mut(|m| {
+            if m.role != Role::Assistant {
+                return true;
+            }
+            if let Some(calls) = m.tool_calls.as_mut() {
+                calls.retain(|c| answered.contains(&c.id));
+                if calls.is_empty() {
+                    m.tool_calls = None;
+                }
+            }
+            // Keep the message only if it still carries content or at least
+            // one surviving tool call; a completely empty assistant message
+            // is illegal on the wire.
+            !m.content.is_empty()
+                || m.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        });
         let tool_specs = tools.as_ref().map(|specs| {
             json!(
                 specs
@@ -907,5 +967,125 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "call_matched");
+    }
+
+    #[test]
+    fn openai_strips_unanswered_tool_calls() {
+        let provider =
+            OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+
+        let call_a = ToolCall {
+            id: "a".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        };
+        let call_b = ToolCall {
+            id: "b".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        let call_c = ToolCall {
+            id: "c".into(),
+            name: "grep".into(),
+            arguments: "{}".into(),
+        };
+
+        // --- Case 1: trailing unanswered assistant (the original bug) ---
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "go"),
+                Message {
+                    tool_calls: Some(vec![call_a.clone()]),
+                    ..Message::new(Role::Assistant, "")
+                },
+            ],
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        // The empty assistant is dropped entirely.
+        assert_eq!(msgs.len(), 1, "trailing unanswered assistant must be dropped");
+
+        // --- Case 2: assistant with content but no tool result ---
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "go"),
+                Message {
+                    tool_calls: Some(vec![call_a.clone()]),
+                    ..Message::new(Role::Assistant, "let me think")
+                },
+            ],
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[1]["content"].as_str().unwrap_or("").contains("let me think"));
+        assert!(msgs[1].get("tool_calls").is_none(), "unanswered calls must be stripped");
+
+        // --- Case 3: partially answered call set ---
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "go"),
+                Message {
+                    tool_calls: Some(vec![call_a.clone(), call_b.clone()]),
+                    ..Message::new(Role::Assistant, "")
+                },
+                Message {
+                    tool_call_id: Some("a".into()),
+                    ..Message::new(Role::Tool, "result a")
+                },
+            ],
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        // The assistant still has call_a (answered), but call_b is stripped.
+        let calls = msgs[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "a");
+
+        // --- Case 4: multiple consecutive unanswered assistants ---
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "go"),
+                Message {
+                    tool_calls: Some(vec![call_a.clone()]),
+                    ..Message::new(Role::Assistant, "first")
+                },
+                Message {
+                    tool_calls: Some(vec![call_b.clone()]),
+                    ..Message::new(Role::Assistant, "second")
+                },
+            ],
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "both assistants kept for their content");
+        assert!(msgs[1].get("tool_calls").is_none());
+        assert!(msgs[2].get("tool_calls").is_none());
+
+        // --- Case 5: fully healthy conversation (no stripping) ---
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "go"),
+                Message {
+                    tool_calls: Some(vec![call_a.clone(), call_c.clone()]),
+                    ..Message::new(Role::Assistant, "")
+                },
+                Message {
+                    tool_call_id: Some("a".into()),
+                    ..Message::new(Role::Tool, "ok")
+                },
+                Message {
+                    tool_call_id: Some("c".into()),
+                    ..Message::new(Role::Tool, "ok")
+                },
+                Message::new(Role::Assistant, "all done"),
+            ],
+            false,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 5, "healthy conversation untouched");
+        assert_eq!(msgs[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(msgs[4]["content"], "all done");
     }
 }

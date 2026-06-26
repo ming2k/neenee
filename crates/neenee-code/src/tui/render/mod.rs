@@ -43,8 +43,8 @@ use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
     draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
-    draw_permission_sheet, draw_question_modal, draw_session_modal, draw_sessions_modal,
-    draw_tool_step_detail_overlay,
+    draw_permissions_manager, draw_permission_sheet, draw_question_modal, draw_session_modal,
+    draw_sessions_modal, draw_tool_step_detail_overlay,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
@@ -96,6 +96,7 @@ pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option
         Modal::Activity => (72, 70),
         Modal::Session => (76, 70),
         Modal::Sessions => (80, 64),
+        Modal::Permissions => (64, 60),
         _ => return None,
     };
     Some(primitives::centered_rect(
@@ -868,7 +869,6 @@ mod tests {
                 (crate::tui::SessionTab::Model, 0),
                 (crate::tui::SessionTab::Mcp, 0),
                 (crate::tui::SessionTab::Skills, 0),
-                (crate::tui::SessionTab::Permissions, 0),
                 (crate::tui::SessionTab::Tools, 0),
             ] {
                 draw_session_modal(
@@ -1176,7 +1176,7 @@ mod tests {
 
         // The empty text row sits one line below the box's top edge.
         let cursor = layout_map
-            .hit_test(
+            .cursor_at(
                 input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16,
                 input_rect.y + 1,
             )
@@ -1499,23 +1499,23 @@ mod tests {
         use crate::tui::document::TableAlignment;
 
         let headers = vec![
-            "工具".to_string(),
-            "类型".to_string(),
-            "底层实现".to_string(),
-            "关键特性".to_string(),
+            "Tool".to_string(),
+            "Type".to_string(),
+            "Implementation".to_string(),
+            "Key Feature".to_string(),
         ];
         let rows = vec![
             vec![
                 "bash".to_string(),
                 "Write".to_string(),
-                "std::process::Command（sh -c / cmd /C）".to_string(),
-                "执行 shell 命令，支持 timeout，输出截断".to_string(),
+                "std::process::Command (sh -c / cmd /C)".to_string(),
+                "execute shell command, supports timeout, truncates output".to_string(),
             ],
             vec![
                 "read_file".to_string(),
                 "Read".to_string(),
                 "std::fs::read_to_string".to_string(),
-                "支持 offset/limit".to_string(),
+                "supports offset/limit".to_string(),
             ],
         ];
         let aligns = vec![
@@ -1574,6 +1574,54 @@ mod tests {
             wide_lines.len() <= lines.len(),
             "wide table should have fewer lines than shrunk table"
         );
+    }
+
+    /// Ragged body rows (fewer cells than the header, and more) must not panic
+    /// the adaptive renderer and must still produce a rectangular grid: every
+    /// data line carries the same number of `│` column separators. Regression
+    /// test for the `index out of bounds: the len is 1 but the index is 1`
+    /// panic at `markdown_table.rs` (`cell_styles[i]`) caused by a body row
+    /// with a single cell in a two-column table.
+    #[test]
+    fn table_render_handles_ragged_rows_without_panicking() {
+        use crate::tui::document::TableAlignment;
+
+        let headers = vec!["A".to_string(), "B".to_string()];
+        // 0, 1, 2, and 3 cells — exercises both the under- and over-wide paths.
+        let rows = vec![
+            vec![],
+            vec!["only".to_string()],
+            vec!["x".to_string(), "y".to_string()],
+            vec!["p".to_string(), "q".to_string(), "r".to_string()],
+        ];
+        let aligns = vec![TableAlignment::None, TableAlignment::None];
+
+        let table = build_table_render(&headers, &rows, &aligns, 40);
+        assert!(!table.lines.is_empty(), "ragged table must still render");
+
+        // Every data line must have the same number of column separators, i.e.
+        // the grid stays rectangular regardless of input raggedness.
+        let pipe_counts: Vec<usize> = table
+            .lines
+            .iter()
+            .filter(|l| l.starts_with('│'))
+            .map(|l| l.matches('│').count())
+            .collect();
+        assert!(!pipe_counts.is_empty(), "must have data lines");
+        assert!(
+            pipe_counts.iter().all(|&c| c == pipe_counts[0]),
+            "ragged rows produced uneven column counts: {pipe_counts:?}"
+        );
+
+        // Every data line carries per-cell geometry for exactly `ncols` cells,
+        // so hit-testing / selection never indexes out of bounds.
+        for info in table.line_info.iter().flatten() {
+            assert_eq!(
+                info.col_spans.len(),
+                2,
+                "each data line must describe exactly 2 cells"
+            );
+        }
     }
 
     #[test]
@@ -1815,5 +1863,309 @@ mod tests {
             render.content_lines, 6,
             "user-logo content_lines must be logo rows + gap + tagline"
         );
+    }
+
+    /// An H1 heading renders with an UNDERLINED modifier. The underline must
+    /// cover only the prefix + text cells and must not bleed into the trailing
+    /// whitespace of the heading row. Inspects the rendered grid cells
+    /// directly to pin the clamp in `draw_message_body`.
+    #[test]
+    fn h1_underline_clamps_to_text_extent() {
+        let theme = Theme::default();
+        let mut terminal = neenee_tui::TestTerminal::new(60, 12);
+        let messages = vec![TranscriptMessage::new(
+            neenee_core::Role::Assistant,
+            "# QQ_H1_TEST\n\nbody text here\n",
+        )];
+        terminal.draw(|f| {
+            let _ = draw_transcript(
+                f,
+                &mut LayoutMap::new(),
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
+        let buffer = terminal.buffer();
+        let width = buffer.area().width;
+        let underline = neenee_tui::Modifier::UNDERLINE;
+
+        let mut head = None;
+        'outer: for y in 0..buffer.area().height {
+            for x in 0..width {
+                if buffer[(x, y)].symbol() == "Q" {
+                    head = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (hx, hy) = head.expect("heading 'Q' cell exists");
+
+        // "QQ_H1_TEST" is 10 cells; prefix is 3 cells. All 13 are underlined.
+        for x in hx..hx + 10 {
+            assert!(
+                buffer[(x, hy)].style.add.contains(underline),
+                "heading text cell at x={x} must be UNDERLINED"
+            );
+        }
+        let trailing = hx + 10;
+        assert!(trailing < width, "trailing cell within grid");
+        assert!(
+            !buffer[(trailing, hy)].style.add.contains(underline),
+            "underline must not bleed into trailing whitespace at x={trailing}"
+        );
+        assert!(
+            !buffer[(width - 1, hy)].style.add.contains(underline),
+            "underline must not reach the right edge"
+        );
+    }
+
+    /// Same clamp check with a multi-codepoint emoji grapheme (ZWJ family) in
+    /// the heading: `wrap_text` measures per-char (overcounting the sequence)
+    /// while the grid renders per-grapheme, so this guards the underline width
+    /// against the char-vs-grapheme measurement split.
+    #[test]
+    fn h1_underline_clamps_with_emoji_grapheme() {
+        let theme = Theme::default();
+        let mut terminal = neenee_tui::TestTerminal::new(60, 12);
+        let messages = vec![TranscriptMessage::new(
+            neenee_core::Role::Assistant,
+            "# 👨‍👩‍👧 OKX\n\nbody\n",
+        )];
+        terminal.draw(|f| {
+            let _ = draw_transcript(
+                f,
+                &mut LayoutMap::new(),
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
+        let buffer = terminal.buffer();
+        let width = buffer.area().width;
+        let underline = neenee_tui::Modifier::UNDERLINE;
+
+        let mut x_pos = None;
+        'outer: for y in 0..buffer.area().height {
+            for x in 0..width {
+                if buffer[(x, y)].symbol() == "X" {
+                    x_pos = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (xx, xy) = x_pos.expect("heading 'X' cell exists");
+
+        assert!(
+            buffer[(xx, xy)].style.add.contains(underline),
+            "heading 'X' text cell must be UNDERLINED"
+        );
+        let trailing = xx + 1;
+        assert!(trailing < width, "trailing cell within grid");
+        assert!(
+            !buffer[(trailing, xy)].style.add.contains(underline),
+            "underline must not bleed past emoji heading at x={trailing}"
+        );
+    }
+
+    /// A wide (emoji) glyph in an H1 heading occupies a head cell plus a
+    /// wide-continuation cell. The grid stores the continuation without the
+    /// `add` modifiers (it is a non-emitted placeholder), but the diff skips
+    /// continuations and emits the head's run style — so the backend prints
+    /// the wide glyph while the UNDERLINED SGR is active, underlining both
+    /// columns. This pins that emitted behavior at the `Draw`-command layer.
+    #[test]
+    fn h1_underline_emits_wide_glyph_in_underlined_run() {
+        let theme = Theme::default();
+        let width = 60u16;
+        let mut terminal = neenee_tui::TestTerminal::new(width, 12);
+        let messages = vec![TranscriptMessage::new(
+            neenee_core::Role::Assistant,
+            "# Hello😀\n\nbody\n",
+        )];
+        terminal.draw(|f| {
+            let _ = draw_transcript(
+                f,
+                &mut LayoutMap::new(),
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
+        let back = terminal.buffer();
+        let front = neenee_tui::Grid::new(width, 12);
+        let cmd = neenee_tui::diff::diff(back, &front);
+        let underline = neenee_tui::Modifier::UNDERLINE;
+
+        let wide_run_style = cmd.draws.iter().find_map(|d| match d {
+            neenee_tui::Draw::Cells { style, cells, .. } => cells
+                .iter()
+                .any(|(sym, w)| sym == "😀" && *w == 2)
+                .then_some(*style),
+            _ => None,
+        });
+        let style =
+            wide_run_style.expect("a Draw::Cells run containing wide glyph '😀' must be emitted");
+        assert!(
+            style.add.contains(underline),
+            "wide glyph '😀' must be emitted in an UNDERLINED run so the terminal \
+             underlines both columns, got add={:?}",
+            style.add,
+        );
+    }
+
+    /// Regression: a long H1 heading that wraps to multiple lines. The heading
+    /// *prefix* (the leading `   ` indent on row 0 and the continuation indent
+    /// on rows 1+) is decoration, not heading text, so it must NOT carry the
+    /// UNDERLINED modifier. Previously the prefix shared the UNDERLINED style,
+    /// which underlined the leading whitespace of every wrapped row — the
+    /// underline appeared to "cross the line head" and cover the blank indent.
+    ///
+    /// We render a heading that wraps to ≥2 rows and assert that, on every
+    /// row, the underline begins exactly at the text column (prefix width) and
+    /// that the indent columns themselves are never underlined. The trailing
+    /// blank columns must also stay un-underlined (the existing clamp).
+    #[test]
+    fn h1_underline_excludes_prefix_indent_on_wrapped_rows() {
+        let theme = Theme::default();
+        let mut terminal = neenee_tui::TestTerminal::new(20, 16);
+        let messages = vec![TranscriptMessage::new(
+            neenee_core::Role::Assistant,
+            "# This is a very long heading that wraps to multiple lines\n\nbody\n",
+        )];
+        terminal.draw(|f| {
+            let _ = draw_transcript(
+                f,
+                &mut LayoutMap::new(),
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
+        let buffer = terminal.buffer();
+        let width = buffer.area().width;
+        let underline = neenee_tui::Modifier::UNDERLINE;
+
+        // The heading prefix is "   " (3 columns); locate the heading's rows
+        // as the contiguous non-blank rows at the top (before the blank gap +
+        // body). The heading "This is a very long heading that wraps to
+        // multiple lines" wraps to several rows here.
+        let mut heading_rows: Vec<u16> = Vec::new();
+        let mut found_body = false;
+        for y in 0..buffer.area().height {
+            let row_has_text =
+                (0..width).any(|x| buffer[(x, y)].symbol() != " ");
+            if !row_has_text {
+                if !heading_rows.is_empty() {
+                    found_body = true;
+                }
+                continue;
+            }
+            if found_body {
+                break;
+            }
+            heading_rows.push(y);
+        }
+        assert!(
+            heading_rows.len() >= 2,
+            "heading must wrap to at least 2 rows, got {}",
+            heading_rows.len()
+        );
+
+        for &y in &heading_rows {
+            // Indent columns [0, prefix_width) must never be underlined.
+            for x in 0..3u16 {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    !cell.style.add.contains(underline),
+                    "indent cell at (x={x}, y={y}) must NOT be underlined \
+                     (it is heading decoration, not text), symbol={:?}",
+                    cell.symbol(),
+                );
+            }
+            // The trailing blank tail (rightmost column) must not be underlined.
+            let last = width - 1;
+            assert!(
+                !buffer[(last, y)].style.add.contains(underline),
+                "trailing cell at (x={last}, y={y}) must NOT be underlined"
+            );
+            // And at least the first text column must be underlined (the
+            // heading text itself is still underlined).
+            let first_text_cell = &buffer[(3, y)];
+            assert!(
+                first_text_cell.style.add.contains(underline),
+                "first heading-text cell at (x=3, y={y}) must be UNDERLINED, \
+                 symbol={:?}",
+                first_text_cell.symbol(),
+            );
+        }
     }
 }

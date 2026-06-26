@@ -329,7 +329,7 @@ const QUANT_ANALYSIS_TOOLS: &[&str] = &[
 /// the analogue of [`INTERACTIVE`] for the quant domain); this one is the
 /// "research before you risk capital" shape.
 ///
-/// This profile exists precisely so the per-role tools-分配 requirement holds:
+/// This profile exists precisely so the per-role tool-allocation requirement holds:
 /// a quant analyst never sees coding tools (`write_file`, `edit_file`, `bash`),
 /// and a coding agent never sees quant tools (`market_data`, `place_order`).
 /// The two domains are isolated by name at the profile layer, which is the
@@ -487,10 +487,10 @@ mod tests {
     #[test]
     fn select_tools_filters_by_name() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(make("read_file")),  // admit (whitelisted)
-            Arc::new(make("bash")),       // reject (not whitelisted)
-            Arc::new(make("write_file")), // reject (not whitelisted)
-            Arc::new(make("grep")),       // admit (whitelisted)
+            Arc::new(make("read_file")),             // admit (whitelisted)
+            Arc::new(make("bash")),                  // reject (not whitelisted)
+            Arc::new(make("write_file")),            // reject (not whitelisted)
+            Arc::new(make("grep")),                  // admit (whitelisted)
             Arc::new(with_spawn(make("read_file"))), // reject (recursion)
         ];
         let selected = EXPLORE.select_tools(&tools);
@@ -525,12 +525,16 @@ mod tests {
         assert!(INTERACTIVE.tool_policy.admits(&make("write_file")));
         assert!(INTERACTIVE.tool_policy.admits(&with_user(make("ask_user"))));
         // Recursion and control-flow are still absolute.
-        assert!(!INTERACTIVE.tool_policy.admits(&with_spawn(make("read_file"))));
+        assert!(
+            !INTERACTIVE
+                .tool_policy
+                .admits(&with_spawn(make("read_file")))
+        );
         assert!(!INTERACTIVE.tool_policy.admits(&make_control()));
     }
 
     /// QUANT is the per-role isolation contract between the coding and
-    /// quant domains (the "tools 分配应该不同,不要搞混" requirement). It
+    /// quant domains (the "separate tool allocation per role" requirement). It
     /// admits the read-only quant tools and shared read-only inspection tools,
     /// but excludes: live trading (place_order), every coding write/edit tool,
     /// bash, and recursion/control. This test pins the domain boundary so a

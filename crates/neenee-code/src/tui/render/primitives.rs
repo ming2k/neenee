@@ -9,6 +9,7 @@ use neenee_tui::{
 };
 
 use super::Theme;
+use super::design::{MODAL_INNER_H_PADDING, MODAL_INNER_V_PADDING, PANEL_BAR_INSET, SCROLLBAR_GAP};
 
 /// Global viewport margin. Only vertical breathing room (1 cell top and
 /// bottom) is reserved; horizontally every component spans the full terminal
@@ -119,6 +120,20 @@ pub(super) fn panel_block(bar_color: Color, bg: Color) -> RtBlock<'static> {
         .style(Style::default().bg(bg))
 }
 
+/// Content rect inside a [`panel_block`]: starts one column right of the left
+/// `┃` bar and reserves a matching column on the right, so the panel's
+/// content is symmetric and a long line never touches either edge. Callers
+/// paint [`panel_block`] bare over the full `area` for the chrome, then
+/// render content into this rect — the left-bar-panel counterpart to how
+/// [`modal_frame`] insets the borderless modal family via
+/// `MODAL_INNER_H_PADDING`.
+pub(super) fn panel_inner(area: Rect) -> Rect {
+    area.inner(Margin {
+        horizontal: PANEL_BAR_INSET,
+        vertical: 0,
+    })
+}
+
 /// Section rects produced by [`modal_frame`]: the header and footer are
 /// `Option`al (omitted when the modal asked for none), and `body` is always
 /// present and flexes to fill whatever the header/footer leave behind.
@@ -131,11 +146,11 @@ pub(super) struct ModalFrame {
 /// Paint the unified modal chrome and split the content area into sections.
 ///
 /// Every centered modal goes through this so the panel style lives in one
-/// place: a borderless solid-bg panel (no `┃` left bar) with a 2-column
-/// left/right and 1-row top/bottom inner padding, then a vertical split into
-/// optional `header` (1 row) / `body` (flex) / optional 1-row gap + `footer`
-/// (1 row). The caller renders its own header / body / footer content into the
-/// returned rects.
+/// place: a borderless solid-bg panel (no `┃` left bar) with
+/// `MODAL_INNER_H_PADDING`/`MODAL_INNER_V_PADDING` inner padding, then a
+/// vertical split into optional `header` (1 row) / `body` (flex) / optional
+/// 1-row gap + `footer` (1 row). The caller renders its own header / body /
+/// footer content into the returned rects.
 pub(super) fn modal_frame(
     frame: &mut Frame,
     area: Rect,
@@ -146,8 +161,8 @@ pub(super) fn modal_frame(
     frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(Style::default().bg(bg)), area);
     let inner = area.inner(Margin {
-        horizontal: 2,
-        vertical: 1,
+        horizontal: MODAL_INNER_H_PADDING,
+        vertical: MODAL_INNER_V_PADDING,
     });
 
     // Tagged constraints so we can map split chunks back to sections:
@@ -240,8 +255,7 @@ fn draw_scrollbar(frame: &mut Frame, body: Rect, scroll: usize, max_scroll: usiz
     let thumb_h = (h * h / (max_scroll + h)).max(1).min(h) as u16;
     let track = h as u16;
     let track_top = body.y;
-    // Shift track_x to the right padding to avoid overlapping the body text
-    let track_x = body.x + body.width;
+    let track_x = body.x + body.width + SCROLLBAR_GAP;
 
     let more_above = scroll > 0;
     let more_below = scroll < max_scroll;
@@ -321,5 +335,37 @@ pub(super) fn rgb(color: Color) -> (u8, u8, u8) {
         Color::LightGreen => (127, 216, 143),
         Color::LightRed => (243, 139, 168),
         _ => (128, 128, 128),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `panel_inner` is the symmetric-inset contract for the left-bar-panel
+    //! family. Lock its geometry directly so a long overlay line can never
+    //! kiss the panel's right edge regardless of terminal width.
+    use super::*;
+    use neenee_tui::Rect;
+
+    #[test]
+    fn panel_inner_insets_symmetrically_around_left_bar() {
+        // A 10-wide panel: the `┃` bar owns the first column, content starts
+        // one column in (clear of the bar) and ends one column short of the
+        // right edge (the bar's mirrored gutter).
+        let area = Rect::new(2, 3, 10, 5);
+        let inner = panel_inner(area);
+        assert_eq!(inner.x, 3, "content starts right after the ┃ bar");
+        assert_eq!(inner.width, 8, "10 − 2 (left bar + right gutter)");
+        assert_eq!(inner.y, 3);
+        assert_eq!(inner.height, 5, "no vertical inset");
+        // Content's right edge is exactly one short of the panel's right edge.
+        assert_eq!(inner.x + inner.width, area.x + area.width - 1);
+    }
+
+    #[test]
+    fn panel_inner_clamps_without_underflow() {
+        // A panel too narrow for the bar + gutter collapses to an empty rect
+        // at the panel's origin rather than underflowing the width.
+        let inner = panel_inner(Rect::new(0, 0, 1, 1));
+        assert_eq!(inner, Rect::new(0, 0, 0, 0));
     }
 }

@@ -46,7 +46,6 @@ keystrokes through the same surface but render their own framing around it.
 
 ## Source
 
-`draw_composer` in `render/composer.rs`. Rendered manually (not via a
-ratatui `Block` widget) so the `┃` bar can be half-height (`╻`/`╹`) on
-transition rows. `INPUT_MSG_IDX = usize::MAX - 2` is the layout-map
+`draw_composer` in `render/composer.rs`. Rendered manually (not via a `Block`
+widget) so the `┃` bar can be half-height (`╻`/`╹`) on transition rows. `INPUT_MSG_IDX = usize::MAX - 2` is the layout-map
 message index reserved for live input selection.

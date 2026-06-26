@@ -12,12 +12,7 @@ impl Tool for GrepTool {
     }
     fn description(&self) -> &str {
         "Search for a regex pattern in files using ripgrep. Returns matches \
-         in `path:line:content` format — each match includes its exact line \
-         number and 2 lines of surrounding context. Use this to locate \
-         specific content in large files: the line numbers it returns let you \
-         target precise regions with `read_file`'s `offset` parameter instead \
-         of blind-reading the whole file. Faster than reading when you know \
-         what you are looking for but not where it is."
+         in `path:line:content` format with 2 lines of surrounding context."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

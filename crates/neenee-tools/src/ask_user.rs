@@ -16,9 +16,8 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user one or more multiple-choice questions to clarify preferences, resolve ambiguity, or decide between trade-offs. \
-         Use this when the request is vague, when multiple valid approaches exist, or before a risky/destructive action. \
-         Provide 2-4 labeled options per question; put the recommended option first and suffix its label with '(Recommended)'. \
+        "Ask the user multiple-choice questions to clarify preferences, resolve ambiguity, or decide between trade-offs. \
+         Provide 2-4 labeled options per question. Put the recommended option first and suffix its label with '(Recommended)'. \
          The user can always choose 'Other' and type a free-form answer."
     }
 
@@ -74,7 +73,6 @@ impl Tool for AskUserTool {
             "required": ["questions"]
         })
     }
-
 
     /// `ask_user` blocks on a live human answer; sub-agents (which have no
     /// user reachable) must be excluded from it by their profile.

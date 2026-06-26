@@ -3,7 +3,7 @@
 //! lays out character-addressable content.
 
 use neenee_tui::{
-    {Color, Style}, {Line, Span},
+    {Color, Modifier, Style}, {Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -102,6 +102,78 @@ pub(super) fn line_spans(
     Line::from(spans)
 }
 
+/// Resolve bold ranges (absolute byte offsets into a block's `content`) into
+/// the local `(range_lo, content_lo, content_hi, range_hi)` 4-tuples relative
+/// to `text` (a single wrapped line starting at `line_start_byte`).
+///
+/// Each tuple covers the full `**…**` span: `[range_lo, content_lo)` is the
+/// leading `**` delimiter (rendered zero-width), `[content_lo, content_hi)` is
+/// the inner content that carries `BOLD`, and `[content_hi, range_hi)` is the
+/// trailing `**` delimiter. Ranges outside the line are dropped; ranges
+/// straddling a wrap boundary are clamped to the line.
+pub(super) fn bold_local_regions(
+    text: &str,
+    line_start_byte: usize,
+    bold_ranges: &[(usize, usize)],
+) -> Vec<(usize, usize, usize, usize)> {
+    let line_end_byte = line_start_byte + text.len();
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    for &(cs, ce) in bold_ranges {
+        if ce <= line_start_byte || cs >= line_end_byte {
+            continue;
+        }
+        let lo = cs.saturating_sub(line_start_byte);
+        let hi = (ce - line_start_byte).min(text.len());
+        if lo >= hi {
+            continue;
+        }
+        let left_delim = bytes.get(lo) == Some(&b'*') && bytes.get(lo + 1) == Some(&b'*');
+        let right_delim = hi > 1
+            && bytes.get(hi - 1) == Some(&b'*')
+            && bytes.get(hi - 2) == Some(&b'*')
+            && hi - 2 > lo;
+        let content_lo = if left_delim { lo + 2 } else { lo };
+        let content_hi = if right_delim { hi - 2 } else { hi };
+        out.push((lo, content_lo, content_hi, hi));
+    }
+    out
+}
+
+/// The byte ranges within `text` that are the `**` bold *delimiter* markers
+/// (the leading/trailing `**`), rendered as zero-width so the bold content
+/// sits flush with its neighbours. Callers store these in
+/// [`BlockRegion::hidden_ranges`] so hit-testing maps screen columns to byte
+/// offsets the same way the user sees them.
+pub(super) fn bold_delim_local_ranges(
+    text: &str,
+    line_start_byte: usize,
+    bold_ranges: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(lo, content_lo, content_hi, hi) in &bold_local_regions(text, line_start_byte, bold_ranges)
+    {
+        if lo < content_lo {
+            out.push((lo, content_lo));
+        }
+        if content_hi < hi {
+            out.push((content_hi, hi));
+        }
+    }
+    out
+}
+
+/// Display width of `text` with the given zero-width (`hidden`) ranges
+/// excluded. Hidden ranges are ASCII markup delimiters, so their byte length
+/// equals their display width and a simple subtraction is exact.
+pub(super) fn visible_width(text: &str, hidden_ranges: &[(usize, usize)]) -> usize {
+    let hidden: usize = hidden_ranges
+        .iter()
+        .map(|&(lo, hi)| hi.saturating_sub(lo))
+        .sum();
+    text.width().saturating_sub(hidden)
+}
+
 /// Build a rendered line that, in addition to the prefix / selection behaviour
 /// of [`line_spans`], paints inline-code runs on a distinct `code_bg` band.
 ///
@@ -110,14 +182,15 @@ pub(super) fn line_spans(
 /// are absolute byte ranges into `content`, can be intersected with this line).
 /// `selected` is relative to `text`, as in [`line_spans`].
 ///
-/// The line is split into runs that are each uniform in *both* the selection
-/// state and the code state, so every cell is painted with exactly one of:
-/// plain (`base`), selected plain (`base` + `selected_bg`), code
-/// (`code_fg` + `code_bg`), or selected code (`code_fg` + `selected_bg`). The
-/// backtick delimiters are part of the code run (they live inside the recorded
-/// range), so the rendered chip reads as `` `read_file` `` on the code surface
-/// — and copy still yields the exact source, because the underlying text is
-/// untouched.
+/// The line is split into runs that are each uniform in the selection state,
+/// the code state, and the bold state. The recorded `code_ranges` cover the
+/// full `` `…` `` span *including* both backtick delimiters, and `bold_ranges`
+/// cover the full `**…**` span *including* both `**` markers, so the underlying
+/// text — and thus copy, which resolves against the block's raw `content` —
+/// keeps them. Visually, though, only the inner content is painted on the code
+/// surface (`code_fg` + `code_bg`); the backtick delimiter bytes are visually
+/// elided (zero-width) — same as bold `**` markers — while copy still yields the
+/// exact `` `read_file` `` source.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn line_spans_rich(
     prefix: &str,
@@ -126,6 +199,7 @@ pub(super) fn line_spans_rich(
     line_start_byte: usize,
     selected: Option<(usize, usize)>,
     code_ranges: &[(usize, usize)],
+    bold_ranges: &[(usize, usize)],
     base: Style,
     code_fg: Color,
     code_bg: Color,
@@ -150,29 +224,86 @@ pub(super) fn line_spans_rich(
             local_code.push((lo, hi));
         }
     }
-    // Fast path: no inline code on this line → defer to the plain builder so
-    // the common case is byte-for-byte identical to before.
-    if local_code.is_empty() {
+    // Bold ranges translated into offsets relative to this line's text
+    // (trimmed to the line's own [0, len] window), then resolved into
+    // `(range_lo, content_lo, content_hi, range_hi)` 4-tuples where the
+    // inner `[content_lo, content_hi)` carries `BOLD` and the surrounding
+    // `**` delimiters are visually elided (zero-width).
+    let bold_regions = bold_local_regions(text, line_start_byte, bold_ranges);
+
+    // Fast path: no inline code or bold on this line → defer to the plain builder
+    if local_code.is_empty() && bold_regions.is_empty() {
         return line_spans(prefix, prefix_style, text, selected, base, selected_bg);
     }
 
-    // Collect every boundary that can change the run style: line start/end, the
-    // selection edges, and each code range's edges. Sort + dedupe, then walk
-    // adjacent pairs emitting one span per uniform segment.
+    // For each local code range, compute the inner content sub-range by
+    // trimming the backtick delimiters. The delimiters are visually elided
+    // (zero-width), while only the inner content carries `code_fg` on the
+    // code surface. Copy is unaffected because it resolves against the
+    // block's raw `content`, which still holds the original `` `…` `` source.
+    let bytes = text.as_bytes();
+    // (range_start, content_start, content_end, range_end)
+    let mut regions: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for &(lo, hi) in &local_code {
+        let left_delim = bytes.get(lo) == Some(&b'`');
+        let right_delim = hi > 0 && bytes.get(hi - 1) == Some(&b'`') && hi - 1 > lo;
+        let content_lo = if left_delim { lo + 1 } else { lo };
+        let content_hi = if right_delim { hi - 1 } else { hi };
+        regions.push((lo, content_lo, content_hi, hi));
+    }
+
+    // Collect every boundary that can change the run style: line start/end,
+    // the selection edges, and each region's four edges. Sort + dedupe, then
+    // walk adjacent pairs emitting one span per uniform segment.
     let mut points: Vec<usize> = vec![0, text.len()];
     if let Some((lo, hi)) = selected {
         points.push(lo);
         points.push(hi);
     }
-    for &(lo, hi) in &local_code {
+    for &(lo, content_lo, content_hi, hi) in &regions {
         points.push(lo);
+        points.push(content_lo);
+        points.push(content_hi);
+        points.push(hi);
+    }
+    for &(lo, content_lo, content_hi, hi) in &bold_regions {
+        points.push(lo);
+        points.push(content_lo);
+        points.push(content_hi);
         points.push(hi);
     }
     points.sort_unstable();
     points.dedup();
 
-    let is_code = |p: usize| local_code.iter().any(|&(lo, hi)| p >= lo && p < hi);
+    // Region of a point: `None` = plain, `Some(true)` = code content,
+    // `Some(false)` = delimiter (padding).
+    let region = |p: usize| -> Option<bool> {
+        regions.iter().find_map(|&(lo, clo, chi, hi)| {
+            if p >= lo && p < hi {
+                Some(p >= clo && p < chi)
+            } else {
+                None
+            }
+        })
+    };
     let is_sel = |p: usize| matches!(selected, Some((lo, hi)) if p >= lo && p < hi);
+    // Whether `p` lies in bold *content* (the inner bytes that carry `BOLD`).
+    let is_bold = |p: usize| {
+        bold_regions
+            .iter()
+            .any(|&(_, content_lo, content_hi, _)| p >= content_lo && p < content_hi)
+    };
+    // Whether `p` lies in a bold *delimiter* (`**`) zone — those bytes are
+    // visually elided (zero-width), so the bold content sits flush with its
+    // neighbours. Copy is unaffected because it resolves against the block's
+    // raw `content`, which still holds the original `**…**` source.
+    let bold_delim = |p: usize| {
+        bold_regions
+            .iter()
+            .any(|&(lo, content_lo, content_hi, hi)| {
+                (p >= lo && p < content_lo) || (p >= content_hi && p < hi)
+            })
+    };
 
     let mut i = 0;
     while i + 1 < points.len() {
@@ -182,15 +313,43 @@ pub(super) fn line_spans_rich(
         if seg_lo >= seg_hi {
             continue;
         }
-        let code = is_code(seg_lo);
         let sel = is_sel(seg_lo);
-        let style = match (code, sel) {
-            (false, false) => base,
-            (false, true) => base.bg(selected_bg),
-            (true, false) => Style::default().fg(code_fg).bg(code_bg),
-            (true, true) => Style::default().fg(code_fg).bg(selected_bg),
-        };
-        spans.push(Span::styled(text[seg_lo..seg_hi].to_string(), style));
+        let bold = is_bold(seg_lo);
+        match region(seg_lo) {
+            None => {
+                if bold_delim(seg_lo) {
+                    // Bold delimiter `**`: visually elided (zero-width).
+                    // The bytes remain in `text` so copy still yields the
+                    // original `**…**` via the block's raw `content`; they
+                    // just occupy no screen columns (recorded in
+                    // `BlockRegion::hidden_ranges` for hit-testing).
+                    continue;
+                } else {
+                    let mut style = if sel { base.bg(selected_bg) } else { base };
+                    if bold {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(Span::styled(text[seg_lo..seg_hi].to_string(), style));
+                }
+            }
+            Some(true) => {
+                let mut style = if sel {
+                    Style::default().fg(code_fg).bg(selected_bg)
+                } else {
+                    Style::default().fg(code_fg).bg(code_bg)
+                };
+                if bold {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                spans.push(Span::styled(text[seg_lo..seg_hi].to_string(), style));
+            }
+            Some(false) => {
+                // Delimiter byte(s): visually elided (zero-width), same as
+                // bold markers. The underlying text (and thus copy) keeps the
+                // backtick; they just occupy no screen columns.
+                continue;
+            }
+        }
     }
     Line::from(spans)
 }
@@ -278,6 +437,45 @@ pub(super) struct WrappedLine {
     pub text: String,
     pub start_byte: usize,
     pub end_byte: usize,
+}
+
+/// Pre-wrap `text` and emit one indented [`Line`] per visual row — the
+/// "container" primitive for modal body blocks.
+///
+/// Unlike pushing a single `Line` with a leading-indent span and letting
+/// `Paragraph::wrap` soft-wrap it, the indent is a geometry property of the
+/// *block*: every visual row — whether it descends from an explicit `\n` or
+/// from a width-induced soft wrap — gets the same leading indent, so wrapped
+/// continuation rows line up with the first instead of snapping to the left
+/// edge. Callers must render the returned lines with wrapping **disabled**
+/// (`render_body(..., wrap=false)`); the text is already broken, and a second
+/// wrap pass would mangle the pre-sized widths.
+///
+/// `body_width` is the full body rectangle width in display columns; the
+/// helper subtracts `indent_cols` internally to size the wrap budget, so the
+/// content never overruns the body's right edge.
+pub(super) fn indented_wrapped_lines(
+    text: &str,
+    indent_cols: usize,
+    body_width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let wrap_width = body_width.saturating_sub(indent_cols).max(1);
+    let indent: String = " ".repeat(indent_cols);
+    let wrapped = wrap_text(text, wrap_width);
+    // An empty input yields no wrapped rows; a truly empty block should be the
+    // caller's responsibility to omit, but guard against a lone-row collapse
+    // for an input that is all whitespace (wrap_text returns at least one row
+    // for non-empty input).
+    wrapped
+        .into_iter()
+        .map(|wl| {
+            Line::from(vec![
+                Span::styled(indent.clone(), Style::default()),
+                Span::styled(wl.text, style),
+            ])
+        })
+        .collect()
 }
 
 /// Wrap text into lines that fit within `max_width` display columns.
@@ -388,15 +586,17 @@ pub(super) fn prohibited_line_end(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for [`line_spans_rich`]. These cover the three things that
-    //! matter for inline-code rendering: copy fidelity (the concatenated span
-    //! content equals the source text), band application (the code run and
-    //! only the code run carries `code_bg`), and selection interaction.
+    //! Unit tests for [`line_spans_rich`]. Copy fidelity is now guaranteed by
+    //! the block model (copy resolves against the block's raw `content`, which
+    //! still holds the original backticks), so these tests focus on the visible
+    //! layout instead: backtick delimiters are hidden as `code_bg` padding
+    //! spaces, only the inner content carries `code_fg` + `code_bg`, and
+    //! selection overrides backgrounds uniformly.
 
     use super::line_spans_rich;
-    use neenee_tui::{Color, Style};
+    use neenee_tui::{Color, Modifier, Style};
 
-    /// Rebuild the rendered text from a line's spans, skipping the prefix.
+    /// Rebuild the *visible* text from a line's spans, skipping the prefix.
     fn rendered_content(line: &neenee_tui::Line<'_>) -> String {
         line.spans
             .iter()
@@ -416,6 +616,7 @@ mod tests {
             0,
             None,
             &[],
+            &[],
             Style::default().fg(Color::White),
             Color::Green,
             Color::Black,
@@ -427,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn code_run_is_painted_on_code_bg_and_round_trips() {
+    fn code_delimiters_hidden_as_padding_content_on_code_surface() {
         // "use `foo` now" with the code range covering `` `foo` ``.
         let text = "use `foo` now";
         let code_range = (4, 9); // "`foo`"
@@ -438,30 +639,37 @@ mod tests {
             0,
             None,
             &[code_range],
+            &[],
             Style::default().fg(Color::White),
             Color::Green,
             Color::Black,
             Color::Red,
         );
-        assert_eq!(rendered_content(&line), text);
 
-        // Three content spans: "use ", "`foo`", " now".
+        // Backticks are visually elided (zero-width); only the inner code content
+        // carries code_fg on code_bg. Copy still yields the original `` `foo` ``
+        // via the block's raw `content`.
+        assert_eq!(rendered_content(&line), "use foo now");
+
+        // Three content spans: "use " · "foo" · " now".
         let content: Vec<_> = line.spans.iter().skip(1).collect();
         assert_eq!(content.len(), 3);
         assert_eq!(content[0].content, "use ");
-        assert_eq!(content[1].content, "`foo`");
+        assert_eq!(content[1].content, "foo");
         assert_eq!(content[2].content, " now");
-        // The code span carries the code background; the plain ones do not.
-        assert_eq!(content[0].style.bg, Color::Reset);
-        assert_eq!(content[1].style.bg, Color::Black);
-        assert_eq!(content[2].style.bg, Color::Reset);
-        assert_eq!(content[1].style.fg, Color::Green);
+
+        // Backgrounds: plain spans carry base (Reset), the code content span
+        // carries code_bg (Black).
+        assert_eq!(content[0].style.bg, Color::Reset); // "use "
+        assert_eq!(content[1].style.bg, Color::Black); // code content
+        assert_eq!(content[1].style.fg, Color::Green); // code_fg
+        assert_eq!(content[2].style.bg, Color::Reset); // " now"
     }
 
     #[test]
     fn selection_overrides_background() {
         // Selecting the whole line paints every span with `selected_bg`,
-        // including the code run.
+        // including the code content and the delimiter padding.
         let text = "a `b` c";
         let line = line_spans_rich(
             "",
@@ -470,14 +678,17 @@ mod tests {
             0,
             Some((0, text.len())),
             &[(2, 5)],
+            &[],
             Style::default().fg(Color::White),
             Color::Green,
             Color::Black,
             Color::Red,
         );
         let content: Vec<_> = line.spans.iter().skip(1).collect();
+        // Every span carries the selected background, including the code content.
         assert!(content.iter().all(|s| s.style.bg == Color::Red));
-        assert_eq!(rendered_content(&line), text);
+        // Backticks are zero-width; the code content sits flush with neighbours.
+        assert_eq!(rendered_content(&line), "a b c");
     }
 
     #[test]
@@ -491,6 +702,7 @@ mod tests {
             100,
             None,
             &[(0, 6)],
+            &[],
             Style::default().fg(Color::White),
             Color::Green,
             Color::Black,
@@ -498,5 +710,107 @@ mod tests {
         );
         assert_eq!(line.spans.len(), 2); // fast path
         assert_eq!(rendered_content(&line), "no code here");
+    }
+
+    #[test]
+    fn bold_delimiters_hidden_as_padding_inner_content_bold() {
+        // "**foo** bar" with the bold range covering the full `**foo**`.
+        let text = "**foo** bar";
+        let bold_range = (0, 7); // "**foo**"
+        let line = line_spans_rich(
+            "",
+            Style::default(),
+            text,
+            0,
+            None,
+            &[],
+            &[bold_range],
+            Style::default().fg(Color::White),
+            Color::Green,
+            Color::Black,
+            Color::Red,
+        );
+
+        // The `**` delimiters are visually elided (zero-width); only the
+        // inner content carries BOLD and the literal inter-word space remains.
+        assert_eq!(rendered_content(&line), "foo bar");
+
+        // Two content spans: "foo" · " bar".
+        let content: Vec<_> = line.spans.iter().skip(1).collect();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].content, "foo"); // bold content
+        assert_eq!(content[1].content, " bar"); // trailing prose
+
+        // Only the inner content carries the BOLD modifier.
+        assert!(content[0].style.add.contains(Modifier::BOLD));
+        assert!(!content[1].style.add.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn bold_delimiters_hidden_under_selection() {
+        // Selecting the whole line paints every span with `selected_bg`,
+        // and the inner content keeps BOLD. The `**` markers are zero-width
+        // so there is no padding to highlight.
+        let text = "a **b** c";
+        let line = line_spans_rich(
+            "",
+            Style::default(),
+            text,
+            0,
+            Some((0, text.len())),
+            &[],
+            &[(2, 7)], // "**b**"
+            Style::default().fg(Color::White),
+            Color::Green,
+            Color::Black,
+            Color::Red,
+        );
+        let content: Vec<_> = line.spans.iter().skip(1).collect();
+        // Every span carries the selected background.
+        assert!(content.iter().all(|s| s.style.bg == Color::Red));
+        // The `**` markers are zero-width: "a b c".
+        assert_eq!(rendered_content(&line), "a b c");
+        // Find the "b" span and confirm it is bold.
+        let b_span = content
+            .iter()
+            .find(|s| s.content == "b")
+            .expect("bold content span present");
+        assert!(b_span.style.add.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn bold_and_code_coexist_without_interference() {
+        // "use `foo` and **bar** now" — a code chip and a bold run on one line.
+        let text = "use `foo` and **bar** now";
+        let line = line_spans_rich(
+            "",
+            Style::default(),
+            text,
+            0,
+            None,
+            &[(4, 9)],   // "`foo`"
+            &[(14, 21)], // "**bar**"
+            Style::default().fg(Color::White),
+            Color::Green,
+            Color::Black,
+            Color::Red,
+        );
+        // Both backtick and `**` delimiters are zero-width: "use foo and bar now".
+        assert_eq!(rendered_content(&line), "use foo and bar now");
+        // The code content carries code_fg/code_bg; the bold content carries
+        // BOLD on the base style.
+        let content: Vec<_> = line.spans.iter().skip(1).collect();
+        let foo_span = content
+            .iter()
+            .find(|s| s.content == "foo")
+            .expect("code content span present");
+        assert_eq!(foo_span.style.fg, Color::Green);
+        assert_eq!(foo_span.style.bg, Color::Black);
+        let bar_span = content
+            .iter()
+            .find(|s| s.content == "bar")
+            .expect("bold content span present");
+        assert!(bar_span.style.add.contains(Modifier::BOLD));
+        assert_eq!(bar_span.style.fg, Color::White); // base, not code_fg
     }
 }

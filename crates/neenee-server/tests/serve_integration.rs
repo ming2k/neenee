@@ -4,11 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::{SinkExt, StreamExt};
 use neenee_core::{AgentRequest, AgentResponse, TurnEvent};
 use neenee_server::serve;
 use neenee_store::session::SessionStore;
 use tokio::sync::{broadcast, mpsc};
-use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 #[tokio::test]
@@ -41,7 +41,10 @@ async fn test_ws_round_trip() {
         .expect("stream closed")
         .expect("ws error");
     let first_str = first_msg.to_string();
-    println!("Got first message: {}...", &first_str[..first_str.len().min(80)]);
+    println!(
+        "Got first message: {}...",
+        &first_str[..first_str.len().min(80)]
+    );
     assert!(first_str.contains("History"), "expected History replay");
 
     // 2. Send a chat request through WS
@@ -49,7 +52,9 @@ async fn test_ws_round_trip() {
         "type": "Request",
         "Chat": { "text": "hello from test", "images": [] }
     });
-    ws.send(WsMessage::Text(request_json.to_string().into())).await.unwrap();
+    ws.send(WsMessage::Text(request_json.to_string().into()))
+        .await
+        .unwrap();
 
     // 3. Verify the request arrived on req_rx
     let req = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
@@ -87,7 +92,7 @@ async fn test_ws_round_trip() {
 
 #[tokio::test]
 async fn serde_shapes() {
-    use neenee_core::{AgentResponse, AgentRequest, TurnEvent, ToolOutput};
+    use neenee_core::{AgentRequest, AgentResponse, ToolOutput, TurnEvent};
     println!("--- serialization shapes ---");
 
     let resp = AgentResponse::Turn {
@@ -98,11 +103,18 @@ async fn serde_shapes() {
 
     let tc = AgentResponse::Turn {
         session_id: "s1".into(),
-        event: TurnEvent::ToolCall { id: "c1".into(), name: "read_file".into(), arguments: "{}".into() },
+        event: TurnEvent::ToolCall {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        },
     };
     println!("Turn(ToolCall): {}", serde_json::to_string(&tc).unwrap());
 
-    let req = AgentRequest::Chat { text: "hi".into(), images: vec![] };
+    let req = AgentRequest::Chat {
+        text: "hi".into(),
+        images: vec![],
+    };
     println!("Request::Chat: {}", serde_json::to_string(&req).unwrap());
 
     let err = AgentResponse::Error("oops".into());
@@ -111,8 +123,11 @@ async fn serde_shapes() {
     let tr = AgentResponse::Turn {
         session_id: "s1".into(),
         event: TurnEvent::ToolResult {
-            id: "c1".into(), name: "bash".into(), output: "done".into(),
-            structured: ToolOutput::Text("done".into()), duration_ms: 5,
+            id: "c1".into(),
+            name: "bash".into(),
+            output: "done".into(),
+            structured: ToolOutput::Text("done".into()),
+            duration_ms: 5,
         },
     };
     println!("Turn(ToolResult): {}", serde_json::to_string(&tr).unwrap());
@@ -121,15 +136,24 @@ async fn serde_shapes() {
         session_id: "s1".into(),
         event: TurnEvent::StreamDelta("chunk".into()),
     };
-    println!("Turn(StreamDelta): {}", serde_json::to_string(&delta).unwrap());
+    println!(
+        "Turn(StreamDelta): {}",
+        serde_json::to_string(&delta).unwrap()
+    );
 
     let clev = AgentResponse::ConversationCleared;
-    println!("ConversationCleared: {}", serde_json::to_string(&clev).unwrap());
+    println!(
+        "ConversationCleared: {}",
+        serde_json::to_string(&clev).unwrap()
+    );
 
     // Deserialization: can we parse the Wire envelope?
     let incoming = r#"{"type":"Request","Chat":{"text":"hi","images":[]}}"#;
     let parsed: serde_json::Value = serde_json::from_str(incoming).unwrap();
-    println!("Parsed incoming: {}", serde_json::to_string_pretty(&parsed).unwrap());
+    println!(
+        "Parsed incoming: {}",
+        serde_json::to_string_pretty(&parsed).unwrap()
+    );
 }
 
 #[test]

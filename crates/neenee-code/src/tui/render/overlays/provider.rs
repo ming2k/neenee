@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::layout::LayoutMap;
 use neenee_core::ProviderPickerSnapshot;
 
-use super::common::caret_column;
+use super::common::{caret_column, truncate_ellipsis};
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
@@ -77,6 +77,7 @@ pub(crate) fn draw_models_modal(
     }
 
     let mut body: Vec<Line> = Vec::new();
+    let body_w = f.body.width as usize;
     if ranked.is_empty() {
         body.push(Line::from(""));
         body.push(Line::from(Span::styled(
@@ -125,7 +126,21 @@ pub(crate) fn draw_models_modal(
             } else {
                 dim
             };
-            body.push(Line::from(vec![
+
+            // Fixed overhead: "★ "(3) + dot(2) + name(17) + key(3) = 25.
+            // Model + "· " + description share the rest.
+            let avail = body_w.saturating_sub(25);
+            let model_max = avail.clamp(1, 40);
+            let trunc_model = truncate_ellipsis(solution.model, model_max);
+            let model_w = trunc_model.width();
+            let desc_max = avail.saturating_sub(model_w + 1 + 2).max(1);
+            let trunc_desc = if solution.description.is_empty() {
+                String::new()
+            } else {
+                truncate_ellipsis(solution.description, desc_max)
+            };
+
+            let mut spans = vec![
                 Span::styled(format!(" {}", star), star_style),
                 Span::styled(dot.to_string(), dim),
                 Span::styled(
@@ -133,9 +148,12 @@ pub(crate) fn draw_models_modal(
                     base.add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{:<2} ", key_label), key_style),
-                Span::styled(format!("{} ", solution.model), dim),
-                Span::styled(format!("· {}", solution.description), dim),
-            ]));
+                Span::styled(format!("{} ", trunc_model), dim),
+            ];
+            if !trunc_desc.is_empty() {
+                spans.push(Span::styled(format!("· {}", trunc_desc), dim));
+            }
+            body.push(Line::from(spans));
         }
     }
     render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);
@@ -196,6 +214,7 @@ pub(crate) fn draw_model_picker(
     }
 
     let mut body: Vec<Line> = Vec::new();
+    let body_w = f.body.width as usize;
     for (row, &mid) in solution.models.iter().enumerate() {
         let is_current = mid == current_model;
         let is_selected = row == modal_index;
@@ -217,13 +236,16 @@ pub(crate) fn draw_model_picker(
         };
         let dot = if is_current { "● " } else { "  " };
         let display = crate::tui::providers::model_display_name(mid);
+        // Fixed overhead: dot(2) + display(19) = 21.
+        let mid_max = body_w.saturating_sub(21).max(1);
+        let trunc_mid = truncate_ellipsis(mid, mid_max);
         body.push(Line::from(vec![
             Span::styled(dot.to_string(), dim),
             Span::styled(
                 format!("{:<18} ", display),
                 base.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(mid.to_string(), dim),
+            Span::styled(trunc_mid, dim),
         ]));
     }
     render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);

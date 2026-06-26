@@ -34,7 +34,6 @@ impl Tool for UseSkillTool {
         })
     }
 
-
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
@@ -79,7 +78,6 @@ impl Tool for ListSkillsTool {
         })
     }
 
-
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         let registry = self.registry.lock();
         Ok(super::render::format_skill_list(&registry.list()))
@@ -109,7 +107,6 @@ impl Tool for ReloadSkillsTool {
             "additionalProperties": false
         })
     }
-
 
     async fn call(&self, _arguments: &str) -> Result<String, String> {
         self.registry.reload().await;

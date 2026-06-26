@@ -143,7 +143,6 @@ impl Tool for StreamingReadTool {
         serde_json::json!({"type": "object"})
     }
 
-
     async fn call(&self, arguments: &str) -> Result<String, String> {
         assert_eq!(arguments, "{\"value\":1}");
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -156,7 +155,7 @@ fn agent() -> Agent {
         Arc::new(TestProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     )
 }
 
@@ -276,7 +275,7 @@ async fn streaming_tool_deltas_are_reassembled_and_executed() {
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "run")];
     let mut events = Vec::new();
@@ -319,7 +318,8 @@ async fn round_persist_fires_at_each_tool_round_boundary() {
     // result. The final round (plain text, no tools) does not cross a
     // boundary and must not fire the callback.
     let calls = Arc::new(AtomicUsize::new(0));
-    let seen_lengths: Arc<std::sync::Mutex<Vec<usize>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_lengths: Arc<std::sync::Mutex<Vec<usize>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     let agent = Agent::new(
         Arc::new(StreamingToolProvider(AtomicUsize::new(0))),
         vec![Arc::new(StreamingReadTool(calls.clone()))],
@@ -349,7 +349,11 @@ async fn round_persist_fires_at_each_tool_round_boundary() {
     // tool_result] = 4. The final round (plain text, no tools) does not
     // cross a boundary and must not fire the callback.
     let recorded = seen_lengths.lock().unwrap().clone();
-    assert_eq!(recorded, vec![4], "round persist fires once with the full history");
+    assert_eq!(
+        recorded,
+        vec![4],
+        "round persist fires once with the full history"
+    );
 }
 
 /// A provider whose SSE stream never yields and never ends simulates a stalled
@@ -384,7 +388,7 @@ async fn stalled_provider_stream_times_out_as_retryable() {
         Arc::new(StalledStreamProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -432,7 +436,7 @@ async fn stream_request_that_never_resolves_times_out() {
         Arc::new(PendingStreamProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -471,7 +475,7 @@ async fn non_streaming_chat_that_never_resolves_times_out() {
         Arc::new(PendingChatProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -519,7 +523,7 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
         Arc::new(ReasoningOnlyProvider),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "hello")];
 
@@ -571,7 +575,7 @@ async fn cancelling_during_tool_execution_emits_tool_cancelled() {
             started: started.clone(),
         })],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let token = CancellationToken::new();
     let mut messages = vec![Message::new(Role::User, "run")];
@@ -623,7 +627,7 @@ async fn write_tool_waits_for_permission_and_always_is_cached() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     ));
     let call = ToolCall {
         id: "call".to_string(),
@@ -683,7 +687,7 @@ async fn rejected_permission_does_not_execute_tool() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     ));
     let call = ToolCall {
         id: "call".to_string(),
@@ -720,7 +724,7 @@ async fn headless_run_rejects_write_tools_without_hanging() {
         Arc::new(PermissionTestProvider(AtomicUsize::new(0))),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     let mut messages = vec![Message::new(Role::User, "write something")];
 
@@ -957,7 +961,7 @@ async fn golden_native_tool_round_then_final_text() {
             Arc::new(RecordingTool::read("beta", "B-out")),
         ],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -989,7 +993,7 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
         ])),
         vec![Arc::new(RecordingTool::read("alpha", "A-out"))],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1031,7 +1035,7 @@ async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
         ])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     agent.set_loop_review_enabled(false);
 
@@ -1058,7 +1062,7 @@ async fn read_loop_guard_injects_one_nudge_after_repeated_reads() {
         ])),
         vec![Arc::new(RecordingTool::read("reader", "R-out"))],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let mut messages = vec![Message::new(Role::User, "go")];
@@ -1095,7 +1099,7 @@ async fn read_loop_guard_suppressed_when_disabled() {
         ])),
         vec![Arc::new(RecordingTool::read("reader", "R-out"))],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     agent.set_loop_review_enabled(false);
 
@@ -1123,7 +1127,7 @@ async fn golden_rejected_write_tool_terminates_turn() {
         ])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1157,7 +1161,7 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
         ]])),
         Vec::new(),
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
@@ -1197,7 +1201,7 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
         ])),
         vec![Arc::new(neenee_tools::AskUserTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let mut messages = vec![Message::new(Role::User, "choose")];
@@ -1246,7 +1250,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     ));
     agent.set_project_root(Some(project_root.clone()));
     assert!(agent.allowed_tools().is_empty());
@@ -1291,7 +1295,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     ));
     agent2.set_project_root(Some(project_root.clone()));
     assert_eq!(
@@ -1313,7 +1317,7 @@ async fn always_permission_persists_across_agents_for_same_project() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     agent3.set_project_root(Some(other_root));
     assert!(
@@ -1344,7 +1348,7 @@ async fn agent_without_project_root_never_writes_permissions_file() {
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     ));
     // Mutations of the allowlist must be no-ops on disk when no project root
     // is set: no panic, no file created.
@@ -1394,7 +1398,7 @@ async fn turn_runs_uncapped_until_model_emits_text() {
         Arc::new(ScriptedProvider::new(rounds)),
         vec![Arc::new(read), Arc::new(write)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     let (events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Always).await;
@@ -1507,7 +1511,7 @@ async fn hard_stop_aborts_when_budget_configured() {
         Arc::new(ScriptedProvider::new(distinct_read_rounds(10, None))),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
     agent.set_hard_stop_rounds(3);
 
@@ -1540,7 +1544,7 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
         Arc::new(ScriptedProvider::new(vec![text_round(verdict_json)])),
         vec![Arc::new(tool)],
         crate::skills::SkillRegistry::empty(),
-    crate::AgentIdentity::default(),
+        crate::AgentIdentity::default(),
     );
 
     // A transcript with one tool round so the estimate is meaningful.

@@ -71,6 +71,21 @@ pub fn revoke_permission(
     }
 }
 
+/// `AgentRequest::ClearAllPermissions` — drop every cached always-allow rule
+/// for this process and push a refreshed snapshot so the permissions manager
+/// modal reflects the now-empty list.
+pub fn clear_all_permissions(
+    agent: &Agent,
+    skills_registry: &Arc<SkillRegistry>,
+    mcp_statuses: &[(String, McpConnectionStatus)],
+    config: &Config,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+) {
+    agent.clear_allowed_tools();
+    let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
+    let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+}
+
 /// `AgentRequest::ToggleTool` — enable/disable a tool for the session and
 /// push a refreshed snapshot. A no-op (unknown tool, or already in the target
 /// state) still refreshes the snapshot so the modal settles rather than

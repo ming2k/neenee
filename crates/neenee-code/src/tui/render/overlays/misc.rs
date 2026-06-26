@@ -8,7 +8,7 @@ use super::common::caret_column;
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
-    centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
+    centered_rect, contrast_fg, modal_frame, panel_block, panel_inner, render_body, viewport_rect,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -249,13 +249,16 @@ pub fn draw_tool_step_detail_overlay(
         Style::default().fg(theme.muted()),
     )));
 
-    let block = panel_block(theme.brand(), theme.panel());
+    // Paint the panel chrome (bg + brand `┃` left bar) bare, then render the
+    // content into `panel_inner` so a long line reserves the bar's mirrored
+    // right gutter instead of running into the panel's right edge — the same
+    // symmetric-inset contract the permission sheet and `modal_frame` use.
+    frame.render_widget(panel_block(theme.brand(), theme.panel()), area);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll(scroll, 0)
-            .wrap(neenee_tui::Wrap { trim: false })
-            .block(block),
-        area,
+            .wrap(neenee_tui::Wrap { trim: false }),
+        panel_inner(area),
     );
 }
 

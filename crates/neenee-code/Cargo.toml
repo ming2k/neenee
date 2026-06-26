@@ -21,8 +21,7 @@ async-trait = { workspace = true }
 crossterm = { workspace = true }
 arboard = "3.6"
 dirs = { workspace = true }
-pulldown-cmark = "0.13"
-unicode-width = "0.1"
+unicode-width = "0.2"
 similar = { version = "2", features = ["unicode"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -35,6 +34,7 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 chrono = { workspace = true }
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 insta = "1.48"

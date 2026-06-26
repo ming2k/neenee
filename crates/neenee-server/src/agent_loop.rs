@@ -33,10 +33,10 @@ use std::sync::{
 use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::UiBridge;
 use crate::session_view::{build_sessions_overview, provider_key_status};
 use crate::side::SideSession;
 use crate::startup::StartupMode;
-use crate::UiBridge;
 
 /// Every piece of long-lived state the agent background task owns. Built by
 /// `main` after startup wiring and moved into [`run`].
@@ -175,8 +175,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
     while let Some(req) = req_rx.recv().await {
         match req {
             AgentRequest::Interrupt => {
-                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
-                    .await;
+                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone).await;
             }
             // The model's self-initiated escape hatch (the `abort` tool).
             // Same teardown as a user interrupt — cancel the in-flight turn —
@@ -184,8 +183,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
             // and SessionEnd hooks fire before the process ends. The turn
             // executing the `abort` tool call is itself cancelled by this.
             AgentRequest::Abort => {
-                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone)
-                    .await;
+                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone).await;
                 let _ = resp_tx.send(AgentResponse::Exit);
             }
             AgentRequest::PermissionReply {
@@ -279,6 +277,15 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     &resp_tx,
                     tool,
                     scope,
+                );
+            }
+            AgentRequest::ClearAllPermissions => {
+                crate::handlers_session::clear_all_permissions(
+                    &agent,
+                    &skills_registry,
+                    &mcp_statuses,
+                    &config,
+                    &resp_tx,
                 );
             }
             AgentRequest::ToggleTool { name, enabled } => {

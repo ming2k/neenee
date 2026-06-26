@@ -241,9 +241,25 @@ impl<W: Write> Backend<W> {
     /// Reset style/cursor tracking — call after the app does a wholesale
     /// screen clear or enters the alt screen, where the terminal's state no
     /// longer matches our tracked style.
-    pub fn invalidate(&mut self) {
+    ///
+    /// Crucially, this **emits a real SGR reset** (`\x1b[0m`) to the terminal,
+    /// not just resets our in-memory tracking. Entering the alt screen *does*
+    /// clear the terminal's SGR state, so a pure tracking reset is sufficient
+    /// there — but a resize (tmux forwarding `SIGWINCH`, or a detach/reattach)
+    /// does **not** touch the terminal's SGR: whatever attribute the previous
+    /// frame last applied (often a bold tool-step summary line) stays on. If
+    /// we only reset our tracker while the terminal keeps the old attribute,
+    /// the next frame's delta-style computation (`apply_style`) sees equal
+    /// attribute bits and emits nothing, so subsequent plain text renders with
+    /// the stale attribute (e.g. the whole transcript reads as bold). Emitting
+    /// the reset forces the real terminal back to RESET, keeping the tracker
+    /// and the terminal honest with each other.
+    pub fn invalidate(&mut self) -> io::Result<()> {
+        self.out.queue(SetAttribute(Attribute::Reset))?;
+        self.out.flush()?;
         self.cur = None;
         self.style = Style::RESET;
+        Ok(())
     }
 }
 

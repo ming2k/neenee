@@ -118,6 +118,17 @@ pub enum InputAction {
     /// Open the session-context modal (Ctrl+I): tabbed overview of the live
     /// session's model, MCP servers, and (later) permissions / tools / skills.
     OpenSession,
+    /// Open the permissions manager modal: a centered list of cached "always
+    /// allow" rules with per-row revoke and clear-all. Reached via the
+    /// `/permissions` slash command (intercepted locally, never sent to the
+    /// backend). `/permissions clear` still goes to the backend.
+    OpenPermissions,
+    /// Revoke the selected "always allow" rule in the permissions manager
+    /// modal. Bound to `Space`.
+    PermissionsActivate,
+    /// Clear every cached "always allow" rule. Bound to `c` in the
+    /// permissions manager modal.
+    PermissionsClearAll,
     /// Cycle the active pane inside the session-context modal. `forward` picks
     /// the direction so Left/Right (and later Tab/Shift+Tab) share one action.
     SessionTabCycle { forward: bool },
@@ -390,6 +401,61 @@ fn cursor_line_end_char(chars: &[char], cursor_position: usize) -> usize {
     }
 }
 
+/// Try to move the caret up one logical line in a multi-line buffer,
+/// preserving the column (char offset within the line) clamped to the
+/// previous line's length. Returns `true` and updates `cursor_position`
+/// when there is a line above; returns `false` (without moving) when the
+/// caret is already on the first line, so the caller can fall through to
+/// history navigation.
+///
+/// This is what lets `↑` walk lines inside a multi-line draft instead of
+/// always jumping to the previous history entry — only at the top line
+/// does it hand off to input history.
+fn cursor_line_up(input: &str, cursor_position: &mut usize) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let pos = (*cursor_position).min(chars.len());
+    let line_start = cursor_line_start_char(&chars, pos);
+    if line_start == 0 {
+        return false;
+    }
+    let col = pos - line_start;
+    // The char just before `line_start` is the newline that ends the
+    // previous line; the previous line's text lives in [prev_start, prev_end).
+    let prev_end = line_start - 1;
+    let prev_start = if let Some(rel) = chars[..prev_end].iter().rposition(|&c| c == '\n') {
+        rel + 1
+    } else {
+        0
+    };
+    let target = prev_start + col.min(prev_end - prev_start);
+    *cursor_position = target;
+    true
+}
+
+/// Try to move the caret down one logical line, mirroring
+/// [`cursor_line_up`]. Returns `false` (without moving) when the caret is
+/// already on the last line, so `↓` hands off to history navigation there.
+fn cursor_line_down(input: &str, cursor_position: &mut usize) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let pos = (*cursor_position).min(chars.len());
+    let line_end = cursor_line_end_char(&chars, pos);
+    if line_end >= chars.len() {
+        return false;
+    }
+    let line_start = cursor_line_start_char(&chars, pos);
+    let col = pos - line_start;
+    // `line_end` is the index of the newline; the next line starts after it.
+    let next_start = line_end + 1;
+    let next_end = if let Some(rel) = chars[next_start..].iter().position(|&c| c == '\n') {
+        next_start + rel
+    } else {
+        chars.len()
+    };
+    let target = next_start + col.min(next_end - next_start);
+    *cursor_position = target;
+    true
+}
+
 /// Process a crossterm event into a high-level action.
 ///
 /// `input` and `cursor_position` are mutable because some events modify them directly.
@@ -622,6 +688,7 @@ pub fn process_event(
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
+                    super::Modal::Permissions => InputAction::CloseModal,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -663,6 +730,7 @@ pub fn process_event(
                             match text.trim() {
                                 "/provider" => InputAction::OpenProvider,
                                 "/session" => InputAction::OpenSession,
+                                "/permissions" => InputAction::OpenPermissions,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
                             }
@@ -716,12 +784,21 @@ pub fn process_event(
                     insert_newline(input, cursor_position, context.active_modal);
                     InputAction::None
                 }
-                // Ctrl+V: paste from the system clipboard. Only active on the
-                // main prompt (not inside modals); the app loop reads the
-                // clipboard asynchronously and either attaches an image or
-                // inserts the text at the cursor.
+                // Ctrl+V: paste from the system clipboard. Active on the
+                // main prompt and in the free-text modals (provider editor,
+                // provider picker filter, history search) which borrow the
+                // input line as a single-line field. The app loop reads the
+                // clipboard asynchronously and either attaches an image,
+                // inserts the text at the cursor (main prompt), or splices it
+                // inline into the modal field (modals).
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if context.active_modal == super::Modal::None {
+                    if matches!(
+                        context.active_modal,
+                        super::Modal::None
+                            | super::Modal::HistorySearch
+                            | super::Modal::Provider
+                            | super::Modal::ModelEditor
+                    ) {
                         InputAction::Paste
                     } else {
                         InputAction::None
@@ -941,6 +1018,11 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Session && c == ' ' {
                         return InputAction::SessionActivate;
                     }
+                    // Space inside the permissions manager revokes the
+                    // selected rule.
+                    if context.active_modal == super::Modal::Permissions && c == ' ' {
+                        return InputAction::PermissionsActivate;
+                    }
                     if context.active_modal == super::Modal::Question {
                         if let Some(d) = c.to_digit(10) {
                             if (1..=9).contains(&d) {
@@ -989,6 +1071,8 @@ pub fn process_event(
                         InputAction::OpenModelEditor
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
+                    } else if context.active_modal == super::Modal::Permissions && c == 'c' {
+                        InputAction::PermissionsClearAll
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionInsertChar(c)
                     } else if matches!(
@@ -1172,6 +1256,7 @@ pub fn process_event(
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
+                    super::Modal::Permissions => InputAction::ModalUp,
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -1186,6 +1271,12 @@ pub fn process_event(
                             // editing instead of walking input history. Once
                             // the queue drains, ↑ resumes its normal role.
                             InputAction::RecallQueued
+                        } else if cursor_line_up(input, cursor_position) {
+                            // Multi-line draft: ↑ first walks the caret to the
+                            // previous line (preserving the column). Only when
+                            // the caret is already on the first line does ↑
+                            // hand off to input-history navigation below.
+                            InputAction::None
                         } else {
                             InputAction::HistoryPrev
                         }
@@ -1209,6 +1300,7 @@ pub fn process_event(
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
+                    super::Modal::Permissions => InputAction::ModalDown,
                     super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
                     super::Modal::None => {
                         if context.focus_zone.is_browse() {
@@ -1217,6 +1309,12 @@ pub fn process_event(
                             && context.suggestion_count > 0
                         {
                             InputAction::SuggestNext
+                        } else if cursor_line_down(input, cursor_position) {
+                            // Multi-line draft: ↓ first walks the caret to the
+                            // next line (preserving the column). Only when the
+                            // caret is already on the last line does ↓ hand
+                            // off to input-history navigation below.
+                            InputAction::None
                         } else {
                             InputAction::HistoryNext
                         }
@@ -1287,8 +1385,17 @@ pub fn process_event(
         }
         Event::Paste(text) => {
             // Terminal-level bracketed paste. Route the payload through the
-            // same chip-or-inline logic as Ctrl+V; only on the main prompt.
-            if context.active_modal == super::Modal::None {
+            // same chip-or-inline logic as Ctrl+V on the main prompt, and
+            // splice it inline into the focused field in the free-text
+            // modals (provider editor, provider picker filter, history
+            // search).
+            if matches!(
+                context.active_modal,
+                super::Modal::None
+                    | super::Modal::HistorySearch
+                    | super::Modal::Provider
+                    | super::Modal::ModelEditor
+            ) {
                 InputAction::BracketedPaste(text)
             } else {
                 InputAction::None
@@ -1296,11 +1403,6 @@ pub fn process_event(
         }
         _ => InputAction::None,
     }
-}
-
-/// Resolve a screen coordinate to a semantic cursor using the layout map.
-pub fn resolve_cursor(layout_map: &LayoutMap, x: u16, y: u16) -> Option<SemanticCursor> {
-    layout_map.hit_test(x, y)
 }
 
 /// Resolve a screen coordinate to the block it belongs to.
@@ -3153,5 +3255,206 @@ mod tests {
             &mut drag,
         );
         assert_eq!(action, InputAction::FocusPrevTarget);
+    }
+
+    /// Drive `Event::Paste` (terminal bracketed paste) through `process_event`
+    /// against the given modal and return the resulting action. The input
+    /// buffer is mutated in place so callers can assert on its contents.
+    fn run_paste(
+        text: &str,
+        input: &mut String,
+        cursor: &mut usize,
+        modal: crate::tui::Modal,
+    ) -> InputAction {
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Paste(text.to_string()),
+            input,
+            cursor,
+            InputContext {
+                active_modal: modal,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                in_side_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        )
+    }
+
+    #[test]
+    fn ctrl_v_returns_paste_in_free_text_modals() {
+        // Ctrl+V routes to InputAction::Paste on the main prompt and in
+        // every free-text modal (provider editor, provider picker filter,
+        // history search). Other modals drop it so a paste never leaks into
+        // a read-only overlay or the permission sheet.
+        let free_text_modals = [
+            crate::tui::Modal::None,
+            crate::tui::Modal::ModelEditor,
+            crate::tui::Modal::Provider,
+            crate::tui::Modal::HistorySearch,
+        ];
+        for modal in free_text_modals {
+            let mut input = String::new();
+            let mut cursor = 0;
+            let action = run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                modal,
+                FocusZone::Compose,
+            );
+            assert_eq!(
+                action,
+                InputAction::Paste,
+                "Ctrl+V should paste in free-text modal"
+            );
+            assert!(input.is_empty(), "Ctrl+V must not mutate the buffer itself");
+        }
+
+        for modal in [
+            crate::tui::Modal::Permission,
+            crate::tui::Modal::Question,
+            crate::tui::Modal::Help,
+            crate::tui::Modal::Sessions,
+        ] {
+            let mut input = String::new();
+            let mut cursor = 0;
+            let action = run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL,
+                modal,
+                FocusZone::Compose,
+            );
+            assert_eq!(
+                action,
+                InputAction::None,
+                "Ctrl+V should be a no-op in non-text modal"
+            );
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_routes_in_free_text_modals() {
+        // Terminal-level bracketed paste mirrors Ctrl+V: it produces a
+        // BracketedPaste action on the main prompt and in the free-text
+        // modals, and is dropped elsewhere.
+        let payload = "sk-test-1234";
+        for modal in [
+            crate::tui::Modal::None,
+            crate::tui::Modal::ModelEditor,
+            crate::tui::Modal::Provider,
+            crate::tui::Modal::HistorySearch,
+        ] {
+            let mut input = String::new();
+            let mut cursor = 0;
+            let action = run_paste(payload, &mut input, &mut cursor, modal);
+            match action {
+                InputAction::BracketedPaste(text) => assert_eq!(
+                    text, payload,
+                    "bracketed paste payload should pass through in free-text modal"
+                ),
+                other => panic!("expected BracketedPaste in free-text modal, got {other:?}"),
+            }
+            assert!(
+                input.is_empty(),
+                "BracketedPaste must not mutate the buffer itself"
+            );
+        }
+
+        let mut input = String::new();
+        let mut cursor = 0;
+        let action = run_paste(payload, &mut input, &mut cursor, crate::tui::Modal::Help);
+        assert_eq!(
+            action,
+            InputAction::None,
+            "bracketed paste should be dropped in Help"
+        );
+    }
+
+    /// Helper: dispatch `code` in the compose zone against a pre-seeded
+    /// multi-line buffer and return the resulting action. The cursor lands
+    /// at `cursor` (in char units) before the keypress.
+    fn multiline_arrow(seed: &str, cursor: usize, code: KeyCode) -> (InputAction, usize) {
+        let mut input = seed.to_string();
+        let mut cur = cursor;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)),
+            &mut input,
+            &mut cur,
+            InputContext {
+                active_modal: crate::tui::Modal::None,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_subagent_view: false,
+                in_side_view: false,
+                has_focused_target: false,
+                focus_zone: FocusZone::Compose,
+                has_queued: false,
+            },
+            &mut drag,
+        );
+        (action, cur)
+    }
+
+    #[test]
+    fn up_arrow_walks_lines_in_multiline_before_history() {
+        // In a multi-line draft, ↑ first moves the caret up a line instead
+        // of jumping to input history — only at the top line does it fall
+        // through to HistoryPrev.
+        let seed = "hello\nworld";
+        // Caret at end of second line: ↑ should move to the same column on
+        // the first line ("hello", col 5) and return None, not HistoryPrev.
+        let (action, cur) = multiline_arrow(seed, "hello\nworld".chars().count(), KeyCode::Up);
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cur, 5, "up should land at col 5 on the first line");
+
+        // Now sitting at the end of the first line: ↑ should hand off to
+        // history navigation.
+        let (action, _) = multiline_arrow(seed, 5, KeyCode::Up);
+        assert_eq!(action, InputAction::HistoryPrev);
+    }
+
+    #[test]
+    fn down_arrow_walks_lines_in_multiline_before_history() {
+        let seed = "hello\nworld";
+        // Caret at start of first line: ↓ moves to the same column on the
+        // second line and returns None, not HistoryNext.
+        let (action, cur) = multiline_arrow(seed, 0, KeyCode::Down);
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cur, 6, "down should land at col 0 of the second line");
+
+        // Caret at end of the second line: ↓ hands off to history.
+        let (action, _) = multiline_arrow(seed, "hello\nworld".chars().count(), KeyCode::Down);
+        assert_eq!(action, InputAction::HistoryNext);
+    }
+
+    #[test]
+    fn up_arrow_clamps_column_to_shorter_line() {
+        // Moving up to a shorter line clamps the column to that line's
+        // length rather than overshooting into the newline.
+        let seed = "hi\nlonger line";
+        // Caret at col 7 of the second line ("longer line").
+        let start = "hi\n".chars().count() + 7;
+        let (action, cur) = multiline_arrow(seed, start, KeyCode::Up);
+        assert_eq!(action, InputAction::None);
+        assert_eq!(cur, 2, "column should clamp to the first line's length");
     }
 }

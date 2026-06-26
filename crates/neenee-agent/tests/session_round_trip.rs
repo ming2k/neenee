@@ -40,7 +40,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
         Arc::new(MockProvider),
         Vec::new(),
         SkillRegistry::empty(),
-    neenee_agent::AgentIdentity::default(),
+        neenee_agent::AgentIdentity::default(),
     ));
     let (tx, _rx) = mpsc::unbounded_channel();
 

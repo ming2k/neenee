@@ -7,7 +7,7 @@ the surface beneath it recedes. A terminal cannot alpha-blend, so recess is
 expressed in one of three ways:
 
 - **Dim** (most centered modals): the footer keeps its height and the whole
-  live surface — transcript, status bar, input box, hint line — is darkened
+  live surface — transcript, activity bar, input box, hint line — is darkened
   in place so it stays visible for context while the centered panel reads as
   the focal layer. The brightness is the `modal_dim_factor` theme field.
 - **Takeover** (the sessions picker only): the footer collapses to zero height
@@ -48,10 +48,9 @@ Every centered modal goes through the same primitives in
                 └───────────────────────────────────┘
 ```
 
-The two non-`modal_frame` exceptions — the [tool-step detail overlay](#tool-step-detail-overlay)
-and the [plan preview](#plan-preview-modal) — manage their own `Paragraph`
-scroll directly. The two [toasts](#toasts) are non-modal and use a different
-`toast` helper.
+The one non-`modal_frame` exception — the [tool-step detail overlay](#tool-step-detail-overlay)
+— manages its own `Paragraph` scroll directly. The two [toasts](#toasts)
+are non-modal and use a different `toast` helper.
 
 ## Overview
 
@@ -195,7 +194,7 @@ Input-history fuzzy search. Borrows the composer input as the query.
 ╭──────────────────────────────────────────────────╮
 │ Input History  ❯ open                            │  ← caret here
 │                                                  │
-│   1  /plan fix the auth module                    │
+│   1  /pursue fix the auth module                  │
 │   2  h̲o̲w̲ do I open the file?                    │  ← matched chars branded
 │   3  explain t̲h̲i̲s̲ function                     │
 │                                                  │
@@ -216,7 +215,7 @@ that exposes a free-text input.
 
 Unlike other centered modals, the question modal uses the **None** recess
 policy — the surface is not dimmed or occluded and the footer is not
-collapsed, so the transcript, status bar, input box, and hint bar all stay
+collapsed, so the transcript, activity bar, input box, and hint bar all stay
 fully visible at full brightness. The modal panel simply floats on top with
 its own solid background.
 

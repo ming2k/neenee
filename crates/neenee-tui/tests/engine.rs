@@ -63,7 +63,7 @@ fn wide_glyph_trailing_column_carries_background_not_reset() {
     let style = Style::default()
         .fg(Color::Rgb(255, 255, 255))
         .bg(Color::Rgb(7, 8, 8)); // near-black surface, like neenee's theme
-    back.put(0, 0, Fit::Clip, style, "中");
+    back.put(0, 0, Fit::Clip, style, "😀");
 
     // Trailing continuation cell: width 0, and its bg is the glyph's bg.
     let trail = back.get(1, 0).unwrap();
@@ -83,7 +83,7 @@ fn wide_glyph_trailing_column_carries_background_not_reset() {
         diff::Draw::Cells { cells, .. } => cells.clone(),
         _ => panic!(),
     };
-    assert_eq!(emitted_cells, vec![("中".to_string(), 2)]);
+    assert_eq!(emitted_cells, vec![("😀".to_string(), 2)]);
 }
 
 #[test]
@@ -285,4 +285,87 @@ fn cell_constructors() {
     let wide = Cell::wide_continuation(Style::default().bg(Color::Rgb(1, 2, 3)));
     assert!(wide.is_wide_continuation());
     assert_eq!(wide.style.bg, Color::Rgb(1, 2, 3));
+}
+
+/// `Backend::invalidate` must emit a real SGR reset (`\x1b[0m`), not just
+/// reset its in-memory tracker. This is the resize fix: the tracker claimed
+/// "RESET" while the terminal kept the last-applied attribute, so the next
+/// frame's delta-style computation saw equal attribute bits and emitted
+/// nothing — leaving plain text rendered with the stale attribute (bold).
+#[test]
+fn invalidate_emits_real_sgr_reset() {
+    use neenee_tui::diff::{Draw, DrawCmd};
+    crossterm::style::force_color_output(true);
+
+    // First render a bold run so the terminal genuinely holds the BOLD
+    // attribute (this is what a tool-step summary line does).
+    let bold_cmd = DrawCmd {
+        draws: vec![Draw::Cells {
+            x: 0,
+            y: 0,
+            style: Style::default().add_modifier(neenee_tui::Modifier::BOLD),
+            cells: vec![("X".to_string(), 1)],
+        }],
+    };
+    let mut buf = Vec::new();
+    let mut be = Backend::with_bce(&mut buf, Bce::Yes);
+    be.render(&bold_cmd).unwrap();
+    // Now simulate a resize: the app calls invalidate, which must push a real
+    // reset to the terminal so the stale BOLD cannot bleed into the repaint.
+    be.invalidate().unwrap();
+    drop(be);
+    let s = String::from_utf8(buf).unwrap();
+    assert!(
+        s.contains("\x1b[0m"),
+        "invalidate must emit a real SGR reset, got: {s:?}"
+    );
+}
+
+/// End-to-end regression for the resize bold bug, using a single persistent
+/// backend (as the real `Terminal` holds across a resize). Render a bold line,
+/// invalidate (resize), then repaint a plain line. Without a real reset in
+/// `invalidate`, the only attribute SGR in the whole stream would be the bold
+/// "set" from the first render — the plain repaint sees `want == tracker` and
+/// emits nothing, so the terminal keeps BOLD and the plain text renders bold.
+/// With the fix, `invalidate` itself emits the reset.
+#[test]
+fn resize_then_repaint_does_not_inherit_stale_bold() {
+    use neenee_tui::diff::{Draw, DrawCmd};
+    crossterm::style::force_color_output(true);
+
+    let bold_cmd = DrawCmd {
+        draws: vec![Draw::Cells {
+            x: 0,
+            y: 0,
+            style: Style::default().add_modifier(neenee_tui::Modifier::BOLD),
+            cells: vec![("X".to_string(), 1)],
+        }],
+    };
+    let plain_cmd = DrawCmd {
+        draws: vec![Draw::Cells {
+            x: 0,
+            y: 0,
+            style: Style::default(),
+            cells: vec![("Y".to_string(), 1)],
+        }],
+    };
+
+    let mut buf = Vec::new();
+    {
+        // One backend instance across the whole resize, exactly as Terminal
+        // owns it — the tracker state survives invalidate.
+        let mut be = Backend::with_bce(&mut buf, Bce::Yes);
+        be.render(&bold_cmd).unwrap();
+        be.invalidate().unwrap(); // resize
+        be.render(&plain_cmd).unwrap();
+    }
+    let s = String::from_utf8(buf).unwrap();
+    // The sequence must contain an SGR reset. Pre-fix, invalidate emitted
+    // nothing and the plain repaint (want == tracker) emitted nothing, so the
+    // terminal kept BOLD and "Y" rendered bold. crossterm encodes reset as
+    // `\x1b[0m`.
+    assert!(
+        s.contains("\x1b[0m"),
+        "resize must emit a real SGR reset so plain repaints drop stale bold, got: {s:?}"
+    );
 }

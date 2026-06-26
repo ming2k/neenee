@@ -54,15 +54,9 @@ impl Tool for AbortTool {
         "abort"
     }
     fn description(&self) -> &str {
-        "Emergency escape hatch: stop the current operation and exit neenee \
-gracefully. Call this ONLY when you detect a stuck state you cannot recover \
-from — you are repeating the same tool call with identical arguments (a loop), \
-you are about to perform a dangerous or irreversible operation you should not \
-complete, or you have reached a dead end and cannot make progress. Do NOT call \
-this for normal task completion, to ask a question, or to signal that you are \
-done — use it solely to halt a situation that would otherwise spin or cause \
-harm. Once called, neenee saves the session and exits. Prefer fixing the loop \
-yourself first; only call this if you cannot."
+        "Emergency escape hatch: stop the operation and exit neenee. \
+         Use ONLY when stuck in an unrecoverable loop or dead end. \
+         Do not use for normal task completion."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

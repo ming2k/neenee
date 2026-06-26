@@ -41,9 +41,7 @@ enum Wire {
     },
     /// Full transcript replay, sent once on connect so the browser catches up
     /// on everything that happened before it joined.
-    History {
-        messages: Vec<Message>,
-    },
+    History { messages: Vec<Message> },
 }
 
 /// Spawn the WebSocket server. Returns immediately; the listener runs as a
@@ -61,7 +59,10 @@ pub fn start_server(
     req_tx: mpsc::UnboundedSender<AgentRequest>,
     events: broadcast::Sender<AgentResponse>,
     session: Arc<SessionStore>,
-) -> (tokio::sync::oneshot::Receiver<u16>, tokio_util::sync::CancellationToken) {
+) -> (
+    tokio::sync::oneshot::Receiver<u16>,
+    tokio_util::sync::CancellationToken,
+) {
     let (actual_port_tx, actual_port_rx) = tokio::sync::oneshot::channel::<u16>();
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_clone = cancel.clone();

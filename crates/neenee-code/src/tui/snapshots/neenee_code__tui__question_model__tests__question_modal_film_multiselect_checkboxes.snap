@@ -9,21 +9,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [ ] a
-            [ ] b
-            [ ] c
-            [ ] Other
-
-
+             [ ] a
+             [ ] b
+             [ ] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === 1,2,3 → select all three ===
 
@@ -32,21 +32,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [x] a
-            [x] b
-            [x] c
-            [ ] Other
-
-
+             [x] a
+             [x] b
+             [x] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === '2' again → deselect 'b' ===
 
@@ -55,18 +55,18 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [x] a
-            [ ] b
-            [x] c
-            [ ] Other
-
-
+             [x] a
+             [ ] b
+             [x] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca

@@ -349,12 +349,10 @@ impl OperationScope {
             ScopeTarget::Unspecified => true,
             ScopeTarget::Path(p) => match &self.paths {
                 None => true,
-                Some(dirs) => {
-                    match resolve_for_check(&p.to_string_lossy()) {
-                        Some(target) => dirs.iter().any(|dir| target.starts_with(dir)),
-                        None => false,
-                    }
-                }
+                Some(dirs) => match resolve_for_check(&p.to_string_lossy()) {
+                    Some(target) => dirs.iter().any(|dir| target.starts_with(dir)),
+                    None => false,
+                },
             },
             ScopeTarget::Command(cmd) => match &self.commands {
                 None => true,

@@ -9,21 +9,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [ ] a
-            [ ] b
-            [ ] c
-            [ ] Other
-
-
+             [ ] a
+             [ ] b
+             [ ] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === down → highlight 'b' ===
 
@@ -32,21 +32,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [ ] a
-            [ ] b
-            [ ] c
-            [ ] Other
-
-
+             [ ] a
+             [ ] b
+             [ ] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === space → toggle 'b' selected ===
 
@@ -55,21 +55,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [ ] a
-            [x] b
-            [ ] c
-            [ ] Other
-
-
+             [ ] a
+             [x] b
+             [ ] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === '1' → select 'a' ===
 
@@ -78,21 +78,21 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [x] a
-            [x] b
-            [ ] c
-            [ ] Other
-
-
+             [x] a
+             [x] b
+             [ ] c
+             [ ] Other
 
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca
 
 === '4' + 'custom' → focus 'Other', type ===
 
@@ -101,18 +101,18 @@ expression: film
 
 
 
-          Question
+           Question
 
-          Which features?
+           Which features?
 
-            [x] a
-            [x] b
-            [ ] c
-            [x] Other
-               cust█
-
-
+             [x] a
+             [x] b
+             [ ] c
+             [x] Other
+                cust█
 
 
 
-          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
+
+
+           ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc ca

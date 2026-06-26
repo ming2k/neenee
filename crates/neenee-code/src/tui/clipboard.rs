@@ -336,6 +336,6 @@ mod tests {
 
     #[tokio::test]
     async fn command_clipboard_receives_utf8_input() {
-        copy_with_command("cat", &[], "复制内容").await.unwrap();
+        copy_with_command("cat", &[], "test😀").await.unwrap();
     }
 }

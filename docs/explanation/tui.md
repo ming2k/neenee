@@ -22,7 +22,7 @@ model used by editors and multiplexers:
 |---------|-------------------|------------|
 | Screen | Primary buffer, scrolling history | Alternate screen, restored on exit |
 | Input | Kernel line editing, `readline` | Raw bytes read directly, edited in-process |
-| Output | Append characters, scroll up | Repaint the whole frame each tick |
+| Output | Append characters, scroll up | Repaint a retained grid, emit only the cell delta |
 | Selection | Grid characters, lost on scroll | Semantic document ranges, stable across redraws |
 | `Ctrl+C` | `SIGINT` | Context action: copy → close modal → clear → quit (never interrupts; use `Esc`) |
 
@@ -53,21 +53,35 @@ cleanup, leaving the host terminal stranded in raw mode with mouse
 capture on, so every mouse motion would spew SGR escape codes into the
 shell.
 
-## Immediate-mode rendering
+## Retained-grid rendering
 
-Rendering is built on [ratatui] using the **immediate-mode** pattern:
-the program does not keep a persistent grid buffer that it patches. Each
-frame, the entire UI is rebuilt from current state and drawn in one
-pass:
+Rendering is built on **`neenee-tui`**, neenee's in-house terminal engine
+(ADR-0038): a *retained-mode* cell grid, a back/front diff, and a crossterm
+backend that emits the minimal escape-code delta per frame. This is the
+vim/nvim `ScreenGrid` model, not an immediate-mode rebuild.
+
+The back [`Grid`](../../crates/neenee-tui/src/grid.rs) is the single source of
+truth for what the application wants on screen, and it is **retained** — not
+rebuilt from scratch each frame. Every write (`set`, `put`, `fill_rect`) marks
+the touched row dirty from the changed column leftward at *write time* (the
+per-line `dirty_col`, vim's `ScreenGrid` model), so there is no full-frame
+rescan. Each frame, the loop:
 
 ```text
-sync shared state → terminal.draw(rebuild widgets) → drain input events
+sync shared state → render into back grid → diff back vs front → emit delta → promote
 ```
 
-Because the frame is a pure function of state, anything that changes
-state — a streamed token, a permission request, a mouse drag — shows up
-on the very next frame with no manual invalidation. That is what makes
-the surface feel live rather than printed.
+`diff` compares the back grid (desired) against the front grid (what the
+terminal currently shows) and walks *only the dirty rows* from each row's
+`dirty_col`. It emits a stream of `Draw` commands — run-length-packed cell runs
+with SGR-merged styles and cursor jumps over unchanged cells. Unchanged rows
+emit nothing. `promote` then copies dirty back cells into the front grid and
+clears dirty, so a second frame against a stable state is a no-op.
+
+State changes still drive the surface immediately: anything that writes into
+the grid — a streamed token, a permission request, a mouse drag — marks the
+touched cells dirty, and the next frame emits just those changes with no manual
+invalidation. That is what makes the surface feel live rather than printed.
 
 Input events are drained in a batch. The first event blocks for the poll
 interval; any further events the terminal has already queued are read
@@ -95,9 +109,11 @@ This is the single biggest difference from terminal text. A line-oriented
 program emits a string; the terminal wraps it and the user can only copy
 the wrapped result. neenee keeps a **structured document** instead.
 
-Each message is parsed with [pulldown-cmark] into a sequence of blocks and
-tagged with a kind — plain text, a tool step, or a thinking trace. The block
-types carry the structure that copy and navigation depend on:
+Each message is parsed with neenee's own markdown parser into a sequence of
+blocks and tagged with a kind — plain text, a tool step, or a thinking
+trace. The block types carry the structure that copy and navigation depend
+on. The full pipeline from raw provider text through parsing to grid
+rendering is covered in [Markdown rendering](markdown-rendering.md).
 
 | Block | Carries |
 |-------|---------|
@@ -145,7 +161,7 @@ to communicate that the agent is busy:
 
 - A monotonic `spinner_tick` advances once per frame and drives the
   breathing-dot indicator (a luminance sweep, not a braille spinner), so
-  the status bar animates at roughly 10 fps even while the
+  the activity bar animates at roughly 10 fps even while the
   harness is waiting on a slow provider.
 - An `activity_status` string surfaces the current phase
   (`responding`, `thinking`, `retry 2/4 in 3s`, `awaiting permission`).
@@ -235,8 +251,8 @@ easy to mistake for an unresponsive loop; a slow luminance sweep reads as
 provider round trip.
 
 The breathing dot is also the **single** motion anchor in the TUI: every
-other running indicator (tool-step summary, reasoning marker, pursuit bar)
-holds a steady accent, never a luminance sweep. Concentrating all of the
+other running indicator (tool-step summary, reasoning marker) holds a
+steady accent, never a luminance sweep. Concentrating all of the
 motion budget in one place preserves the dot's role as a peripheral
 "system is alive" cue — if every component breathed in unison, the dot
 would lose its isolation and stop functioning as an anchor. Per-step
@@ -293,5 +309,5 @@ live in the lookup reference:
 - [Request flow](request-flow.md) — how streamed tokens reach the TUI
   over SSE.
 
-[ratatui]: https://ratatui.rs
-[pulldown-cmark]: https://docs.rs/pulldown-cmark
+[neenee-tui]: ../../crates/neenee-tui/src/lib.rs
+[Markdown rendering]: markdown-rendering.md

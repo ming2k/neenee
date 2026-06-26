@@ -95,7 +95,9 @@ impl Tool for MarketDataTool {
                 "note": "stub market_data.depth — wire a real exchange adapter",
             })
             .to_string()),
-            other => Err(format!("Unknown kind '{other}' (expected quote|klines|depth)")),
+            other => Err(format!(
+                "Unknown kind '{other}' (expected quote|klines|depth)"
+            )),
         }
     }
 }

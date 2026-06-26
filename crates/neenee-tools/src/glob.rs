@@ -33,9 +33,7 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Fast file pattern matching. Find files by glob pattern, e.g. '**/*.rs' or \
-         'src/**/*.ts'. Returns matching paths. Prefer this over recursive listing when you \
-         know the file extension or naming pattern."
+        "Find files by glob pattern (e.g., '**/*.rs', 'src/**/*.ts'). Returns matching paths."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

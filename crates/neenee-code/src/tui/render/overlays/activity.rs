@@ -9,7 +9,9 @@ use neenee_tui::{
 
 use super::common::todo_status_glyph_color;
 use crate::tui::render::Theme;
+use crate::tui::render::design::{MODAL_BODY_LEADING_INDENT, MODAL_TITLE_META_GAP};
 use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::text_layout::{indented_wrapped_lines, wrap_text};
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
 /// pursuit bar, plan panel, and activity bar used to show, gathered into one
@@ -67,20 +69,32 @@ pub fn draw_activity_modal(
     let area = centered_rect(72, 70, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
-    // ── Header: section title (no tab strip) ──
+    let muted = theme.muted();
+
+    // ── Header: section title, plus a trailing meta counter for Todos ──
+    // The Todos `done/total` counter sits beside the title instead of being
+    // re-emitted as a second "Todos" body line, so the label shows once.
     if let Some(h) = f.header {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                active_tab.title(),
-                Style::default()
-                    .fg(theme.brand())
-                    .add_modifier(Modifier::BOLD),
-            ))),
-            h,
-        );
+        let mut header_spans: Vec<Span<'static>> = vec![Span::styled(
+            active_tab.title(),
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        )];
+        if let crate::tui::ActivityTab::Todos = active_tab {
+            if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
+                use neenee_core::TodoStatus;
+                let done = list.count(TodoStatus::Completed);
+                let total = list.items.len();
+                header_spans.push(Span::styled(
+                    format!("{}{done}/{total}", " ".repeat(MODAL_TITLE_META_GAP)),
+                    Style::default().fg(muted),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(header_spans)), h);
     }
 
-    let muted = theme.muted();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     match active_tab {
@@ -101,13 +115,15 @@ pub fn draw_activity_modal(
                 } else {
                     String::new()
                 };
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        format!("{}{}", objective_label, pursuit.objective),
-                        Style::default().fg(theme.fg()),
-                    ),
-                ]));
+                // Pre-wrap so a long objective's continuation rows inherit the
+                // leading indent (render_body no longer soft-wraps this modal).
+                let objective = format!("{}{}", objective_label, pursuit.objective);
+                lines.extend(indented_wrapped_lines(
+                    &objective,
+                    MODAL_BODY_LEADING_INDENT,
+                    f.body.width as usize,
+                    Style::default().fg(theme.fg()),
+                ));
             }
 
             // ── Prompt (current turn's user message) ──
@@ -122,13 +138,20 @@ pub fn draw_activity_modal(
                         .fg(theme.brand())
                         .add_modifier(Modifier::BOLD),
                 )]));
-                // The body wraps long lines (render_body wrap=true), so the
-                // raw prompt is pushed as a single 2-indent line and neenee-tui
-                // breaks it at the body width.
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(prompt.to_string(), Style::default().fg(theme.fg())),
-                ]));
+                // Container primitive: pre-wrap at `body_width - indent` and
+                // emit one indented `Line` per visual row. This is the fix for
+                // the bug where only the first logical line of a multi-line
+                // prompt was indented — every row (explicit `\n` *and*
+                // width-induced continuation) now inherits the block indent,
+                // because the indent is a geometry property of the block, not
+                // a span painted on a single logical line. `render_body` runs
+                // with wrapping disabled below.
+                lines.extend(indented_wrapped_lines(
+                    prompt,
+                    MODAL_BODY_LEADING_INDENT,
+                    f.body.width as usize,
+                    Style::default().fg(theme.fg()),
+                ));
             }
 
             // ── Status (always shown) ──
@@ -144,32 +167,31 @@ pub fn draw_activity_modal(
             )]));
 
             if turn_count > 0 {
-                let mut detail: Vec<Span<'static>> = vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(format!("turn {}", turn_count), Style::default().fg(muted)),
-                ];
+                // Build the structured detail as one string so the container
+                // helper can pre-wrap it as a unit — a long model name or
+                // locale-dependent elapsed string would otherwise overflow the
+                // body's right edge (render_body no longer soft-wraps here).
+                let mut detail = format!("turn {}", turn_count);
                 if current_round >= 1 {
-                    detail.push(Span::styled(" · ", Style::default().fg(muted)));
-                    detail.push(Span::styled(
-                        format!("round {}", current_round),
-                        Style::default().fg(muted),
-                    ));
+                    detail.push_str(" · ");
+                    detail.push_str(&format!("round {}", current_round));
                 }
                 if !current_model.is_empty() {
-                    detail.push(Span::styled(" · ", Style::default().fg(muted)));
-                    detail.push(Span::styled(
-                        crate::tui::model_display_name(current_model),
-                        Style::default().fg(muted),
-                    ));
+                    detail.push_str(" · ");
+                    detail.push_str(&crate::tui::model_display_name(current_model));
                 }
                 if let Some(started) = turn_started_at {
-                    detail.push(Span::styled(" · ", Style::default().fg(muted)));
-                    detail.push(Span::styled(
-                        crate::tui::render::chrome::format_elapsed(started.elapsed()),
-                        Style::default().fg(muted),
+                    detail.push_str(" · ");
+                    detail.push_str(&crate::tui::render::chrome::format_elapsed(
+                        started.elapsed(),
                     ));
                 }
-                lines.push(Line::from(detail));
+                lines.extend(indented_wrapped_lines(
+                    &detail,
+                    MODAL_BODY_LEADING_INDENT,
+                    f.body.width as usize,
+                    Style::default().fg(muted),
+                ));
             }
 
             let status_style = if idle {
@@ -179,53 +201,72 @@ pub fn draw_activity_modal(
                     .fg(theme.brand())
                     .add_modifier(Modifier::ITALIC)
             };
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    if idle {
-                        "idle".to_string()
-                    } else {
-                        activity.to_string()
-                    },
-                    status_style,
-                ),
-            ]));
+            let status_label = if idle {
+                "idle".to_string()
+            } else {
+                activity.to_string()
+            };
+            lines.extend(indented_wrapped_lines(
+                &status_label,
+                MODAL_BODY_LEADING_INDENT,
+                f.body.width as usize,
+                status_style,
+            ));
             if !review_alert.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        format!("⚠ {review_alert}"),
-                        Style::default().fg(theme.warn()),
-                    ),
-                ]));
+                lines.extend(indented_wrapped_lines(
+                    &format!("⚠ {review_alert}"),
+                    MODAL_BODY_LEADING_INDENT,
+                    f.body.width as usize,
+                    Style::default().fg(theme.warn()),
+                ));
             }
         }
 
         crate::tui::ActivityTab::Todos => {
             if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
-                use neenee_core::TodoStatus;
-                let done = list.count(TodoStatus::Completed);
-                let total = list.items.len();
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "Todos",
-                        Style::default()
-                            .fg(theme.brand())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  {done}/{total}"), Style::default().fg(muted)),
-                ]));
+                // Hanging indent: the status glyph leads the first visual row;
+                // continuation rows align under the content, not the glyph.
+                // The content column is `indent + glyph(1) + space(1)`, and the
+                // content is pre-wrapped at `body_width - content_column` so a
+                // long task description wraps cleanly instead of spilling past
+                // the body's right edge.
+                let glyph_col = MODAL_BODY_LEADING_INDENT + 1;
+                let content_col = glyph_col + 1;
+                let body_w = f.body.width as usize;
+                let content_wrap_w = body_w.saturating_sub(content_col).max(1);
                 for item in &list.items {
                     let glyph_color = todo_status_glyph_color(item.status, theme, muted);
-                    // The todo content wraps at the body width (render_body
-                    // wrap=true), so long task descriptions no longer spill
-                    // past the right edge and vanish.
-                    lines.push(Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(item.status.glyph(), Style::default().fg(glyph_color)),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(item.content.clone(), Style::default().fg(theme.fg())),
-                    ]));
+                    let glyph = item.status.glyph();
+                    let wrapped = wrap_text(&item.content, content_wrap_w);
+                    // wrap_text yields nothing only for empty input; render an
+                    // empty todo as a glyph + blank content row regardless.
+                    if wrapped.is_empty() {
+                        let row = Line::from(vec![
+                            Span::styled(" ".repeat(MODAL_BODY_LEADING_INDENT), Style::default()),
+                            Span::styled(glyph, Style::default().fg(glyph_color)),
+                            Span::styled(" ", Style::default()),
+                        ]);
+                        lines.push(row);
+                        continue;
+                    }
+                    for (i, wl) in wrapped.iter().enumerate() {
+                        if i == 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    " ".repeat(MODAL_BODY_LEADING_INDENT),
+                                    Style::default(),
+                                ),
+                                Span::styled(glyph, Style::default().fg(glyph_color)),
+                                Span::styled(" ", Style::default()),
+                                Span::styled(wl.text.clone(), Style::default().fg(theme.fg())),
+                            ]));
+                        } else {
+                            lines.push(Line::from(vec![
+                                Span::styled(" ".repeat(content_col), Style::default()),
+                                Span::styled(wl.text.clone(), Style::default().fg(theme.fg())),
+                            ]));
+                        }
+                    }
                 }
             } else {
                 lines.push(Line::from(Span::styled(
@@ -236,7 +277,12 @@ pub fn draw_activity_modal(
         }
     }
 
-    render_body(frame, f.body, lines, scroll, None, true, theme);
+    // Wrapping is disabled: every wrappable block above was pre-wrapped by the
+    // `indented_wrapped_lines` / `wrap_text` container primitives, which emit
+    // one already-indented `Line` per visual row. A second wrap pass here
+    // would mangle the pre-sized budgets and re-introduce the continuation-
+    // row indent bug (the whole reason the pre-wrap path exists).
+    render_body(frame, f.body, lines, scroll, None, false, theme);
 
     if let Some(footer) = f.footer {
         frame.render_widget(

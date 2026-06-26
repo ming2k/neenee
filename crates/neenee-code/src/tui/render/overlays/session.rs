@@ -192,9 +192,7 @@ pub fn draw_session_modal(
     let mut body: Vec<Line> = Vec::new();
     let is_list_pane = matches!(
         tab,
-        crate::tui::SessionTab::Skills
-            | crate::tui::SessionTab::Permissions
-            | crate::tui::SessionTab::Tools
+        crate::tui::SessionTab::Skills | crate::tui::SessionTab::Tools
     );
 
     match tab {
@@ -347,32 +345,7 @@ pub fn draw_session_modal(
                         skill.enabled,
                         "enabled",
                         "disabled",
-                        theme,
-                    ));
-                }
-            }
-        }
-        crate::tui::SessionTab::Permissions => {
-            let rules = session_context
-                .map(|s| s.permissions.as_slice())
-                .unwrap_or(&[]);
-            if rules.is_empty() {
-                body.push(placeholder(
-                    "No always-allow rules cached this session.",
-                    session_context.is_some(),
-                    theme.muted(),
-                ));
-            } else {
-                for (i, rule) in rules.iter().enumerate() {
-                    let summary = format!("{} {}", rule.tool, rule.scope);
-                    body.push(selectable_row(
-                        i,
-                        modal_index,
-                        &summary,
-                        "Space revokes this rule",
-                        true,
-                        "allowed",
-                        "",
+                        body_rect.width as usize,
                         theme,
                     ));
                 }
@@ -396,6 +369,7 @@ pub fn draw_session_modal(
                         tool.enabled,
                         "on",
                         "off",
+                        body_rect.width as usize,
                         theme,
                     ));
                 }
@@ -415,10 +389,7 @@ pub fn draw_session_modal(
     render_body(frame, body_rect, body, scroll, follow, false, theme);
 
     // ── Footer ──
-    let interactive = matches!(
-        tab,
-        crate::tui::SessionTab::Permissions | crate::tui::SessionTab::Tools
-    );
+    let interactive = matches!(tab, crate::tui::SessionTab::Tools);
     let scrollable = content_lines > visible;
     let mut hint = String::from("← → switch tab");
     if interactive {

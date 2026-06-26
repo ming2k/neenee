@@ -41,6 +41,6 @@ Lookup-oriented documentation — tables, lists, and exact values.
 | Thinking step | [thinking-step.md](tui/thinking-step.md) |
 | Step state machine | [step-state.md](tui/step-state.md) |
 | Sub-agent view | [subagent-view.md](tui/subagent-view.md) |
-| Status bar | [status-bar.md](tui/status-bar.md) |
+| Activity bar | [status-bar.md](tui/status-bar.md) |
 | Hint bar | [hint-line.md](tui/hint-line.md) |
 | Modals | [modals.md](tui/modals.md) |

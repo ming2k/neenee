@@ -95,13 +95,13 @@ mod tests {
 
     #[test]
     fn drain_reassembles_split_utf8_across_chunks() {
-        // "并行" is two CJK chars (6 bytes). Split the second char (3 bytes)
+        // "😀😁" is two wide chars (8 bytes). Split the second char (4 bytes)
         // across two network chunks the way a TLS read would: the first chunk
         // ends with an incomplete leading byte sequence, the second completes
         // it. Decoding per-chunk would yield U+FFFD (`�`); buffering bytes and
         // decoding at the `\n` boundary must preserve the original text.
-        let frame = "data: {\"text\":\"并行\"}\n".as_bytes().to_vec();
-        let split = frame.len() - 2;
+        let frame = "data: {\"text\":\"😀😁\"}\n".as_bytes().to_vec();
+        let split = frame.len() - 5; // split inside the second 4-byte emoji
         let mut buffer: Vec<u8> = Vec::new();
 
         buffer.extend_from_slice(&frame[..split]);
@@ -112,7 +112,7 @@ mod tests {
 
         buffer.extend_from_slice(&frame[split..]);
         let lines = drain_complete_lines(&mut buffer);
-        assert_eq!(lines, vec!["data: {\"text\":\"并行\"}".to_string()]);
+        assert_eq!(lines, vec!["data: {\"text\":\"😀😁\"}".to_string()]);
         assert!(buffer.is_empty(), "buffer must be fully drained");
     }
 

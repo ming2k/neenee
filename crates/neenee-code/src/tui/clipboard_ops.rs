@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use neenee_core::ImagePart;
+use neenee_core::{ImagePart, resolve_model};
 
 use crate::tui::clipboard::{self, ClipboardRead, CopyOutcome};
 use crate::tui::composer_attachments::{
@@ -54,12 +54,43 @@ pub(super) fn spawn_clipboard_paste(tx: &mpsc::UnboundedSender<ClipboardRead>) {
 
 /// Apply a completed clipboard paste: attach an image, insert text at the
 /// cursor, or surface an error toast.
+///
+/// On the main prompt (`Modal::None`) a paste follows the chip-or-inline
+/// composer semantics — images stage as `[Image #N]` attachments and large
+/// text blocks collapse into `[Pasted text #N +M lines]` chips. Inside a
+/// free-text modal (provider editor, provider picker filter, history
+/// search) the input line is borrowed as a single-line field, so the paste
+/// splices the text inline at the cursor with newlines stripped (matching
+/// `insert_newline` being a no-op in modals) and skips the chip / attachment
+/// machinery entirely. Other modals drop the paste silently.
 pub(super) fn apply_clipboard_paste(app: &mut App, read: ClipboardRead) {
-    if app.active_modal != Modal::None {
-        return;
+    match app.active_modal {
+        Modal::None => apply_composer_paste(app, read),
+        Modal::HistorySearch | Modal::Provider | Modal::ModelEditor => {
+            apply_modal_field_paste(app, read)
+        }
+        _ => {}
     }
+}
+
+/// Main-prompt paste: chips for images and large text blocks, inline insert
+/// with a toast for short snippets. See [`apply_clipboard_paste`].
+fn apply_composer_paste(app: &mut App, read: ClipboardRead) {
     match read {
         ClipboardRead::Image { data, mime } => {
+            // If the current model doesn't support vision, reject the image
+            // paste with a toast rather than silently dropping it — the user
+            // should know why their paste didn't take.
+            if !resolve_model(&app.current_model).vision {
+                app.copy_toast_message = format!(
+                    "{} does not support images — paste ignored",
+                    app.current_model,
+                );
+                app.copy_toast_failed = true;
+                app.copy_toast_until =
+                    Some(std::time::Instant::now() + Duration::from_millis(2000));
+                return;
+            }
             let encoded = clipboard::base64_image(&data);
             app.pending_images.push(ImagePart {
                 mime,
@@ -109,6 +140,52 @@ pub(super) fn apply_clipboard_paste(app: &mut App, read: ClipboardRead) {
                 );
             }
             app.copy_toast_failed = false;
+            app.copy_toast_until = Some(std::time::Instant::now() + Duration::from_millis(1200));
+        }
+        ClipboardRead::Empty => {
+            app.copy_toast_message = "clipboard is empty".to_string();
+            app.copy_toast_failed = true;
+            app.copy_toast_until = Some(std::time::Instant::now() + Duration::from_millis(1200));
+        }
+    }
+}
+
+/// Modal-field paste: splice text inline at the cursor, stripping newlines
+/// to preserve single-line semantics (the provider editor's API-key and
+/// model-id fields, the picker filter, and the history search query are all
+/// single-line). Image pastes are dropped with a short toast since the
+/// modal field has no attachment staging. See [`apply_clipboard_paste`].
+fn apply_modal_field_paste(app: &mut App, read: ClipboardRead) {
+    match read {
+        ClipboardRead::Text(text) => {
+            // Collapse any newlines (and trailing carriage returns) so a
+            // copied multi-line block pastes as one continuous line, matching
+            // the single-line editing the modal fields already enforce.
+            let stripped: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+            let chars_to_insert = stripped.chars().count();
+            if chars_to_insert == 0 {
+                return;
+            }
+            let byte_pos = app
+                .input
+                .char_indices()
+                .map(|(i, _)| i)
+                .nth(app.cursor_position)
+                .unwrap_or(app.input.len());
+            app.input.insert_str(byte_pos, &stripped);
+            app.cursor_position += chars_to_insert;
+            app.copy_toast_message = format!(
+                "pasted {chars_to_insert} char{}",
+                if chars_to_insert == 1 { "" } else { "s" }
+            );
+            app.copy_toast_failed = false;
+            app.copy_toast_until = Some(std::time::Instant::now() + Duration::from_millis(1200));
+        }
+        ClipboardRead::Image { .. } => {
+            // Modal fields are single-line text; images are not attachable
+            // here. Surface a brief toast so the paste is not silently lost.
+            app.copy_toast_message = "can't paste image into this field".to_string();
+            app.copy_toast_failed = true;
             app.copy_toast_until = Some(std::time::Instant::now() + Duration::from_millis(1200));
         }
         ClipboardRead::Empty => {

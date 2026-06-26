@@ -96,15 +96,13 @@ pub enum SelectionState {
         message_idx: usize,
         block_idx: usize,
     },
-    /// One logical table cell is selected. `cell_idx` is row-major
+    /// One logical table cell is selected in full. `cell_idx` is row-major
     /// (`row * ncols + col`, with the header as row 0) so it maps back to the
-    /// block's headers/rows. Selecting a cell grabs its full (possibly
-    /// line-wrapped) text without bleeding into adjacent cells or borders.
+    /// block's headers/rows.
     ///
-    /// Scaffolded but not yet constructed: the selection state, the
-    /// `get_selected_text` cell branch, and the `LayoutMap` table-grid bookkeeping
-    /// are in place, but no input path produces a cell selection yet. Targeted
-    /// allow until the table-cell drag handler lands.
+    /// Currently only reachable via copy of a previously set selection;
+    /// cell-bounded drags use [`SelectionState::Range`] with
+    /// [`CellDragInfo`] clamping instead.
     #[allow(dead_code)]
     TableCell {
         message_idx: usize,
@@ -167,10 +165,13 @@ impl SelectionState {
 /// This returns the *original* text data, ignoring any terminal line wrapping.
 /// `table_grid` resolves the last-rendered grid for a `Block::Table` so cell
 /// selection returns the actually-displayed text with borders stripped.
+/// `cell_info` provides context when the selection is a [`Range`] bounded
+/// inside a table cell (free substring selection within `│` fences).
 pub fn get_selected_text<'a>(
     state: &SelectionState,
     messages: &'a [TranscriptMessage],
     table_grid: &dyn Fn(usize, usize) -> Option<&'a str>,
+    cell_info: Option<&CellDragInfo>,
 ) -> Option<String> {
     match state {
         SelectionState::None => None,
@@ -204,6 +205,11 @@ pub fn get_selected_text<'a>(
             };
 
             if start.message_idx == end.message_idx {
+                // Cell-bounded range: extract a substring of the cell's
+                // original text, mapping grid-line byte offsets back.
+                if let Some(ci) = cell_info {
+                    return Some(ci.extract_range_text(start.byte_offset, end.byte_offset));
+                }
                 // Selection within a single message.
                 let msg = messages.get(start.message_idx)?;
                 extract_within_message(start.message_idx, msg, &start, &end, table_grid)
@@ -309,42 +315,84 @@ fn extract_within_message<'a>(
     Some(result)
 }
 
+/// Context for a drag that started inside a table cell. Stored alongside
+/// [`SelectionDrag`] so the drag can clamp cursor positions to the cell's
+/// `│` boundaries without auto-selecting the whole cell.
+#[derive(Debug, Clone)]
+pub struct CellDragInfo {
+    pub message_idx: usize,
+    pub block_idx: usize,
+    /// Original cell text (from headers/rows, before padding/wrapping).
+    pub cell_text: String,
+    /// `(lo, hi)` byte range of the padded cell content within the grid-line
+    /// text that the anchor cursor falls on. Used to clamp byte offsets.
+    pub cell_byte_range: (usize, usize),
+}
+
+impl CellDragInfo {
+    /// Clamp a cursor's byte offset into the cell's content range. If the
+    /// cursor lands on a different line, it is clamped to `[lo, hi]`.
+    pub fn clamp_cursor(&self, cursor: SemanticCursor) -> SemanticCursor {
+        let (lo, hi) = self.cell_byte_range;
+        SemanticCursor::new(
+            self.message_idx,
+            self.block_idx,
+            cursor.byte_offset.clamp(lo, hi),
+        )
+    }
+
+    /// Extract the selected substring from the cell's original text.
+    /// `anchor` and `head` are the clamped cursors (both should be
+    /// message_idx == self.message_idx, block_idx == self.block_idx).
+    pub fn extract_range_text(&self, start_byte: usize, end_byte: usize) -> String {
+        let (lo, _hi) = self.cell_byte_range;
+        let cell_start = start_byte.saturating_sub(lo).min(self.cell_text.len());
+        let cell_end = end_byte.saturating_sub(lo).min(self.cell_text.len());
+        if cell_start < cell_end {
+            self.cell_text[cell_start..cell_end].to_string()
+        } else {
+            String::new()
+        }
+    }
+}
+
 /// A helper that manages the lifecycle of a mouse-drag selection.
 #[derive(Debug, Default)]
 pub struct SelectionDrag {
     pub active: bool,
     pub anchor: Option<SemanticCursor>,
-    /// When the drag started inside a table cell, this holds
-    /// `(message_idx, block_idx, cell_idx)` so each update can be clamped to
-    /// that cell's hit boxes, preventing the selection from crossing `│`
-    /// borders into adjacent cells.
-    pub cell_constraint: Option<(usize, usize, usize)>,
+    /// When a drag begins inside a table cell, this stores the cell context
+    /// so the selection is clamped to the cell's `│` boundaries. The user
+    /// can select a *substring* of the cell — not the whole cell — but the
+    /// selection can never cross `│` into an adjacent cell. `None` for
+    /// ordinary text-range drags, which follow the pointer freely.
+    pub cell_info: Option<CellDragInfo>,
 }
 
 impl SelectionDrag {
+    /// Arm a text-range drag. The selection follows the pointer (head cursor).
     pub fn start(&mut self, cursor: SemanticCursor) {
         self.active = true;
         self.anchor = Some(cursor);
-        self.cell_constraint = None;
+        self.cell_info = None;
     }
 
-    /// Start a drag that is confined to a single table cell.
-    pub fn start_in_cell(&mut self, cursor: SemanticCursor, cell: (usize, usize, usize)) {
+    /// Arm a drag locked to one table cell's `│` boundaries.
+    pub fn start_in_cell(&mut self, cursor: SemanticCursor, cell: CellDragInfo) {
         self.active = true;
         self.anchor = Some(cursor);
-        self.cell_constraint = Some(cell);
+        self.cell_info = Some(cell);
     }
 
     pub fn end(&mut self) {
         self.active = false;
-        self.cell_constraint = None;
-        // Keep anchor so the selection remains; it will be cleared externally.
+        // Keep anchor + cell_info so the selection remains; cleared externally.
     }
 
     pub fn cancel(&mut self) {
         self.active = false;
         self.anchor = None;
-        self.cell_constraint = None;
+        self.cell_info = None;
     }
 }
 
@@ -363,7 +411,7 @@ mod tests {
             block_idx: 0,
         };
         assert_eq!(
-            get_selected_text(&sel, &messages, &|_, _| None),
+            get_selected_text(&sel, &messages, &|_, _| None, None),
             Some("Hello world".to_string())
         );
     }
@@ -395,6 +443,7 @@ mod tests {
             },
             &[message],
             &|_, _| None,
+            None,
         )
         .unwrap();
 
@@ -411,7 +460,7 @@ mod tests {
             head: SemanticCursor::new(0, 0, 10),
         };
         assert_eq!(
-            get_selected_text(&sel, &messages, &|_, _| None),
+            get_selected_text(&sel, &messages, &|_, _| None, None),
             Some("world".to_string())
         );
     }
@@ -423,10 +472,12 @@ mod tests {
             Block::Text {
                 content: "First".to_string(),
                 code_ranges: Vec::new(),
+                bold_ranges: Vec::new(),
             },
             Block::Text {
                 content: "Second".to_string(),
                 code_ranges: Vec::new(),
+                bold_ranges: Vec::new(),
             },
         ];
         let messages = vec![msg];
@@ -436,38 +487,38 @@ mod tests {
         };
         // Head at byte 3 ('o') is included.
         assert_eq!(
-            get_selected_text(&sel, &messages, &|_, _| None),
+            get_selected_text(&sel, &messages, &|_, _| None, None),
             Some("rst\nSeco".to_string())
         );
     }
 
     #[test]
     fn multibyte_selection_never_panics_and_includes_head_char() {
-        let msg = TranscriptMessage::new(Role::Assistant, "你好世界");
+        let msg = TranscriptMessage::new(Role::Assistant, "😀😃😄😁");
         let messages = vec![msg];
 
-        // Head in the middle of 世 (byte 7 is not a boundary) — must not panic.
+        // Head in the middle of 😄 (byte 10 is not a boundary) — must not panic.
         let sel = SelectionState::Range {
             anchor: SemanticCursor::new(0, 0, 1),
-            head: SemanticCursor::new(0, 0, 7),
+            head: SemanticCursor::new(0, 0, 10),
         };
         assert_eq!(
-            get_selected_text(&sel, &messages, &|_, _| None),
-            Some("你好世".to_string())
+            get_selected_text(&sel, &messages, &|_, _| None, None),
+            Some("😀😃😄".to_string())
         );
     }
 
     #[test]
     fn selection_head_past_text_end_is_clamped() {
-        let msg = TranscriptMessage::new(Role::Assistant, "短文本");
+        let msg = TranscriptMessage::new(Role::Assistant, "abc😀");
         let messages = vec![msg];
         let sel = SelectionState::Range {
             anchor: SemanticCursor::new(0, 0, 0),
             head: SemanticCursor::new(0, 0, 999),
         };
         assert_eq!(
-            get_selected_text(&sel, &messages, &|_, _| None),
-            Some("短文本".to_string())
+            get_selected_text(&sel, &messages, &|_, _| None, None),
+            Some("abc😀".to_string())
         );
     }
 
@@ -490,7 +541,7 @@ mod tests {
             message_idx: 0,
             block_idx: 0,
         };
-        let copied = get_selected_text(&sel, &messages, &grid_fn).unwrap();
+        let copied = get_selected_text(&sel, &messages, &grid_fn, None).unwrap();
         assert_eq!(copied, "a b\nc d");
     }
 
@@ -515,7 +566,7 @@ mod tests {
             anchor: SemanticCursor::new(0, 0, data_start),
             head: SemanticCursor::new(0, 0, data_end),
         };
-        let copied = get_selected_text(&sel, &messages, &grid_fn).unwrap();
+        let copied = get_selected_text(&sel, &messages, &grid_fn, None).unwrap();
         assert_eq!(copied, "hello world");
     }
 
@@ -541,6 +592,7 @@ mod tests {
                 },
                 &messages,
                 &|_, _| None,
+                None,
             )
         };
         assert_eq!(copy(0), Some("name".to_string())); // header col 0
@@ -571,6 +623,7 @@ mod tests {
             },
             &messages,
             &|_, _| None,
+            None,
         )
         .unwrap();
         assert_eq!(copied, long);

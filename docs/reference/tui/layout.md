@@ -48,10 +48,8 @@ The default. A two-chunk vertical split inside `draw_transcript`:
 │   (messages, expandable steps, sticky pinned summaries)      │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│  Plan panel (optional, 0 or 3 rows)               ┐          │
-│  Pursuit bar (optional, 0 or 1 row)                   │          │
-│  Status bar (optional, 0 or 1 row)                 │ chunks[1]│
-│  Input box (grows with text, capped)               │          │
+│  Activity bar (optional, 0 or 1 row)              ┐          │
+│  Input box (grows with text, capped)               │ chunks[1]│
 │  Hint bar (1 row, persistent)                     ┘          │
 ├──────────────────────────────────────────────────────────────┤
 │app_bg  (bottom viewport margin, 1 row)                       │
@@ -64,26 +62,19 @@ the transcript reclaims the full vertical space above the footer.
 
 ### Footer stack
 
-The footer's height is the sum of its rows. Each row is independently
-optional and the stack collapses from the top when a row is hidden:
+The footer's height is the sum of its rows. The activity bar is optional and
+collapses to 0 when idle; the input and hint bars are persistent (when chrome
+is visible):
 
 | Row | Height | When present |
 |-----|--------|--------------|
-| Plan panel | `PLAN_PANEL_ROWS = 3` | A plan is active; not in sub-agent view; chrome visible |
-| Pursuit bar | `GOAL_BAR_ROWS = 1` | A pursuit is in the `Active` state; not in sub-agent view; chrome visible |
-| Status bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle` / `responding`; not in sub-agent view; chrome visible |
+| Activity bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle`; not in sub-agent view; chrome visible. Unifies the prior pursuit bar, status bar, and todos/review segments into one click-to-open bar. |
 | Input box | `COMPOSER_VERTICAL_CHROME_ROWS + wrapped_lines`, capped at `terminal_height / 2`, min `COMPOSER_MIN_HEIGHT = 3` | Not in sub-agent view; chrome visible |
 | Hint bar | `HINT_BAR_ROWS = 1` | Chrome visible (always, when no modal is open) |
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ ╭── Plan: docs/plan.md · 2/5 done ───────────────────╮     │  ← plan panel
-│ │ ✓ extract session store   ▸ migrate tests   · pending │     │
-│ ╰────────────────────────────────────────────────────╯     │
-├────────────────────────────────────────────────────────────┤
-│ ● ship the pursuit bar  [1/2]                                  │  ← pursuit bar
-├────────────────────────────────────────────────────────────┤
-│ ● turn 4 · round 2 · making edits                           │  ← status bar
+│ ● turn 4 · round 2 · making edits   ⟴ ship docs   2/5   │  ← activity bar
 ├────────────────────────────────────────────────────────────┤
 │  > type here…                                               │  ← input box
 ├────────────────────────────────────────────────────────────┤
@@ -91,8 +82,13 @@ optional and the stack collapses from the top when a row is hidden:
 └────────────────────────────────────────────────────────────┘
 ```
 
-The footer is inset by `FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols on
-each side; all rows share the same horizontal extent so their left and
+The activity bar carries the breathing-dot liveness anchor plus the live
+turn/round/phase label, the active pursuit objective and its `[done/total]`
+progress, and a todos `d/t` segment — each surfaced as it applies. The pursuit
+and plan summaries that used to occupy their own footer rows now live inside
+the Activity modal (opened by clicking the bar) and as inline transcript
+notices. The footer is inset by `FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols
+on each side; all rows share the same horizontal extent so their left and
 right edges line up.
 
 ### Sticky pinned step summary
@@ -132,7 +128,7 @@ not the root conversation.
 | Transcript (children) | `Min(0)` | fills |
 | Sub-agent bar | `Length(SUBAGENT_BAR_ROWS = 1)` | 1 |
 
-Status bar, plan panel, pursuit bar, input box, and hint bar all collapse to 0 —
+Status bar, activity bar, input box, and hint bar all collapse to 0 —
 the zoomed view is read-only, with the navigation bar as its only chrome. See
 [Sub-agent view](subagent-view.md) for the focus stack that drives this
 mode and the bar's contents.
@@ -145,8 +141,8 @@ its normal height and darkens the whole live surface in place
 (`recess_backdrop` scales every cell by `theme.modal_dim_factor`), so the
 transcript and chrome stay visible for context while the centered panel reads
 as the focal layer. The **Takeover** policy (the sessions picker only) instead
-collapses the entire footer (plan panel, pursuit bar, status bar, input box,
-hint bar) to 0 height and fully occludes the surface. The one
+collapses the entire footer (activity bar, input box, hint bar) to 0 height and
+fully occludes the surface. The one
 **None**-recess surface is the [permission sheet](modals.md#permission-sheet),
 which is inline (no dimming, no footer collapse) and replaces only the
 input-box area.
@@ -162,8 +158,7 @@ input-box area.
 │            │                                    │            │
 │            ╰────────────────────────────────────╯            │
 │                                                              │
-│footer = 0 (plan panel, pursuit bar, status bar, input box,     │
-│           hint bar all hidden)                               │
+│footer = 0 (activity bar, input box, hint bar all hidden)      │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -196,7 +191,7 @@ wraps with `TRANSCRIPT_H_INSET` cells of slack on the right.
 ```
 
 The footer shares the same inset (`FOOTER_H_INSET = TRANSCRIPT_H_INSET`),
-so the plan panel, pursuit bar, status bar, input box, and hint bar all line up with
+so the activity bar, input box, and hint bar all line up with
 the transcript content above.
 
 ## Transcript viewport behavior
@@ -217,9 +212,7 @@ the transcript content above.
 | Left/right viewport margin | 0 cols | `VIEWPORT_H_MARGIN` |
 | Left/right gutter (all content) | 2 cols `app_bg` | `TRANSCRIPT_H_INSET`, applied via `transcript_band_rect` (steps) / explicit spans (user panel, code block) / wrap-width slack (markdown) |
 | Footer side inset | 2 cols (matches `TRANSCRIPT_H_INSET`) | `FOOTER_H_INSET` |
-| Status bar height | 1 row | `STATUS_BAR_ROWS` |
-| Pursuit bar height | 1 row | `GOAL_BAR_ROWS` |
-| Plan panel height | 3 rows (top border + content + bottom border) | `PLAN_PANEL_ROWS` |
+| Activity bar height | 1 row | `STATUS_BAR_ROWS` |
 | Hint bar height | 1 row | `HINT_BAR_ROWS` |
 | Sub-agent bar height | 1 row | `SUBAGENT_BAR_ROWS` |
 | Input box min height | 3 rows (top transition + 1 text + bottom transition) | `COMPOSER_MIN_HEIGHT` |
@@ -243,10 +236,9 @@ the transcript content above.
 | File | Responsibility |
 |------|----------------|
 | `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, sub-agent split, sticky summary overlay |
-| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `GOAL_BAR_ROWS`, `STATUS_BAR_ROWS`, `PLAN_PANEL_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
+| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `STATUS_BAR_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop` |
-| `render/chrome.rs` | `draw_status_bar`, `draw_pursuit_bar` / `PursuitBarView`, `draw_hint_bar` / `HintBarView` |
+| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
-| `render/message_body.rs` | `draw_plan_panel` |
 | `render/step/renderers.rs` | `draw_subagent_bar`, `draw_sticky_summary_if_needed` |
 | `app.rs` | `in_subagent_view`, `focus_stack`, `follow_bottom`, scroll clamping |

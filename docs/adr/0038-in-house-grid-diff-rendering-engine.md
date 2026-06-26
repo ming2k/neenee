@@ -1,6 +1,6 @@
 # 0038. Replace ratatui with an in-house grid + diff rendering engine
 
-- **Status:** Accepted (engine scaffolded; widget migration in progress)
+- **Status:** Accepted (engine built; widget layer fully migrated off ratatui)
 - **Date:** 2026-06-27
 
 ## Context
@@ -94,6 +94,11 @@ cell-level byte minimization nvim's TUI frontend does.
 
 ## What this does NOT change (yet)
 
+> **Update (resolved):** the widget migration is complete. All renderers under
+> `neenee-code/src/tui/render/` now paint through the `neenee-tui` grid API,
+> `ratatui` is removed from the workspace, and `WideHealBackend` (ADR-0036) is
+> deleted. The bullets below are retained as the original decision context.
+
 - **Widget layer.** The tool-step / markdown / modal / diff / table / grep
   renderers currently in `neenee-code/src/tui/render/` (~5000 lines) still
   render *through ratatui*. Migrating them onto the new grid API is a
@@ -124,9 +129,9 @@ cell-level byte minimization nvim's TUI frontend does.
   third-buffer ghost workaround, no `bce`) are addressed by one coherent
   model instead of three separate patches. The engine is pure and
   unit-testable (feed two grids, assert the diff) — no live terminal needed.
-- **Positive:** `WideHealBackend` and its third full-screen buffer can be
-  deleted once the widget layer migrates; ghost cells become impossible by
-  construction.
+- **Positive:** `WideHealBackend` and its third full-screen buffer have been
+  deleted (the widget layer migrated onto the grid API); ghost cells are
+  impossible by construction.
 - **Neutral:** the engine adds one crate and ~600 lines of carefully-tested
   core. The widget migration is the remaining large effort and is tracked
   separately.
@@ -140,11 +145,9 @@ cell-level byte minimization nvim's TUI frontend does.
 - `crates/neenee-tui/` — the engine (`cell`, `text`, `grid`, `diff`,
   `backend`) and `tests/engine.rs` (the four-guarantee end-to-end tests).
 - [ADR-0036](0036-cjk-wide-char-ghost-cells.md) — the third-buffer fix this
-  engine supersedes.
-- `crates/neenee-code/src/tui/wide_heal_backend.rs` — the wrapper to be
-  retired after widget migration.
+  engine supersedes (the wrapper it introduced, `wide_heal_backend.rs`, has
+  been deleted).
 - neovim `src/nvim/grid_defs.h` / `screen.c` — `ScreenGrid`, per-line
   `dirty_col`, window `VALID`/`NOT_VALID` dirty states (the model this engine
   follows).
-- [Terminal UI](../explanation/tui.md) — "Immediate-mode rendering" (the
-  section to be revised to "retained grid" once migration lands).
+- [Terminal UI](../explanation/tui.md) — "Retained-grid rendering".

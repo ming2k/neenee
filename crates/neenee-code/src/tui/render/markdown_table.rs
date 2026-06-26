@@ -8,9 +8,9 @@ use neenee_tui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::document::TableAlignment;
+use crate::tui::document::{scan_inline, CodeRange, TableAlignment};
 
-use super::text_layout::wrap_text;
+use super::text_layout::{wrap_text, WrappedLine};
 
 /// Push one segment of a table grid line, splitting it around the selection
 /// overlay (if any). `seg_lo`/`seg_hi` are byte offsets within `text`;
@@ -64,6 +64,19 @@ pub(super) struct TableRowInfo {
     /// `(byte_start, byte_end)` of each column's padded content within the
     /// line text. Length equals the column count.
     pub col_spans: Vec<(usize, usize)>,
+    /// `(byte_start, byte_end)` of the actual cell text content (without
+    /// alignment padding) within the line text. A sub-range of `col_spans`.
+    pub col_content_spans: Vec<(usize, usize)>,
+    /// Start byte of this line's cell content within the original (unwrapped,
+    /// unpadded) cell text. Used to map code/bold ranges onto the displayed
+    /// substring.
+    pub col_offsets: Vec<usize>,
+    /// Per-cell original code ranges (absolute, relative to the original
+    /// cell text). Same for every wrapped line of the same cell.
+    pub col_code_ranges: Vec<Vec<CodeRange>>,
+    /// Per-cell original bold ranges (absolute, relative to the original
+    /// cell text). Same for every wrapped line of the same cell.
+    pub col_bold_ranges: Vec<Vec<CodeRange>>,
 }
 
 /// Build the visual lines of a GFM-style table grid that fits within
@@ -85,10 +98,12 @@ pub(super) fn build_table_render(
         };
     }
 
-    // Per-column intrinsic width.
+    // Per-column intrinsic width. `.take(ncols)` ignores any cells beyond the
+    // header width (GFM drops over-wide cells); short rows simply contribute
+    // fewer candidates, which is correct for a column-wise maximum.
     let dwidth = |s: &str| s.width();
     let mut widths = vec![0usize; ncols];
-    for (i, h) in headers.iter().enumerate().take(ncols) {
+    for (i, h) in headers.iter().enumerate() {
         widths[i] = widths[i].max(dwidth(h));
     }
     for row in rows {
@@ -106,23 +121,53 @@ pub(super) fn build_table_render(
         widths = shrink_column_widths(&widths, content_available, 3);
     }
 
-    // Wrap each cell to its (possibly shrunk) column width.
-    let wrap_cell = |cell: &str, w: usize| -> Vec<String> {
+    // Scan inline code / bold ranges for every cell (original text, before
+    // wrapping or padding). These ranges use byte offsets relative to the
+    // start of each cell's original string. Iterate by column index over
+    // `0..ncols` so a ragged row yields empty styles for its missing cells
+    // rather than producing a short vec that `format_data_line` would
+    // out-of-bounds index (`cell_styles[i]`).
+    let header_cell_styles: Vec<(Vec<CodeRange>, Vec<CodeRange>)> =
+        headers.iter().map(|h| scan_inline(h)).collect();
+    let row_cell_styles: Vec<Vec<(Vec<CodeRange>, Vec<CodeRange>)>> = rows
+        .iter()
+        .map(|row| {
+            (0..ncols)
+                .map(|i| {
+                    row.get(i)
+                        .map(|cell| scan_inline(cell))
+                        .unwrap_or_else(|| (Vec::new(), Vec::new()))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Wrap each cell to its (possibly shrunk) column width, preserving byte
+    // offsets via WrappedLine.
+    let wrap_cell = |cell: &str, w: usize| -> Vec<WrappedLine> {
         if cell.is_empty() {
-            return vec![String::new()];
+            return vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }];
         }
         let wrapped = wrap_text(cell, w.max(1));
         if wrapped.is_empty() {
-            vec![String::new()]
+            vec![WrappedLine {
+                text: String::new(),
+                start_byte: 0,
+                end_byte: 0,
+            }]
         } else {
-            wrapped.into_iter().map(|wl| wl.text).collect()
+            wrapped
         }
     };
 
-    let wrapped_headers: Vec<Vec<String>> = (0..ncols)
+    let wrapped_headers: Vec<Vec<WrappedLine>> = (0..ncols)
         .map(|i| wrap_cell(&headers[i], widths[i]))
         .collect();
-    let wrapped_rows: Vec<Vec<Vec<String>>> = rows
+    let wrapped_rows: Vec<Vec<Vec<WrappedLine>>> = rows
         .iter()
         .map(|row| {
             (0..ncols)
@@ -139,27 +184,71 @@ pub(super) fn build_table_render(
             .join(sep)
     };
 
-    // Build one data line and record each column's padded-content byte span.
+    // Build one data line from a row of wrapped cells, returning the line
+    // text together with per-cell geometry and style metadata.
     let format_data_line =
-        |cells: &[Vec<String>], line_idx: usize| -> (String, Vec<(usize, usize)>) {
+        |cells: &[Vec<WrappedLine>],
+         cell_styles: &[(Vec<CodeRange>, Vec<CodeRange>)],
+         line_idx: usize|
+         -> (String, TableRowInfo) {
             let mut line = String::from("│ ");
-            let mut spans = Vec::with_capacity(ncols);
+            let mut col_spans = Vec::with_capacity(ncols);
+            let mut col_content_spans = Vec::with_capacity(ncols);
+            let mut col_offsets = Vec::with_capacity(ncols);
+            let mut col_code_ranges = Vec::with_capacity(ncols);
+            let mut col_bold_ranges = Vec::with_capacity(ncols);
             for i in 0..ncols {
-                let cell_line = cells[i].get(line_idx).map(String::as_str).unwrap_or("");
-                let part = pad_cell_text(
-                    cell_line,
-                    widths[i],
-                    aligns.get(i).copied().unwrap_or(TableAlignment::None),
-                );
-                let start = line.len();
+                let wl = cells[i].get(line_idx);
+                let cell_line = wl.map(|w| w.text.as_str()).unwrap_or("");
+                let cell_start_byte = wl.map(|w| w.start_byte).unwrap_or(0);
+                let align = aligns.get(i).copied().unwrap_or(TableAlignment::None);
+
+                let part = pad_cell_text(cell_line, widths[i], align);
+
+                // Compute where the actual cell content (without padding)
+                // sits within the padded string.
+                let cell_w = cell_line.width();
+                let pad = widths[i].saturating_sub(cell_w);
+                let (content_lo_in_part, content_hi_in_part) = match align {
+                    TableAlignment::Right => (pad, pad + cell_w),
+                    TableAlignment::Center => {
+                        let left = pad / 2;
+                        (left, left + cell_w)
+                    }
+                    TableAlignment::None | TableAlignment::Left => (0, cell_w),
+                };
+
+                let padded_start = line.len();
                 line.push_str(&part);
-                spans.push((start, line.len()));
+                let padded_end = line.len();
+
+                col_spans.push((padded_start, padded_end));
+                col_content_spans.push((
+                    padded_start + content_lo_in_part,
+                    padded_start + content_hi_in_part,
+                ));
+                col_offsets.push(cell_start_byte);
+
+                let (cr, br) = &cell_styles[i];
+                col_code_ranges.push(cr.clone());
+                col_bold_ranges.push(br.clone());
+
                 if i + 1 < ncols {
                     line.push_str(" │ ");
                 }
             }
             line.push_str(" │");
-            (line, spans)
+            (
+                line,
+                TableRowInfo {
+                    row: 0, // filled by caller
+                    col_spans,
+                    col_content_spans,
+                    col_offsets,
+                    col_code_ranges,
+                    col_bold_ranges,
+                },
+            )
         };
 
     let mut lines = Vec::new();
@@ -170,12 +259,10 @@ pub(super) fn build_table_render(
 
     let header_height = wrapped_headers.iter().map(|v| v.len()).max().unwrap_or(1);
     for line_idx in 0..header_height {
-        let (l, spans) = format_data_line(&wrapped_headers, line_idx);
+        let (l, mut info) = format_data_line(&wrapped_headers, &header_cell_styles, line_idx);
+        info.row = 0;
         lines.push(l);
-        line_info.push(Some(TableRowInfo {
-            row: 0,
-            col_spans: spans,
-        }));
+        line_info.push(Some(info));
     }
 
     lines.push(format!("├{}┤", join_horizontal("┼")));
@@ -185,13 +272,12 @@ pub(super) fn build_table_render(
 
     for (row_idx, wrapped_row) in wrapped_rows.iter().enumerate() {
         let row_height = wrapped_row.iter().map(|v| v.len()).max().unwrap_or(1);
+        let cell_styles = &row_cell_styles[row_idx];
         for line_idx in 0..row_height {
-            let (l, spans) = format_data_line(wrapped_row, line_idx);
+            let (l, mut info) = format_data_line(wrapped_row, cell_styles, line_idx);
+            info.row = row_idx + 1;
             lines.push(l);
-            line_info.push(Some(TableRowInfo {
-                row: row_idx + 1,
-                col_spans: spans,
-            }));
+            line_info.push(Some(info));
         }
         // Horizontal separator between body rows (not after the last one).
         if row_idx + 1 < wrapped_rows.len() {

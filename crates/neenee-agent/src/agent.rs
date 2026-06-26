@@ -397,10 +397,7 @@ impl Agent {
     /// diagnostic never call this, so the default `None` keeps their round
     /// boundaries no-ops.
     pub fn set_round_persist(&self, f: RoundPersistFn) {
-        *self
-            .round_persist
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(f);
+        *self.round_persist.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     /// Fire the mid-turn save point if installed. Returns `Ok(())` when no
@@ -414,9 +411,9 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         match f {
-            Some(f) => f(messages)
-                .await
-                .map_err(|error| HarnessError::Other(format!("could not persist mid-turn round: {error}"))),
+            Some(f) => f(messages).await.map_err(|error| {
+                HarnessError::Other(format!("could not persist mid-turn round: {error}"))
+            }),
             None => Ok(()),
         }
     }
@@ -585,7 +582,10 @@ impl Agent {
     /// unrestricted; `SubagentTool` sets the scope resolved from the bound
     /// subagent profile on the child before it runs.
     pub fn set_operation_scope(&self, scope: neenee_core::OperationScope) {
-        *self.operation_scope.lock().unwrap_or_else(|e| e.into_inner()) = scope;
+        *self
+            .operation_scope
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = scope;
     }
 
     /// Snapshot of this agent's operation boundary. Used by the `execute_tool`

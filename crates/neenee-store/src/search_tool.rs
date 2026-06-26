@@ -46,7 +46,6 @@ impl Tool for SearchHistoryTool {
         })
     }
 
-
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("invalid arguments: {e}"))?;

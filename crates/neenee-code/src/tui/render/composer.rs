@@ -249,6 +249,7 @@ pub fn draw_composer(
                 text: wl.text.clone(),
                 prefix_cols: COMPOSER_PROMPT_PREFIX_COLS as u16,
                 rect: Rect::new(input_rect.x, row_y, full_w as u16, 1),
+                hidden_ranges: Vec::new(),
             });
         }
     }

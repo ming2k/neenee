@@ -53,13 +53,6 @@ pub fn summary_at(cursor: &SemanticCursor) -> Option<(usize, StepKind)> {
     Some((cursor.message_idx, kind))
 }
 
-/// Message index of the step summary under the cursor, if any — the per-frame
-/// hover state. A thin convenience over [`summary_at`] for callers that only
-/// need the index.
-pub fn hovered_summary(cursor: &SemanticCursor) -> Option<usize> {
-    summary_at(cursor).map(|(mi, _)| mi)
-}
-
 // ── Lifecycle-aware default disclosure ──
 //
 // A step's default disclosure is a pure function of (kind, lifecycle) — NOT
@@ -123,12 +116,6 @@ mod tests {
     fn non_summary_is_none() {
         assert!(summary_at(&cursor(5, 0)).is_none());
         assert!(summary_at(&cursor(0, 0)).is_none());
-        assert_eq!(hovered_summary(&cursor(5, 9)), None);
-    }
-
-    #[test]
-    fn hovered_summary_returns_index() {
-        assert_eq!(hovered_summary(&cursor(TOOL_STEP_BLOCK_IDX, 4)), Some(4));
     }
 
     fn config(defaults: &[(&str, bool)]) -> TuiConfig {

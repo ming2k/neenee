@@ -36,18 +36,17 @@ pub fn str_len_w(s: &str) -> usize {
 
 /// The column width of a single grapheme cluster.
 ///
-/// A grapheme may be several code points (e.g. `e` + combining acute). Its
-/// display width is the width of its *base* character; zero-width combining
-/// marks and ZWJ-joined emoji sequences contribute nothing beyond the base.
+/// Uses `UnicodeWidthStr::width` on the **full cluster string** so that
+/// multi-codepoint sequences — emoji ZWJ families, skin-tone variants,
+/// flag sequences — are measured as a whole (typically width 2) instead of
+/// only looking at the first code point.  `unicode-width ≥ 0.2` handles
+/// these correctly at the string level; per-char measurement cannot.
+///
 /// Control characters (including embedded newlines) report width 0 so the
 /// application can handle them structurally rather than as visible glyphs.
 pub fn grapheme_width(grapheme: &str) -> u8 {
-    // The base char is the first code point; combining marks that follow are
-    // zero-width. This is the same rule `UnicodeWidthChar` encodes per-char.
-    match grapheme.chars().next() {
-        Some(ch) => ch.width().unwrap_or(0) as u8,
-        None => 0,
-    }
+    use unicode_width::UnicodeWidthStr;
+    grapheme.width() as u8
 }
 
 /// A grapheme broken out with its precomputed width and byte range. Returned
@@ -245,7 +244,7 @@ mod tests {
 
     #[test]
     fn wide_grapheme_has_width_two() {
-        assert_eq!(grapheme_width("中"), 2);
+        assert_eq!(grapheme_width("😀"), 2);
         assert_eq!(grapheme_width("a"), 1);
         // Combining mark: base width only.
         assert_eq!(grapheme_width("e\u{0301}"), 1);

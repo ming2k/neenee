@@ -1,16 +1,18 @@
-# Status bar
+# Activity bar
 
-Transient activity indicator shown directly above the input box.
+Transient activity indicator shown directly above the input box. It unifies
+the live status label, the active pursuit, todos progress, and the
+breathing-dot liveness anchor into one click-to-open bar.
 
 ## Appearance
 
 ```text
- ● making edits · ⟴ refactor auth module · plan 2/5 · 23s
+ ● making edits · ⟴ refactor auth module · todos 2/5 · 23s
 ```
 
 The bar surfaces what the user most wants to know mid-turn: the **live
 status** (lead, brand + italic), an optional **pursuit badge** (`⟴ <objective>`,
-shown only while a pursuit is armed), **plan/task progress** (`plan d/t`,
+shown only while a pursuit is armed), **todos progress** (`todos d/t`,
 shown only when a non-empty task list exists), and **elapsed** time (the only
 live counter). Segments are omitted when there is nothing to report, so a
 plain turn reads simply:
@@ -23,7 +25,7 @@ The structural counters — `turn N · round M · <model>` — no longer live on
 the bar. They take space and change rarely, so they moved into the
 **Activity modal** that this bar opens on click. The whole bar is a click
 target (and `Tab`/`Enter` opens the modal): one glance answers "what's
-happening, is there a plan, how long?", one click shows the full breakdown
+happening, are there todos, how long?", one click shows the full breakdown
 (Activity tab: pursuit, current prompt, turn/round/model/elapsed; Tasks tab:
 the todo list).
 
@@ -33,11 +35,11 @@ the todo list).
 | Glyph | `●` (`spinner_glyph`), BOLD |
 | Glyph color | `breathing_color(phase, theme.brand(), theme.surface())` — a cosine luminance sweep between brand and surface so the dot breathes at roughly 10 fps instead of cycling braille frames |
 | Status text color | `theme.brand()` + ITALIC |
-| Pursuit / plan / elapsed | `theme.muted()` |
+| Pursuit / todos / elapsed | `theme.muted()` |
 | Indent | 1 space |
 
 The breathing sweep is the TUI's single liveness anchor — every other
-running indicator (tool step, thinking marker, pursuit bar) holds a steady
+running indicator (tool step, thinking marker) holds a steady
 accent so this dot is the only thing in the user's peripheral vision that
 moves. See [ADR-0008](../../adr/0008-single-breathing-anchor.md).
 

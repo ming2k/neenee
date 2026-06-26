@@ -588,9 +588,17 @@ pub async fn execute_turn(
     }
 
     let admitted_session_id = session.id().await;
+    // Build turn_history from the committed session history + the new
+    // user message.  The user message is *not* pushed into the committed
+    // `history` yet — if this turn fails (non-retryable provider error,
+    // e.g. an image sent to a non-vision model), the history stays clean
+    // and the next turn won't carry the poison.  On success the whole
+    // `turn_history` (with the assistant reply and any tool results)
+    // replaces `history` atomically (see the success path below).
     let mut turn_history = {
-        let mut history = history.lock().await;
-        history.push(if input.hidden {
+        let history = history.lock().await;
+        let mut th = history.clone();
+        th.push(if input.hidden {
             Message::injected(
                 Role::User,
                 input.prompt,
@@ -608,7 +616,7 @@ pub async fn execute_turn(
                 message.with_images(input.images)
             }
         });
-        history.clone()
+        th
     };
     session.replace_messages(turn_history.clone()).await?;
 

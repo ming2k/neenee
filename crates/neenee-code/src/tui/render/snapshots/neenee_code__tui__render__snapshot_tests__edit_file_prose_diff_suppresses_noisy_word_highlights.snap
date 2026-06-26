@@ -1,0 +1,22 @@
+---
+source: crates/neenee-code/src/tui/render/snapshot_tests.rs
+assertion_line: 307
+expression: "render_grid(&m, 100, 30)"
+---
+  - Edit docs/explanation/tui.md +1 -1
+
+     1   - Because the frame is a pure function of state, anything that changes state — a streamed
+            token, a permission request, a mouse drag — shows up on the very next frame with no ma
+           nual invalidation.
+        1+ Because the frame is a pure function of state, diff compares the back grid against the
+           front grid and walks only the dirty rows from each row's dirty column.
+
+backgrounds:
+.=reset  B=#070808  C=#201414  D=#121F16
+0: .2 B96
+1: .2 B96
+2: .2 C96
+3: .2 C96
+4: .2 C96
+5: .2 D96
+6: .2 D96

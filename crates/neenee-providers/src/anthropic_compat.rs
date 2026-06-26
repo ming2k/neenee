@@ -132,6 +132,35 @@ impl AnthropicMessagesProvider {
             conversation.push(message);
         }
 
+        // Every assistant `tool_calls` must be followed by a corresponding
+        // `tool` result.  Collect the ids that got a result, then strip
+        // unanswered calls from every assistant message.
+        let answered: std::collections::HashSet<String> = conversation
+            .iter()
+            .filter_map(|m| {
+                if m.role == Role::Tool {
+                    m.tool_call_id.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        conversation.retain_mut(|m| {
+            if m.role != Role::Assistant {
+                return true;
+            }
+            if let Some(calls) = m.tool_calls.as_mut() {
+                calls.retain(|c| answered.contains(&c.id));
+                if calls.is_empty() {
+                    m.tool_calls = None;
+                }
+            }
+            !m.content.is_empty()
+                || m.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        });
+
         let mut body = json!({
             "model": self.model,
             "messages": conversation.into_iter().map(anthropic_message).collect::<Vec<_>>(),

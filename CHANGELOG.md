@@ -9,27 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Inline code rendering.** Inline-code spans (`` `read_file` ``) in assistant
-  prose, headings, list items, blockquotes, and reasoning traces are now styled
-  on the same surface as fenced code blocks (`` `code_fg` `` on `` `code_bg` ``)
-  instead of being flattened into the surrounding text with bare backticks. The
-  markdown parser records each span's byte range on the prose block and the
-  renderer paints the run (delimiters included) as a distinct chip, so the span
-  reads as inline code at a glance. Copy and semantic selection are unchanged:
-  the flattened text still carries the original backticks and the byte-addressable
-  model is untouched, so selecting and copying an inline-code span yields the
-  exact source.
+- **Session/server layer: `neenee-server`.** A new crate peering
+  `neenee-code` at the application layer enables a long-running daemon holding
+  multiple concurrent agent sessions that several clients can subscribe to.
+  `SharedState` / `SessionRegistry` / `SessionHandle` replace the single-process
+  `mpsc` pair with a broadcast fan-out, so a browser frontend can hot-attach to
+  a running session over WebSocket (`serve` mode). This unblocks a future web
+  frontend while the TUI keeps working unchanged. See
+  [ADR-0037](docs/adr/0037-server-layer.md).
 
-## [Unreleased]
-
-### Changed
-
-- **Renamed the coding application: crate `neenee-cli` → `neenee-code`, binary
-  `neenee` → `neenee-code`.** The workspace now has two domain applications
-  (coding and quant), so neither carries the bare name. Every existing `neenee`
-  invocation is now `neenee-code`. See [ADR-0035](docs/adr/0035-application-layer-split.md).
-
-### Added
+- **In-house TUI grid + diff rendering engine (`neenee-tui`).** ratatui is
+  removed from the workspace and replaced with a vim-style retained cell grid
+  with write-marks-dirty tracking. The diff now walks only cells that changed
+  (idle frames emit nothing), wide-glyph trailing columns are owned at write
+  time, and `bce` (back-color-erase) support makes clearing a line tail a single
+  `\x1b[K`. The widget layer is fully migrated off ratatui. See
+  [ADR-0038](docs/adr/0038-in-house-grid-diff-rendering-engine.md).
 
 - **`neenee-quant` application crate** — the quantitative-trading application, a
   peer of `neenee-code` at the application layer. Depends on `neenee-agent` and
@@ -42,6 +37,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`QUANT` subagent profile** — a bounded subagent profile in `neenee-core`
   admitting read-only quant tools plus shared read-only inspection, while
   excluding live trading and all coding write/edit/exec tools.
+
+- **Inline code rendering.** Inline-code spans (`` `read_file` ``) in assistant
+  prose, headings, list items, blockquotes, and reasoning traces are now styled
+  on the same surface as fenced code blocks (`` `code_fg` `` on `` `code_bg` ``)
+  instead of being flattened into the surrounding text with bare backticks. The
+  markdown parser records each span's byte range on the prose block and the
+  renderer paints the run (delimiters included) as a distinct chip, so the span
+  reads as inline code at a glance. Copy and semantic selection are unchanged:
+  the flattened text still carries the original backticks and the byte-addressable
+  model is untouched, so selecting and copying an inline-code span yields the
+  exact source.
+
+### Changed
+
+- **Renamed the coding application: crate `neenee-cli` → `neenee-code`, binary
+  `neenee` → `neenee-code`.** The workspace now has two domain applications
+  (coding and quant), so neither carries the bare name. Every existing `neenee`
+  invocation is now `neenee-code`. See [ADR-0035](docs/adr/0035-application-layer-split.md).
+
+### Fixed
+
+- **CJK wide-character "ghost" cells.** Scrolling a transcript containing CJK
+  (double-width) text under foot + tmux no longer leaves stray gray blocks next
+  to the glyphs at the wrap column. The in-house grid engine owns each wide
+  glyph's trailing column at write time, so the background stays fresh through
+  scroll and partial redraws. (Originally patched by the third-buffer
+  `WideHealBackend` wrapper of ADR-0036, now superseded by ADR-0038.)
 
 ## [0.6.1] - 2026-06-26
 

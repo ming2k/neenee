@@ -51,7 +51,7 @@ crossterm keypresses through a **key handler**, and redraws via the
                   ┌─────────────────────────────────┐
    real keypress  │  State struct (fixture data)     │  render closure
    ──────────────▶│  + on_key closure (state machine)│──────────────▶ draw_*_modal()
-   (crossterm)    │                                  │  (ratatui Frame)
+   (crossterm)    │                                  │  (neenee-tui Frame)
                   └─────────────────────────────────┘
 ```
 

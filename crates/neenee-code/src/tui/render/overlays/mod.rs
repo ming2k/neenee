@@ -12,6 +12,7 @@ pub(crate) mod activity;
 pub(crate) mod common;
 pub(crate) mod misc;
 pub(crate) mod permission;
+pub(crate) mod permissions_manager;
 pub(crate) mod provider;
 pub(crate) mod session;
 
@@ -22,5 +23,6 @@ pub use misc::{
     draw_tool_step_detail_overlay,
 };
 pub use permission::{draw_permission_sheet, draw_question_modal};
+pub(crate) use permissions_manager::draw_permissions_manager;
 pub(crate) use provider::{draw_model_editor, draw_model_picker, draw_models_modal};
 pub use session::{draw_session_modal, draw_sessions_modal};

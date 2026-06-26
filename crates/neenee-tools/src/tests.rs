@@ -6,9 +6,9 @@ mod tests {
 
     #[test]
     fn html_to_text_handles_multibyte_before_script_tags() {
-        let html = "人工<script>hidden</script>智能<style>.x{}</style>新闻";
+        let html = "αβ<script>hidden</script>γδ<style>.x{}</style>εζ";
 
-        assert_eq!(html_to_text(html), "人工智能新闻");
+        assert_eq!(html_to_text(html), "αβγδεζ");
     }
 
     #[test]
@@ -279,10 +279,7 @@ mod tests {
         // (os error 21)"), which gives the model no hint about what to do.
         // Now it gets an explicit, actionable message naming `list_dir`, which
         // breaks any retry loop.
-        let dir = std::env::temp_dir().join(format!(
-            "neenee-read-isdir-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("neenee-read-isdir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let err = ReadFileTool

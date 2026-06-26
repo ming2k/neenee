@@ -212,7 +212,7 @@ stack and the transcript switches to showing that step's children.
 
 When zoomed in:
 
-- The entire footer — pursuit bar, status bar, input box, hint bar — is
+- The entire footer — activity bar, input box, hint bar — is
   hidden. The subagent view is read-only chrome.
 - A one-row navigation band at the bottom shows the position (`N of M`) on the
   left and `Esc back   [ prev   ] next` on the right.

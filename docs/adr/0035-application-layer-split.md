@@ -110,7 +110,7 @@ write/edit, and `bash`).
 
 - **Self-register quant tools and filter them out at runtime.** Rejected:
   runtime filtering is brittle and inverts the contract. The requirement
-  ("tools 分配应该不同, 不要搞混") is enforced most reliably by never mixing
+  ("separate tool allocation per role") is enforced most reliably by never mixing
   the registries in the first place.
 
 - **Make `neenee-quant` a subcrate/child of `neenee-code`.** Rejected: they

@@ -297,6 +297,17 @@ fn edit_file_expanded_renders_diff() {
 }
 
 #[test]
+fn edit_file_prose_diff_suppresses_noisy_word_highlights() {
+    let m = tool_step(
+        "edit_file",
+        r#"{"path":"docs/explanation/tui.md","old_string":"Because the frame is a pure function of state, anything that changes state — a streamed token, a permission request, a mouse drag — shows up on the very next frame with no manual invalidation.","new_string":"Because the frame is a pure function of state, diff compares the back grid against the front grid and walks only the dirty rows from each row's dirty column."}"#,
+        Some("Edited docs/explanation/tui.md"),
+        true,
+    );
+    insta::assert_snapshot!(render_grid(&m, 100, 30));
+}
+
+#[test]
 fn edit_file_multihunk_interleaves_changes() {
     // Two separated single-token edits: the LCS diff must interleave
     // context/remove/add per hunk rather than all-remove-then-all-add.
@@ -306,6 +317,32 @@ fn edit_file_multihunk_interleaves_changes() {
         Some("Edited a.rs"),
         true,
     );
+    insta::assert_snapshot!(render_grid(&m, 80, 40));
+}
+
+#[test]
+fn edit_file_distant_hunks_show_ellipsis_with_range_header() {
+    // Two changes separated by 10 context lines — well past the 2×3=6
+    // overlap window. An ellipsis row must appear between the two hunks
+    // with a centred ⋮ gutter and a @@ range header in theme-info colour.
+    let old = concat!(
+        "line  1\nline  2\nCHANGE\n",
+        "line  4\nline  5\nline  6\nline  7\nline  8\nline  9\n",
+        "line 10\nline 11\nline 12\nline 13\n",
+        "CHANGE\nline 15\nline 16\n",
+    );
+    let new = concat!(
+        "line  1\nline  2\nchange\n",
+        "line  4\nline  5\nline  6\nline  7\nline  8\nline  9\n",
+        "line 10\nline 11\nline 12\nline 13\n",
+        "change\nline 15\nline 16\n",
+    );
+    let args = format!(
+        r#"{{"path":"a.rs","old_string":{},"new_string":{}}}"#,
+        serde_json::to_string(old).unwrap(),
+        serde_json::to_string(new).unwrap(),
+    );
+    let m = tool_step("edit_file", &args, Some("Edited a.rs"), true);
     insta::assert_snapshot!(render_grid(&m, 80, 40));
 }
 
@@ -373,6 +410,54 @@ fn tool_step_detail_overlay_renders_full_shell_output() {
         rows.pop();
     }
     insta::assert_snapshot!(rows.join("\n"));
+}
+
+#[test]
+fn tool_step_detail_overlay_keeps_right_gutter_clear_on_long_lines() {
+    // The detail overlay's left `┃` bar must have a mirrored right gutter
+    // (panel_inner): a stdout line long enough to fill the panel never runs
+    // its text into the panel's last column, no matter the terminal width.
+    let long = "x".repeat(512);
+    let m = tool_step_structured(
+        "bash",
+        r#"{"command":"cargo test"}"#,
+        neenee_core::ToolOutput::Shell {
+            command: "cargo test".into(),
+            stdout: long,
+            stderr: String::new(),
+            exit: Some(0),
+            truncated: false,
+        },
+        false,
+    );
+    // Recompute the overlay's panel rect with the exact primitives it uses,
+    // so the assertion tracks the real geometry rather than a hard-coded guess.
+    let mut panel = Rect::default();
+    let mut terminal = neenee_tui::TestTerminal::new(60, 14);
+    terminal.draw(|f| {
+        panel = super::primitives::centered_rect(92, 84, super::primitives::viewport_rect(f));
+        super::draw_tool_step_detail_overlay(f, &m, 0, &Theme::default());
+    });
+    let buf = terminal.buffer();
+    let bw = buf.area().width as usize;
+    let gutter_col = (panel.x + panel.width - 1) as usize; // bar's mirrored gutter
+    let content_end = (panel.x + panel.width - 2) as usize; // last content column
+
+    let mut saw_content = false;
+    for y in 0..panel.height as usize {
+        let gutter = buf.content[y * bw + gutter_col].symbol();
+        assert_eq!(
+            gutter, " ",
+            "right gutter col {gutter_col} on row {y} must stay clear, got {gutter:?}"
+        );
+        if buf.content[y * bw + content_end].symbol() == "x" {
+            saw_content = true;
+        }
+    }
+    assert!(
+        saw_content,
+        "expected the long line to render into the panel's last content column"
+    );
 }
 
 #[test]

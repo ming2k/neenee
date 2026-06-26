@@ -218,9 +218,8 @@ pub fn summary_for(name: &str, arguments: &str, profile: Option<&str>) -> String
 }
 
 /// Build the renderable diff for a tool step whose [`ToolPresenter::result_kind`]
-/// is [`ResultKind::Diff`]. Reads `old_string`/`new_string` for `edit_file` and
-/// the full `content` for `write_file` (an all-added diff). Returns an empty
-/// diff for any other tool or malformed arguments.
+/// is [`ResultKind::Diff`]. Reads `old_string`/`new_string` from `edit_file`
+/// arguments. Returns an empty diff for any other tool or malformed arguments.
 pub fn diff_lines_for(name: &str, arguments: &str) -> Vec<DiffLine> {
     let Ok(value) = serde_json::from_str::<Value>(arguments) else {
         return Vec::new();

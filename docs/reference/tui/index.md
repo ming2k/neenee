@@ -1,7 +1,11 @@
 # TUI reference
 
-The neenee terminal UI is built with [ratatui] and rendered by the
-`crates/neenee-code/src/tui/render/` module tree (entry point `render/mod.rs`).
+The neenee terminal UI is rendered by the in-house
+[neenee-tui](../../../crates/neenee-tui/src/lib.rs) engine (ADR-0038): a
+retained cell grid with write-marks-dirty tracking, a back/front diff, and a
+crossterm backend. The widget layer lives in the
+`crates/neenee-code/src/tui/render/` module tree (entry point `render/mod.rs`)
+and renders *into* the engine's grid via `Frame::render_widget`.
 
 ## Frame layout
 
@@ -10,9 +14,7 @@ The neenee terminal UI is built with [ratatui] and rendered by the
 │  Transcript viewport                            (Min 0)  │
 │   (messages, expandable steps, sticky pinned summaries)  │
 ├──────────────────────────────────────────────────────────┤
-│  Plan panel                             (0 or 3 rows)  │
-│  Pursuit bar                                (0 or 1 row)  │
-│  Status bar                              (0 or 1 row)  │
+│  Activity bar                                 (0 or 1 row)  │
 │  Input box                         (2 + wrapped lines)  │
 │  Hint bar                                       (1 row)  │
 └──────────────────────────────────────────────────────────┘
@@ -48,11 +50,9 @@ when one is open); it is not a zone toggle.
 | [Thinking step](thinking-step.md) | Expandable step for reasoning text |
 | [Step state machine](step-state.md) | The three orthogonal axes (Lifecycle × Disclosure × Interaction) and the accent/weight color channels |
 | [Sub-agent view](subagent-view.md) | Inline sub-agent step + zoomed-in child stream + navigation bar + focus stack |
-| [Status bar](status-bar.md) | Breathing-dot activity indicator + label |
+| [Activity bar](status-bar.md) | Breathing-dot liveness anchor + turn/round/phase label + pursuit objective + todos progress; clickable to open the Activity modal |
 | [Hint bar](hint-line.md) | Focus-zone pill + model/context cluster |
-| [Pursuit bar](pursuit-bar.md) | Active-pursuit indicator with objective + checklist progress; clickable to surface `/pursuit status` |
-| [Plan panel](layout.md#footer-stack) | Sticky 3-row plan-progress card above the input box |
-| [Modals](modals.md) | Models, Model editor, Sessions, Session, History, Question, Permission, Tool-step detail, Help, Plan preview, Toasts |
+| [Modals](modals.md) | Models, Model editor, Sessions, Session, History, Question, Permission, Tool-step detail, Help, Toasts |
 
 ## Other reference
 
@@ -71,17 +71,23 @@ when one is open); it is not a zone toggle.
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |
 | `render/message_body.rs` | `draw_message_body` (markdown text, user panels, code blocks) |
 | `render/step/mod.rs` | Step module: draw orchestration, shared header rendering, sticky-pin tracking |
-| `render/step/renderers.rs` | Tool-step (`draw_tool_step`), thinking (`draw_reasoning_trace`), and sub-agent step renderers |
+| `render/step/renderers.rs` | Tool-step, thinking (`draw_reasoning_trace`), and sub-agent step renderers |
 | `render/step/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
+| `render/tools/` | Per-tool-step renderers (one file per tool: `bash`, `edit`, `read`, `grep`, `web`, `ask_user`, `read_image`, `diff`, `meta`, `fallback`) |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
-| `render/chrome.rs` | `draw_status_bar`, `draw_pursuit_bar` / `PursuitBarView`, `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
-| `render/overlays.rs` | Modals: models, model editor, sessions, session, history, question, permission, tool-step detail, help, plan preview, toasts |
+| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
+| `render/overlays/` | Modal subsystem (dir): `permission`, `provider`, `session`, `activity`, plus shared `common` and `misc` |
+| `render/empty_state.rs` | Empty-transcript placeholder view |
+| `render/notice.rs` | Transient notice/toast rendering |
 | `render/markdown_table.rs` | `build_table_render`, `shrink_column_widths` |
 | `document.rs` | Document model: `TranscriptMessage`, `Block` enum, `MessageKind`, markdown parsing, `parse_arguments_kv` |
 | `layout.rs` | `LayoutMap`, `BlockRegion`, `SemanticCursor`, hit-testing |
 | `selection.rs` | `SelectionState`, `get_selected_text`, character-boundary snapping |
 | `input.rs` | Event-to-action mapping: keyboard, mouse, `InputAction` enum |
-| `lib.rs` | App loop: state sync, draw orchestration, action handling, `extract_selection_text` |
-| `clipboard.rs` | OSC52 + system clipboard integration |
-
-[ratatui]: https://ratatui.rs
+| `event_loop.rs` | App loop: state sync, draw orchestration, action handling, `extract_selection_text` |
+| `app.rs` | Application state: `App`, `Modal`, `Recess`, activity/session tabs |
+| `terminal.rs` | Terminal lifecycle: raw-mode/alt-screen setup-teardown, render-loop wiring |
+| `step_interaction.rs` | Browse-zone step focus, toggle, and keyboard interaction |
+| `clipboard.rs` / `clipboard_ops.rs` | OSC52 + system clipboard integration; async copy/spawned-ops |
+| `completion.rs` | Slash-command / path completion menu |
+| `fuzzy.rs` | Fuzzy matcher for history search |

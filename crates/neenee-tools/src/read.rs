@@ -11,36 +11,14 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a **text** file (UTF-8). Each line is prefixed with its file \
-         line number (e.g. `17: ...`) so you can reference exact lines \
-         later. Supports `offset` (1-based start line) and `limit` (max \
-         lines). Output is paginated (~50 KB per page); a large read \
-         returns the first chunk plus a concrete `offset=<next>` to \
-         continue.\n\
+        "Read a text file. Each line is prefixed with its line number. \
+         Supports `offset` (1-based start line) and `limit` (max lines to read). \
+         Output is paginated (~50 KB per page); large reads return the first chunk \
+         and indicate the next `offset` to continue.\n\
          \n\
-         This tool is for source code, config, docs and other plain text \
-         only. Images and other binary files (archives, executables, \
-         media, office docs) are NOT supported here — they are rejected.\n\
-         \n\
-         HOW TO USE:\n\
-         - First read of an unknown file: call with just `path` (offset \
-         defaults to 1) to discover its structure.\n\
-         - Call this tool in parallel ONLY when you want to read several \
-         DIFFERENT files at once. Never issue multiple reads of the same file \
-         in one round — the page boundary is line-based and you cannot \
-         predict it, so parallel reads of one file overlap.\n\
-         - To page through a single file, read sequentially: each result ends \
-         with `offset=<next>`; call again with exactly that offset. Do not \
-         guess or reuse an offset you have already read.\n\
-         - Looking for specific content in a large file: use `grep` FIRST — \
-         it returns `path:line:content` matches with exact line numbers, \
-         which you can then target with this tool's `offset` parameter.\n\
-         - Avoid tiny repeated slices (e.g. 30-line chunks). If you need more \
-         context, read a larger window with a bigger `limit`.\n\
-         - An empty range means you are past EOF.\n\
-         \n\
-         DIRECTORIES are not readable here — pass a directory path to the \
-         `list_dir` tool instead."
+         - Use `grep` first to find specific content in large files.\n\
+         - To inspect multiple scattered lines, make a single read encompassing the entire range.\n\
+         - Do not use this tool for directories (use `list_dir`) or binary files."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -189,9 +167,10 @@ impl Tool for ReadFileTool {
             let suffix = if more_remain {
                 let remaining = total_lines - shown_end;
                 Some(format!(
-                    "[{} more line{} below — read with offset={}]",
+                    "[{} more line{} below — read {} with offset={}]",
                     remaining,
                     if remaining == 1 { "" } else { "s" },
+                    path,
                     shown_end + 1
                 ))
             } else {

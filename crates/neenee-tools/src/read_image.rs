@@ -29,15 +29,8 @@ impl Tool for ReadImageTool {
         "read_image"
     }
     fn description(&self) -> &str {
-        "Read an **image** file so you can see it. Returns the image inline \
-         for your vision; no text is extracted. Use this for screenshots, \
-         diagrams, photos, UI mockups, charts — anything you need to actually \
-         *look at* rather than read as text.\n\
-         \n\
-         Supported formats: PNG, JPEG, GIF, WebP. For plain-text files \
-         (source code, config, docs) use `read_file` instead — this tool is \
-         for images only. Large images are auto-resized to a sensible \
-         resolution before being shown to you."
+        "Read an image file (PNG, JPEG, GIF, WebP) to view its contents visually. \
+         Large images are automatically resized. Use `read_file` for text files."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

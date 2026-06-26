@@ -392,9 +392,9 @@ fn mention_range_rejects_cursor_before_at() {
 
 #[test]
 fn mention_range_handles_multibyte_before_at() {
-    // `中文 @x` — the `@` is preceded by an ASCII space, so we detect it
+    // `😀😁 @x` — the `@` is preceded by an ASCII space, so we detect it
     // even when multibyte chars appear earlier in the input.
-    let s = "中文 @x";
+    let s = "😀😁 @x";
     // Byte offset of the cursor at end (after `x`).
     let cursor_byte = s.len();
     let at_byte = s.find('@').unwrap();
@@ -538,6 +538,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         modal_index: 0,
         session_tab: SessionTab::Model,
         session_scroll: 0,
+        permissions_scroll: 0,
         current_provider: "mock".to_string(),
         current_model: "mock".to_string(),
         cwd: cwd.clone(),
@@ -942,4 +943,261 @@ fn recall_queued_skips_delivered_markers() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].raw, "already sent");
     assert_eq!(messages[0].delivery, DeliveryStatus::Delivered);
+}
+
+#[test]
+fn recall_queued_latches_completion_dismissal() {
+    // A recall replaces `input` programmatically (not via a keystroke), so it
+    // must latch `completion_dismissed` the same way a slash-command accept
+    // does. Otherwise recalling a queued `/help` would immediately re-open the
+    // slash-completion popup — a spurious "complete" step the user never asked
+    // for. Mirrors the latch in the history-navigation paths.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.pending_dispatch.push_back(QueuedDispatch {
+        text: "/help".to_string(),
+        images: Vec::new(),
+        text_pastes: Vec::new(),
+    });
+    let mut messages = vec![queued_user_message("/help")];
+
+    assert!(app.recall_queued(&mut messages));
+    assert_eq!(app.input, "/help");
+    assert!(
+        app.completion_dismissed,
+        "recall must latch dismissal so the slash popup stays hidden"
+    );
+    assert!(
+        app.suggestion_index.is_none(),
+        "recall must clear the completion highlight"
+    );
+    // The completions for `/help` are non-empty, so the latch is the only thing
+    // keeping the render gate (`!completion_dismissed`) from drawing the menu.
+    assert!(
+        !app.completions().is_empty(),
+        "`/help` should have candidates"
+    );
+}
+
+#[test]
+fn modal_paste_splices_text_inline_stripping_newlines() {
+    // Pasting into a free-text modal field (here the provider editor's
+    // API-key field) splices the text at the cursor and collapses newlines
+    // so a copied multi-line block pastes as one continuous single line,
+    // matching the single-line semantics the modal already enforces. No
+    // chip is inserted and no attachment is staged.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::ModelEditor;
+    app.editor_field = 0;
+    app.input = "sk-".to_string();
+    app.cursor_position = app.input.chars().count();
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Text("abc\ndef\n".to_string()),
+    );
+
+    assert_eq!(app.input, "sk-abcdef");
+    assert_eq!(app.cursor_position, "sk-abcdef".chars().count());
+    assert!(
+        app.pending_text_pastes.is_empty(),
+        "no chip staging in modals"
+    );
+    assert!(
+        !app.input.contains("Pasted text"),
+        "no chip label in modals"
+    );
+}
+
+#[test]
+fn modal_paste_inserts_at_cursor_not_at_end() {
+    // The splice honors the cursor position, so a paste in the middle of
+    // an existing field inserts between the surrounding characters rather
+    // than appending.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::ModelEditor;
+    app.editor_field = 1;
+    app.input = "gpt-4omini".to_string();
+    app.cursor_position = "gpt-4o".chars().count();
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Text("turbo".to_string()),
+    );
+
+    assert_eq!(app.input, "gpt-4oturbomini");
+    assert_eq!(
+        app.cursor_position,
+        "gpt-4oturbo".chars().count(),
+        "cursor lands just past the inserted text"
+    );
+}
+
+#[test]
+fn modal_paste_applies_to_provider_picker_and_history_search() {
+    // The inline paste path is shared by every free-text modal that borrows
+    // the input line, so the provider picker filter and the history search
+    // query paste the same way as the editor.
+    for modal in [Modal::Provider, Modal::HistorySearch] {
+        let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+        app.active_modal = modal;
+        app.input = String::new();
+        app.cursor_position = 0;
+
+        clipboard_ops::apply_clipboard_paste(
+            &mut app,
+            crate::tui::clipboard::ClipboardRead::Text("query".to_string()),
+        );
+
+        assert_eq!(
+            app.input, "query",
+            "paste should inline into free-text modal"
+        );
+        assert_eq!(app.cursor_position, "query".chars().count());
+        assert!(app.pending_text_pastes.is_empty());
+    }
+}
+
+#[test]
+fn modal_paste_drops_image_with_failure_toast() {
+    // An image paste has nowhere to go in a single-line modal field, so it
+    // is dropped with a failure toast rather than silently lost or staged
+    // as an attachment.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::ModelEditor;
+    app.input = String::new();
+    app.cursor_position = 0;
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Image {
+            data: vec![0x89, 0x50, 0x4e, 0x47],
+            mime: "image/png".to_string(),
+        },
+    );
+
+    assert!(app.input.is_empty(), "image paste must not insert text");
+    assert!(
+        app.pending_images.is_empty(),
+        "no attachment staging in modals"
+    );
+    assert!(
+        app.copy_toast_failed,
+        "image paste in a modal should toast a failure"
+    );
+    assert!(app.copy_toast_until.is_some());
+}
+
+#[test]
+fn composer_paste_still_chips_large_text_on_main_prompt() {
+    // The main-prompt path is unchanged: a large paste collapses into a
+    // `[Pasted text #N +M lines]` chip and stages the full text, so the
+    // modal-aware branching did not regress the composer behaviour.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::None;
+    app.input = String::new();
+    app.cursor_position = 0;
+    let big = format!("line\n{}", "x".repeat(2048));
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Text(big.clone()),
+    );
+
+    assert!(
+        app.input.contains("Pasted text #1"),
+        "large paste on the main prompt should produce a chip"
+    );
+    assert_eq!(app.pending_text_pastes.len(), 1);
+    assert_eq!(app.pending_text_pastes[0], big);
+}
+
+#[test]
+fn paste_in_readonly_modal_is_dropped_silently() {
+    // Read-only / non-text modals (Help, Sessions, Permission, ...) drop a
+    // paste silently — no insertion, no toast, no attachment.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::Help;
+    app.input = String::new();
+    app.cursor_position = 0;
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Text("ignored".to_string()),
+    );
+
+    assert!(app.input.is_empty());
+    assert!(
+        app.copy_toast_until.is_none(),
+        "readonly modal paste should not toast"
+    );
+    assert!(app.pending_text_pastes.is_empty());
+}
+
+#[test]
+fn composer_image_paste_rejected_when_model_lacks_vision() {
+    // When the current model doesn't support vision, pasting an image on
+    // the main prompt should show a failure toast and leave no attachment.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::None;
+    app.current_model = "glm-5.2".to_string(); // vision: false
+    app.input = String::new();
+    app.cursor_position = 0;
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Image {
+            data: vec![0x89, 0x50, 0x4e, 0x47],
+            mime: "image/png".to_string(),
+        },
+    );
+
+    assert!(
+        app.pending_images.is_empty(),
+        "non-vision model must not stage image attachments"
+    );
+    assert!(
+        app.copy_toast_failed,
+        "non-vision model should toast a failure on image paste"
+    );
+    assert!(
+        app.copy_toast_message.contains("does not support images"),
+        "toast should say the model doesn't support images, got: {}",
+        app.copy_toast_message,
+    );
+    assert!(app.copy_toast_until.is_some());
+}
+
+#[test]
+fn composer_image_paste_accepted_when_model_has_vision() {
+    // When the current model supports vision, pasting an image on the main
+    // prompt should stage the attachment and insert an `[Image #N]` chip.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::None;
+    app.current_model = "gpt-4o".to_string(); // vision: true
+    app.input = String::new();
+    app.cursor_position = 0;
+
+    clipboard_ops::apply_clipboard_paste(
+        &mut app,
+        crate::tui::clipboard::ClipboardRead::Image {
+            data: vec![0x89, 0x50, 0x4e, 0x47],
+            mime: "image/png".to_string(),
+        },
+    );
+
+    assert_eq!(
+        app.pending_images.len(),
+        1,
+        "vision-capable model should stage the image attachment"
+    );
+    assert!(
+        app.input.contains("[Image #1]"),
+        "image chip should be inserted into the input, got: {}",
+        app.input,
+    );
+    assert!(
+        !app.copy_toast_failed,
+        "vision-capable model should show a success toast"
+    );
+    assert!(app.copy_toast_until.is_some());
 }

@@ -9,12 +9,7 @@ use std::sync::{Arc, RwLock};
 use neenee_agent::orchestration::ProxyProvider;
 use neenee_agent::skills::SkillRegistry;
 use neenee_core::Provider;
-use neenee_store::{
-    RepeatStore,
-    config::Config,
-    embedding,
-    provider_usage::ProviderUsage,
-};
+use neenee_store::{RepeatStore, config::Config, embedding, provider_usage::ProviderUsage};
 use tokio::sync::RwLock as AsyncRwLock;
 
 /// Process-level singletons shared across every session in a server process.
@@ -64,8 +59,10 @@ impl SharedState {
     pub async fn new(config: Config, project_root: std::path::PathBuf) -> Result<Self, String> {
         use neenee_store::paths;
 
-        let initial_provider: Arc<dyn Provider> =
-            neenee_agent::catalog::build_provider_for(&config, neenee_agent::catalog::default_provider_id(&config));
+        let initial_provider: Arc<dyn Provider> = neenee_agent::catalog::build_provider_for(
+            &config,
+            neenee_agent::catalog::default_provider_id(&config),
+        );
         let provider_holder = Arc::new(RwLock::new(initial_provider));
         let agent_provider = Arc::new(ProxyProvider::new(provider_holder.clone()));
 
@@ -102,10 +99,7 @@ impl SharedState {
     /// Record the MCP connection statuses after the caller has loaded the MCP
     /// tools and spawned the background reconnect loop.
     pub fn set_mcp_statuses(&self, statuses: Vec<(String, neenee_core::McpConnectionStatus)>) {
-        *self
-            .mcp_statuses
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = statuses;
+        *self.mcp_statuses.write().unwrap_or_else(|e| e.into_inner()) = statuses;
     }
 }
 

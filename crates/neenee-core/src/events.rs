@@ -68,6 +68,11 @@ pub enum AgentRequest {
         tool: String,
         scope: String,
     },
+    /// Clear every cached "always allow" permission rule for this process.
+    /// The harness drops the whole in-memory allowlist and replies with an
+    /// updated [`AgentResponse::SessionContext`] so the permissions manager
+    /// modal reflects the now-empty list.
+    ClearAllPermissions,
     /// Enable or disable a tool for the current session. Disabled tools are
     /// hidden from the model (their schemas are not sent) and rejected if the
     /// model still tries to call them. The harness replies with an updated

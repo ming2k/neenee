@@ -238,9 +238,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_text_concatenates_parts_and_preserves_cjk() {
-        let payload = r#"{"candidates":[{"content":{"parts":[{"text":"并行"},{"text":"开发"}]}}]}"#;
-        assert_eq!(extract_text(payload), "并行开发");
+    fn extract_text_concatenates_parts_and_preserves_multibyte() {
+        let payload = r#"{"candidates":[{"content":{"parts":[{"text":"😀😁"},{"text":"😃😄"}]}}]}"#;
+        assert_eq!(extract_text(payload), "😀😁😃😄");
     }
 
     #[test]

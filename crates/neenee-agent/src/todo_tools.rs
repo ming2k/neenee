@@ -71,7 +71,6 @@ impl Tool for TodoWriteTool {
         })
     }
 
-
     async fn call(&self, arguments: &str) -> Result<String, String> {
         #[derive(serde::Deserialize)]
         struct Arguments {
@@ -222,7 +221,6 @@ impl Tool for TodoUpdateTool {
             "additionalProperties": false
         })
     }
-
 
     async fn call(&self, arguments: &str) -> Result<String, String> {
         let value = serde_json::from_str::<serde_json::Value>(arguments)

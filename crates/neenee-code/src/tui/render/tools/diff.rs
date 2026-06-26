@@ -228,16 +228,18 @@ pub fn line_diff(old: &str, new: &str, line_offset: usize) -> Vec<DiffLine> {
     out
 }
 
-/// Default context lines shown on each side of a change before collapsing.
-const COLLAPSE_CONTEXT: usize = 4;
+/// Context lines kept on each side of a change hunk before collapsing.
+/// GitHub-style: 3 lines above and 3 below each change group.
+const COLLAPSE_CONTEXT: usize = 3;
 
 /// Collapse long runs of unchanged context lines into a single [`DiffOp::Ellipsis`]
 /// marker so a diff spanning distant edits stays compact. Keeps up to
-/// [`COLLAPSE_CONTEXT`] lines of context around each change group; everything
-/// beyond that window is replaced by one `⋯` row.
+/// [`COLLAPSE_CONTEXT`] (3) lines of context around each change group —
+/// GitHub-style: 3 lines above and 3 below every hunk. Everything beyond that
+/// window is replaced by one `⋯` row.
 ///
 /// Leading and trailing context (before the first / after the last change) is
-/// also trimmed to `COLLAPSE_CONTEXT` lines.
+/// also trimmed to [`COLLAPSE_CONTEXT`] lines.
 pub fn collapse_context_runs(diff: &[DiffLine]) -> Vec<DiffLine> {
     let n = diff.len();
     if n == 0 {
@@ -410,18 +412,41 @@ mod tests {
 
     #[test]
     fn collapse_keeps_short_context_runs_intact() {
-        // Two changes separated by only 4 context lines — within the window.
+        // Two changes separated by 4 context lines — well within the
+        // 2*COLLAPSE_CONTEXT=6 overlap window, so no ellipsis needed.
         let old = "a\nCHANGE1\nc\nd\ne\nf\nCHANGE2\nz";
         let new = "a\nchange1\nc\nd\ne\nf\nchange2\nz";
         let diff = line_diff(old, new, 0);
         let collapsed = collapse_context_runs(&diff);
 
-        // No ellipsis needed — the gap fits within COLLAPSE_CONTEXT.
+        // No ellipsis — the keep windows overlap.
         let ellipsis_count = collapsed
             .iter()
             .filter(|l| l.op == DiffOp::Ellipsis)
             .count();
         assert_eq!(ellipsis_count, 0);
+    }
+
+    #[test]
+    fn collapse_inserts_ellipsis_when_hunks_are_far_apart() {
+        // Two changes separated by 8 context lines — just over the 6-line
+        // overlap window (2*COLLAPSE_CONTEXT), so an ellipsis is inserted.
+        let old =
+            "a\nCHANGE1\nc\nd\ne\nf\ng\nh\ni\nj\nCHANGE2\nz";
+        let new =
+            "a\nchange1\nc\nd\ne\nf\ng\nh\ni\nj\nchange2\nz";
+        let diff = line_diff(old, new, 0);
+        let collapsed = collapse_context_runs(&diff);
+
+        let ellipsis_count = collapsed
+            .iter()
+            .filter(|l| l.op == DiffOp::Ellipsis)
+            .count();
+        assert_eq!(ellipsis_count, 1, "gap > 2*COLLAPSE_CONTEXT triggers ellipsis");
+
+        let has_remove = collapsed.iter().any(|l| l.op == DiffOp::Remove);
+        let has_add = collapsed.iter().any(|l| l.op == DiffOp::Add);
+        assert!(has_remove && has_add);
     }
 
     #[test]

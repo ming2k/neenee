@@ -10,6 +10,7 @@ use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
 };
+use neenee_tui::{Constraint, Direction, Layout};
 use unicode_width::UnicodeWidthStr;
 
 // The permission sheet renders inline, replacing the composer (input box)
@@ -62,28 +63,22 @@ pub fn draw_question_modal(
         );
     }
 
-    // Build the body as a list of logical lines. The header chip and question
-    // text sit back-to-back (no blank line between them), and options are
-    // compact (no inter-option blank line) so a question with many options
-    // fits without unnecessary vertical waste. The renderer wraps long lines
-    // and scrolls (with a scrollbar) when they still overflow.
-    let mut body: Vec<Line> = Vec::new();
+    let mut header_lines: Vec<Line> = Vec::new();
+    let mut option_lines: Vec<Line> = Vec::new();
     if let Some(q) = question {
         if let Some(header) = &q.header {
-            body.push(Line::from(vec![Span::styled(
+            header_lines.push(Line::from(vec![Span::styled(
                 header.clone(),
                 Style::default()
                     .fg(theme.info())
                     .add_modifier(Modifier::BOLD),
             )]));
         }
-        body.push(Line::from(vec![Span::styled(
+        header_lines.push(Line::from(vec![Span::styled(
             q.question.clone(),
             Style::default().fg(theme.fg()),
         )]));
-        // One blank line between the stem and the option list — visual
-        // breathing room separating the question from its choices.
-        body.push(Line::from(""));
+        header_lines.push(Line::from(""));
 
         let q_selected = selected.get(current_question);
         let other_index = q.options.len();
@@ -97,7 +92,7 @@ pub fn draw_question_modal(
             let is_selected = q_selected.is_some_and(|s| s.contains(&i));
             let is_highlighted = i == highlighted;
             render_question_option(
-                &mut body,
+                &mut option_lines,
                 i,
                 &option.label,
                 option.description.as_deref(),
@@ -109,7 +104,7 @@ pub fn draw_question_modal(
         }
 
         render_question_option(
-            &mut body,
+            &mut option_lines,
             other_index,
             OTHER_OPTION_LABEL,
             None,
@@ -119,9 +114,7 @@ pub fn draw_question_modal(
             theme,
         );
         if other_highlighted {
-            // Block caret (█) at the end of the typed text — no placeholder
-            // hint, so the field reads as a bare editing affordance.
-            body.push(Line::from(vec![
+            option_lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
                 Span::styled(
                     format!("{}{}", other_text_value, "█"),
@@ -131,12 +124,21 @@ pub fn draw_question_modal(
         }
     }
 
-    // Compute the logical line index of the highlighted option so the body
-    // renderer can follow it and keep it on screen as the user navigates.
-    // Header/title rows come before the options; each option is one label row
-    // plus an optional description row, with no blank separator between them.
-    let follow = highlighted_row_index(question, highlighted);
-    render_body(frame, f.body, body, scroll, follow, true, theme);
+    let header_height = header_lines.len() as u16;
+    let mut constraints = vec![Constraint::Length(header_height)];
+    constraints.push(Constraint::Min(0));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(f.body);
+
+    let header_rect = chunks[0];
+    let options_rect = chunks[1];
+
+    frame.render_widget(Paragraph::new(header_lines), header_rect);
+
+    let follow = highlighted_option_row_index(question, highlighted);
+    render_body(frame, options_rect, option_lines, scroll, follow, true, theme);
 
     if let Some(fo) = f.footer {
         frame.render_widget(
@@ -149,21 +151,16 @@ pub fn draw_question_modal(
     }
 }
 
-/// Map the highlighted option index to its row in the body's line list, so
+/// Map the highlighted option index to its row in the options line list, so
 /// [`render_body`] can follow it and keep it visible as the user moves the
-/// cursor. The header chip (if any) and the question text each take one row;
-/// every option takes one label row plus one description row when it has one.
-fn highlighted_row_index(
+/// cursor. Each option takes one label row plus one description row when it
+/// has one.
+fn highlighted_option_row_index(
     question: Option<&neenee_core::UserQuestion>,
     highlighted: usize,
 ) -> Option<usize> {
     let q = question?;
     let mut row = 0;
-    if q.header.is_some() {
-        row += 1;
-    }
-    row += 1; // question text
-    row += 1; // blank separator between stem and options
     for (i, opt) in q.options.iter().enumerate() {
         if i == highlighted {
             return Some(row);
@@ -173,7 +170,6 @@ fn highlighted_row_index(
             row += 1;
         }
     }
-    // The synthetic "Other" row sits right after the last real option.
     if highlighted == q.options.len() {
         return Some(row);
     }
