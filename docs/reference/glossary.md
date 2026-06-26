@@ -122,6 +122,15 @@ symbol, the symbol is backticked and never abbreviated.
 | **implicit capability** | What a hook may do is implied by its event, not a knob: `PreToolUse`/`Stop` may deny; `PostToolUse`/`UserPromptSubmit`/`PreCompact` may inject context; the rest only observe. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
 | **matcher** | A tool-name filter on the tool events: a `|`-separated exact-name list, or a regex; omitted/`*` matches all. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
 
+## Prompts
+
+| Term | Definition |
+|------|------------|
+| **prompt channel** | One of the two composition targets for harness-assembled text: `System` (the head system message) and `User` (any harness-injected user-role message). [ADR-0039](../adr/0039-unified-prompt-registry.md) |
+| **`PromptSection`** | A declarative, self-contained prompt fragment: an id, a channel, an `InjectionKind`, a `rank`, an `is_active` predicate, and a `render`. One section == one injection path == one `InjectionKind` variant. [ADR-0039](../adr/0039-unified-prompt-registry.md) |
+| **prompt registry** | The single entry point that collects `PromptSection`s per channel, sorts by `rank`, renders, and stamps `InjectionOrigin` — replacing the per-site `format!`/`push_str`/`Vec::join` assembly. [ADR-0039](../adr/0039-unified-prompt-registry.md) |
+| **`PromptContext`** | The read-only view (identity preamble, pursuit, tool names, skills index, last user text) a section's `render` draws from; plain owned data so it lives in core without a reverse edge into `neenee-agent`. [ADR-0039](../adr/0039-unified-prompt-registry.md) |
+
 ## Architecture
 
 | Term | Definition |

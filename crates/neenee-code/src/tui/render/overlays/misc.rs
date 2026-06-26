@@ -262,7 +262,7 @@ pub fn draw_tool_step_detail_overlay(
     );
 }
 
-pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
+pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) {
     let area = centered_rect(58, 70, viewport_rect(frame));
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
@@ -339,12 +339,12 @@ pub fn draw_help_modal(frame: &mut Frame, theme: &Theme) {
         Line::from(""),
         Line::from(desc("Drag to select · Ctrl+C or Ctrl+Shift+C to copy.")),
     ];
-    render_body(frame, f.body, body, &mut 0, None, true, theme);
+    render_body(frame, f.body, body, scroll, None, true, theme);
 
     if let Some(fo) = f.footer {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "esc · close",
+                "↑/↓ scroll · esc close",
                 Style::default().fg(theme.muted()),
             ))),
             fo,

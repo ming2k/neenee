@@ -169,10 +169,11 @@ pub struct TranscriptView<'a> {
     /// affordance. `None` whenever the pointer is elsewhere or an overlay
     /// modal is open.
     pub hovered_step: Option<usize>,
-    /// Keyboard-focused activatable target. Part of the in-progress focus-
-    /// navigation feature (see `UiState::has_focused_target`); the render side
-    /// is ready but no caller sets it yet, hence the targeted allow.
-    #[allow(dead_code)]
+    /// Keyboard-focused activatable target. When `Some`, the matching step's
+    /// summary line is painted with the focus-ring cue (a reversed fg/bg bar)
+    /// so keyboard navigation via `Ctrl+↑`/`Ctrl+↓` has a clear, unambiguous
+    /// visual indicator that does not compete with the hover/expand luminance
+    /// channel. `None` means no step is focused.
     pub focused_target: Option<InteractiveTarget>,
     /// User-supplied ASCII logo lines (from `$XDG_CONFIG_HOME/neenee/logo.txt`)
     /// that replace the built-in wordmark on the empty-state hero. `None` when
@@ -251,8 +252,9 @@ pub fn draw_transcript(
         review_alert,
         turn_started_at,
         hovered_step,
+        focused_target,
+        logo,
         theme,
-        ..
     } = view;
     let full = frame.area();
     // Components render inside the vertical viewport margins (1 cell top and
@@ -383,10 +385,10 @@ pub fn draw_transcript(
     let show_empty_state = messages.is_empty() && subagent_bar.is_none() && side_banner.is_none();
 
     if show_empty_state {
-        empty_state::draw_empty_state(frame, transcript_area, view.logo, theme);
+        empty_state::draw_empty_state(frame, transcript_area, logo, theme);
         // Account for the hero so the app loop does not treat the session as a
         // zero-height stream (which would mis-pin the scroll position).
-        content_lines = empty_state::empty_state_content_lines(view.logo);
+        content_lines = empty_state::empty_state_content_lines(logo);
     } else {
         for (mi, msg) in messages.iter().enumerate() {
             // Model attribution badge: shown above the first assistant-side
@@ -436,6 +438,7 @@ pub fn draw_transcript(
                     &mut current_y,
                     &mut content_lines,
                     hovered_step == Some(mi),
+                    focused_target == Some(InteractiveTarget::tool_step(mi)),
                 );
             } else if msg.is_tool_step() {
                 draw_tool_step(
@@ -452,6 +455,7 @@ pub fn draw_transcript(
                     &mut content_lines,
                     &mut sticky_steps,
                     hovered_step == Some(mi),
+                    focused_target == Some(InteractiveTarget::tool_step(mi)),
                 );
             } else if msg.is_thinking() {
                 draw_reasoning_trace(
@@ -468,6 +472,7 @@ pub fn draw_transcript(
                     &mut content_lines,
                     &mut sticky_steps,
                     hovered_step == Some(mi),
+                    focused_target == Some(InteractiveTarget::thinking(mi)),
                 );
             } else {
                 draw_message_body(
@@ -791,7 +796,10 @@ mod tests {
                 &theme,
             );
             draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
-            draw_help_modal(f, &theme);
+            {
+                let mut scroll = 0;
+                draw_help_modal(f, &mut scroll, &theme);
+            }
             draw_sessions_modal(
                 f,
                 &[
@@ -2427,7 +2435,7 @@ mod tests {
     }
 
     /// Regression: a long H1 heading that wraps to multiple lines. The heading
-    /// *prefix* (the leading `   ` indent on row 0 and the continuation indent
+    /// *prefix* (the leading indent on row 0 and the continuation indent
     /// on rows 1+) is decoration, not heading text, so it must NOT carry the
     /// UNDERLINED modifier. Previously the prefix shared the UNDERLINED style,
     /// which underlined the leading whitespace of every wrapped row — the
@@ -2503,11 +2511,12 @@ mod tests {
 
         for &y in &heading_rows {
             // Indent columns [0, text_start) must never be underlined.
-            // The heading prefix is a hard-coded 3-col indent (see the
-            // `Block::Heading` arm), applied inside the already-inset band:
-            // global viewport margin (0) + entry inset (2*TRANSCRIPT_H_INSET)
-            // + heading prefix (3) = 7. Text starts at col 7.
-            let text_start = (super::TRANSCRIPT_H_INSET + 3) as u16;
+            // The heading prefix is `TRANSCRIPT_BODY_LEADING_INDENT` cols
+            // (matching body prose — see the `Block::Heading` arm), applied
+            // inside the already-inset band: entry inset (TRANSCRIPT_H_INSET)
+            // + heading prefix (TRANSCRIPT_BODY_LEADING_INDENT). Text starts
+            // at col `TRANSCRIPT_H_INSET + TRANSCRIPT_BODY_LEADING_INDENT`.
+            let text_start = super::TRANSCRIPT_H_INSET + super::TRANSCRIPT_BODY_LEADING_INDENT;
             for x in 0..text_start {
                 let cell = &buffer[(x, y)];
                 assert!(

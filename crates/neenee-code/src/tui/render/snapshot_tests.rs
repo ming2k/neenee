@@ -107,6 +107,7 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
             &mut content_lines,
             &mut sticky,
             false,
+            false,
         );
     });
 

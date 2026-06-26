@@ -39,26 +39,25 @@ pub enum Interaction {
     Idle,
     /// Pointer rests on the summary line — a soft hover affordance.
     Hovered,
-    /// Keyboard focus ring is on this step. Deliberately does **not** brighten
-    /// the summary (see [`summary_weight`]): focus is a separate concern from
-    /// disclosure/weight and is conveyed by its own cue (e.g. a marker tint or
-    /// rail), never by stealing the "open/hover" luminance channel. This is
-    /// what prevents a collapsed, focused step from reading as "still
-    /// highlighted".
-    ///
-    /// Not yet constructed by any caller — kept in the contract so
-    /// [`summary_weight`]'s match stays exhaustive and the future focus-ring
-    /// cue has a first-class state to read.
-    #[allow(dead_code)]
+    /// Keyboard focus ring is on this step. Reads as the **primary foreground**
+    /// via [`summary_weight`] (same luminance as an expanded step), so a focused
+    /// step clearly stands out from its idle/muted siblings. Focus takes
+    /// priority over hover in [`from_hover_focused`](Interaction::from_hover_focused)
+    /// so the deliberate keyboard cue never yields to the incidental pointer
+    /// affordance.
     Focused,
 }
 
 impl Interaction {
-    /// Build from the raw `hovered` flag produced by the pointer hit-test.
-    /// Keyboard focus is tracked separately at the call site and currently does
-    /// not feed the weight channel.
-    pub fn from_hover(hovered: bool) -> Self {
-        if hovered {
+    /// Build from the raw interaction flags produced by the call site.
+    ///
+    /// Priority: **focus** beats **hover** beats **idle**. Focus wins over
+    /// hover so a keyboard-navigating user never sees the pointer's soft
+    /// affordance compete with the deliberate focus cue.
+    pub fn from_hover_focused(hovered: bool, focused: bool) -> Self {
+        if focused {
+            Interaction::Focused
+        } else if hovered {
             Interaction::Hovered
         } else {
             Interaction::Idle
@@ -67,21 +66,24 @@ impl Interaction {
 }
 
 /// Summary-line **weight** (luminance) — a pure function of disclosure ×
-/// interaction. This is the "is it open / am I pointing at it?" channel only;
-/// it never depends on lifecycle, so it cannot leak run-state or focus into the
-/// brightness.
+/// interaction. This is the "is it open / focused / under the pointer?"
+/// channel only; it never depends on lifecycle, so it cannot leak run-state
+/// into the brightness.
 ///
 /// Priority:
 /// - An **expanded** step reads as the primary foreground (the active state)
 ///   regardless of interaction — its body being open is the strongest signal.
-/// - A **collapsed** step under the pointer lights up to the intermediate hover
-///   tone as a click affordance.
-/// - Otherwise (collapsed + idle, or collapsed + focused) it stays muted.
+/// - A **collapsed** step carrying keyboard focus also reads as the primary
+///   foreground, so the user can tell at a glance which step the cursor is on.
+/// - A **collapsed** step under the pointer (but not focused) lights up to the
+///   intermediate hover tone as a soft click affordance.
+/// - Otherwise (collapsed + idle) it stays muted.
 pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &Theme) -> Color {
     match (disclosure, interaction) {
         (Disclosure::Expanded, _) => theme.fg(),
+        (Disclosure::Collapsed, Interaction::Focused) => theme.fg(),
         (Disclosure::Collapsed, Interaction::Hovered) => theme.hover(),
-        (Disclosure::Collapsed, _) => theme.muted(),
+        (Disclosure::Collapsed, Interaction::Idle) => theme.muted(),
     }
 }
 
@@ -144,15 +146,15 @@ mod tests {
         assert_ne!(hovered, theme.muted());
     }
 
-    /// Collapsed + focused collapses to muted — the regression guard for the
-    /// "collapsed focused step stays highlighted" bug.
+    /// Collapsed + focused reads as the primary foreground — the core focus
+    /// affordance. A keyboard-focused step must stand out from its muted idle
+    /// siblings so the user can see exactly which step the cursor is on.
     #[test]
-    fn collapsed_focused_is_muted() {
+    fn collapsed_focused_is_primary() {
         let theme = Theme::default();
-        assert_eq!(
-            summary_weight(Disclosure::Collapsed, Interaction::Focused, &theme),
-            theme.muted()
-        );
+        let focused = summary_weight(Disclosure::Collapsed, Interaction::Focused, &theme);
+        assert_eq!(focused, theme.fg());
+        assert_ne!(focused, theme.muted(), "focused must not read as idle");
     }
 
     /// A lifecycle accent overrides the weight channel entirely.
@@ -196,5 +198,21 @@ mod tests {
             summary_text_color(None, Disclosure::Collapsed, Interaction::Idle, &theme),
             theme.muted()
         );
+        // Collapsed + focused (no accent) → primary foreground.
+        assert_eq!(
+            summary_text_color(None, Disclosure::Collapsed, Interaction::Focused, &theme),
+            theme.fg()
+        );
+    }
+
+    /// `from_hover_focused` priority: focus > hover > idle. A focused step is
+    /// always `Focused` even when also under the pointer, so the deliberate
+    /// keyboard cue never yields to the incidental hover affordance.
+    #[test]
+    fn focus_beats_hover_beats_idle() {
+        assert_eq!(Interaction::from_hover_focused(false, false), Interaction::Idle);
+        assert_eq!(Interaction::from_hover_focused(true, false), Interaction::Hovered);
+        assert_eq!(Interaction::from_hover_focused(false, true), Interaction::Focused);
+        assert_eq!(Interaction::from_hover_focused(true, true), Interaction::Focused);
     }
 }

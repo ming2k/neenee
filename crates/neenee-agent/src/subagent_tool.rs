@@ -298,14 +298,23 @@ impl SubagentTool {
         // research subagent never pays for a diagnostic and review can never
         // recurse. No setup needed here. ADR-0018.
 
-        // The subagent's system message carries only the task; the persona
-        // framing comes from its AgentIdentity (set above from
-        // profile.system_prompt), which `ensure_system_prompt` opens with.
-        let system = format!("Task: {}", description);
-        let mut messages = vec![
-            neenee_core::Message::new(neenee_core::Role::System, system),
-            neenee_core::Message::new(neenee_core::Role::User, prompt.to_string()),
-        ];
+        // The subagent's transcript opens with just the task as the user
+        // message. The head system message is rebuilt every round by
+        // `prepare_turn_messages` from the profile persona (carried via
+        // `AgentIdentity`, set above) composed with the mission-neutral
+        // sections (tone, todo) through the prompt registry — see ADR-0039.
+        //
+        // An earlier `Task: {description}` system message here was dead code:
+        // `ensure_system_prompt` replaces any leading system message on round
+        // 1, so it was clobbered before the first model request and the
+        // persona (also vying for index 0) was what actually reached the
+        // model. Dropping it makes the single-message path honest. The task
+        // itself is the user message; `description` remains a required label
+        // arg (validated above) for the parent / TUI.
+        let mut messages = vec![neenee_core::Message::new(
+            neenee_core::Role::User,
+            prompt.to_string(),
+        )];
         // The subagent runs with its own (never-cancelled) token. When the
         // parent turn is interrupted, the parent's dispatch drops this future
         // and emits a `ToolCancelled` for the `task` call id; the TUI then
@@ -498,6 +507,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(output, "found 3 relevant files");
+    }
+
+    /// Regression for ADR-0039 stage 3: the subagent's head system message is
+    /// the registry-composed persona + mission-neutral sections (tone, todo).
+    /// The legacy `Task: {description}` system message was dead code —
+    /// `ensure_system_prompt` clobbered index 0 on round 1 — and has been
+    /// removed; the task lives in the user message alone.
+    #[tokio::test]
+    async fn subagent_head_system_message_has_no_dead_task_line() {
+        let tool = SubagentTool::new(
+            std::sync::Arc::new(CannedProvider),
+            vec![std::sync::Arc::new(EchoReadTool)],
+            &EXPLORE,
+        );
+        let outcome = tool
+            .run_sub_agent_outcome(
+                None,
+                r#"{"description":"find files","prompt":"where are the handlers?"}"#,
+                Box::new(|_event: neenee_core::SubagentEvent| {}),
+            )
+            .await
+            .unwrap();
+
+        // messages[0] is the rebuilt system message: EXPLORE persona opens it,
+        // then the tone and todo sections compose in.
+        let system = &outcome.messages[0];
+        assert_eq!(system.role, neenee_core::Role::System);
+        assert!(
+            system.content.starts_with("You are a focused research subagent"),
+            "system message should open with the EXPLORE persona"
+        );
+        assert!(
+            system.content.contains("Tone and output:"),
+            "mission-neutral tone section composes in"
+        );
+        assert!(
+            system.content.contains("Task tracking:"),
+            "todo guidance section composes in"
+        );
+        assert!(
+            !system.content.contains("Task: find files"),
+            "the dead `Task: {{description}}` line must not appear (ADR-0039)"
+        );
+
+        // The task is the user message, untouched by the system assembly.
+        assert_eq!(outcome.messages[1].role, neenee_core::Role::User);
+        assert_eq!(outcome.messages[1].content, "where are the handlers?");
     }
 
     #[tokio::test]

@@ -144,7 +144,7 @@ draw_message_body()          [message_body.rs]
   ├─ for each Block:
   │   ├─ Text     → wrap_text() → line_spans_rich() + selection paint
   │   ├─ Code     → code_gutter_line() + language badge
-  │   ├─ Heading  → bold weight + level-dependent indent
+  │   ├─ Heading  → bold weight (+ underline for H1); same leading indent as prose
   │   ├─ ListItem → marker prefix (• / 1. / [x]) + wrapped content
   │   ├─ Quote    → `┃` bar prefix + muted colour
   │   ├─ Table    → build_table_render() [markdown_table.rs] → box-drawing grid

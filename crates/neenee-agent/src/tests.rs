@@ -171,9 +171,107 @@ fn pursuit_is_injected_into_system_prompt() {
     let agent = agent();
     agent.set_pursuit(active_pursuit("ship the harness"));
 
-    let prompt = agent.build_system_message().content;
+    // Drive the real placement path: rebuild the head system message from
+    // live agent state and read it back off the message list (ADR-0039).
+    let mut messages: Vec<Message> = Vec::new();
+    agent.ensure_system_prompt(&mut messages);
+    let prompt = messages[0].content.clone();
 
     assert!(prompt.contains("ship the harness"));
+}
+
+/// Regression for ADR-0039 stage 6: the `/review` reviewer subagent's head
+/// system message must actually carry the review composition (REVIEW persona +
+/// registered dimensions + JSON contract). Previously the reviewer pre-seeded
+/// a system message that `ensure_system_prompt` clobbered on round 1, so none
+/// of it reached the model; the reviewer now carries a dedicated registry and
+/// `ensure_system_prompt` rebuilds the composition every round.
+#[test]
+fn reviewer_system_message_carries_persona_dimensions_and_contract() {
+    use neenee_core::{REVIEW, Role};
+
+    let reviewer = Agent::new(
+        Arc::new(TestProvider),
+        REVIEW.select_tools(&[]),
+        crate::skills::SkillRegistry::empty(),
+        crate::AgentIdentity::default(),
+    );
+    let mut reviewer = reviewer;
+    let dimensions = crate::session_review::default_reviews();
+    reviewer.set_prompt_registry(crate::prompt::reviewer_prompt_registry(&dimensions));
+
+    // Drive the same placement path the streaming loop uses: the registry
+    // composes the head system message from the reviewer's sections.
+    let mut messages: Vec<Message> = vec![Message::new(Role::User, "transcript snapshot")];
+    reviewer.ensure_system_prompt(&mut messages);
+
+    let system = &messages[0];
+    assert_eq!(system.role, Role::System);
+    assert!(
+        system.content.starts_with(REVIEW.system_prompt),
+        "system message should open with the REVIEW persona"
+    );
+    assert!(
+        system.content.contains("Assess each of these dimensions"),
+        "the dimensions preamble composes in"
+    );
+    assert!(
+        system.content.contains("`looping`"),
+        "the registered 'looping' dimension is listed"
+    );
+    assert!(
+        system.content.contains("Return ONLY a JSON object"),
+        "the JSON verdict contract composes in"
+    );
+    assert_eq!(
+        system.origin.as_ref().map(|o| o.kind),
+        Some(neenee_core::InjectionKind::SystemPrompt)
+    );
+}
+
+/// Golden layout test for ADR-0039 stage 2: the registry-assembled system
+/// message must reproduce the legacy `parts.join("\n")` layout byte-for-byte
+/// for a representative state (identity + pursuit set, no ask_user tool, no
+/// skills). Sections that need a gap carry their own leading `\n`, so a
+/// single-`\n` join reproduces the prior `Vec::join("\n")` shape exactly.
+#[test]
+fn system_prompt_registry_reproduces_legacy_layout() {
+    let mut agent = agent();
+    // The `agent()` helper ships an empty identity; give it one so the
+    // preamble section is active and exercises the full layout.
+    agent.identity = crate::AgentIdentity::new("neenee", "an expert AI coding assistant");
+    agent.set_pursuit(active_pursuit("ship the harness"));
+
+    let mut messages: Vec<Message> = Vec::new();
+    agent.ensure_system_prompt(&mut messages);
+    let prompt = &messages[0].content;
+
+    // preamble \n tone \n todo \n (blank line from pursuit's leading \n) pursuit
+    let expected = "You are neenee, an expert AI coding assistant.\n\
+         Tone and output: be concise and direct. Answer the actual question with the \
+         minimum needed — short replies, one word when that suffices — and skip \
+         preamble, recaps of what you just did, and unsolicited explanations. Never \
+         commit unless explicitly asked. Take the reasonable action with ordinary \
+         tools instead of asking permission; reserve questions for genuine ambiguity \
+         or trade-offs.\n\
+         Task tracking: for work that spans multiple steps, use the `todo` tool to lay \
+         out the steps up front, then update each item's status with `todo_update` (or \
+         `todo` for a full restructure) as you progress — move a step to in_progress \
+         when you start it and completed/cancelled the moment it is done. Keep the \
+         list honest: it is the single source of truth shown to the user, so don't \
+         let it drift from reality. At most one item may be in_progress at a time. \
+         Skip the list entirely for single-step requests.\n\
+         \n\
+         Active harness pursuit (active):\n\
+         ship the harness";
+    assert_eq!(prompt, expected, "registry output must match legacy layout");
+
+    // Origin is the channel canonical kind, regardless of how many sections
+    // composed the message.
+    assert_eq!(
+        messages[0].origin.as_ref().map(|o| o.kind),
+        Some(crate::InjectionKind::SystemPrompt)
+    );
 }
 
 #[test]

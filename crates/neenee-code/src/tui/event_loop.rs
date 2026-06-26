@@ -390,7 +390,7 @@ pub(super) async fn run_app_loop(
                     .collect();
                 let idx = tasks
                     .iter()
-                    .position(|message| message.tool_step_call_id() == Some(current.as_str()))?;
+                    .position(|message| message.tool_step_call_id() == Some(current.call_id.as_str()))?;
                 Some(render::SubagentBarInfo {
                     label: tasks.get(idx)?.subagent_label(),
                     index: idx + 1,
@@ -656,7 +656,7 @@ pub(super) async fn run_app_loop(
                         &app.theme,
                     );
                 }
-                Modal::Help => render::draw_help_modal(f, &app.theme),
+                Modal::Help => render::draw_help_modal(f, &mut app.help_scroll, &app.theme),
                 Modal::ToolStepDetail => {
                     if let Some(msg) = app
                         .tool_detail_message_idx
@@ -1376,6 +1376,7 @@ pub(super) async fn run_app_loop(
                 input::InputAction::OpenHelp => {
                     app.active_modal = Modal::Help;
                     app.modal_index = 0;
+                    app.help_scroll = 0;
                 }
                 input::InputAction::OpenSession => {
                     // The session-context modal is a tabbed overview. It does
@@ -1541,6 +1542,8 @@ pub(super) async fn run_app_loop(
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = app.help_scroll.saturating_sub(1);
                     } else {
                         // While a permission sheet is open the transcript stays
                         // scrollable, so the wheel / page keys drive the
@@ -1557,6 +1560,8 @@ pub(super) async fn run_app_loop(
                         app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = app.help_scroll.saturating_add(1);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -2518,14 +2523,14 @@ pub(super) fn compact_retry_reason(message: &str) -> String {
 /// resolve through the same context.
 pub(super) fn resolve_focused_mut<'a>(
     messages: &'a mut [TranscriptMessage],
-    focus_stack: &[String],
+    focus_stack: &[crate::tui::app::ZoomFrame],
     mi: usize,
 ) -> Option<&'a mut TranscriptMessage> {
     let Some(current) = focus_stack.last() else {
         return messages.get_mut(mi);
     };
     let task_idx = messages.iter().position(|message| {
-        message.is_subagent_task() && message.tool_step_call_id() == Some(current.as_str())
+        message.is_subagent_task() && message.tool_step_call_id() == Some(current.call_id.as_str())
     })?;
     messages[task_idx].subagent_children_mut()?.get_mut(mi)
 }
@@ -2535,13 +2540,13 @@ pub(super) fn resolve_focused_mut<'a>(
 /// expand/collapse operations. Callers filter by kind as needed.
 pub(super) fn focused_messages_mut<'a>(
     messages: &'a mut [TranscriptMessage],
-    focus_stack: &[String],
+    focus_stack: &[crate::tui::app::ZoomFrame],
 ) -> Box<dyn Iterator<Item = &'a mut TranscriptMessage> + 'a> {
     match focus_stack.last() {
         None => Box::new(messages.iter_mut()),
         Some(current) => {
             let task_idx = messages.iter().position(|message| {
-                message.is_subagent_task() && message.tool_step_call_id() == Some(current.as_str())
+                message.is_subagent_task() && message.tool_step_call_id() == Some(current.call_id.as_str())
             });
             match task_idx {
                 Some(idx) => match messages[idx].subagent_children_mut() {

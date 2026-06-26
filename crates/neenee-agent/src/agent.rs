@@ -183,6 +183,13 @@ pub struct Agent {
     /// sub-agents, the review diagnostic, and tests — they have no session of
     /// their own to persist, so the round boundary is a plain no-op there.
     round_persist: std::sync::Mutex<Option<RoundPersistFn>>,
+    /// Declarative prompt registry (ADR-0039). Holds one [`PromptSection`] per
+    /// injection path, keyed by id. Seeded with the default system-channel
+    /// sections in [`Agent::new`] via [`crate::prompt::default_prompt_registry`];
+    /// the system message is rebuilt each round by composing the active
+    /// sections in rank order. User-channel sections are added in later
+    /// migration stages.
+    pub(crate) prompt_registry: crate::PromptRegistry,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -318,6 +325,7 @@ impl Agent {
             inbox_rx: std::sync::Mutex::new(None),
             identity,
             round_persist: std::sync::Mutex::new(None),
+            prompt_registry: crate::prompt::default_prompt_registry(),
         }
     }
 
@@ -329,6 +337,16 @@ impl Agent {
             .context_prune_threshold_tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = budget_tokens;
+    }
+
+    /// Replace the prompt registry wholesale. Used by sub-callers that need a
+    /// different system-message composition than the default mission-neutral
+    /// set — currently the `/review` diagnostic, whose reviewer subagent gets
+    /// a persona + dimensions + JSON-contract registry (ADR-0039 stage 6) so
+    /// `ensure_system_prompt` rebuilds the review prompt correctly each round
+    /// instead of clobbering a pre-seeded system message.
+    pub(crate) fn set_prompt_registry(&mut self, registry: crate::PromptRegistry) {
+        self.prompt_registry = registry;
     }
 
     /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_rounds`
@@ -1036,9 +1054,7 @@ impl Agent {
                 return Err(HarnessError::Interrupted);
             }
 
-            remove_empty_assistant_messages(messages);
-            self.ensure_system_prompt(messages);
-            self.inject_implicit_skills(messages);
+            self.prepare_turn_messages(messages);
             on_event(AgentEvent::ModelRequestStarted {
                 tool_round: tool_rounds,
             });
@@ -1153,9 +1169,7 @@ impl Agent {
                 return Err(HarnessError::Interrupted);
             }
 
-            remove_empty_assistant_messages(messages);
-            self.ensure_system_prompt(messages);
-            self.inject_implicit_skills(messages);
+            self.prepare_turn_messages(messages);
             tracing::debug!(tool_round = tool_rounds, "requesting model completion");
             on_event(AgentEvent::ModelRequestStarted {
                 tool_round: tool_rounds,
@@ -2204,6 +2218,11 @@ fn empty_response_error(response: &Message) -> HarnessError {
     )
 }
 
-fn remove_empty_assistant_messages(messages: &mut Vec<Message>) {
+/// Drop assistant messages that carry neither text nor a tool call — the model
+/// occasionally emits an empty assistant frame that would otherwise confuse
+/// the next provider request. Called from the shared
+/// [`crate::prompt::Agent::prepare_turn_messages`] prep funnel, which both
+/// turn loops route through (ADR-0039).
+pub(crate) fn remove_empty_assistant_messages(messages: &mut Vec<Message>) {
     messages.retain(|message| message.role != Role::Assistant || valid_assistant_response(message));
 }

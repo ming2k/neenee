@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/review` reviewer prompt reached the model clobbered.** The session-review
+  diagnostic subagent pre-seeded its system message (role persona + the
+  dimensions to evaluate + the JSON verdict contract) and then ran the streaming
+  turn loop, whose per-round `ensure_system_prompt` replaces any leading system
+  message — so on round 1 the review prompt was overwritten by the default
+  neutral set and never reached the model. The feature limped along only because
+  verdict parsing degrades gracefully. The reviewer now carries a dedicated
+  prompt registry (`review.persona` + `review.dimensions` + `review.json_contract`)
+  installed via `Agent::set_prompt_registry`, and its transcript opens at the
+  user message so the composed review prompt is rebuilt correctly every round.
+  See [ADR-0039](docs/adr/0039-unified-prompt-registry.md).
+
 ## [0.7.1] - 2026-07-11
 
 ### Fixed

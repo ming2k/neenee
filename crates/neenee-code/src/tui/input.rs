@@ -565,12 +565,20 @@ pub fn process_event(
                         InputAction::QuestionCancel
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
+                    } else if context.in_side_view {
+                        // `/btw` side view: Esc returns to the primary
+                        // transcript (ADR-0017). Takes priority over focus
+                        // clearing and completion so one Esc always exits.
+                        InputAction::ExitSideView
+                    } else if context.in_subagent_view {
+                        // Subagent zoom: Esc returns to the parent view.
+                        // Takes priority over focus clearing so one Esc
+                        // always exits the zoom, even if a step inside the
+                        // subagent is keyboard-focused.
+                        InputAction::ExitSubAgent
                     } else if context.has_focused_target {
-                        // A transcript step is focused: Esc is the deliberate
-                        // exit that clears the focus and hands every key back to
-                        // the input box. Takes priority over the completion /
-                        // subagent / responding arms so one Esc always lands
-                        // focus on the prompt first.
+                        // A transcript step is focused: Esc clears the focus
+                        // and hands every key back to the input box.
                         InputAction::ClearFocusedTarget
                     } else if context.completion_kind != super::CompletionKind::None
                         && context.suggestion_count > 0
@@ -581,14 +589,6 @@ pub fn process_event(
                         // clears the dismissal latch, so Esc then ↑/↓ walks
                         // history instead of suggestions.
                         InputAction::CloseCompletion
-                    } else if context.in_side_view {
-                        // `/btw` side view: Esc returns to the primary
-                        // transcript (ADR-0017). Takes priority over the
-                        // subagent / responding arms because the side view
-                        // and subagent zoom are mutually exclusive.
-                        InputAction::ExitSideView
-                    } else if context.in_subagent_view {
-                        InputAction::ExitSubAgent
                     } else if context.is_responding {
                         InputAction::Interrupt
                     } else {
@@ -1237,7 +1237,8 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
-                    super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
+                    super::Modal::ModelEditor => InputAction::None,
+                    super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusPrevTarget
@@ -1281,7 +1282,8 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
-                    super::Modal::ModelEditor | super::Modal::Help => InputAction::None,
+                    super::Modal::ModelEditor => InputAction::None,
+                    super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusNextTarget

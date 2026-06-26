@@ -4,8 +4,8 @@
 //! subagent task, or a reasoning trace. Historically each kind computed its
 //! summary-line color from a tangle of ad-hoc flags (`expanded`, `focused`,
 //! `hovered`, status…) scattered across the data, interaction, and render
-//! layers. That conflation was the root cause of bugs like "a collapsed step
-//! stays highlighted because it still carries keyboard focus".
+//! layers. That conflation was the root cause of bugs like "the focused step's
+//! text never lights up because the render layer discarded the focus flag".
 //!
 //! This module models a step's state as **three orthogonal axes**, each with
 //! a single reason to change, and reduces the visible presentation to pure
@@ -35,11 +35,14 @@
 //!   lifecycle only affects its marker) yield no accent, handing control to
 //!   the weight channel.
 //! - **weight** (luminance) — from Disclosure × Interaction, via
-//!   [`state::summary_weight`]. Decides how bright the summary reads based on
-//!   whether it is open or under the pointer — never which color.
+//!   [`state::summary_weight`]. Decides how bright the summary reads: expanded
+//!   or focused steps read as the primary foreground, a collapsed step under
+//!   the pointer (but not focused) reads as the intermediate hover tone, and
+//!   an idle collapsed step reads as muted — never which color.
 //!
 //! Keeping the channels separate is what makes the behavior consistent across
-//! step kinds and immune to the old "focus leaks into color" class of bug.
+//! step kinds: a step brightens when it is open, focused, or hovered, and each
+//! cause flows through the single [`state::summary_weight`] entry point.
 
 use super::Theme;
 

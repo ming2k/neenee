@@ -833,6 +833,7 @@ pub async fn run_tui(
         turn_started_at: None,
         activity_tab: ActivityTab::Activity,
         activity_scroll: 0,
+        help_scroll: 0,
         pending_permission: None,
         question: None,
         question_scroll: 0,

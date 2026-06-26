@@ -46,6 +46,7 @@ pub mod model;
 pub mod todos;
 pub use todos::{MAX_TODOS, TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext};
 pub mod pressure;
+pub mod prompt;
 pub mod session_review;
 pub mod session_title;
 pub mod skillsconfig;
@@ -72,6 +73,7 @@ pub use pressure::{
     CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
     PruneOutcome, estimate_chars, estimate_tokens, prune_tool_results,
 };
+pub use prompt::{PromptChannel, PromptContext, PromptRegistry, PromptSection};
 pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};
 pub use session_title::{TITLE_MAX_LEN, clean_title};
 pub use skillsconfig::SkillsConfig;

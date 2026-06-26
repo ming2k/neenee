@@ -139,7 +139,7 @@ The loop runs identically for interactive (streaming) and headless
 
 ```mermaid
 flowchart TD
-    A["prepare_tools"] --> C["ensure_system_prompt"]
+    A["prepare_tools"] --> C["prepare_turn_messages<br/>(rebuild system msg +<br/>load implicit skills)"]
     C --> D["stream_chat_events"]
     D --> E["accumulate text / reasoning / tool_calls"]
     E --> F["push assistant message"]

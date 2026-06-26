@@ -891,8 +891,8 @@ pub(super) fn draw_message_body(
                 code_ranges,
                 bold_ranges,
             } => {
-                let prefix = "   ".to_string();
-                let prefix_cols = display_width_u16(&prefix);
+                let prefix = " ".repeat(TRANSCRIPT_BODY_LEADING_INDENT as usize);
+                let prefix_cols = TRANSCRIPT_BODY_LEADING_INDENT;
                 let modifier = if *level == 1 {
                     Modifier::BOLD | Modifier::UNDERLINED
                 } else {

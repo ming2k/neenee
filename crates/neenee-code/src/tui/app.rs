@@ -226,6 +226,22 @@ impl ActivityTab {
     }
 }
 
+/// Capturable snapshot of the main transcript's scroll position, saved when
+/// zooming into a nested view and restored on return.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct ScrollSnapshot {
+    pub offset: u16,
+    pub follow_bottom: bool,
+}
+
+/// One frame on the focus stack: the subagent task call-id plus the parent
+/// view's scroll snapshot, restored verbatim when the frame is popped.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZoomFrame {
+    pub call_id: String,
+    pub saved_scroll: ScrollSnapshot,
+}
+
 pub struct App {
     pub input: String,
     /// Structured transcript messages (semantic document model).
@@ -283,11 +299,10 @@ pub struct App {
     /// content below the collapsed step does not yank the header back down.
     /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
     pub pin_summary_line: Option<usize>,
-    /// Stack of subagent task call-ids that the view is zoomed into. Empty
-    /// means the root conversation is shown; a non-empty stack renders the
-    /// focused `task` tool step's child messages as the main stream, with a
-    /// navigation bar to return to the parent or cycle sibling sub-agents.
-    pub focus_stack: Vec<String>,
+    /// Stack of nested zoom frames (subagent tasks). Empty means the root
+    /// conversation is shown; the top frame is the currently focused view.
+    /// Each frame carries the parent's scroll snapshot, restored on exit.
+    pub focus_stack: Vec<ZoomFrame>,
     pub tx: mpsc::UnboundedSender<AgentRequest>,
     pub should_quit: Arc<AtomicBool>,
     /// `/serve` hot-attach tap (ADR-0037 §7). When active, the response
@@ -378,6 +393,12 @@ pub struct App {
     /// Scroll offset inside `Modal::Activity`. Reset to 0 each time the modal
     /// opens; clamped each frame by the modal's body renderer.
     pub activity_scroll: usize,
+    /// Scroll offset inside `Modal::Help`. Reset to 0 each time the modal opens;
+    /// clamped each frame by the modal's body renderer. The keybinding list
+    /// overflows a typical terminal, so this is what keeps the lower sections
+    /// reachable — the renderer used to take a throwaway `&mut 0`, leaving the
+    /// modal unscrollable.
+    pub help_scroll: usize,
     pub pending_permission: Option<PermissionRequest>,
     /// The open question (ask_user) modal's self-contained MVU state, or
     /// `None` when no question modal is open. Replaces the four separate
@@ -768,14 +789,14 @@ impl App {
         if self.in_side_view {
             return &self.side_messages;
         }
-        let Some(call_id) = self.focus_stack.last() else {
+        let Some(frame) = self.focus_stack.last() else {
             return &self.messages;
         };
         self.messages
             .iter()
             .find_map(|message| {
                 if message.is_subagent_task()
-                    && message.tool_step_call_id() == Some(call_id.as_str())
+                    && message.tool_step_call_id() == Some(frame.call_id.as_str())
                 {
                     message.subagent_children()
                 } else {
@@ -801,15 +822,21 @@ impl App {
 
     /// Zoom into a subagent task's child messages.
     pub fn enter_subagent(&mut self, call_id: String) {
-        self.focus_stack.push(call_id);
+        let saved_scroll = ScrollSnapshot {
+            offset: self.scroll,
+            follow_bottom: self.follow_bottom,
+        };
+        self.focus_stack.push(ZoomFrame { call_id, saved_scroll });
         self.reset_view_state();
     }
 
     /// Return from the current subagent view to its parent. Returns true if a
     /// view was actually popped.
     pub fn exit_subagent(&mut self) -> bool {
-        if self.focus_stack.pop().is_some() {
+        if let Some(frame) = self.focus_stack.pop() {
             self.reset_view_state();
+            self.scroll = frame.saved_scroll.offset;
+            self.follow_bottom = frame.saved_scroll.follow_bottom;
             true
         } else {
             false
@@ -843,9 +870,10 @@ impl App {
     /// task at the current focus level. No-op when not in a subagent view or
     /// when there are no siblings.
     pub fn cycle_sibling(&mut self, dir: i8) {
-        let Some(current) = self.focus_stack.last().cloned() else {
+        let Some(current) = self.focus_stack.last() else {
             return;
         };
+        let current_id = current.call_id.clone();
         let task_ids: Vec<String> = self
             .messages
             .iter()
@@ -857,7 +885,7 @@ impl App {
                 }
             })
             .collect();
-        let Some(idx) = task_ids.iter().position(|id| *id == current) else {
+        let Some(idx) = task_ids.iter().position(|id| *id == current_id) else {
             return;
         };
         if task_ids.len() < 2 {
@@ -865,8 +893,9 @@ impl App {
         }
         let n = task_ids.len() as isize;
         let next = ((idx as isize + dir as isize).rem_euclid(n)) as usize;
-        self.focus_stack.pop();
-        self.focus_stack.push(task_ids[next].clone());
+        if let Some(frame) = self.focus_stack.last_mut() {
+            frame.call_id = task_ids[next].clone();
+        }
         self.reset_view_state();
     }
 

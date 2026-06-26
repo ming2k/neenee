@@ -623,7 +623,8 @@ pub fn help() -> io::Result<()> {
                 " Esc quit ",
                 &theme,
                 |f| {
-                    draw_help_modal(f, &theme);
+                    let mut scroll = 0;
+                    draw_help_modal(f, &mut scroll, &theme);
                 },
             );
         },

@@ -89,7 +89,7 @@ impl Agent {
         // open a file to check a looping claim but cannot mutate anything or
         // spawn further agents.
         let sub_tools = REVIEW.select_tools(&self.tools);
-        let reviewer = Agent::new(
+        let mut reviewer = Agent::new(
             self.provider.clone(),
             sub_tools,
             SkillRegistry::empty(),
@@ -102,8 +102,14 @@ impl Agent {
         // The reviewer reads a transcript excerpt; disable the deterministic
         // read-loop guard's nudge (ADR-0034) so its own reads are never steered.
         reviewer.set_loop_review_enabled(false);
+        // The reviewer's head system message is the review composition (persona
+        // + dimensions + JSON contract), not the default mission-neutral set.
+        // Installed as a dedicated registry so `ensure_system_prompt` rebuilds
+        // it correctly every round (ADR-0039 stage 6) — previously a pre-seeded
+        // system message here was clobbered on round 1 and the review prompt
+        // never reached the model.
+        reviewer.set_prompt_registry(crate::prompt::reviewer_prompt_registry(&dimensions));
 
-        let system = build_reviewer_system_prompt(&dimensions);
         let transcript = serialize_transcript(messages, TRANSCRIPT_SNAPSHOT_BUDGET_CHARS);
         let user = format!(
             "The agent under review has completed {tool_rounds} tool rounds this turn. \
@@ -111,10 +117,11 @@ impl Agent {
              {transcript}\n\n\
              Evaluate every dimension listed above and return the JSON object now."
         );
-        let mut child_messages = vec![
-            Message::new(Role::System, system),
-            Message::new(Role::User, user),
-        ];
+        // The transcript is the user message; the head system message is built
+        // by `ensure_system_prompt` from the reviewer registry above. Starting
+        // without a pre-seeded system message avoids the round-1 clobber that
+        // lost the review prompt before ADR-0039 stage 6.
+        let mut child_messages = vec![Message::new(Role::User, user)];
 
         let cancel = CancellationToken::new();
         // Box the recursive call: `run_session_review` is reached from inside
@@ -136,34 +143,6 @@ impl Agent {
             }
         }
     }
-}
-
-/// Assemble the reviewer's system prompt: the [`REVIEW`] role framing, the
-/// list of dimensions to evaluate, and the exact JSON contract the runner
-/// parses. Pinning the contract here keeps parsing and prompting in sync.
-fn build_reviewer_system_prompt(dimensions: &[Arc<dyn SessionReview>]) -> String {
-    let mut prompt = String::from(REVIEW.system_prompt);
-    prompt.push_str(
-        "\n\nYou are evaluating the health of another agent's turn. \
-                     Assess each of these dimensions:\n\n",
-    );
-    for dim in dimensions {
-        prompt.push_str(&format!(
-            "- `{}` — {}. {}\n",
-            dim.id(),
-            dim.label(),
-            dim.instruction()
-        ));
-    }
-    prompt.push_str(
-        "\nReturn ONLY a JSON object (no markdown, no prose) of this exact shape:\n\
-         {\"verdicts\":[{\"dimension\":\"<id>\",\"status\":\"healthy|watch|stuck\",\
-         \"detail\":\"<one short sentence>\"}]}\n\
-         Use status \"healthy\" when there is no concern, \"watch\" when progress is \
-         slow or risky but not stuck, and \"stuck\" only when the agent is clearly \
-         looping without converging. Include one entry per dimension.",
-    );
-    prompt
 }
 
 /// Flatten the transcript into a compact text excerpt the reviewer can read in

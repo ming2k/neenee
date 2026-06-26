@@ -63,6 +63,17 @@ reach the model through the user channel on demand. Likewise, tools are never
 listed in the system message — their names and schemas travel the dedicated
 `tools` field.
 
+Each section is a declarative entry in a prompt registry (`PromptRegistry` in
+`neenee-core`), not a hardcoded `push` in an imperative method. A section
+carries a stable id, a rank that fixes its reading order, an `is_active`
+precondition, and a `render`; the registry composes the active sections in
+rank order and stamps the channel's canonical origin. That makes each
+section individually unit-testable and individually re-orderable or
+disable-able without editing the others. The same engine serves a sub-agent:
+its registry is seeded from its profile so the composed system message is the
+role's persona plus the neutral sections. See
+[ADR-0039](../../adr/0039-unified-prompt-registry.md).
+
 ## Conditional injections
 
 The system message is not the only place the harness shapes behavior. As a turn
@@ -153,8 +164,18 @@ reopened later reconstructs the exact live turn. This is the contract that lets
 resume, replay, and audit all trust the transcript: nothing was silently
 inserted, and everything that was inserted is identifiable.
 
+The same closed classifier does double duty as the registration key for the
+system channel's prompt sections: what a transcript records as an injection's
+*source* is what the registry knows as a section's *identity*, so provenance
+and composition stay in lockstep rather than drifting into two vocabularies.
+
 ## Decision history
 
+- [ADR-0039](../../adr/0039-unified-prompt-registry.md) — the system-prompt
+  sections become declarative `PromptRegistry` entries keyed by
+  `InjectionKind`, replacing the ad-hoc `format!`/`push_str` assembly. The
+  same change fixed a latent defect where a sub-agent system message
+  pre-seeded before the turn loop was clobbered on round 1.
 - [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md)
   — the deterministic read-loop guard and why a frequency window replaces a
   consecutive counter.
