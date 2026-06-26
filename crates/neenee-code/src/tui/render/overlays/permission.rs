@@ -1,11 +1,7 @@
 //! Permission sheet (inline) and question modal.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block as RtBlock, Clear, Paragraph},
+use neenee_tui::{
+    Frame, Rect, {Block as RtBlock, Clear, Paragraph}, {Line, Span}, {Modifier, Style},
 };
 
 use neenee_core::{PermissionRequest, UserQuestionRequest};
@@ -32,7 +28,6 @@ const PERMISSION_MAX_BODY_ROWS: u16 = 14;
 /// submits with Enter. Multi-select questions use checkboxes; single-select
 /// uses radio buttons. A numbered digit key (1-9) jumps directly to an option.
 const OTHER_OPTION_LABEL: &str = "Other";
-const OTHER_OPTION_PLACEHOLDER: &str = "Type your own answer";
 
 pub fn draw_question_modal(
     frame: &mut Frame,
@@ -124,22 +119,13 @@ pub fn draw_question_modal(
             theme,
         );
         if other_highlighted {
-            let display = if other_text_value.is_empty() {
-                OTHER_OPTION_PLACEHOLDER
-            } else {
-                other_text_value
-            };
+            // Block caret (█) at the end of the typed text — no placeholder
+            // hint, so the field reads as a bare editing affordance.
             body.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
                 Span::styled(
-                    format!("{} {}", "▏", display),
-                    Style::default()
-                        .fg(if other_text_value.is_empty() {
-                            theme.muted()
-                        } else {
-                            theme.brand()
-                        })
-                        .add_modifier(Modifier::UNDERLINED),
+                    format!("{}{}", other_text_value, "█"),
+                    Style::default().fg(theme.brand()),
                 ),
             ]));
         }
@@ -217,11 +203,11 @@ fn render_question_option(
     };
 
     let marker_style = if is_selected {
-        Style::default()
-            .fg(theme.ok())
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.ok()).add_modifier(Modifier::BOLD)
     } else if is_highlighted {
-        Style::default().fg(theme.brand()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.brand())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted())
     };
@@ -382,8 +368,8 @@ pub fn draw_permission_sheet(
     );
     frame.render_widget(
         Paragraph::new(body_lines)
-            .scroll((body_scroll.min(u16::MAX as usize) as u16, 0))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
+            .scroll(body_scroll.min(u16::MAX as usize) as u16, 0)
+            .wrap(neenee_tui::Wrap { trim: false }),
         body_area,
     );
 

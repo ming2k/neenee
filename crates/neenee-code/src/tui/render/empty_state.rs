@@ -16,12 +16,8 @@
 //! wordmark is used. Either way the art is clamped to a safe bounding box so a
 //! giant paste can never blow out the welcome screen.
 
-use ratatui::{
-    Frame,
-    layout::{Alignment, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Alignment, Frame, Paragraph, Rect, {Line, Span}, {Modifier, Style},
 };
 
 use super::theme::Theme;
@@ -164,32 +160,24 @@ pub(super) fn empty_state_content_lines(user_logo: Option<&[String]>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     #[test]
     fn empty_state_renders_builtin_without_panicking() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let theme = Theme::default();
-        terminal
-            .draw(|f| {
-                draw_empty_state(f, f.area(), None, &theme);
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_empty_state(f, f.area(), None, &theme);
+        });
     }
 
     #[test]
     fn empty_state_renders_user_logo_without_panicking() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let theme = Theme::default();
         let logo = vec!["  X X  ".to_string(), " X X X ".to_string()];
-        terminal
-            .draw(|f| {
-                draw_empty_state(f, f.area(), Some(&logo), &theme);
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_empty_state(f, f.area(), Some(&logo), &theme);
+        });
     }
 
     #[test]

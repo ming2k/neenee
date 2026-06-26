@@ -96,7 +96,7 @@ If the user presses `Esc`, the TUI sends an empty answer. The agent returns a
 text result explaining that no answer was provided, and the model decides how
 to proceed.
 
-If the user interrupts the turn (`Ctrl+C` or the equivalent), the harness
+If the user interrupts the turn (double `Esc`), the harness
 rejects every pending question sender with `None`. Each blocked `ask_user`
 future then resolves to the cancelled result.
 

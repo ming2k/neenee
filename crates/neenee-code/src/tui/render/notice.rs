@@ -10,12 +10,8 @@
 //!
 //! [`NoticeSeverity`]: crate::tui::document::NoticeSeverity
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Frame, Paragraph, Rect, {Color, Style}, {Line, Span},
 };
 
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};

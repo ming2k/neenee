@@ -2,11 +2,8 @@
 
 use std::collections::HashMap;
 
-use ratatui::{
-    Frame,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Frame, Paragraph, {Line, Span}, {Modifier, Style},
 };
 use unicode_width::UnicodeWidthStr;
 

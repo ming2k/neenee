@@ -1,6 +1,6 @@
 //! Color palette used across the renderer.
 
-use ratatui::style::Color;
+use neenee_tui::Color;
 
 /// Styles used during rendering.
 pub struct Theme {

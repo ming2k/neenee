@@ -50,6 +50,28 @@ impl Rect {
     pub const fn area(self) -> u32 {
         self.width as u32 * self.height as u32
     }
+
+    /// Right edge x coordinate (exclusive).
+    pub const fn right(self) -> u16 {
+        self.x.saturating_add(self.width)
+    }
+
+    /// Bottom edge y coordinate (exclusive).
+    pub const fn bottom(self) -> u16 {
+        self.y.saturating_add(self.height)
+    }
+
+    /// Split this rect horizontally at `offset` from the left, returning
+    /// `(left, right)`.
+    pub fn split_horizontal(self, offset: u16) -> (Rect, Rect) {
+        let left_w = offset.min(self.width);
+        let right_x = self.x + left_w;
+        let right_w = self.width - left_w;
+        (
+            Rect::new(self.x, self.y, left_w, self.height),
+            Rect::new(right_x, self.y, right_w, self.height),
+        )
+    }
 }
 
 /// A margin to apply when computing an inner rect.

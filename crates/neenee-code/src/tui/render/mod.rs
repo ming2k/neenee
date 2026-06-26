@@ -1,4 +1,4 @@
-//! Rendering engine: draws the transcript (and footer chrome) using ratatui
+//! Rendering engine: draws the transcript (and footer chrome) using neenee-tui
 //! while recording semantic-to-screen layout information.
 
 mod chrome;
@@ -60,12 +60,8 @@ use text_layout::{
 };
 pub use theme::Theme;
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block as RtBlock, Paragraph},
+use neenee_tui::{
+    Block as RtBlock, Constraint, Direction, Frame, Layout, Line, Paragraph, Rect, Span, Style,
 };
 
 use crate::tui::document::TranscriptMessage;
@@ -664,12 +660,8 @@ mod tests {
     /// (border math, rect underflows, empty content) without a live terminal.
     #[test]
     fn redesigned_components_render_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 30);
 
         terminal
             .draw(|f| {
@@ -748,194 +740,185 @@ mod tests {
                 );
                 draw_copy_toast(f, "copied to clipboard", false, &theme);
                 draw_armed_toast(f, "press Ctrl+C again to exit", &theme);
-            })
-            .unwrap();
+            });
 
         // Modals + permission sheet on a fresh frame.
-        terminal
-            .draw(|f| {
-                draw_models_modal(
-                    f,
-                    &mut LayoutMap::new(),
-                    &[],
-                    "mock",
-                    0,
-                    &HashMap::new(),
-                    &ProviderPickerSnapshot::default(),
-                    "",
-                    0,
-                    &theme,
-                );
-                let history_roster: Vec<String> = vec!["a".to_string()];
-                let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> =
-                    crate::tui::fuzzy::rank(&history_roster, "");
-                draw_history_modal(
-                    f,
-                    &mut LayoutMap::new(),
-                    &history_roster,
-                    "",
-                    0,
-                    &ranked,
-                    0,
-                    &theme,
-                );
-                draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
-                draw_help_modal(f, &theme);
-                draw_sessions_modal(
-                    f,
-                    &[
-                        neenee_core::SessionOverview {
-                            id: "abc123".to_string(),
-                            overview: "Refactor the renderer".to_string(),
-                            created_at: 0,
-                            updated_at: 0,
-                            message_count: 12,
-                            active: true,
+        terminal.draw(|f| {
+            draw_models_modal(
+                f,
+                &mut LayoutMap::new(),
+                &[],
+                "mock",
+                0,
+                &HashMap::new(),
+                &ProviderPickerSnapshot::default(),
+                "",
+                0,
+                &theme,
+            );
+            let history_roster: Vec<String> = vec!["a".to_string()];
+            let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> =
+                crate::tui::fuzzy::rank(&history_roster, "");
+            draw_history_modal(
+                f,
+                &mut LayoutMap::new(),
+                &history_roster,
+                "",
+                0,
+                &ranked,
+                0,
+                &theme,
+            );
+            draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
+            draw_help_modal(f, &theme);
+            draw_sessions_modal(
+                f,
+                &[
+                    neenee_core::SessionOverview {
+                        id: "abc123".to_string(),
+                        overview: "Refactor the renderer".to_string(),
+                        created_at: 0,
+                        updated_at: 0,
+                        message_count: 12,
+                        active: true,
+                    },
+                    neenee_core::SessionOverview {
+                        id: "def456".to_string(),
+                        overview: "Fix the tool_call_id bug".to_string(),
+                        created_at: 0,
+                        updated_at: 0,
+                        message_count: 4,
+                        active: false,
+                    },
+                ],
+                0,
+                &theme,
+            );
+            let question_request = UserQuestionRequest {
+                id: "q1".to_string(),
+                questions: vec![neenee_core::UserQuestion {
+                    header: Some("Style".to_string()),
+                    question: "Which error handling crate?".to_string(),
+                    options: vec![
+                        neenee_core::UserQuestionOption {
+                            label: "anyhow (Recommended)".to_string(),
+                            description: Some("Simple".to_string()),
                         },
-                        neenee_core::SessionOverview {
-                            id: "def456".to_string(),
-                            overview: "Fix the tool_call_id bug".to_string(),
-                            created_at: 0,
-                            updated_at: 0,
-                            message_count: 4,
-                            active: false,
+                        neenee_core::UserQuestionOption {
+                            label: "thiserror".to_string(),
+                            description: Some("Structured".to_string()),
                         },
                     ],
-                    0,
-                    &theme,
-                );
-                let question_request = UserQuestionRequest {
-                    id: "q1".to_string(),
-                    questions: vec![neenee_core::UserQuestion {
-                        header: Some("Style".to_string()),
-                        question: "Which error handling crate?".to_string(),
-                        options: vec![
-                            neenee_core::UserQuestionOption {
-                                label: "anyhow (Recommended)".to_string(),
-                                description: Some("Simple".to_string()),
-                            },
-                            neenee_core::UserQuestionOption {
-                                label: "thiserror".to_string(),
-                                description: Some("Structured".to_string()),
-                            },
-                        ],
-                        multi_select: false,
-                    }],
-                };
-                draw_question_modal(
-                    f,
-                    &question_request,
-                    0,
-                    &[vec![1]],
-                    &[String::new()],
-                    1,
-                    &mut 0,
-                    &theme,
-                );
-                // Session context modal: every pane must render without panicking
-                // across (a) an unknown provider + empty snapshot, (b) a fully
-                // populated snapshot exercising the Skills / Permissions / Tools
-                // list panes and the MCP per-server tool names.
-                let snapshot = neenee_core::SessionContextSnapshot {
-                    model: neenee_core::ModelInfo {
-                        provider: "gemini".to_string(),
-                        model: "gemini-2.5-flash".to_string(),
-                        display_name: "Gemini 2.5 Flash".to_string(),
-                        context_window: 1_000_000,
-                        api_key_ready: true,
-                        description: "Google Gemini 2.5 Flash".to_string(),
-                        capabilities: vec!["tool calling".to_string()],
-                    },
-                    tools: vec![neenee_core::ToolInfo {
-                        name: "bash".to_string(),
-                        description: "run a shell command".to_string(),
-                        enabled: true,
-                        source: "builtin".to_string(),
-                    }],
-                    permissions: vec![neenee_core::PermissionRuleInfo {
-                        tool: "bash".to_string(),
-                        scope: "*".to_string(),
-                    }],
-                    skills: vec![neenee_core::SkillInfo {
-                        name: "rust-expert".to_string(),
-                        description: "Rust help".to_string(),
-                        version: Some("1.0.0".to_string()),
-                        enabled: true,
-                        source: "repo".to_string(),
-                        tags: vec!["rust".to_string()],
-                    }],
-                    mcp: vec![neenee_core::McpServerInfo {
-                        name: "fs".to_string(),
-                        connected: true,
-                        disabled: false,
-                        failure: None,
-                        tool_names: vec!["read_file".to_string(), "write_file".to_string()],
-                    }],
-                };
-                let mut key_status = HashMap::new();
-                key_status.insert("gemini".to_string(), true);
-                for (tab, idx) in [
-                    (crate::tui::SessionTab::Model, 0),
-                    (crate::tui::SessionTab::Mcp, 0),
-                    (crate::tui::SessionTab::Skills, 0),
-                    (crate::tui::SessionTab::Permissions, 0),
-                    (crate::tui::SessionTab::Tools, 0),
-                ] {
-                    draw_session_modal(
-                        f,
-                        tab,
-                        "custom-unknown",
-                        "some-model",
-                        &key_status,
-                        &[],
-                        Some(&snapshot),
-                        idx,
-                        &mut 0,
-                        &theme,
-                    );
-                }
-                // And once with no snapshot, to cover the placeholder fallbacks.
+                    multi_select: false,
+                }],
+            };
+            draw_question_modal(
+                f,
+                &question_request,
+                0,
+                &[vec![1]],
+                &[String::new()],
+                1,
+                &mut 0,
+                &theme,
+            );
+            // Session context modal: every pane must render without panicking
+            // across (a) an unknown provider + empty snapshot, (b) a fully
+            // populated snapshot exercising the Skills / Permissions / Tools
+            // list panes and the MCP per-server tool names.
+            let snapshot = neenee_core::SessionContextSnapshot {
+                model: neenee_core::ModelInfo {
+                    provider: "gemini".to_string(),
+                    model: "gemini-2.5-flash".to_string(),
+                    display_name: "Gemini 2.5 Flash".to_string(),
+                    context_window: 1_000_000,
+                    api_key_ready: true,
+                    description: "Google Gemini 2.5 Flash".to_string(),
+                    capabilities: vec!["tool calling".to_string()],
+                },
+                tools: vec![neenee_core::ToolInfo {
+                    name: "bash".to_string(),
+                    description: "run a shell command".to_string(),
+                    enabled: true,
+                    source: "builtin".to_string(),
+                }],
+                permissions: vec![neenee_core::PermissionRuleInfo {
+                    tool: "bash".to_string(),
+                    scope: "*".to_string(),
+                }],
+                skills: vec![neenee_core::SkillInfo {
+                    name: "rust-expert".to_string(),
+                    description: "Rust help".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    enabled: true,
+                    source: "repo".to_string(),
+                    tags: vec!["rust".to_string()],
+                }],
+                mcp: vec![neenee_core::McpServerInfo {
+                    name: "fs".to_string(),
+                    connected: true,
+                    disabled: false,
+                    failure: None,
+                    tool_names: vec!["read_file".to_string(), "write_file".to_string()],
+                }],
+            };
+            let mut key_status = HashMap::new();
+            key_status.insert("gemini".to_string(), true);
+            for (tab, idx) in [
+                (crate::tui::SessionTab::Model, 0),
+                (crate::tui::SessionTab::Mcp, 0),
+                (crate::tui::SessionTab::Skills, 0),
+                (crate::tui::SessionTab::Permissions, 0),
+                (crate::tui::SessionTab::Tools, 0),
+            ] {
                 draw_session_modal(
                     f,
-                    crate::tui::SessionTab::Model,
+                    tab,
                     "custom-unknown",
                     "some-model",
                     &key_status,
                     &[],
-                    None,
-                    0,
+                    Some(&snapshot),
+                    idx,
                     &mut 0,
                     &theme,
                 );
-            })
-            .unwrap();
+            }
+            // And once with no snapshot, to cover the placeholder fallbacks.
+            draw_session_modal(
+                f,
+                crate::tui::SessionTab::Model,
+                "custom-unknown",
+                "some-model",
+                &key_status,
+                &[],
+                None,
+                0,
+                &mut 0,
+                &theme,
+            );
+        });
 
-        terminal
-            .draw(|f| {
-                let request = PermissionRequest {
-                    id: "p1".to_string(),
-                    tool: "bash".to_string(),
-                    label: "bash".to_string(),
-                    description: "run a command".to_string(),
-                    arguments: r#"{"command":"ls"}"#.to_string(),
-                    scope: "*".to_string(),
-                };
-                let rect = ratatui::layout::Rect::new(0, 0, 60, 3);
-                let _ = draw_permission_sheet(f, &request, 0, false, false, 0, rect, &theme);
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            let request = PermissionRequest {
+                id: "p1".to_string(),
+                tool: "bash".to_string(),
+                label: "bash".to_string(),
+                description: "run a command".to_string(),
+                arguments: r#"{"command":"ls"}"#.to_string(),
+                scope: "*".to_string(),
+            };
+            let rect = neenee_tui::Rect::new(0, 0, 60, 3);
+            let _ = draw_permission_sheet(f, &request, 0, false, false, 0, rect, &theme);
+        });
     }
 
     /// Render both the compact subagent step (root view) and the zoomed-in
     /// subagent view with its navigation bar, ensuring no layout panics.
     #[test]
     fn subagent_step_and_view_render_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 30);
 
         // Root view: a completed subagent task renders as a compact step.
         let mut task = TranscriptMessage::tool_step(
@@ -959,72 +942,68 @@ mod tests {
             task,
         ];
 
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                let _ = draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &root_messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "running subagent",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            let _ = draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &root_messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "running subagent",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
 
         // Zoomed-in subagent view: the task's children are the message stream
         // and the navigation bar is shown.
         let children = root_messages[1].subagent_children().unwrap().to_vec();
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                let _ = draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &children,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: Some(SubagentBarInfo {
-                            label: "explore the codebase".to_string(),
-                            index: 1,
-                            total: 1,
-                        }),
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            let _ = draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &children,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: Some(SubagentBarInfo {
+                        label: "explore the codebase".to_string(),
+                        index: 1,
+                        total: 1,
+                    }),
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
     }
 
     #[test]
@@ -1114,46 +1093,40 @@ mod tests {
     /// but grow to fit wrapped text when the input is long.
     #[test]
     fn input_box_grows_with_wrapped_content() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let messages: Vec<TranscriptMessage> = Vec::new();
 
         fn render_with(theme: &Theme, messages: &[TranscriptMessage], input: &str) -> Rect {
-            let backend = TestBackend::new(40, 24);
-            let mut terminal = Terminal::new(backend).unwrap();
+            let mut terminal = neenee_tui::TestTerminal::new(40, 24);
             let mut rect = Rect::default();
-            terminal
-                .draw(|f| {
-                    let mut layout_map = LayoutMap::new();
-                    let r = draw_transcript(
-                        f,
-                        &mut layout_map,
-                        TranscriptView {
-                            messages,
-                            scroll: 0,
-                            selection: &SelectionState::None,
-                            activity: "",
-                            spinner_phase: 0,
-                            input,
-                            byte_cursor: input.len(),
-                            chrome_hidden: false,
-                            subagent_bar: None,
-                            side_banner: None,
-                            pursuit: None,
-                            todos: None,
-                            review_alert: String::new(),
-                            turn_started_at: None,
-                            hovered_step: None,
-                            focused_target: None,
-                            logo: None,
-                            theme,
-                        },
-                    );
-                    rect = r.input_rect;
-                })
-                .unwrap();
+            terminal.draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                let r = draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages,
+                        scroll: 0,
+                        selection: &SelectionState::None,
+                        activity: "",
+                        spinner_phase: 0,
+                        input,
+                        byte_cursor: input.len(),
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
+                        review_alert: String::new(),
+                        turn_started_at: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        logo: None,
+                        theme,
+                    },
+                );
+                rect = r.input_rect;
+            });
             rect
         }
 
@@ -1181,31 +1154,25 @@ mod tests {
     /// `composer_wrapped`.
     #[test]
     fn draw_composer_records_region_for_empty_input() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(30, 5);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(30, 5);
         let mut layout_map = LayoutMap::new();
         let input_rect = Rect::new(0, 0, 30, 3);
-        terminal
-            .draw(|f| {
-                draw_composer(
-                    f,
-                    input_rect,
-                    "",
-                    0,
-                    true,
-                    true,
-                    &theme,
-                    &mut layout_map,
-                    true,
-                    &mut 0,
-                    &SelectionState::None,
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_composer(
+                f,
+                input_rect,
+                "",
+                0,
+                true,
+                true,
+                &theme,
+                &mut layout_map,
+                true,
+                &mut 0,
+                &SelectionState::None,
+            );
+        });
 
         // The empty text row sits one line below the box's top edge.
         let cursor = layout_map
@@ -1222,32 +1189,26 @@ mod tests {
     /// on the second wrapped line when the cursor sits past the first wrap.
     #[test]
     fn draw_composer_wraps_and_positions_caret() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(20, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(20, 12);
         // "aaaa bbbb cccc" wraps within the ~17-wide inner area; cursor at the
         // very end should be on a later line, not off the box.
         let input = "aaaa bbbb cccc dddd eeee";
-        terminal
-            .draw(|f| {
-                draw_composer(
-                    f,
-                    Rect::new(0, 0, 20, 8),
-                    input,
-                    input.len(),
-                    true,
-                    true,
-                    &theme,
-                    &mut LayoutMap::new(),
-                    true,
-                    &mut 0,
-                    &SelectionState::None,
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_composer(
+                f,
+                Rect::new(0, 0, 20, 8),
+                input,
+                input.len(),
+                true,
+                true,
+                &theme,
+                &mut LayoutMap::new(),
+                true,
+                &mut 0,
+                &SelectionState::None,
+            );
+        });
     }
 
     /// Sent user messages and the composer must render as solid panels whose
@@ -1256,16 +1217,12 @@ mod tests {
     /// drop the right-side padding again.
     #[test]
     fn user_message_and_composer_keep_symmetric_panel_padding() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let user_bg = theme.user_surface();
         let input_bg = theme.input_surface();
         let app_bg = theme.surface();
         let width = 60u16;
-        let backend = TestBackend::new(width, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(width, 24);
 
         // A long user message fills the first wrapped line edge to edge, so the
         // right-side padding is only present if the wrap width reserves it.
@@ -1275,64 +1232,62 @@ mod tests {
         )];
         let long_input = "y".repeat(200);
 
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                // draw_transcript only computes the input box geometry; the composer
-                // itself is drawn separately (as the live app does), using the
-                // returned input_rect.
-                let render = draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "",
-                        spinner_phase: 0,
-                        input: &long_input,
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                );
-                let mut input_scroll = 0;
-                draw_composer(
-                    f,
-                    render.input_rect,
-                    &long_input,
-                    0,
-                    true,
-                    true,
-                    &theme,
-                    &mut layout_map,
-                    false,
-                    &mut input_scroll,
-                    &SelectionState::None,
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            // draw_transcript only computes the input box geometry; the composer
+            // itself is drawn separately (as the live app does), using the
+            // returned input_rect.
+            let render = draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: &long_input,
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+            let mut input_scroll = 0;
+            draw_composer(
+                f,
+                render.input_rect,
+                &long_input,
+                0,
+                true,
+                true,
+                &theme,
+                &mut layout_map,
+                false,
+                &mut input_scroll,
+                &SelectionState::None,
+            );
+        });
 
-        let buffer = terminal.backend().buffer();
+        let buffer = terminal.buffer();
 
         // Find the first user-message text row: col 0,1 are the app_bg outer
         // gutter, col 2,3 are the left inner pad (user_panel_bg), col 4 starts
         // the text. Scan for the row whose col 4 is 'x' under user_panel_bg.
-        let user_row = (0..buffer.area.height)
+        let user_row = (0..buffer.area().height)
             .find(|&y| {
                 let c4 = &buffer[(4, y)];
                 c4.symbol() == "x" && c4.bg == user_bg
             })
-            .expect("a user message text row should be rendered");
+            .expect("user message row exists");
 
         // Left: 2-col app_bg outer gutter, then 2-col user_panel_bg inner pad.
         assert_eq!(buffer[(0, user_row)].bg, app_bg, "left outer gutter");
@@ -1364,12 +1319,12 @@ mod tests {
         // Composer: the input panel starts at x = FOOTER_H_INSET (2). `›` at
         // x=2, text from x=4, and a 2-col right pad in input_bg before the
         // app_bg gutter at the far right.
-        let composer_row = (0..buffer.area.height)
+        let composer_row = (0..buffer.area().height)
             .find(|&y| {
                 let c4 = &buffer[(4, y)];
                 c4.symbol() == "y" && c4.bg == input_bg
             })
-            .expect("a composer text row should be rendered");
+            .expect("composer row exists");
         assert_eq!(buffer[(2, composer_row)].symbol(), "›", "composer prompt");
         assert_eq!(
             buffer[(4, composer_row)].symbol(),
@@ -1406,58 +1361,52 @@ mod tests {
     /// can tell their message is pending, not delivered.
     #[test]
     fn queued_user_message_renders_badge_and_dimmer_bg() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let queued_bg = theme.user_surface_queued();
         let delivered_bg = theme.user_surface();
         let width = 40u16;
-        let backend = TestBackend::new(width, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(width, 12);
 
         let messages = vec![
             TranscriptMessage::new(neenee_core::Role::User, "first queued").queued(),
             TranscriptMessage::new(neenee_core::Role::User, "second queued").queued(),
         ];
 
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                let _ = draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            let _ = draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
 
-        let buffer = terminal.backend().buffer();
+        let buffer = terminal.buffer();
 
         // Both queued panels must carry the queued bg, never the delivered bg.
         // Scan the inner-pad columns (2,3) of every row for any cell painted
         // with the delivered bg — that would mean a queued message leaked the
         // wrong surface.
-        for y in 0..buffer.area.height {
+        for y in 0..buffer.area().height {
             for x in 2..4 {
                 let bg = buffer[(x, y)].bg;
                 assert_ne!(
@@ -1471,7 +1420,7 @@ mod tests {
         // Each queued user message renders one "⏸ Queued" badge row. Count
         // rows whose inner-padding cells carry the queued bg AND whose
         // first-content cell starts with the pause glyph.
-        let badge_count = (0..buffer.area.height)
+        let badge_count = (0..buffer.area().height)
             .filter(|&y| buffer[(2, y)].bg == queued_bg && buffer[(4, y)].symbol() == "⏸")
             .count();
         assert_eq!(
@@ -1488,13 +1437,9 @@ mod tests {
     /// extent of drawn content, including the inter-message gap row.
     #[test]
     fn transcript_content_rect_spans_band_and_gap_rows() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let width = 40u16;
-        let backend = TestBackend::new(width, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(width, 24);
         // Two assistant text messages so a `MESSAGE_GAP_ROWS` blank row is
         // emitted between them — that row is rendered but never registered.
         let messages = vec![
@@ -1502,34 +1447,32 @@ mod tests {
             TranscriptMessage::new(neenee_core::Role::Assistant, "second".to_string()),
         ];
         let mut layout_map = LayoutMap::new();
-        terminal
-            .draw(|f| {
-                draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            );
+        });
 
         let rect = layout_map
             .transcript_content_rect()
@@ -1667,9 +1610,6 @@ mod tests {
     /// only need to prove the renderer consumes each state without exploding.
     #[test]
     fn history_modal_renders_every_query_state() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let history = vec![
             "git status".to_string(),
@@ -1685,8 +1625,7 @@ mod tests {
         ];
 
         for (query, expected_matches) in cases {
-            let backend = TestBackend::new(80, 24);
-            let mut terminal = Terminal::new(backend).unwrap();
+            let mut terminal = neenee_tui::TestTerminal::new(80, 24);
             let mut ranked = crate::tui::fuzzy::rank(&history, query);
             crate::tui::fuzzy::sort_by_score(&mut ranked);
             assert_eq!(
@@ -1696,34 +1635,29 @@ mod tests {
                 query,
                 expected_matches
             );
-            terminal
-                .draw(|f| {
-                    draw_history_modal(
-                        f,
-                        &mut LayoutMap::new(),
-                        &history,
-                        query,
-                        query.chars().count(),
-                        &ranked,
-                        0,
-                        &theme,
-                    );
-                })
-                .expect("draw must not panic");
+            terminal.draw(|f| {
+                draw_history_modal(
+                    f,
+                    &mut LayoutMap::new(),
+                    &history,
+                    query,
+                    query.chars().count(),
+                    &ranked,
+                    0,
+                    &theme,
+                );
+            });
         }
 
         // Empty history must render the "(no history yet)" placeholder rather
         // than indexing into an empty slice.
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let empty: Vec<String> = Vec::new();
         let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> =
             crate::tui::fuzzy::rank(&empty, "");
-        terminal
-            .draw(|f| {
-                draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);
-            })
-            .expect("empty-history draw must not panic");
+        terminal.draw(|f| {
+            draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);
+        });
     }
 
     /// With no messages, `draw_transcript` renders the empty-state hero in
@@ -1731,44 +1665,38 @@ mod tests {
     /// not treat it as a zero-height stream) and the call does not panic.
     #[test]
     fn empty_session_renders_empty_state_with_nonzero_height() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let messages: Vec<TranscriptMessage> = Vec::new();
 
         let mut render_opt: Option<TranscriptRender> = None;
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                render_opt = Some(draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "idle",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                ));
-            })
-            .expect("empty-session draw must not panic");
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            render_opt = Some(draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "idle",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            ));
+        });
         let render = render_opt.expect("draw_transcript must return a render");
 
         // The empty-state hero replaces the transcript; it occupies the logo
@@ -1788,44 +1716,38 @@ mod tests {
     /// never competes with real content.
     #[test]
     fn nonempty_session_does_not_render_empty_state() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let messages = vec![TranscriptMessage::new(neenee_core::Role::User, "hello")];
 
         let mut render_opt: Option<TranscriptRender> = None;
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                render_opt = Some(draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "idle",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: None,
-                        theme: &theme,
-                    },
-                ));
-            })
-            .expect("non-empty draw must not panic");
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            render_opt = Some(draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "idle",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                },
+            ));
+        });
         let render = render_opt.expect("draw_transcript must return a render");
 
         // With a real message the stream is rendered normally — content_lines
@@ -1844,12 +1766,8 @@ mod tests {
     /// wordmark's height.
     #[test]
     fn empty_session_uses_user_logo_and_reports_its_height() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let messages: Vec<TranscriptMessage> = Vec::new();
         // Four lines → reported content is 4 + 2 (gap + tagline) = 6.
         let logo: Vec<String> = vec![
@@ -1863,35 +1781,33 @@ mod tests {
         .collect();
 
         let mut render_opt: Option<TranscriptRender> = None;
-        terminal
-            .draw(|f| {
-                let mut layout_map = LayoutMap::new();
-                render_opt = Some(draw_transcript(
-                    f,
-                    &mut layout_map,
-                    TranscriptView {
-                        messages: &messages,
-                        scroll: 0,
-                        selection: &SelectionState::None,
-                        activity: "idle",
-                        spinner_phase: 0,
-                        input: "",
-                        byte_cursor: 0,
-                        chrome_hidden: false,
-                        subagent_bar: None,
-                        side_banner: None,
-                        pursuit: None,
-                        todos: None,
-                        review_alert: String::new(),
-                        turn_started_at: None,
-                        hovered_step: None,
-                        focused_target: None,
-                        logo: Some(&logo),
-                        theme: &theme,
-                    },
-                ));
-            })
-            .expect("user-logo empty-state draw must not panic");
+        terminal.draw(|f| {
+            let mut layout_map = LayoutMap::new();
+            render_opt = Some(draw_transcript(
+                f,
+                &mut layout_map,
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    activity: "idle",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    subagent_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: Some(&logo),
+                    theme: &theme,
+                },
+            ));
+        });
         let render = render_opt.expect("draw_transcript must return a render");
 
         // 4 logo lines + 1 blank gap + 1 tagline = 6 content lines.

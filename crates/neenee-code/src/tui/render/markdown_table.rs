@@ -3,9 +3,8 @@
 //! to the allotted width, and produces the rendered border + data lines along
 //! with per-cell byte spans used by selection and click hit-testing.
 
-use ratatui::{
-    style::{Color, Style},
-    text::Span,
+use neenee_tui::{
+    Span, {Color, Style},
 };
 use unicode_width::UnicodeWidthStr;
 

@@ -2,9 +2,8 @@
 //! gutter rendering, and selection arithmetic shared by every renderer that
 //! lays out character-addressable content.
 
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
+use neenee_tui::{
+    {Color, Style}, {Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -202,7 +201,7 @@ pub(super) fn line_spans_rich(
 /// themselves render borderless with only the gutter as ornament.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn code_gutter_line(
-    left_bar: Option<Color>,
+    left_bar: Color,
     left_indent: usize,
     gutter: &str,
     gutter_gap: usize,
@@ -222,11 +221,8 @@ pub(super) fn code_gutter_line(
         Style::default().bg(code_bg),
     ));
 
-    if let Some(bar_color) = left_bar {
-        spans.push(Span::styled(
-            "┃",
-            Style::default().bg(code_bg).fg(bar_color),
-        ));
+    if left_bar != Color::Reset {
+        spans.push(Span::styled("┃", Style::default().bg(code_bg).fg(left_bar)));
         prefix += 1;
     }
 
@@ -398,10 +394,10 @@ mod tests {
     //! only the code run carries `code_bg`), and selection interaction.
 
     use super::line_spans_rich;
-    use ratatui::style::{Color, Style};
+    use neenee_tui::{Color, Style};
 
     /// Rebuild the rendered text from a line's spans, skipping the prefix.
-    fn rendered_content(line: &ratatui::text::Line<'_>) -> String {
+    fn rendered_content(line: &neenee_tui::Line<'_>) -> String {
         line.spans
             .iter()
             .skip(1)
@@ -456,10 +452,10 @@ mod tests {
         assert_eq!(content[1].content, "`foo`");
         assert_eq!(content[2].content, " now");
         // The code span carries the code background; the plain ones do not.
-        assert_eq!(content[0].style.bg, None);
-        assert_eq!(content[1].style.bg, Some(Color::Black));
-        assert_eq!(content[2].style.bg, None);
-        assert_eq!(content[1].style.fg, Some(Color::Green));
+        assert_eq!(content[0].style.bg, Color::Reset);
+        assert_eq!(content[1].style.bg, Color::Black);
+        assert_eq!(content[2].style.bg, Color::Reset);
+        assert_eq!(content[1].style.fg, Color::Green);
     }
 
     #[test]
@@ -480,9 +476,7 @@ mod tests {
             Color::Red,
         );
         let content: Vec<_> = line.spans.iter().skip(1).collect();
-        assert!(content
-            .iter()
-            .all(|s| s.style.bg == Some(Color::Red)));
+        assert!(content.iter().all(|s| s.style.bg == Color::Red));
         assert_eq!(rendered_content(&line), text);
     }
 

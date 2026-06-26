@@ -3,13 +3,7 @@
 //! and records semantic [`BlockRegion`]s / table cell hit boxes for selection
 //! and click hit-testing.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-};
+use neenee_tui::{Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::document::{Block, DeliveryStatus, TranscriptMessage};
@@ -589,7 +583,7 @@ pub(super) fn draw_message_body(
                         };
 
                         let line = code_gutter_line(
-                            None,
+                            Color::Reset,
                             left_indent,
                             &gutter,
                             gutter_gap,

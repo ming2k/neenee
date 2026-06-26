@@ -16,7 +16,7 @@ operation and exits neenee gracefully.
 Calling `abort` sends an `AgentRequest::Abort` to the harness, which:
 
 1. Cancels the in-flight turn — the same `CancellationToken` path as the user
-   pressing `Esc` or `Ctrl+C`. The turn executing the `abort` call is itself
+   pressing `Esc` twice. The turn executing the `abort` call is itself
    cancelled.
 2. Emits `AgentResponse::Exit`, so the TUI shuts down via the **graceful exit**
    path: the session is saved and `SessionEnd` hooks fire before the process

@@ -149,7 +149,8 @@ pub enum InputAction {
     ScrollBottom,
     /// Copy current selection.
     CopySelection,
-    /// Plain Ctrl+C: copy selection, interrupt, clear input, or arm quit.
+    /// Plain Ctrl+C: copy selection, clear input, or arm quit. It never
+    /// interrupts a running turn — only double-Esc does.
     CtrlC,
     /// Toggle expanded details for semantic tool steps.
     ToggleToolSteps,
@@ -504,7 +505,8 @@ pub fn process_event(
             {
                 return InputAction::CopySelection;
             }
-            // Plain Ctrl+C: semantic copy/interrupt/clear/quit, resolved by the app.
+            // Plain Ctrl+C: semantic copy/clear/quit, resolved by the app.
+            // It does not interrupt a running task — only double-Esc does.
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return InputAction::CtrlC;
             }

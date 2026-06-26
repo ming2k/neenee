@@ -20,8 +20,9 @@ use neenee_tools::mcp::load_mcp_tools;
 mod showcase;
 mod tui;
 
-
-pub(crate) use neenee_server::{agent_loop, agent_setup, hooks, mcp_catalog, pursuits, side, startup};
+pub(crate) use neenee_server::{
+    agent_loop, agent_setup, hooks, mcp_catalog, pursuits, side, startup,
+};
 
 /// This CLI's identity, handed to the engine as its opening system prompt.
 /// Lives here (not in `neenee-agent`) so the engine stays identity-agnostic
@@ -29,7 +30,6 @@ pub(crate) use neenee_server::{agent_loop, agent_setup, hooks, mcp_catalog, purs
 ///
 /// The identity constants + [`neenee_identity`] now live in `neenee-server`
 /// (the layer that constructs agents); this binary re-exports them.
-
 use neenee_server::{
     neenee_identity,
     startup::{BuiltinCmd, StartupMode, init_tracing, parse_args},

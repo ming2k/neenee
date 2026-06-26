@@ -7,12 +7,8 @@
 //! into view. State and color resolution live in [`super`] (re-exported from
 //! [`super::state`]).
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Color, Frame, Modifier, Paragraph, Rect, Style, {Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -292,7 +288,7 @@ fn draw_code_content(
             };
 
             let line = code_gutter_line(
-                None,
+                Color::Reset,
                 left_indent,
                 &gutter,
                 gutter_gap,

@@ -199,3 +199,33 @@ impl<W: io::Write> Terminal<W> {
         Ok(())
     }
 }
+
+/// A test terminal: owns a back grid the tests can render into and then
+/// inspect, without any real I/O. Mirrors the `Terminal<TestBackend>` pattern
+/// ratatui tests used. The grid is accessible via [`TestTerminal::buffer`].
+pub struct TestTerminal {
+    back: Grid,
+}
+
+impl TestTerminal {
+    /// Create a test terminal with a grid of the given dimensions.
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
+            back: Grid::new(width, height),
+        }
+    }
+
+    /// Run a draw closure against a frame over the back grid.
+    pub fn draw<F>(&mut self, render: F)
+    where
+        F: FnOnce(&mut Frame<'_>),
+    {
+        let mut frame = Frame::new(&mut self.back);
+        render(&mut frame);
+    }
+
+    /// Read the rendered grid (the "buffer" the tests inspect).
+    pub fn buffer(&self) -> &Grid {
+        &self.back
+    }
+}

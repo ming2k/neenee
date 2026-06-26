@@ -5,7 +5,7 @@
 //! state types and the accent/weight resolution so they can be unit-tested in
 //! isolation from rendering.
 
-use ratatui::style::Color;
+use neenee_tui::Color;
 
 use super::Theme;
 

@@ -90,7 +90,7 @@ pub fn run() -> io::Result<()> {
                 // rect, mirroring how the real app positions it.
                 let h = (f.area().height as usize / 2).max(6) as u16;
                 let y = f.area().height.saturating_sub(h);
-                let rect = ratatui::layout::Rect::new(f.area().x, y, f.area().width, h);
+                let rect = neenee_tui::Rect::new(f.area().x, y, f.area().width, h);
                 let clamped = draw_permission_sheet(
                     f,
                     &s.fx[s.idx],

@@ -333,11 +333,9 @@ pub struct TuiClipboard;
 #[async_trait::async_trait]
 impl neenee_server::UiBridge for TuiClipboard {
     async fn copy_to_clipboard(&self, text: &str) -> Result<neenee_server::CopyOutcome, String> {
-        copy(text)
-            .await
-            .map(|outcome| match outcome {
-                CopyOutcome::Native => neenee_server::CopyOutcome::Native,
-                CopyOutcome::Osc52 => neenee_server::CopyOutcome::Osc52,
-            })
+        copy(text).await.map(|outcome| match outcome {
+            CopyOutcome::Native => neenee_server::CopyOutcome::Native,
+            CopyOutcome::Osc52 => neenee_server::CopyOutcome::Osc52,
+        })
     }
 }

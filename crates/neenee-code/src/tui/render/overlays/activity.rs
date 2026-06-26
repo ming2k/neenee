@@ -3,11 +3,8 @@
 //! Each section is opened independently by clicking the corresponding segment
 //! on the activity bar — there is no tab strip or Left/Right cycling.
 
-use ratatui::{
-    Frame,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Frame, Paragraph, {Line, Span}, {Modifier, Style},
 };
 
 use super::common::todo_status_glyph_color;
@@ -126,7 +123,7 @@ pub fn draw_activity_modal(
                         .add_modifier(Modifier::BOLD),
                 )]));
                 // The body wraps long lines (render_body wrap=true), so the
-                // raw prompt is pushed as a single 2-indent line and ratatui
+                // raw prompt is pushed as a single 2-indent line and neenee-tui
                 // breaks it at the body width.
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),

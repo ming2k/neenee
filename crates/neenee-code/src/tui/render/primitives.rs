@@ -3,12 +3,9 @@
 //! modules do not need to depend on each other for these primitives.
 
 use crate::tui::app::Recess;
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Style},
-    text::Line,
-    widgets::{Block as RtBlock, Clear, Paragraph},
+use neenee_tui::{
+    Constraint, Direction, Frame, Layout, Line, Margin, Rect, {Block as RtBlock, Clear, Paragraph},
+    {Color, Style},
 };
 
 use super::Theme;
@@ -23,7 +20,7 @@ pub(super) const VIEWPORT_V_MARGIN: u16 = 1;
 /// and bottom). The full `frame.size()` is only used to paint the app
 /// background and the modal backdrop.
 pub(super) fn viewport_rect(frame: &Frame) -> Rect {
-    frame.area().inner(ratatui::layout::Margin {
+    frame.area().inner(neenee_tui::Margin {
         horizontal: VIEWPORT_H_MARGIN,
         vertical: VIEWPORT_V_MARGIN,
     })
@@ -95,6 +92,8 @@ fn dim_surface(frame: &mut Frame, factor: f32) {
     for cell in buffer.content.iter_mut() {
         cell.fg = scale_color(cell.fg, factor);
         cell.bg = scale_color(cell.bg, factor);
+        cell.style.fg = cell.fg;
+        cell.style.bg = cell.bg;
     }
 }
 
@@ -114,8 +113,8 @@ fn scale_color(color: Color, factor: f32) -> Color {
 /// A borderless panel with a single thick colored left bar (opencode-style).
 pub(super) fn panel_block(bar_color: Color, bg: Color) -> RtBlock<'static> {
     RtBlock::default()
-        .borders(ratatui::widgets::Borders::LEFT)
-        .border_type(ratatui::widgets::BorderType::Thick)
+        .borders(neenee_tui::Borders::LEFT)
+        .border_type(neenee_tui::BorderType::Thick)
         .border_style(Style::default().fg(bar_color))
         .style(Style::default().bg(bg))
 }
@@ -215,9 +214,9 @@ pub(super) fn render_body(
         }
     }
 
-    let mut para = Paragraph::new(lines).scroll((*scroll as u16, 0));
+    let mut para = Paragraph::new(lines).scroll(*scroll as u16, 0);
     if wrap {
-        para = para.wrap(ratatui::widgets::Wrap { trim: false });
+        para = para.wrap(neenee_tui::Wrap { trim: false });
     }
     frame.render_widget(para, body_rect);
 
@@ -251,7 +250,7 @@ fn draw_scrollbar(frame: &mut Frame, body: Rect, scroll: usize, max_scroll: usiz
     // within `body`, which is inside the buffer, so direct content indexing
     // is safe.
     let buf = frame.buffer_mut();
-    let buf_area = buf.area;
+    let buf_area = buf.area();
     if more_above {
         let cell = cell_at_index(buf, buf_area, track_x, track_top);
         cell.set_symbol("▲");
@@ -289,14 +288,15 @@ fn draw_scrollbar(frame: &mut Frame, body: Rect, scroll: usize, max_scroll: usiz
 /// The caller guarantees the coordinate lies inside `area`.
 #[allow(deprecated)]
 fn cell_at_index<'a>(
-    buf: &'a mut ratatui::buffer::Buffer,
+    buf: &'a mut neenee_tui::Grid,
     area: Rect,
     x: u16,
     y: u16,
-) -> &'a mut ratatui::buffer::Cell {
+) -> &'a mut neenee_tui::Cell {
     let idx = (y as usize - area.y as usize) * area.width as usize + (x as usize - area.x as usize);
     let cell = &mut buf.content[idx];
     cell.set_skip(false);
+    let _ = cell;
     cell
 }
 

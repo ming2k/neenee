@@ -1,8 +1,7 @@
 //! Shared helpers used across multiple overlay renderers.
 
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
+use neenee_tui::{
+    {Color, Style}, {Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
 

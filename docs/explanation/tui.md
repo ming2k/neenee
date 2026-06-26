@@ -24,7 +24,7 @@ model used by editors and multiplexers:
 | Input | Kernel line editing, `readline` | Raw bytes read directly, edited in-process |
 | Output | Append characters, scroll up | Repaint the whole frame each tick |
 | Selection | Grid characters, lost on scroll | Semantic document ranges, stable across redraws |
-| `Ctrl+C` | `SIGINT` | Context action: copy → interrupt → close modal → clear → quit |
+| `Ctrl+C` | `SIGINT` | Context action: copy → close modal → clear → quit (never interrupts; use `Esc`) |
 
 Every capability below follows from that shift.
 

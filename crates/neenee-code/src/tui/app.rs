@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tokio::sync::{Mutex as AsyncMutex, mpsc, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use neenee_core::{
     AgentRequest, AgentResponse, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
@@ -253,15 +253,15 @@ pub struct App {
     /// Expanded step pinned under the HUD bar (its message index + screen rect),
     /// when its body is scrolled into view. Clicks inside the rect collapse it.
     pub sticky_step: Option<usize>,
-    pub sticky_rect: Option<ratatui::layout::Rect>,
+    pub sticky_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the activity bar for the current frame, so clicks inside
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
     /// streaming, subagent view, or chrome hidden).
-    pub activity_rect: Option<ratatui::layout::Rect>,
+    pub activity_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
     /// when no todos are shown (empty task list or bar hidden).
-    pub todos_rect: Option<ratatui::layout::Rect>,
+    pub todos_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the currently-open dismissable overlay modal (the
     /// centered panel, not the full-screen backdrop), so a click that lands
     /// outside it closes the modal — mirroring Esc. Written each render via
@@ -269,7 +269,7 @@ pub struct App {
     /// when the modal paints no full backdrop (Permission), or when it borrows
     /// the composer input and therefore must close through its own restore
     /// path (Provider / ModelEditor / HistorySearch).
-    pub modal_rect: Option<ratatui::layout::Rect>,
+    pub modal_rect: Option<neenee_tui::Rect>,
     /// Content-line index of the sticky step's real summary. Used to re-anchor
     /// the scroll offset when the user collapses the pinned step so the summary
     /// lands at the top of the viewport instead of jumping to unrelated content.

@@ -13,10 +13,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use neenee_tui::{Backend, Frame, Terminal};
 
-pub type Term = Terminal<CrosstermBackend<Stdout>>;
+pub type Term = Terminal<Stdout>;
 
 /// Set up a raw-mode alternate screen and return a ready terminal. Stripped
 /// down from the real app's lifecycle (no mouse capture / bracketed paste /
@@ -26,14 +25,14 @@ pub fn setup_terminal() -> io::Result<Term> {
     let mut stdout = io::stdout();
     queue!(stdout, EnterAlternateScreen)?;
     stdout.flush()?;
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
+    let backend = Backend::new(stdout);
+    Ok(Terminal::new(backend))
 }
 
 /// Restore the terminal (disable raw mode, leave alternate screen, show cursor).
 pub fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.writer(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -64,7 +63,7 @@ pub enum ShowAction {
 /// holding its mutable bits.
 pub fn run_showcase<S, R, H>(state: &mut S, mut render: R, mut on_key: H) -> io::Result<()>
 where
-    R: FnMut(&mut ratatui::Frame, &S),
+    R: FnMut(&mut Frame, &S),
     H: FnMut(&mut S, ShowKey) -> ShowAction,
 {
     let mut terminal = setup_terminal()?;
@@ -108,18 +107,18 @@ where
 /// (top), the modal body (flex), and a hint footer (bottom). Showcases call
 /// this so they all share the same framing — only the inner renderer differs.
 pub fn draw_with_chrome<F>(
-    f: &mut ratatui::Frame,
+    f: &mut Frame,
     title: &str,
     hint: &str,
     theme: &crate::tui::render::Theme,
     draw_modal: F,
 ) where
-    F: FnOnce(&mut ratatui::Frame),
+    F: FnOnce(&mut Frame),
 {
-    use ratatui::layout::{Constraint, Direction, Layout};
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Paragraph};
+    use neenee_tui::{Block, Borders, Paragraph};
+    use neenee_tui::{Constraint, Direction, Layout};
+    use neenee_tui::{Line, Span};
+    use neenee_tui::{Modifier, Style};
 
     let area = f.area();
     let chunks = Layout::default()

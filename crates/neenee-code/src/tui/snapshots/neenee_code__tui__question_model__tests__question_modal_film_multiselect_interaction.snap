@@ -11,18 +11,19 @@ expression: film
 
           Question
 
-           Which features?
+          Which features?
+
+            [ ] a
+            [ ] b
+            [ ] c
+            [ ] Other
 
 
-          ❯ 1. [ ] a
 
-            2. [ ] b
 
-            3. [ ] c
 
-            4. [ ] Other
 
-          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
 
 === down → highlight 'b' ===
 
@@ -33,18 +34,19 @@ expression: film
 
           Question
 
-           Which features?
+          Which features?
+
+            [ ] a
+            [ ] b
+            [ ] c
+            [ ] Other
 
 
-            1. [ ] a
 
-          ❯ 2. [ ] b
 
-            3. [ ] c
 
-            4. [ ] Other
 
-          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
 
 === space → toggle 'b' selected ===
 
@@ -55,18 +57,19 @@ expression: film
 
           Question
 
-           Which features?
+          Which features?
+
+            [ ] a
+            [x] b
+            [ ] c
+            [ ] Other
 
 
-            1. [ ] a
 
-          ❯ 2. [x] b
 
-            3. [ ] c
 
-            4. [ ] Other
 
-          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
 
 === '1' → select 'a' ===
 
@@ -77,18 +80,19 @@ expression: film
 
           Question
 
-           Which features?
+          Which features?
+
+            [x] a
+            [x] b
+            [ ] c
+            [ ] Other
 
 
-          ❯ 1. [x] a
 
-            2. [x] b
 
-            3. [ ] c
 
-            4. [ ] Other
 
-          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can
 
 === '4' + 'custom' → focus 'Other', type ===
 
@@ -99,15 +103,16 @@ expression: film
 
           Question
 
-           Which features?
+          Which features?
+
+            [x] a
+            [x] b
+            [ ] c
+            [x] Other
+               cust█
 
 
-            1. [x] a
 
-            2. [x] b
 
-            3. [ ] c
 
-          ❯ 4. [x] Other
-
-          ↑↓ navigate · Space toggle · 1-9 jump · Enter submit
+          ↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc can

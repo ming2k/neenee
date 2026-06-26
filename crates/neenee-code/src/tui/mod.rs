@@ -1,4 +1,4 @@
-//! Terminal UI frontend: a ratatui + crossterm app split into application
+//! Terminal UI frontend: an in-house grid engine + crossterm app split into application
 //! state ([`app`]), input mapping ([`input`]), the event/render loop
 //! ([`event_loop`]), the semantic document model ([`document`]), and the
 //! rendering engine ([`render`], with its `step`/`overlays`/`tools`
@@ -22,7 +22,6 @@ pub mod selection;
 pub mod step_interaction;
 mod terminal;
 mod transcript;
-mod wide_heal_backend;
 
 pub(crate) use app::{ActivityTab, App, Modal, Recess, SessionTab};
 pub(crate) use completion::{Completion, CompletionKind};
@@ -43,7 +42,7 @@ use neenee_core::{
     ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
     TodoStatus, TurnEvent, UserQuestionRequest, mcp::McpConnectionStatus,
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use neenee_tui::{Backend, Terminal};
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -88,13 +87,13 @@ pub async fn run_tui(
         EnableBracketedPaste,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    // Wrap the crossterm backend so wide-character (CJK) trailing cells are
-    // healed: changed rows are re-emitted in full, keeping the glyph background
-    // spillover fresh so tmux can't leave gray "ghost" blocks. See
-    // `wide_heal_backend`.
-    let backend = wide_heal_backend::WideHealBackend::new(CrosstermBackend::new(stdout));
-    let mut terminal = Terminal::new(backend)?;
-    terminal.show_cursor()?;
+    // The neenee-tui engine owns its grid + diff + crossterm I/O directly. No
+    // No ratatui, no WideHealBackend wrapper — the engine's retained grid writes
+    // wide-glyph trailing cells with the glyph's own background at write time,
+    // so ghost cells cannot occur regardless of terminal or multiplexer
+    // (ADR-0038).
+    let backend = Backend::new(stdout);
+    let mut terminal = Terminal::new(backend);
     // Install the signal guard after the terminal enters raw mode + alt screen
     // so any later SIGTERM/SIGINT/SIGHUP restores it instead of stranding it.
     terminal::spawn_signal_guard();
@@ -911,7 +910,7 @@ pub async fn run_tui(
     // Restore terminal
     disable_raw_mode()?;
     execute!(
-        terminal.backend_mut(),
+        terminal.writer(),
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture

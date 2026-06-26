@@ -29,6 +29,20 @@ pub enum Color {
     Reset,
     Rgb(u8, u8, u8),
     Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
     White,
 }
 
@@ -62,13 +76,26 @@ impl Color {
     /// to their conventional approximate RGB so the recede/contrast heuristic
     /// still works for any stray named color.
     pub fn luminance(self) -> f32 {
-        let (r, g, b) = match self {
-            Color::Rgb(r, g, b) => (r, g, b),
-            Color::Black => (0, 0, 0),
-            Color::White => (255, 255, 255),
-            Color::Reset => (0, 0, 0),
-        };
+        let (r, g, b) = self.to_rgb_approx();
         0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+    }
+
+    /// Approximate RGB triple for any color variant. Named colors use the
+    /// xterm-256 defaults so contrast/dim heuristics work on them too.
+    fn to_rgb_approx(self) -> (u8, u8, u8) {
+        match self {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Reset | Color::Black => (0, 0, 0),
+            Color::Red | Color::LightRed => (224, 108, 117),
+            Color::Green | Color::LightGreen => (127, 216, 143),
+            Color::Yellow | Color::LightYellow => (229, 192, 123),
+            Color::Blue | Color::LightBlue => (137, 180, 250),
+            Color::Magenta | Color::LightMagenta => (203, 166, 247),
+            Color::Cyan | Color::LightCyan => (86, 182, 194),
+            Color::Gray => (128, 128, 128),
+            Color::DarkGray => (64, 64, 64),
+            Color::White => (255, 255, 255),
+        }
     }
 
     /// Black on light fills, white on dark fills.
@@ -88,6 +115,7 @@ impl fmt::Display for Color {
             Color::Rgb(r, g, b) => write!(f, "#{r:02X}{g:02X}{b:02X}"),
             Color::Black => f.write_str("#000"),
             Color::White => f.write_str("#FFF"),
+            other => write!(f, "{:?}", other),
         }
     }
 }
@@ -104,11 +132,13 @@ bitflags::bitflags! {
     /// `|` and a diff can test "which bits changed" with `^`.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
     pub struct Modifier: u16 {
-        const BOLD      = 1 << 0;
-        const DIM       = 1 << 1;
-        const ITALIC    = 1 << 2;
-        const UNDERLINE = 1 << 3;
-        const REVERSE   = 1 << 4;
+        const BOLD          = 1 << 0;
+        const DIM           = 1 << 1;
+        const ITALIC        = 1 << 2;
+        const UNDERLINE     = 1 << 3;
+        /// Alias matching ratatui's naming, so migrated code reads identically.
+        const UNDERLINED    = Self::UNDERLINE.bits();
+        const REVERSE       = 1 << 4;
         const STRIKETHROUGH = 1 << 5;
     }
 }
@@ -132,12 +162,19 @@ impl Style {
     pub fn bg(self, bg: Color) -> Self {
         Self { bg, ..self }
     }
-    /// Add attributes.
-    pub fn with_add(self, add: Modifier) -> Self {
+    /// Add attributes. Named `add_modifier` to match ratatui's API so
+    /// migrated code is a pure import-path swap.
+    pub fn add_modifier(self, add: Modifier) -> Self {
         Self {
             add: self.add | add,
             ..self
         }
+    }
+    /// Deprecated alias retained for any in-tree caller; prefer
+    /// [`Style::add_modifier`].
+    #[deprecated(note = "use add_modifier")]
+    pub fn with_add(self, add: Modifier) -> Self {
+        self.add_modifier(add)
     }
 
     /// The default "nothing rendered" style: default fg, default bg, no attrs.
@@ -172,6 +209,10 @@ pub struct Cell {
     pub symbol: String,
     pub width: u8,
     pub style: Style,
+    /// Foreground color (mirrors `style.fg` for ratatui `cell.fg` compatibility).
+    pub fg: Color,
+    /// Background color (mirrors `style.bg` for ratatui `cell.bg` compatibility).
+    pub bg: Color,
 }
 
 impl Cell {
@@ -182,6 +223,8 @@ impl Cell {
             symbol: " ".to_string(),
             width: 1,
             style: Style::RESET,
+            fg: Color::Reset,
+            bg: Color::Reset,
         }
     }
 
@@ -191,6 +234,8 @@ impl Cell {
         Cell {
             symbol: " ".to_string(),
             width: 1,
+            fg: style.fg,
+            bg: style.bg,
             style,
         }
     }
@@ -200,11 +245,10 @@ impl Cell {
     /// background so the column can never ghost.
     pub fn wide_continuation(head_style: Style) -> Self {
         Cell {
-            // Empty symbol: the backend skips emitting this cell directly;
-            // its background is carried implicitly by the head glyph's SGR.
-            // Kept as a single-space so a naive string dump still lines up.
             symbol: " ".to_string(),
             width: 0,
+            fg: Color::Reset,
+            bg: head_style.bg,
             style: Style {
                 bg: head_style.bg,
                 ..Style::RESET
@@ -217,6 +261,8 @@ impl Cell {
         Cell {
             symbol: symbol.into(),
             width: 1,
+            fg: style.fg,
+            bg: style.bg,
             style,
         }
     }
@@ -224,6 +270,57 @@ impl Cell {
     /// Whether this cell is the trailing half of a wide glyph.
     pub fn is_wide_continuation(&self) -> bool {
         self.width == 0
+    }
+
+    // --- ratatui-compatible mutation API (used by the primitives layer for
+    //     in-place scrollbar / dim edits). ---
+
+    /// Set the symbol, recomputing its display width.
+    pub fn set_symbol(&mut self, symbol: &str) {
+        self.symbol.clear();
+        self.symbol.push_str(symbol);
+        self.width = crate::text::grapheme_width(symbol);
+    }
+
+    /// Override the foreground.
+    pub fn set_fg(&mut self, fg: Color) {
+        self.style.fg = fg;
+        self.fg = fg;
+    }
+
+    /// Override the background.
+    pub fn set_bg(&mut self, bg: Color) {
+        self.style.bg = bg;
+        self.bg = bg;
+    }
+
+    /// The current symbol (ratatui-compat accessor).
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    /// Foreground color accessor.
+    pub fn fg(&self) -> Color {
+        self.style.fg
+    }
+
+    /// Background color accessor.
+    pub fn bg(&self) -> Color {
+        self.style.bg
+    }
+
+    /// No-op in this engine (wide-glyph handling is at the grid level, not via
+    /// per-cell skip flags). Exists for ratatui API compatibility.
+    pub fn set_skip(&mut self, _skip: bool) {}
+
+    /// Return this cell's style (ratatui-compat method).
+    pub fn style(&self) -> Style {
+        self.style
+    }
+
+    /// Reset to a blank default cell (ratatui-compat).
+    pub fn reset(&mut self) {
+        *self = Cell::blank();
     }
 }
 

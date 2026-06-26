@@ -63,9 +63,22 @@ pub enum Fit {
 /// (`dirty_col`, `dirty_row_lo`, `dirty_row_hi`) is updated on every mutating
 /// call so [`Grid::diff`] only walks the region that actually changed.
 pub struct Grid {
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) cells: Vec<Cell>,
+    pub width: u16,
+    pub height: u16,
+    /// The cell array, row-major. Public so the primitives layer (scrollbar,
+    /// dim-recess) can index it directly the way it indexed ratatui's
+    /// `Buffer::content`. Writes here bypass dirty tracking — callers that
+    /// mutate in place must call [`Grid::mark`] for the touched content, or
+    /// [`Grid::mark_all_dirty`] for a wholesale edit.
+    pub content: Vec<Cell>,
+    /// Alias for [`Grid::cells`] matching ratatui's `Buffer::content` naming,
+    /// so migrated code that reads `buf.content[idx]` works without changes.
+    /// This is a method returning a slice because a field alias would require
+    /// duplicating the storage; callers should use `.cells` directly in new
+    /// code.
+    // Note: we can't have both `cells` field and `content` field. Callers
+    // that used `buf.content` need to use `buf.cells` instead. The migration
+    // script handles this rename.
     /// Leftmost changed column on each row since the last flush, or `None`
     /// when the row is clean. Mirrors vim's per-line `dirty_col`.
     pub(crate) dirty_col: Vec<Option<u16>>,
@@ -79,11 +92,11 @@ impl Grid {
     /// Create a blank grid of the given size, filled with default cells and
     /// fully clean (nothing dirty). This is the back-grid starting state.
     pub fn new(width: u16, height: u16) -> Self {
-        let cells = vec![Cell::blank(); (width as usize) * (height as usize)];
+        let content = vec![Cell::blank(); (width as usize) * (height as usize)];
         Self {
             width,
             height,
-            cells,
+            content,
             dirty_col: vec![None; height as usize],
             dirty_row_lo: None,
             dirty_row_hi: None,
@@ -105,9 +118,9 @@ impl Grid {
             let src = y as usize * self.width as usize;
             let dst = y as usize * width as usize;
             next[dst..dst + copy_w as usize]
-                .clone_from_slice(&self.cells[src..src + copy_w as usize]);
+                .clone_from_slice(&self.content[src..src + copy_w as usize]);
         }
-        self.cells = next;
+        self.content = next;
         self.width = width;
         self.height = height;
         self.dirty_col = vec![None; height as usize];
@@ -130,7 +143,7 @@ impl Grid {
         if x >= self.width || y >= self.height {
             return None;
         }
-        self.cells.get(self.index_of(x, y))
+        self.content.get(self.index_of(x, y))
     }
 
     /// Mutably access a cell without marking it dirty. Use when the caller
@@ -141,7 +154,7 @@ impl Grid {
             return None;
         }
         let idx = self.index_of(x, y);
-        self.cells.get_mut(idx)
+        self.content.get_mut(idx)
     }
 
     /// Write a cell at `(x, y)`, marking that row dirty from column `x`.
@@ -152,7 +165,7 @@ impl Grid {
             return;
         }
         let idx = self.index_of(x, y);
-        self.cells[idx] = cell;
+        self.content[idx] = cell;
         self.mark(x, y);
     }
 
@@ -202,16 +215,18 @@ impl Grid {
             let head = Cell {
                 symbol: grapheme.to_string(),
                 width: w,
+                fg: style.fg,
+                bg: style.bg,
                 style,
             };
             let head_idx = self.index_of(cx, cy);
-            self.cells[head_idx] = head;
+            self.content[head_idx] = head;
             self.mark(cx, cy);
             // Place the trailing continuation cell for a wide glyph, carrying
             // the glyph's background so the column can never ghost.
             if w >= 2 && cx + 1 < self.width {
                 let trail_idx = self.index_of(cx + 1, cy);
-                self.cells[trail_idx] = Cell::wide_continuation(style);
+                self.content[trail_idx] = Cell::wide_continuation(style);
                 self.mark(cx + 1, cy);
             }
             cx += w as u16;
@@ -227,7 +242,7 @@ impl Grid {
         for row in y..y.saturating_add(h).min(self.height) {
             for col in x..x.saturating_add(w).min(self.width) {
                 let idx = self.index_of(col, row);
-                self.cells[idx] = blank.clone();
+                self.content[idx] = blank.clone();
             }
             self.mark(x, row);
         }
@@ -242,7 +257,7 @@ impl Grid {
         let blank = Cell::blank_styled(style);
         let start = self.index_of(x.min(self.width.saturating_sub(1)), y);
         let end = self.index_of(self.width, y);
-        for cell in &mut self.cells[start..end] {
+        for cell in &mut self.content[start..end] {
             *cell = blank.clone();
         }
         self.mark(x, y);
@@ -291,14 +306,22 @@ impl Grid {
     /// Row-major index for `(x, y)`. Caller guarantees in-bounds. Does not
     /// borrow `self` so it can be used within a mutable borrow of `cells`.
     #[inline]
-    fn index_of(&self, x: u16, y: u16) -> usize {
+    pub fn index_of(&self, x: u16, y: u16) -> usize {
         y as usize * self.width as usize + x as usize
     }
 
+    /// The grid's bounding rect (origin 0,0). Convenience for renderers that
+    /// ask `buf.area`.
+    pub fn area(&self) -> crate::layout::Rect {
+        crate::layout::Rect::new(0, 0, self.width, self.height)
+    }
+
     /// Record that column `x` on row `y` changed, expanding the row's dirty
-    /// window leftward and extending the dirty row range.
+    /// window leftward and extending the dirty row range. Public so callers
+    /// that mutate [`Grid::cells`] in place (scrollbar, dim) can keep the
+    /// dirty tracking honest.
     #[inline]
-    fn mark(&mut self, x: u16, y: u16) {
+    pub fn mark(&mut self, x: u16, y: u16) {
         let slot = &mut self.dirty_col[y as usize];
         match *slot {
             Some(lo) => *slot = Some(lo.min(x)),
@@ -306,6 +329,33 @@ impl Grid {
         }
         self.dirty_row_lo = Some(self.dirty_row_lo.map(|lo| lo.min(y)).unwrap_or(y));
         self.dirty_row_hi = Some(self.dirty_row_hi.map(|hi| hi.max(y)).unwrap_or(y));
+    }
+}
+
+impl std::ops::Index<(u16, u16)> for Grid {
+    type Output = Cell;
+    fn index(&self, (x, y): (u16, u16)) -> &Cell {
+        &self.content[y as usize * self.width as usize + x as usize]
+    }
+}
+
+impl std::ops::IndexMut<(u16, u16)> for Grid {
+    fn index_mut(&mut self, (x, y): (u16, u16)) -> &mut Cell {
+        let idx = y as usize * self.width as usize + x as usize;
+        &mut self.content[idx]
+    }
+}
+
+impl std::ops::Index<usize> for Grid {
+    type Output = Cell;
+    fn index(&self, idx: usize) -> &Cell {
+        &self.content[idx]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Grid {
+    fn index_mut(&mut self, idx: usize) -> &mut Cell {
+        &mut self.content[idx]
     }
 }
 

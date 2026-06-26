@@ -5,12 +5,8 @@
 //! modal (pursuit + plan + live activity), replacing the old always-pinned pursuit
 //! bar and task panel.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block as RtBlock, Clear, Paragraph},
+use neenee_tui::{
+    Block as RtBlock, Clear, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style,
 };
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
@@ -632,65 +628,54 @@ mod tests {
     /// below the input without panicking.
     #[test]
     fn hint_bar_renders_model_and_context() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
-        let backend = TestBackend::new(80, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 3);
         let messages = vec![TranscriptMessage::new(neenee_core::Role::User, "hi")];
-        terminal
-            .draw(|f| {
-                draw_hint_bar(
-                    f,
-                    Rect::new(0, 2, 80, 1),
-                    HintBarView {
-                        current_provider: "mock",
-                        current_model: "mock-model",
-                        messages: &messages,
-                        focus_zone: crate::tui::input::FocusZone::Compose,
-                        shell_active: false,
-                        auto_approve: false,
-                    },
-                    &theme,
-                );
-            })
-            .unwrap();
+        terminal.draw(|f| {
+            draw_hint_bar(
+                f,
+                Rect::new(0, 2, 80, 1),
+                HintBarView {
+                    current_provider: "mock",
+                    current_model: "mock-model",
+                    messages: &messages,
+                    focus_zone: crate::tui::input::FocusZone::Compose,
+                    shell_active: false,
+                    auto_approve: false,
+                },
+                &theme,
+            );
+        });
     }
 
     #[test]
     fn hint_bar_pill_reflects_focus_zone_and_shell_active() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let messages: Vec<TranscriptMessage> = vec![];
         // Helper that draws the bar with a given (focus_zone, shell_active)
         // pair and returns the pill text — i.e. the bracketed label in the
         // top-left of the rendered buffer.
         fn pill_text(
-            terminal: &mut Terminal<ratatui::backend::TestBackend>,
+            terminal: &mut neenee_tui::TestTerminal,
             focus_zone: crate::tui::input::FocusZone,
             shell_active: bool,
         ) -> String {
             let mut captured = String::new();
-            terminal
-                .draw(|f| {
-                    let view = HintBarView {
-                        current_provider: "",
-                        current_model: "",
-                        messages: &Vec::<TranscriptMessage>::new(),
-                        focus_zone,
-                        shell_active,
-                        auto_approve: false,
-                    };
-                    draw_hint_bar(f, Rect::new(0, 0, 80, 1), view, &Theme::default());
-                })
-                .unwrap();
+            terminal.draw(|f| {
+                let view = HintBarView {
+                    current_provider: "",
+                    current_model: "",
+                    messages: &Vec::<TranscriptMessage>::new(),
+                    focus_zone,
+                    shell_active,
+                    auto_approve: false,
+                };
+                draw_hint_bar(f, Rect::new(0, 0, 80, 1), view, &Theme::default());
+            });
             // The pill starts at column 0: `[ LABEL ]`. Walk the row and
             // collect the bracketed region verbatim.
-            let buf = terminal.backend().buffer();
-            let bw = buf.area.width as usize;
+            let buf = terminal.buffer();
+            let bw = buf.area().width as usize;
             for x in 0..bw {
                 let cell = &buf.content[x];
                 captured.push_str(cell.symbol());
@@ -703,8 +688,7 @@ mod tests {
             trimmed[..end].trim().to_string()
         }
 
-        let backend = TestBackend::new(80, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 1);
         let _ = &messages;
 
         // Compose zone, no `!` typed → COMPOSE.

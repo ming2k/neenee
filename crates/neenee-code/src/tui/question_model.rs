@@ -878,28 +878,24 @@ mod tests {
     /// stays compact and diffable.
     fn render_question_grid(model: &QuestionModel, width: u16, height: u16) -> String {
         use crate::tui::render::{Theme, draw_question_modal};
-        use ratatui::{Terminal, backend::TestBackend};
 
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("test backend");
-        terminal
-            .draw(|f| {
-                let mut scroll = 0;
-                draw_question_modal(
-                    f,
-                    model.request(),
-                    model.current(),
-                    model.selected(),
-                    model.other_text(),
-                    model.highlight(),
-                    &mut scroll,
-                    &Theme::default(),
-                );
-            })
-            .expect("draw");
+        let mut terminal = neenee_tui::TestTerminal::new(width, height);
+        terminal.draw(|f| {
+            let mut scroll = 0;
+            draw_question_modal(
+                f,
+                model.request(),
+                model.current(),
+                model.selected(),
+                model.other_text(),
+                model.highlight(),
+                &mut scroll,
+                &Theme::default(),
+            );
+        });
 
-        let buf = terminal.backend().buffer();
-        let bw = buf.area.width as usize;
+        let buf = terminal.buffer();
+        let bw = buf.area().width as usize;
         let mut rows: Vec<String> = Vec::with_capacity(height as usize);
         for y in 0..height as usize {
             let mut row = String::new();

@@ -2,12 +2,8 @@
 //! wrapping with vertical scroll to keep the caret visible, and per-row
 //! layout-map recording for semantic selection / copy.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::Style,
-    text::{Line, Span},
-    widgets::Paragraph,
+use neenee_tui::{
+    Frame, Paragraph, Rect, Style, {Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
 

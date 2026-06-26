@@ -1784,7 +1784,11 @@ mod tests {
         let text = "Call the `read_file` tool.";
         let expected = code_ranges_of(text);
         let blocks = parse_blocks(text);
-        let Block::Text { content, code_ranges } = &blocks[0] else {
+        let Block::Text {
+            content,
+            code_ranges,
+        } = &blocks[0]
+        else {
             panic!("expected Text block, got {:?}", blocks[0]);
         };
         assert_eq!(content, text);
@@ -1794,7 +1798,12 @@ mod tests {
         let text = "Use `list_dir` for directories";
         let expected = code_ranges_of(text);
         let blocks = parse_blocks(&format!("# {text}"));
-        let Block::Heading { content, code_ranges, .. } = &blocks[0] else {
+        let Block::Heading {
+            content,
+            code_ranges,
+            ..
+        } = &blocks[0]
+        else {
             panic!("expected Heading block, got {:?}", blocks[0]);
         };
         assert_eq!(content, text);
@@ -1804,7 +1813,12 @@ mod tests {
         let text = "item with `code` inside";
         let expected = code_ranges_of(text);
         let blocks = parse_blocks(&format!("- {text}"));
-        let Block::ListItem { content, code_ranges, .. } = &blocks[0] else {
+        let Block::ListItem {
+            content,
+            code_ranges,
+            ..
+        } = &blocks[0]
+        else {
             panic!("expected ListItem block, got {:?}", blocks[0]);
         };
         assert_eq!(content, text);
@@ -1814,7 +1828,11 @@ mod tests {
         let text = "quoted `code` span";
         let expected = code_ranges_of(text);
         let blocks = parse_blocks(&format!("> {text}"));
-        let Block::Quote { content, code_ranges } = &blocks[0] else {
+        let Block::Quote {
+            content,
+            code_ranges,
+        } = &blocks[0]
+        else {
             panic!("expected Quote block, got {:?}", blocks[0]);
         };
         assert_eq!(content, text);
@@ -2038,7 +2056,9 @@ mod tests {
         );
         assert_eq!(task.subagent_label(), "write the plan");
         assert!(
-            task.push_subagent_event(&neenee_core::SubagentEvent::Started { profile: "explore".to_string() })
+            task.push_subagent_event(&neenee_core::SubagentEvent::Started {
+                profile: "explore".to_string()
+            })
         );
         assert_eq!(task.subagent_label(), "explore · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.

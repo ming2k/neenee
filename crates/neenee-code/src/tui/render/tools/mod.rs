@@ -28,7 +28,7 @@ mod web;
 pub use diff::{DiffLine, DiffOp};
 pub(crate) use diff::{collapse_context_runs, line_diff};
 
-use ratatui::style::Color;
+use neenee_tui::Color;
 use serde_json::Value;
 
 use super::Theme;

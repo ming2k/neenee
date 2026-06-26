@@ -1,11 +1,7 @@
 //! History search, tool-step detail, help, plan preview, and toast modals.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block as RtBlock, Borders, Clear, Paragraph},
+use neenee_tui::{
+    Block as RtBlock, Borders, Clear, Color, Frame, Modifier, Paragraph, Rect, Style, {Line, Span},
 };
 
 use super::common::caret_column;
@@ -256,8 +252,8 @@ pub fn draw_tool_step_detail_overlay(
     let block = panel_block(theme.brand(), theme.panel());
     frame.render_widget(
         Paragraph::new(lines)
-            .scroll((scroll, 0))
-            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll(scroll, 0)
+            .wrap(neenee_tui::Wrap { trim: false })
             .block(block),
         area,
     );
@@ -369,7 +365,7 @@ pub(crate) fn toast(frame: &mut Frame, theme: &Theme, message: &str, color: Colo
 
     let block = RtBlock::default()
         .borders(Borders::LEFT | Borders::RIGHT)
-        .border_type(ratatui::widgets::BorderType::Thick)
+        .border_type(neenee_tui::BorderType::Thick)
         .border_style(Style::default().fg(color))
         .style(Style::default().bg(theme.panel()));
 

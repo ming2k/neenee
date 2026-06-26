@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crossterm::event;
-use ratatui::{Terminal, backend::Backend};
+use neenee_tui::Terminal;
 use tokio::sync::mpsc;
 
 use neenee_core::{
@@ -35,8 +35,8 @@ use crate::tui::selection::{
 use crate::tui::step_interaction;
 use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
 
-use tokio::sync::{Mutex, broadcast};
 use neenee_core::AgentResponse;
+use tokio::sync::{Mutex, broadcast};
 
 /// Shared runtime state crossing the response-listener / event-loop boundary.
 /// Each field is the single source of truth for one piece of live harness
@@ -116,15 +116,12 @@ pub(super) enum SideViewSignal {
     Closed,
 }
 
-pub(super) async fn run_app_loop<B: Backend>(
-    terminal: &mut Terminal<B>,
+pub(super) async fn run_app_loop(
+    terminal: &mut Terminal<std::io::Stdout>,
     app: &mut App,
     runtime: UiRuntime,
     session: Arc<neenee_store::session::SessionStore>,
-) -> io::Result<()>
-where
-    io::Error: From<<B as Backend>::Error>,
-{
+) -> io::Result<()> {
     let mut _copy_toast_timer: u8 = 0;
     // Clipboard copies run in background tasks so a slow/hanging system
     // clipboard (arboard/wl-copy) can never freeze the event loop.
@@ -472,7 +469,7 @@ where
                     if let Some(request) = app.pending_permission.as_ref() {
                         // Extend the slot down by the hint-line height so the
                         // sheet also covers (replaces) the hint bar.
-                        let permission_rect = ratatui::layout::Rect::new(
+                        let permission_rect = neenee_tui::Rect::new(
                             input_rect.x,
                             input_rect.y,
                             input_rect.width,
@@ -1016,17 +1013,13 @@ where
                                 if let Some(ct) = app.serve_cancel.take() {
                                     ct.cancel();
                                 }
-                                runtime
-                                    .messages
-                                    .lock()
-                                    .await
-                                    .push(
-                                        TranscriptMessage::new(
-                                            Role::Assistant,
-                                            "Serve mode stopped.".to_string(),
-                                        )
-                                        .with_origin(UserMessageOrigin::Slash),
-                                    );
+                                runtime.messages.lock().await.push(
+                                    TranscriptMessage::new(
+                                        Role::Assistant,
+                                        "Serve mode stopped.".to_string(),
+                                    )
+                                    .with_origin(UserMessageOrigin::Slash),
+                                );
                             } else {
                                 runtime.messages.lock().await.push(
                                     TranscriptMessage::new(
@@ -1040,13 +1033,12 @@ where
                         } else {
                             let (bc_tx, _) = broadcast::channel::<AgentResponse>(1024);
                             *tap = Some(bc_tx.clone());
-                            let (port_rx, cancel_token) =
-                                neenee_server::serve::start_server(
-                                    port,
-                                    app.tx.clone(),
-                                    bc_tx,
-                                    session.clone(),
-                                );
+                            let (port_rx, cancel_token) = neenee_server::serve::start_server(
+                                port,
+                                app.tx.clone(),
+                                bc_tx,
+                                session.clone(),
+                            );
                             // Stash the cancel token so `/serve` (stop) can
                             // shut the listener down.
                             app.serve_cancel = Some(cancel_token);
@@ -1058,14 +1050,10 @@ where
                                  Open ws://localhost:{} in a WebSocket client.",
                                 actual_port, actual_port,
                             );
-                            runtime
-                                .messages
-                                .lock()
-                                .await
-                                .push(
-                                    TranscriptMessage::new(Role::Assistant, msg)
-                                        .with_origin(UserMessageOrigin::Slash),
-                                );
+                            runtime.messages.lock().await.push(
+                                TranscriptMessage::new(Role::Assistant, msg)
+                                    .with_origin(UserMessageOrigin::Slash),
+                            );
                         }
                         runtime.is_responding.store(false, Ordering::SeqCst);
                         return Ok(());

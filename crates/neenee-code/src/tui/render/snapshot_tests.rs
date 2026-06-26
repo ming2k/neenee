@@ -13,7 +13,7 @@
 
 #![cfg(test)]
 
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use neenee_tui::Rect;
 
 use crate::tui::document::{MessageKind, TranscriptMessage};
 use crate::tui::layout::LayoutMap;
@@ -83,37 +83,34 @@ fn tool_step_streaming(
 /// Render `msg` as a tool step into a fresh `width x height` buffer and
 /// return the painted grid as trimmed text rows joined by newlines.
 fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend");
-    terminal
-        .draw(|f| {
-            let area: Rect = f.area();
-            let mut layout_map = LayoutMap::default();
-            let selection = SelectionState::default();
-            let theme = Theme::default();
-            let mut skip_rows = 0usize;
-            let mut current_y = area.y;
-            let mut content_lines = 0usize;
-            let mut sticky = Vec::new();
-            draw_tool_step(
-                f,
-                area,
-                msg,
-                0,
-                &selection,
-                &theme,
-                &mut layout_map,
-                &mut skip_rows,
-                &mut current_y,
-                &mut content_lines,
-                &mut sticky,
-                false,
-            );
-        })
-        .expect("draw");
+    let mut terminal = neenee_tui::TestTerminal::new(width, height);
+    terminal.draw(|f| {
+        let area: Rect = f.area();
+        let mut layout_map = LayoutMap::default();
+        let selection = SelectionState::default();
+        let theme = Theme::default();
+        let mut skip_rows = 0usize;
+        let mut current_y = area.y;
+        let mut content_lines = 0usize;
+        let mut sticky = Vec::new();
+        draw_tool_step(
+            f,
+            area,
+            msg,
+            0,
+            &selection,
+            &theme,
+            &mut layout_map,
+            &mut skip_rows,
+            &mut current_y,
+            &mut content_lines,
+            &mut sticky,
+            false,
+        );
+    });
 
-    let buf = terminal.backend().buffer();
-    let bw = buf.area.width as usize;
+    let buf = terminal.buffer();
+    let bw = buf.area().width as usize;
     let mut rows: Vec<String> = Vec::with_capacity(height as usize);
     for y in 0..height as usize {
         let mut row = String::new();
@@ -144,14 +141,14 @@ fn render_grid(msg: &TranscriptMessage, width: u16, height: u16) -> String {
 /// Compact per-row background run-length map + legend for a rendered buffer.
 /// Skips rows that are entirely the terminal default so the output stays
 /// focused on the painted step.
-fn background_map(buf: &ratatui::buffer::Buffer) -> (String, String) {
-    use ratatui::style::Color;
-    type Bg = Option<Color>;
+fn background_map(buf: &neenee_tui::Grid) -> (String, String) {
+    use neenee_tui::Color;
+    type Bg = Color;
 
-    let bw = buf.area.width as usize;
-    let bh = buf.area.height as usize;
+    let bw = buf.area().width as usize;
+    let bh = buf.area().height as usize;
 
-    let is_default = |bg: Bg| matches!(bg, None | Some(Color::Reset));
+    let is_default = |bg: Bg| bg == Color::Reset;
 
     // Distinct bg colors in first-appearance order.
     let mut order: Vec<Bg> = Vec::new();
@@ -176,10 +173,9 @@ fn background_map(buf: &ratatui::buffer::Buffer) -> (String, String) {
     };
     let fmt_color = |bg: Bg| -> String {
         match bg {
-            None => "unset".to_string(),
-            Some(Color::Reset) => "reset".to_string(),
-            Some(Color::Rgb(r, g, b)) => format!("#{:02X}{:02X}{:02X}", r, g, b),
-            Some(other) => format!("{:?}", other),
+            Color::Reset => "reset".to_string(),
+            Color::Rgb(r, g, b) => format!("#{:02X}{:02X}{:02X}", r, g, b),
+            other => format!("{:?}", other),
         }
     };
     let legend = order
@@ -346,7 +342,6 @@ fn bash_running_streams_live_preview() {
 
 #[test]
 fn tool_step_detail_overlay_renders_full_shell_output() {
-    use ratatui::{Terminal, backend::TestBackend};
     let m = tool_step_structured(
         "bash",
         r#"{"command":"cargo test"}"#,
@@ -359,17 +354,14 @@ fn tool_step_detail_overlay_renders_full_shell_output() {
         },
         false,
     );
-    let backend = TestBackend::new(60, 14);
-    let mut terminal = Terminal::new(backend).expect("backend");
-    terminal
-        .draw(|f| {
-            super::draw_tool_step_detail_overlay(f, &m, 0, &Theme::default());
-        })
-        .expect("draw");
-    let buf = terminal.backend().buffer();
-    let bw = buf.area.width as usize;
+    let mut terminal = neenee_tui::TestTerminal::new(60, 14);
+    terminal.draw(|f| {
+        super::draw_tool_step_detail_overlay(f, &m, 0, &Theme::default());
+    });
+    let buf = terminal.buffer();
+    let bw = buf.area().width as usize;
     let mut rows: Vec<String> = Vec::new();
-    for y in 0..buf.area.height as usize {
+    for y in 0..buf.area().height as usize {
         let mut row = String::new();
         for x in 0..bw {
             let sym: &str = buf.content[y * bw + x].symbol();

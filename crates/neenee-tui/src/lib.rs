@@ -44,6 +44,8 @@
 #![allow(dead_code)]
 
 pub mod backend;
+
+pub use backend::Backend;
 mod cell;
 pub mod diff;
 pub mod frame;
@@ -54,7 +56,7 @@ pub mod widgets;
 
 pub use cell::{Cell, Color, Modifier, Style};
 pub use diff::{Draw, DrawCmd};
-pub use frame::{CursorState, Frame, Terminal, Widget};
+pub use frame::{CursorState, Frame, Terminal, TestTerminal, Widget};
 pub use grid::{Fit, Grid, Pos};
 pub use layout::{Constraint, Direction, Layout, Margin, Rect};
 pub use widgets::{Alignment, Block, BorderType, Borders, Clear, Line, Paragraph, Span, Wrap};

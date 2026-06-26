@@ -30,8 +30,34 @@ impl<'a> Span<'a> {
             style,
         }
     }
+
+    /// Display width of this span's content.
+    pub fn width(&self) -> usize {
+        crate::text::str_idth(&self.content)
+    }
 }
 
+impl<'a> From<Vec<Span<'a>>> for Line<'a> {
+    fn from(spans: Vec<Span<'a>>) -> Self {
+        Self {
+            spans,
+            ..Default::default()
+        }
+    }
+}
+impl<'a> From<Span<'a>> for Line<'a> {
+    fn from(span: Span<'a>) -> Self {
+        Self {
+            spans: vec![span],
+            ..Default::default()
+        }
+    }
+}
+impl<'a> From<&'a str> for Line<'a> {
+    fn from(s: &'a str) -> Self {
+        Line::raw(s)
+    }
+}
 impl<'a> From<&'a str> for Span<'a> {
     fn from(s: &'a str) -> Self {
         Span::raw(s)
@@ -58,7 +84,10 @@ impl<'a> Line<'a> {
             ..Default::default()
         }
     }
-    pub fn from<T: Into<Span<'a>>>(span: T) -> Self {
+    /// Construct from a single span (any type that can become a `Span`).
+    /// Note: this is `Line::from_span` not `Line::from` to avoid shadowing
+    /// the `From<Vec<Span>>` trait impl.
+    pub fn from_span<T: Into<Span<'a>>>(span: T) -> Self {
         Self {
             spans: vec![span.into()],
             ..Default::default()
@@ -115,6 +144,8 @@ impl Borders {
     pub const NONE: Borders = Borders(0);
     pub const LEFT: Borders = Borders(1);
     pub const RIGHT: Borders = Borders(2);
+    pub const TOP: Borders = Borders(4);
+    pub const BOTTOM: Borders = Borders(8);
     pub const fn union(self, other: Borders) -> Borders {
         Borders(self.0 | other.0)
     }

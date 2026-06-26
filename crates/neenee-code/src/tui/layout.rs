@@ -3,7 +3,7 @@
 //! During rendering we record where each block lands on the terminal grid.
 //! This allows mouse events to be resolved back to semantic positions.
 
-use ratatui::layout::Rect;
+use neenee_tui::Rect;
 use unicode_width::UnicodeWidthChar;
 
 pub const TOOL_STEP_BLOCK_IDX: usize = usize::MAX;
