@@ -12,8 +12,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crossterm::event::EventStream;
-use futures::{FutureExt, StreamExt};
+use crossterm::event::{self, Event};
 use neenee_tui::Terminal;
 use tokio::sync::mpsc;
 
@@ -216,6 +215,64 @@ async fn handle_permission_submit(app: &mut App, runtime: &UiRuntime) {
     }
 }
 
+/// Owns the dedicated terminal-input reader thread used by [`run_app_loop`].
+///
+/// The thread blocks in `crossterm::event::poll`/`read` and forwards each event
+/// over an unbounded channel, so the async loop awaits/drains a plain tokio
+/// channel instead of crossterm's `EventStream`. This is deliberate, not
+/// incidental: `EventStream::poll_next` registers the *calling task's* waker
+/// exactly once (guarded by an internal `executed` flag), so draining queued
+/// events with `next().now_or_never()` registered a **no-op** waker — after
+/// which a parked `select!` could no longer be woken by a real keystroke and
+/// input was only serviced on the heartbeat tick (up to ~1s while idle). A
+/// channel registers the real task waker on every `recv`/`try_recv`, so input
+/// wakes the loop immediately and coalescing drains stay waker-safe.
+///
+/// Dropping the guard signals the thread to stop; it observes the flag within
+/// one poll timeout and exits on its own. We deliberately do not join, so an
+/// exiting loop is never blocked waiting on the next poll cycle.
+struct InputReader {
+    shutdown: Arc<AtomicBool>,
+}
+
+impl InputReader {
+    fn spawn(tx: mpsc::UnboundedSender<Event>) -> io::Result<Self> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        std::thread::Builder::new()
+            .name("neenee-tui-input".into())
+            .spawn(move || {
+                // Poll with a bounded timeout instead of blocking forever in
+                // `read()`: a ready event still returns immediately (zero added
+                // input latency), while the timeout lets the thread notice the
+                // shutdown flag and exit promptly once the loop ends.
+                while !thread_shutdown.load(Ordering::Relaxed) {
+                    match event::poll(std::time::Duration::from_millis(200)) {
+                        Ok(true) => match event::read() {
+                            // Receiver gone → the loop has exited; stop reading.
+                            Ok(ev) => {
+                                if tx.send(ev).is_err() {
+                                    break;
+                                }
+                            }
+                            // Terminal read error → nothing more to read; stop.
+                            Err(_) => break,
+                        },
+                        Ok(false) => {} // timeout: loop back to re-check shutdown
+                        Err(_) => break, // poll error → stop
+                    }
+                }
+            })?;
+        Ok(Self { shutdown })
+    }
+}
+
+impl Drop for InputReader {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
 pub(super) async fn run_app_loop(
     terminal: &mut Terminal<std::io::Stdout>,
     app: &mut App,
@@ -236,11 +293,16 @@ pub(super) async fn run_app_loop(
     // reason: arboard/wl-paste must never block the event loop.
     let (paste_tx, mut paste_rx) = mpsc::unbounded_channel::<clipboard::ClipboardRead>();
 
-    // Stage 4: async terminal input. The loop awaits events from this stream
-    // inside a `select!` alongside listener wakeups and the animation tick, so
-    // input intake is decoupled from rendering — a slow frame never starves
-    // input, and a listener update no longer waits out a fixed poll interval.
-    let mut events = EventStream::new();
+    // Stage 4: terminal input intake. A dedicated reader thread blocks on
+    // `event::read()` and forwards each event over this channel; the loop awaits
+    // it in the `select!` below (and drains queued events with `try_recv`). Both
+    // register the real task waker, so input intake stays decoupled from
+    // rendering *and* always wakes the loop immediately — a slow frame never
+    // starves input, and a keystroke never waits out the heartbeat. See
+    // [`InputReader`] for why this replaces crossterm's `EventStream`.
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
+    // Held until the loop returns; its `Drop` signals the reader thread to stop.
+    let _input_reader = InputReader::spawn(input_tx)?;
 
     // Stage 3: carries "an input event was handled last iteration, so a frame
     // is due" across the loop boundary, since input is drained at the *end* of
@@ -1005,11 +1067,15 @@ pub(super) async fn run_app_loop(
         loop {
             let event = if events_drained {
                 // Coalesce already-queued events into this same redraw. A
-                // ready event is taken; a not-ready stream ends the drain.
-                match events.next().now_or_never() {
-                    Some(Some(Ok(ev))) => ev,
-                    Some(Some(Err(_))) | Some(None) => return Ok(()),
-                    None => break,
+                // non-blocking `try_recv` takes any event the reader thread has
+                // already queued; an empty channel ends the drain. Unlike the
+                // old `EventStream::next().now_or_never()`, this registers no
+                // stray waker, so the parked `select!` above stays wakeable by
+                // the next real keystroke.
+                match input_rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
             } else {
                 // First wakeup of the iteration: await an input event OR a
@@ -1020,10 +1086,11 @@ pub(super) async fn run_app_loop(
                 // breaks out so the top of the loop re-renders.
                 tokio::select! {
                     biased;
-                    maybe = events.next() => match maybe {
-                        Some(Ok(ev)) => ev,
-                        // Stream error or end: the terminal went away — exit.
-                        Some(Err(_)) | None => return Ok(()),
+                    maybe = input_rx.recv() => match maybe {
+                        Some(ev) => ev,
+                        // Sender dropped: the reader thread stopped (terminal
+                        // read error or shutdown) — exit.
+                        None => return Ok(()),
                     },
                     _ = runtime.dirty_notify.notified() => break,
                     // Adaptive heartbeat: ~10fps while animating (advances the
