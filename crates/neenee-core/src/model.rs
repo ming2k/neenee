@@ -56,24 +56,28 @@ pub struct Model {
     pub vision: bool,
     /// Wire protocol used to reach this model. See [`WireFormat`].
     pub format: WireFormat,
-    /// Optional tool-usage guardrails injected into the system prompt as a
-    /// [`ModelToolUsageGuidance`] section. Empty for models that need no
-    /// extra guidance (Claude, GPT). Non-empty for models (e.g. GLM) that
-    /// benefit from explicit anti-loop / one-tool-per-turn instructions.
-    /// Stored here so the model entry is the single source of truth; the
-    /// prompt engine just renders whatever the resolved model carries.
-    pub tool_usage_hint: &'static str,
+    /// Model-specific prompt guidance injected into the system prompt as a
+    /// [`ModelGuidance`] section. Because each model behaves differently,
+    /// this is the per-model hook for any behavioral nudge a model needs
+    /// (e.g. GLM's anti-loop / one-tool-per-turn instructions). Empty when
+    /// the model needs none (Claude, GPT, Gemini). The model entry is the
+    /// single source of truth; the prompt engine just renders whatever the
+    /// resolved model carries.
+    pub model_guidance: &'static str,
 }
 
 /// The canonical registry of known models. Add a model here when it is
 /// referenced by any built-in provider preset; user-defined models that are not
 /// in this list fall back to [`fallback_model`] at resolution time.
-
-/// Tool-usage guardrails for the GLM model family. These models can get
-/// stuck re-issuing identical tool calls without making progress. The
-/// prompt engine injects this hint via [`ModelToolUsageGuidance`] when
-/// the resolved model carries a non-empty [`Model::tool_usage_hint`].
-pub const GLM_TOOL_USAGE_HINT: &str = "\
+///
+/// [`fallback_model`]: crate::fallback_model
+///
+/// Model-specific guidance for the GLM family. Because these models can get
+/// stuck re-issuing identical tool calls without making progress, their
+/// [`Model::model_guidance`] carries explicit anti-loop / one-tool-per-turn
+/// instructions. The prompt engine injects it via [`ModelGuidance`] when
+/// the resolved model carries a non-empty value.
+pub const GLM_GUIDANCE: &str = "\
 # Tool usage policy\n\
 - Use exactly one tool per assistant message. After each tool call, wait \
 for the result before continuing.\n\
@@ -92,7 +96,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: GLM_TOOL_USAGE_HINT,
+        model_guidance: GLM_GUIDANCE,
     },
     Model {
         id: "glm-5.1",
@@ -103,7 +107,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: GLM_TOOL_USAGE_HINT,
+        model_guidance: GLM_GUIDANCE,
     },
     Model {
         id: "glm-5",
@@ -114,7 +118,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: GLM_TOOL_USAGE_HINT,
+        model_guidance: GLM_GUIDANCE,
     },
     Model {
         id: "glm-4.7",
@@ -125,7 +129,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: GLM_TOOL_USAGE_HINT,
+        model_guidance: GLM_GUIDANCE,
     },
     // ── Kimi (Moonshot / opencode-go) ─────────────────────────────────────
     Model {
@@ -137,7 +141,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "kimi-k2.6",
@@ -148,7 +152,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "kimi-k2.5",
@@ -159,7 +163,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
@@ -171,7 +175,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "gpt-4o-mini",
@@ -182,7 +186,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── Gemini (Google) ────────────────────────────────────────────────────
     Model {
@@ -194,7 +198,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "gemini-2.0-flash",
@@ -205,7 +209,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── DeepSeek (opencode-go / direct) ────────────────────────────────────
     Model {
@@ -217,7 +221,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "deepseek-v4-pro",
@@ -228,7 +232,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── MiMo (Xiaomi / opencode-go, OpenAI format) ─────────────────────────
     Model {
@@ -240,7 +244,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "mimo-v2.5-pro",
@@ -251,7 +255,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "mimo-v2-pro",
@@ -262,7 +266,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "mimo-v2-omni",
@@ -273,7 +277,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── MiniMax (opencode-go, Anthropic /messages format) ──────────────────
     Model {
@@ -285,7 +289,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "minimax-m2.7",
@@ -296,7 +300,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "minimax-m2.5",
@@ -307,7 +311,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     // ── Qwen (opencode-go, OpenAI /chat/completions format) ────────────────
     // models.dev records qwen3.* as `@ai-sdk/openai-compatible` under
@@ -322,7 +326,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "qwen3.7-plus",
@@ -333,7 +337,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "qwen3.6-plus",
@@ -344,7 +348,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
     Model {
         id: "qwen3.5-plus",
@@ -355,7 +359,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     },
 ];
 
@@ -378,7 +382,7 @@ pub fn fallback_model(_id: &str) -> Model {
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
-        tool_usage_hint: "",
+        model_guidance: "",
     }
 }
 

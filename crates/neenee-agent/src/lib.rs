@@ -53,6 +53,8 @@
 //! `use neenee_agent::*` and get the full domain vocabulary alongside the
 //! orchestration API.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub use neenee_core::*;
 
 // Persistence-backed types that lived in core pre-refactor now live in store

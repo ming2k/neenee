@@ -6,6 +6,8 @@
 //! this crate does not enumerate them here. Shared helpers live in
 //! [`helpers`], and pluggable web-search backends in [`search`].
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod commands;
 pub mod mcp;
 pub mod project;

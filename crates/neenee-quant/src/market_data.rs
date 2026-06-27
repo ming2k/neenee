@@ -106,3 +106,119 @@ impl Tool for MarketDataTool {
 pub fn shared() -> Arc<dyn Tool> {
     Arc::new(MarketDataTool::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> MarketDataTool {
+        MarketDataTool::new()
+    }
+
+    #[test]
+    fn name_and_accessors() {
+        assert_eq!(tool().name(), "market_data");
+        // Description is non-empty and model-facing prose.
+        assert!(!tool().description().is_empty());
+        // Read-only tool: no scope target, no user, no control flow.
+        assert!(!tool().requires_user());
+        assert!(!tool().spawns_subagent());
+        assert!(!tool().affects_control_flow());
+    }
+
+    #[test]
+    fn schema_is_object_with_required_symbol_and_kind() {
+        let schema = tool().parameters();
+        assert_eq!(schema["type"], "object");
+        let required = schema["required"].as_array().expect("required is array");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"symbol"), "got: {names:?}");
+        assert!(names.contains(&"kind"), "got: {names:?}");
+        // `kind` is an enum of the three supported request types.
+        let kind_enum: Vec<&str> = schema["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind enum")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(kind_enum, ["quote", "klines", "depth"]);
+    }
+
+    #[tokio::test]
+    async fn call_quote_returns_symbol_and_price() {
+        let out = tool()
+            .call(r#"{"symbol":"BTCUSDT","kind":"quote"}"#)
+            .await
+            .expect("quote ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["symbol"], "BTCUSDT");
+        assert!(v.get("price").is_some(), "price present: {v}");
+    }
+
+    #[tokio::test]
+    async fn call_klines_defaults_interval_when_absent() {
+        let out = tool()
+            .call(r#"{"symbol":"ETHUSDT","kind":"klines"}"#)
+            .await
+            .expect("klines ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // Missing `interval` falls back to "1h".
+        assert_eq!(v["interval"], "1h", "default interval applied");
+        assert_eq!(v["symbol"], "ETHUSDT");
+    }
+
+    #[tokio::test]
+    async fn call_klines_honors_explicit_interval() {
+        let out = tool()
+            .call(r#"{"symbol":"ETHUSDT","kind":"klines","interval":"5m"}"#)
+            .await
+            .expect("klines ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["interval"], "5m", "explicit interval honored");
+    }
+
+    #[tokio::test]
+    async fn call_depth_returns_empty_books() {
+        let out = tool()
+            .call(r#"{"symbol":"AAPL","kind":"depth"}"#)
+            .await
+            .expect("depth ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["symbol"], "AAPL");
+        assert!(v["bids"].is_array());
+        assert!(v["asks"].is_array());
+    }
+
+    #[tokio::test]
+    async fn call_rejects_unknown_kind() {
+        let err = tool()
+            .call(r#"{"symbol":"X","kind":"trades"}"#)
+            .await
+            .expect_err("unknown kind should error");
+        assert!(
+            err.contains("Unknown kind") && err.contains("trades"),
+            "err: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_rejects_missing_symbol() {
+        let err = tool()
+            .call(r#"{"kind":"quote"}"#)
+            .await
+            .expect_err("missing symbol should error");
+        assert!(err.contains("symbol"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn call_rejects_invalid_json() {
+        let err = tool().call("not json").await.expect_err("bad json");
+        assert!(err.contains("Invalid JSON"), "err: {err}");
+    }
+
+    #[test]
+    fn shared_wraps_a_fresh_instance() {
+        let t = shared();
+        assert_eq!(t.name(), "market_data");
+    }
+}

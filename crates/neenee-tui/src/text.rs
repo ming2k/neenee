@@ -180,14 +180,16 @@ pub fn wrap(text: &str, max_width: usize) -> Vec<Line> {
             // Kinsoku: avoid starting the next line with a closing punct, or
             // ending it with an opening punct. Pull one grapheme across the break
             // to keep the pair intact.
+            #[allow(clippy::unwrap_used)] // grapheme cluster always contains >=1 char
             let first_char = grapheme.chars().next().unwrap();
+            #[allow(clippy::unwrap_used)] // current is non-empty in this branch
             let last_char = current.chars().last().unwrap();
 
             let move_previous = prohibited_line_start(first_char) || prohibited_line_end(last_char);
 
             let mut moved_grapheme = None;
             if move_previous {
-                if let Some((offset, last_g)) = current.grapheme_indices(true).last() {
+                if let Some((offset, last_g)) = current.grapheme_indices(true).next_back() {
                     // Only move if there is more than 1 grapheme in current,
                     // so we don't strand an empty line.
                     if offset > 0 {

@@ -1,3 +1,8 @@
+//! Integration test: panicking on assertion failure is the desired
+//! behaviour here, so the workspace `unwrap_used`/`expect_used` lints
+//! are relaxed for this file. (Lib/bin code stays linted.)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Full-duplex substrate tests (ADR-0029).
 //!
 //! These run as a standalone integration binary (`cargo test --test duplex`)

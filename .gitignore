@@ -10,6 +10,16 @@
 # Insta snapshot test diffs (only committed .snap files are the source of truth)
 *.snap.new
 
+# One-off scratch binaries/scripts at the repo root (e.g. `cargo build` of a
+# loose `test_*.rs`). They are dev-time scaffolding, not source — keep them out
+# of version control. Anything meant to ship lives under `crates/` instead.
+/test
+/test_*
+/test_width
+/test_tui_width
+/test.rs
+/test_*.rs
+
 # IDE files
 .vscode/
 .idea/

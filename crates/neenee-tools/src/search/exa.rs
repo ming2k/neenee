@@ -45,6 +45,7 @@ impl SearchProvider for ExaProvider {
 /// Build the Exa MCP URL, appending `?exaApiKey=` when a key is configured.
 /// Uses reqwest's URL encoder so keys with special characters stay intact.
 fn endpoint_with_key(api_key: Option<&str>) -> String {
+    #[allow(clippy::expect_used)] // EXA_URL is a compile-time constant; invalid URL is a build bug
     let base = reqwest::Url::parse(EXA_URL).expect("hardcoded Exa URL is valid");
     let key = api_key.map(str::trim).filter(|s| !s.is_empty());
     match key {

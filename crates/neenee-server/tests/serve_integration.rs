@@ -1,3 +1,8 @@
+//! Integration test: panicking on assertion failure is the desired
+//! behaviour here, so the workspace `unwrap_used`/`expect_used` lints
+//! are relaxed for this file. (Lib/bin code stays linted.)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 // Integration test: start_server + connect via WS + verify history replay + request/response round-trip
 // Run: cargo test -p neenee-server --test serve_integration -- --nocapture
 

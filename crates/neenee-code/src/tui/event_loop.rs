@@ -388,9 +388,9 @@ pub(super) async fn run_app_loop(
                     .iter()
                     .filter(|message| message.is_subagent_task())
                     .collect();
-                let idx = tasks
-                    .iter()
-                    .position(|message| message.tool_step_call_id() == Some(current.call_id.as_str()))?;
+                let idx = tasks.iter().position(|message| {
+                    message.tool_step_call_id() == Some(current.call_id.as_str())
+                })?;
                 Some(render::SubagentBarInfo {
                     label: tasks.get(idx)?.subagent_label(),
                     index: idx + 1,
@@ -2558,7 +2558,8 @@ pub(super) fn focused_messages_mut<'a>(
         None => Box::new(messages.iter_mut()),
         Some(current) => {
             let task_idx = messages.iter().position(|message| {
-                message.is_subagent_task() && message.tool_step_call_id() == Some(current.call_id.as_str())
+                message.is_subagent_task()
+                    && message.tool_step_call_id() == Some(current.call_id.as_str())
             });
             match task_idx {
                 Some(idx) => match messages[idx].subagent_children_mut() {

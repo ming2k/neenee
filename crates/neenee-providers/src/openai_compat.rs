@@ -4,7 +4,9 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use neenee_core::{Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall, model::resolve as resolve_model};
+use neenee_core::{
+    Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall, model::resolve as resolve_model,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -150,10 +152,7 @@ impl OpenAiCompatProvider {
             // Keep the message only if it still carries content or at least
             // one surviving tool call; a completely empty assistant message
             // is illegal on the wire.
-            !m.content.is_empty()
-                || m.tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| !calls.is_empty())
+            !m.content.is_empty() || m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
         });
         let tool_specs = tools.as_ref().map(|specs| {
             json!(
@@ -971,8 +970,7 @@ mod tests {
 
     #[test]
     fn openai_strips_unanswered_tool_calls() {
-        let provider =
-            OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
 
         let call_a = ToolCall {
             id: "a".into(),
@@ -1003,7 +1001,11 @@ mod tests {
         );
         let msgs = body["messages"].as_array().unwrap();
         // The empty assistant is dropped entirely.
-        assert_eq!(msgs.len(), 1, "trailing unanswered assistant must be dropped");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "trailing unanswered assistant must be dropped"
+        );
 
         // --- Case 2: assistant with content but no tool result ---
         let body = provider.request_body(
@@ -1018,8 +1020,16 @@ mod tests {
         );
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2);
-        assert!(msgs[1]["content"].as_str().unwrap_or("").contains("let me think"));
-        assert!(msgs[1].get("tool_calls").is_none(), "unanswered calls must be stripped");
+        assert!(
+            msgs[1]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("let me think")
+        );
+        assert!(
+            msgs[1].get("tool_calls").is_none(),
+            "unanswered calls must be stripped"
+        );
 
         // --- Case 3: partially answered call set ---
         let body = provider.request_body(

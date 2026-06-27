@@ -66,10 +66,11 @@ pub struct PromptContext {
     /// Concatenation of the latest visible user text (used by mention-style
     /// sections such as implicit-skill load).
     pub last_visible_user_text: String,
-    /// Tool-usage guardrails from the resolved model. Empty for most models;
-    /// non-empty when the model entry carries a [`Model::tool_usage_hint`]
-    /// (e.g. GLM family). Rendered verbatim by [`ModelToolUsageGuidance`].
-    pub tool_usage_hint: &'static str,
+    /// Model-specific guidance from the resolved model. Empty for most
+    /// models; non-empty when the model entry carries a
+    /// [`Model::model_guidance`] (e.g. GLM family). Rendered verbatim by
+    /// [`ModelGuidance`].
+    pub model_guidance: &'static str,
 }
 
 impl PromptContext {
@@ -279,11 +280,7 @@ mod tests {
         }
     }
 
-    fn sys(
-        id: &'static str,
-        rank: u32,
-        text: &'static str,
-    ) -> S {
+    fn sys(id: &'static str, rank: u32, text: &'static str) -> S {
         S {
             id,
             channel: PromptChannel::System,
@@ -304,10 +301,7 @@ mod tests {
 
         let msg = reg.build_system_message(&PromptContext::empty());
         assert_eq!(msg.role, Role::System);
-        assert_eq!(
-            msg.content,
-            "Identity body.\nTone body.\nTodo body."
-        );
+        assert_eq!(msg.content, "Identity body.\nTone body.\nTodo body.");
     }
 
     #[test]
@@ -418,13 +412,18 @@ mod tests {
             text: None,
         });
 
-        assert!(reg.render_section("missing", &PromptContext::empty()).is_none());
         assert!(
-            reg.render_section("user.x", &PromptContext::empty()).is_none(),
+            reg.render_section("missing", &PromptContext::empty())
+                .is_none()
+        );
+        assert!(
+            reg.render_section("user.x", &PromptContext::empty())
+                .is_none(),
             "inactive section yields None"
         );
         assert!(
-            reg.render_section("user.y", &PromptContext::empty()).is_none(),
+            reg.render_section("user.y", &PromptContext::empty())
+                .is_none(),
             "section rendering None yields None"
         );
     }
@@ -450,7 +449,8 @@ mod tests {
         let msg = reg.build_system_message(&PromptContext::empty());
         assert_eq!(msg.content, "A");
         assert!(
-            reg.render_section("system.b", &PromptContext::empty()).is_none(),
+            reg.render_section("system.b", &PromptContext::empty())
+                .is_none(),
             "disabled section also yields None via render_section"
         );
     }

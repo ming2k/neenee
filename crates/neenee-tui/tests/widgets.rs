@@ -1,3 +1,8 @@
+//! Integration test: panicking on assertion failure is the desired
+//! behaviour here, so the workspace `unwrap_used`/`expect_used` lints
+//! are relaxed for this file. (Lib/bin code stays linted.)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! High-level API tests: Frame, Layout, Paragraph/Block/Clear widgets render
 //! correctly into the grid and the frame loop converges.
 

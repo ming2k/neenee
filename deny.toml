@@ -1,0 +1,114 @@
+# cargo-deny configuration.
+#
+# Run locally with:  cargo deny check
+# Installed on demand (it is not part of the regular toolchain): the
+# `security audit` CI job uses `rustsec/audit-check` for advisories; this file
+# additionally governs licenses, dependency bans, and platform-specific source
+# restrictions should `cargo deny` be wired into CI later.
+#
+# Three checks are enforced as failures: advisories (known CVEs/yanked),
+# licenses (only the allow-list below), and bans (no crates we've explicitly
+# rejected). `sources` is configured but non-fatal so adding a new git/path
+# source during local experimentation doesn't block development.
+
+[graph]
+# Validate against the committed lockfile so the checks are reproducible.
+# (cargo-deny reads Cargo.lock by default; this is here to document intent.)
+
+# ---------------------------------------------------------------------------
+# advisories: RUSTSEC advisories + yanked crates.
+# ---------------------------------------------------------------------------
+[advisories]
+# Fail the check if any advisory affects the dependency graph. This is the
+# primary security gate; we don't carry known-vulnerable dependencies.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Treat unmaintained/yanked crates as failures too — they should be bumped, not
+# ignored. `unmaintained = "workspace"` would only flag crates we depend on
+# directly, which is too narrow.
+yanked = "deny"
+# If an advisory genuinely can't be addressed, record it here with a reason
+# rather than muting wholesale. (Empty by default — we want them loud.)
+ignore = []
+
+# ---------------------------------------------------------------------------
+# licenses: only permit these licenses across the entire graph.
+# ---------------------------------------------------------------------------
+[licenses]
+# Deny on disallowed licenses. We allow the standard permissive + weak-copyleft
+# set commonly found in the Rust ecosystem. Strong copyleft (GPL/AGPL) and
+# "other"/"non-standard" are NOT permitted because they'd contaminate this
+# MIT-licensed project.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
+]
+# Confidence threshold for the license detection. A higher value means cargo-deny
+# must be more certain about a crate's license before accepting it, reducing the
+# chance of silently permitting an ambiguous one.
+confidence-threshold = 0.93
+# Some crates ship their license text in a non-standard location; let
+# cargo-deny still clear them via their SPDX expression.
+version = 2
+
+# Crates whose license cargo-deny can't infer from the file (e.g. inline SPDX
+# only) are enumerated here. Kept to a minimum.
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ---------------------------------------------------------------------------
+# bans: reject unwanted crates and cap duplicate versions.
+# ---------------------------------------------------------------------------
+[bans]
+# Warn (not fail) when multiple versions of a crate are pulled in. A hard deny
+# is impractical in a graph this size — transitive duplicates like `windows-sys`
+# and `getrandom` are unavoidable today. Warnings keep them visible without
+# blocking every build.
+multiple-versions = "warn"
+# A crate that is yanked should never resolve; covered by [advisories] too.
+# Highlight crates that are near-duplicates of each other (e.g. `bcrypt` vs
+# `rust-crypto`) so reviewers notice questionable additions.
+highlight = "all"
+# Allow the workspace's own crates to appear under multiple versions (e.g.
+# during a rename/migration), but still flag external duplicates.
+workspace-default-features = "warn"
+
+# Explicitly rejected crates. Adding any of these is a hard failure; each entry
+# is annotated so the reviewer sees what to use instead.
+[[bans.deny]]
+name = "openssl"
+# Use rustls instead: pure-Rust TLS, no system OpenSSL linkage, smaller audit
+# surface. reqwest is configured with rustls in the workspace.
+
+[[bans.deny]]
+name = "rustls-ffi"
+# Don't pull in C TLS bindings; prefer the native `rustls` crate.
+
+# Certain crates are mutually redundant — prefer one canonical choice. Flag
+# (as warnings, via multiple-versions above) rather than hard-deny, since
+# transitive pulls are common. Directly depending on both should be caught in
+# review.
+
+# ---------------------------------------------------------------------------
+# sources: where crates may be fetched from.
+# ---------------------------------------------------------------------------
+[sources]
+# Unknown registries and git sources are allowed during local dev but surface a
+# notice, so a typo'd source URL is visible without breaking iteration.
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

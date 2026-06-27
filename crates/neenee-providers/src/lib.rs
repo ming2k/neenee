@@ -23,6 +23,8 @@
 //! `openai_content`) live here so each provider module can stay focused on its
 //! wire format.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod anthropic_compat;
 mod gemini;
 mod mock;

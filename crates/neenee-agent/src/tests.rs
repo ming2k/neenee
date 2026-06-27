@@ -246,14 +246,8 @@ fn system_prompt_registry_reproduces_legacy_layout() {
     agent.ensure_system_prompt(&mut messages);
     let prompt = &messages[0].content;
 
-    // preamble \n tone \n todo \n (blank line from pursuit's leading \n) pursuit
+    // preamble \n todo \n (blank line from pursuit's leading \n) pursuit
     let expected = "You are neenee, an expert AI coding assistant.\n\
-         Tone and output: be concise and direct. Answer the actual question with the \
-         minimum needed — short replies, one word when that suffices — and skip \
-         preamble, recaps of what you just did, and unsolicited explanations. Never \
-         commit unless explicitly asked. Take the reasonable action with ordinary \
-         tools instead of asking permission; reserve questions for genuine ambiguity \
-         or trade-offs.\n\
          Task tracking: for work that spans multiple steps, use the `todo` tool to lay \
          out the steps up front, then update each item's status with `todo_update` (or \
          `todo` for a full restructure) as you progress — move a step to in_progress \

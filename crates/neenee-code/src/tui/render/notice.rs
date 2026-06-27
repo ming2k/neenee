@@ -16,8 +16,8 @@ use neenee_tui::{
 
 use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
 
-use super::text_layout::wrap_text;
 use super::Theme;
+use super::text_layout::wrap_text;
 
 /// Severity presentation: the leading glyph and its color.
 ///

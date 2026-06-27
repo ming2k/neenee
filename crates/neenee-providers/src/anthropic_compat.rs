@@ -155,10 +155,7 @@ impl AnthropicMessagesProvider {
                     m.tool_calls = None;
                 }
             }
-            !m.content.is_empty()
-                || m.tool_calls
-                    .as_ref()
-                    .is_some_and(|calls| !calls.is_empty())
+            !m.content.is_empty() || m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
         });
 
         let mut body = json!({

@@ -1,7 +1,7 @@
 //! Process-level shared state: singletons constructed once at bootstrap and
 //! borrowed by every session. This is the `neenee-code` `main.rs:96-278`
-//! bootstrap block (config + provider holder + skills registry + MCP + embedding
-//! + repeat store) lifted into a reusable type, so a server process and a TUI
+//! bootstrap block (config + provider holder + skills registry + MCP and embedding
+//! and repeat store) lifted into a reusable type, so a server process and a TUI
 //! process build the same foundation.
 
 use std::sync::{Arc, RwLock};

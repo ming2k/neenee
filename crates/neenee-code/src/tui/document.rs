@@ -1149,7 +1149,6 @@ fn parse_blocks_plain(text: &str) -> Vec<Block> {
     }]
 }
 
-
 fn parse_blocks_markdown(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let lines: Vec<&str> = text.split('\n').collect();
@@ -1165,35 +1164,34 @@ fn parse_blocks_markdown(text: &str) -> Vec<Block> {
     // (List items are pushed directly during the list run — adjacent items
     // share no Break thanks to push_block's ListItem-pair rule.)
 
-    let flush_para = |para: &mut Vec<String>,
-                      para_hard: &mut Vec<bool>,
-                      blocks: &mut Vec<Block>| {
-        if para.is_empty() {
-            return;
-        }
-        // Join lines: a soft break inserts a space; a hard break (the *previous*
-        // line ended with a two-space marker) inserts a literal "\n".
-        let mut content = String::new();
-        for (idx, line) in para.iter().enumerate() {
-            if idx > 0 {
-                content.push(if para_hard[idx - 1] { '\n' } else { ' ' });
+    let flush_para =
+        |para: &mut Vec<String>, para_hard: &mut Vec<bool>, blocks: &mut Vec<Block>| {
+            if para.is_empty() {
+                return;
             }
-            content.push_str(line);
-        }
-        let (code_ranges, bold_ranges) = scan_inline(&content);
-        let trimmed_len = content.trim_end().len();
-        let content = content[..trimmed_len].to_string();
-        push_block(
-            blocks,
-            Block::Text {
-                content,
-                code_ranges: clamp_ranges(&code_ranges, trimmed_len),
-                bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
-            },
-        );
-        para.clear();
-        para_hard.clear();
-    };
+            // Join lines: a soft break inserts a space; a hard break (the *previous*
+            // line ended with a two-space marker) inserts a literal "\n".
+            let mut content = String::new();
+            for (idx, line) in para.iter().enumerate() {
+                if idx > 0 {
+                    content.push(if para_hard[idx - 1] { '\n' } else { ' ' });
+                }
+                content.push_str(line);
+            }
+            let (code_ranges, bold_ranges) = scan_inline(&content);
+            let trimmed_len = content.trim_end().len();
+            let content = content[..trimmed_len].to_string();
+            push_block(
+                blocks,
+                Block::Text {
+                    content,
+                    code_ranges: clamp_ranges(&code_ranges, trimmed_len),
+                    bold_ranges: clamp_ranges(&bold_ranges, trimmed_len),
+                },
+            );
+            para.clear();
+            para_hard.clear();
+        };
 
     while i < lines.len() {
         let line = lines[i];
@@ -1217,13 +1215,7 @@ fn parse_blocks_markdown(text: &str) -> Vec<Block> {
             if i < lines.len() {
                 i += 1;
             }
-            push_block(
-                &mut blocks,
-                Block::Code {
-                    language,
-                    content,
-                },
-            );
+            push_block(&mut blocks, Block::Code { language, content });
             continue;
         }
 
@@ -1323,7 +1315,10 @@ fn parse_blocks_markdown(text: &str) -> Vec<Block> {
         }
 
         // --- Table (GFM: | ... | lines with a separator row) ------------------
-        if trimmed.starts_with('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim()) {
+        if trimmed.starts_with('|')
+            && i + 1 < lines.len()
+            && is_table_separator(lines[i + 1].trim())
+        {
             flush_para(&mut para, &mut para_hard, &mut blocks);
             let mut table = TableAccumulator::default();
             // Header row
@@ -1425,10 +1420,8 @@ fn parse_heading(s: &str) -> Option<(u8, &str)> {
 
 /// Parse a blockquote line `> text`. Supports `> text` and `>text`.
 fn parse_quote(s: &str) -> Option<&str> {
-    s.strip_prefix('>').map(|rest| {
-        let rest = rest.strip_prefix(' ').unwrap_or(rest);
-        rest
-    })
+    s.strip_prefix('>')
+        .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
 }
 
 /// Parse a list-item line. Returns `(ordered_marker, content, checked)`.
@@ -1526,9 +1519,7 @@ fn is_table_separator(s: &str) -> bool {
     // Each cell must contain at least one `-`, only `-`,`:`,and spaces.
     stripped.split('|').all(|cell| {
         let c = cell.trim();
-        !c.is_empty()
-            && c.contains('-')
-            && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        !c.is_empty() && c.contains('-') && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
     })
 }
 
@@ -1609,7 +1600,6 @@ fn find_backtick_run(s: &str, n: usize) -> Option<usize> {
     }
     None
 }
-
 
 /// Enforce the GFM table column-count invariant: the number of columns is
 /// fixed by the header row, so every body row is normalized to exactly that
@@ -1715,11 +1705,9 @@ fn pad_cell(cell: &str, width: usize, align: TableAlignment) -> String {
     }
 }
 
-
 fn display_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
-
 
 /// Drop ranges that fall entirely past `len` and clamp the end of any range
 /// that straddles it (trim_end can only shrink trailing whitespace, so in
@@ -1748,7 +1736,6 @@ fn push_block(blocks: &mut Vec<Block>, block: Block) {
     }
     blocks.push(block);
 }
-
 
 #[cfg(test)]
 mod tests {

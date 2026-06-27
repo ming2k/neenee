@@ -14,3 +14,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 neenee-tools = { path = "../neenee-tools" }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

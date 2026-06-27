@@ -30,6 +30,7 @@ const PERMISSION_MAX_BODY_ROWS: u16 = 14;
 /// uses radio buttons. A numbered digit key (1-9) jumps directly to an option.
 const OTHER_OPTION_LABEL: &str = "Other";
 
+#[allow(clippy::too_many_arguments)] // modal draw fns thread many context args by nature
 pub fn draw_question_modal(
     frame: &mut Frame,
     request: &UserQuestionRequest,

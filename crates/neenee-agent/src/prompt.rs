@@ -57,15 +57,9 @@ impl PromptSection for IdentityPreamble {
     }
 }
 
-/// Mission-neutral tone / output guidance.
+/// Mission-neutral tone / output guidance. Currently empty — always inactive.
+/// Exists as a structural slot for future tone directives.
 struct ToneGuidance;
-
-const TONE: &str = "Tone and output: be concise and direct. Answer the actual question with the \
-                    minimum needed — short replies, one word when that suffices — and skip \
-                    preamble, recaps of what you just did, and unsolicited explanations. Never \
-                    commit unless explicitly asked. Take the reasonable action with ordinary \
-                    tools instead of asking permission; reserve questions for genuine ambiguity \
-                    or trade-offs.";
 
 impl PromptSection for ToneGuidance {
     fn id(&self) -> &'static str {
@@ -81,19 +75,20 @@ impl PromptSection for ToneGuidance {
         20
     }
     fn render(&self, _ctx: &PromptContext) -> Option<String> {
-        Some(String::from(TONE))
+        None
     }
 }
 
-/// Model-family-specific tool-usage guardrails. Renders the resolved model's
-/// [`Model::tool_usage_hint`] verbatim when non-empty — the model entry is the
-/// single source of truth. Empty for Claude/GPT/Gemini; carries anti-loop
-/// guidance for GLM-family models.
-struct ModelToolUsageGuidance;
+/// Model-specific guidance. Each model behaves differently, so the resolved
+/// model's [`Model::model_guidance`] is the per-model hook for whatever
+/// behavioral nudge it needs (e.g. GLM's anti-loop instructions). Renders it
+/// verbatim when non-empty — the model entry is the single source of truth.
+/// Empty for Claude/GPT/Gemini.
+struct ModelGuidance;
 
-impl PromptSection for ModelToolUsageGuidance {
+impl PromptSection for ModelGuidance {
     fn id(&self) -> &'static str {
-        "system.model_tool_usage"
+        "system.model_guidance"
     }
     fn channel(&self) -> PromptChannel {
         PromptChannel::System
@@ -105,13 +100,13 @@ impl PromptSection for ModelToolUsageGuidance {
         25
     }
     fn is_active(&self, ctx: &PromptContext) -> bool {
-        !ctx.tool_usage_hint.is_empty()
+        !ctx.model_guidance.is_empty()
     }
     fn render(&self, ctx: &PromptContext) -> Option<String> {
-        if ctx.tool_usage_hint.is_empty() {
+        if ctx.model_guidance.is_empty() {
             None
         } else {
-            Some(format!("\n{}", ctx.tool_usage_hint))
+            Some(format!("\n{}", ctx.model_guidance))
         }
     }
 }
@@ -245,7 +240,7 @@ pub(crate) fn default_prompt_registry() -> PromptRegistry {
     let mut registry = PromptRegistry::new();
     registry.register(IdentityPreamble);
     registry.register(ToneGuidance);
-    registry.register(ModelToolUsageGuidance);
+    registry.register(ModelGuidance);
     registry.register(TodoGuidance);
     registry.register(PursuitObjective);
     registry.register(AskUserGuidance);
@@ -318,8 +313,7 @@ impl PromptSection for ReviewDimensions {
 /// and parsing stay in sync.
 struct ReviewJsonContract;
 
-const REVIEW_JSON_CONTRACT: &str =
-    "Return ONLY a JSON object (no markdown, no prose) of this exact shape:\n\
+const REVIEW_JSON_CONTRACT: &str = "Return ONLY a JSON object (no markdown, no prose) of this exact shape:\n\
      {\"verdicts\":[{\"dimension\":\"<id>\",\"status\":\"healthy|watch|stuck\",\
      \"detail\":\"<one short sentence>\"}]}\n\
      Use status \"healthy\" when there is no concern, \"watch\" when progress is \
@@ -394,15 +388,14 @@ impl Agent {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let tool_usage_hint = neenee_core::resolve_model(&self.provider.model())
-            .tool_usage_hint;
+        let model_guidance = neenee_core::resolve_model(&self.provider.model()).model_guidance;
         PromptContext {
             identity_preamble: self.identity.preamble(),
             pursuit: self.get_pursuit(),
             tool_names,
             skills_index,
             last_visible_user_text,
-            tool_usage_hint,
+            model_guidance,
         }
     }
 

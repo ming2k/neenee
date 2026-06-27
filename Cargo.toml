@@ -46,3 +46,16 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
+
+# Workspace-wide lint policy (inherited by every member via `lints.workspace =
+# true`). `unwrap_used` / `expect_used` are *warnings*, not denies: in this code
+# base nearly every production `unwrap`/`expect` is a documented structural
+# invariant (a match-guarded `pop_front`, a parse of a compile-time constant,
+# `chars().next()` on a grapheme that parses to ≥1 char). Surfacing them as
+# warnings makes new, unguarded ones visible in review without churning the
+# existing, well-annotated call sites. Tests are exempted: they should panic on
+# assertion failure, so each crate's `lib.rs` allows both lints under
+# `#[cfg_attr(test, ...)]`.
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

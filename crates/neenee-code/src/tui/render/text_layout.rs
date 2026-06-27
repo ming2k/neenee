@@ -590,7 +590,7 @@ fn wrap_impl(text: &str, max_width: usize, hidden_ranges: &[(usize, usize)]) -> 
 
             let mut moved_grapheme = None;
             if move_previous {
-                if let Some((offset, last_g)) = current_line.grapheme_indices(true).last() {
+                if let Some((offset, last_g)) = current_line.grapheme_indices(true).next_back() {
                     // Only pop when we know a character will move down with the wrap
                     // leaving at least one on the current line.
                     if offset > 0 {

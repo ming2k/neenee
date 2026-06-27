@@ -326,7 +326,10 @@ fn resolve_focused_mut_indexes_root_when_unfocused() {
 #[test]
 fn resolve_focused_mut_indexes_children_when_focused() {
     let mut messages = conversation_with_subagents();
-    let focus = vec![crate::tui::app::ZoomFrame { call_id: "task_b".to_string(), saved_scroll: crate::tui::app::ScrollSnapshot::default() }];
+    let focus = vec![crate::tui::app::ZoomFrame {
+        call_id: "task_b".to_string(),
+        saved_scroll: crate::tui::app::ScrollSnapshot::default(),
+    }];
     // Index 0 inside task_b's children => "child B1".
     let resolved = event_loop::resolve_focused_mut(&mut messages, &focus, 0);
     assert_eq!(resolved.map(|m| m.raw.clone()).as_deref(), Some("child B1"));
@@ -339,7 +342,10 @@ fn focused_tool_steps_mut_only_touches_focused_subagent_children() {
     let mut messages = conversation_with_subagents();
     // Focused on task_a: its single child is an assistant message (not a
     // tool step), so the focused stream has 1 message and 0 tool steps.
-    let focus = vec![crate::tui::app::ZoomFrame { call_id: "task_a".to_string(), saved_scroll: crate::tui::app::ScrollSnapshot::default() }];
+    let focus = vec![crate::tui::app::ZoomFrame {
+        call_id: "task_a".to_string(),
+        saved_scroll: crate::tui::app::ScrollSnapshot::default(),
+    }];
     let total = focused_messages_mut(&mut messages, &focus).count();
     assert_eq!(total, 1);
     let tool_steps = focused_messages_mut(&mut messages, &focus)

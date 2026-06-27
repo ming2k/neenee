@@ -117,79 +117,6 @@ fn cell_drag_selected_span(
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tui::document::TableAlignment;
-
-    #[test]
-    fn table_markup_hidden_ranges_drive_hitbox_widths() {
-        let table = build_table_render(
-            &["a".to_string(), "b".to_string()],
-            &[vec!["`中`".to_string(), "**ab**".to_string()]],
-            &[TableAlignment::None, TableAlignment::None],
-            80,
-        );
-        let row_idx = table
-            .lines
-            .iter()
-            .position(|line| line.contains("`中`"))
-            .expect("data row should render");
-        let line = &table.lines[row_idx];
-        let info = table.line_info[row_idx]
-            .as_ref()
-            .expect("data row should carry row info");
-        let hidden = table_line_hidden_ranges(line, info);
-
-        assert_eq!(visible_width_window(line, 0, line.len(), &hidden), 11);
-        for &(lo, hi) in &info.col_spans {
-            assert_eq!(visible_width_window(line, lo, hi, &hidden), 2);
-            assert!(line[lo..hi].width() > 2, "raw markup width must be larger");
-        }
-    }
-
-    #[test]
-    fn cell_drag_selection_spans_only_origin_cell_segments() {
-        use crate::tui::layout::{SemanticCursor, TableCellSegment};
-
-        let selection = SelectionState::Range {
-            anchor: SemanticCursor::new(0, 0, 11),
-            head: SemanticCursor::new(0, 0, 100),
-        };
-        let cell = CellDragInfo {
-            message_idx: 0,
-            block_idx: 0,
-            cell_text: "abcdef".to_string(),
-            segments: vec![
-                TableCellSegment {
-                    rendered_range: (10, 13),
-                    content_range: (10, 13),
-                    source_range: (0, 3),
-                },
-                TableCellSegment {
-                    rendered_range: (40, 43),
-                    content_range: (40, 43),
-                    source_range: (3, 6),
-                },
-            ],
-        };
-
-        assert_eq!(
-            cell_drag_selected_span(&selection, &cell, 0, &" ".repeat(20)),
-            Some((11, 13))
-        );
-        assert_eq!(
-            cell_drag_selected_span(&selection, &cell, 30, &" ".repeat(20)),
-            Some((10, 13))
-        );
-        assert_eq!(
-            cell_drag_selected_span(&selection, &cell, 60, &" ".repeat(20)),
-            None,
-            "rows/cells outside the origin cell must not inherit generic range selection"
-        );
-    }
-}
-
 /// Render the blocks of a single message inside the given area.
 ///
 /// This is extracted so that normal messages and tool steps can share
@@ -423,7 +350,7 @@ pub(super) fn draw_message_body(
                         let prefix_cols = if is_user {
                             (USER_MESSAGE_OUTER_GUTTER_COLS + USER_MESSAGE_TEXT_GAP_COLS) as u16
                         } else {
-                            TRANSCRIPT_BODY_LEADING_INDENT as u16
+                            TRANSCRIPT_BODY_LEADING_INDENT
                         };
                         let hidden_ranges = if is_user {
                             Vec::new()
@@ -1114,5 +1041,78 @@ pub(super) fn draw_message_body(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::document::TableAlignment;
+
+    #[test]
+    fn table_markup_hidden_ranges_drive_hitbox_widths() {
+        let table = build_table_render(
+            &["a".to_string(), "b".to_string()],
+            &[vec!["`中`".to_string(), "**ab**".to_string()]],
+            &[TableAlignment::None, TableAlignment::None],
+            80,
+        );
+        let row_idx = table
+            .lines
+            .iter()
+            .position(|line| line.contains("`中`"))
+            .expect("data row should render");
+        let line = &table.lines[row_idx];
+        let info = table.line_info[row_idx]
+            .as_ref()
+            .expect("data row should carry row info");
+        let hidden = table_line_hidden_ranges(line, info);
+
+        assert_eq!(visible_width_window(line, 0, line.len(), &hidden), 11);
+        for &(lo, hi) in &info.col_spans {
+            assert_eq!(visible_width_window(line, lo, hi, &hidden), 2);
+            assert!(line[lo..hi].width() > 2, "raw markup width must be larger");
+        }
+    }
+
+    #[test]
+    fn cell_drag_selection_spans_only_origin_cell_segments() {
+        use crate::tui::layout::{SemanticCursor, TableCellSegment};
+
+        let selection = SelectionState::Range {
+            anchor: SemanticCursor::new(0, 0, 11),
+            head: SemanticCursor::new(0, 0, 100),
+        };
+        let cell = CellDragInfo {
+            message_idx: 0,
+            block_idx: 0,
+            cell_text: "abcdef".to_string(),
+            segments: vec![
+                TableCellSegment {
+                    rendered_range: (10, 13),
+                    content_range: (10, 13),
+                    source_range: (0, 3),
+                },
+                TableCellSegment {
+                    rendered_range: (40, 43),
+                    content_range: (40, 43),
+                    source_range: (3, 6),
+                },
+            ],
+        };
+
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 0, &" ".repeat(20)),
+            Some((11, 13))
+        );
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 30, &" ".repeat(20)),
+            Some((10, 13))
+        );
+        assert_eq!(
+            cell_drag_selected_span(&selection, &cell, 60, &" ".repeat(20)),
+            None,
+            "rows/cells outside the origin cell must not inherit generic range selection"
+        );
     }
 }

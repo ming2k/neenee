@@ -1,3 +1,8 @@
+//! Integration test: panicking on assertion failure is the desired
+//! behaviour here, so the workspace `unwrap_used`/`expect_used` lints
+//! are relaxed for this file. (Lib/bin code stays linted.)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Integration test: the QUANT profile isolates quant tools from coding tools.
 //!
 //! Built with REAL tool instances (the quant tools from this crate + the real

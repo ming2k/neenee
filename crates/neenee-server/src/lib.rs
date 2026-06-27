@@ -17,8 +17,8 @@
 //!   embedding store, repeat store). Every session borrows from it; nothing
 //!   here is session-scoped.
 //! - **[`SessionRegistry`]** — a map of `session_id → Arc<SessionHandle>`. Each
-//!   [`SessionHandle`] owns its own `Agent` + `SessionStore` + request channel
-//!   + a `broadcast` channel for its responses, so multiple clients can
+//!   [`SessionHandle`] owns its own `Agent`, `SessionStore`, request channel,
+//!   and a `broadcast` channel for its responses, so multiple clients can
 //!   subscribe to the same session's event stream.
 //! - **the transport bridge** — (future) WebSocket / SSE adapters that
 //!   translate the wire protocol (`AgentRequest`/`AgentResponse`, now
@@ -40,6 +40,8 @@
 //! (persistence), `neenee-providers` + `neenee-tools` (concrete impls the
 //! session assembles), and `neenee-core` (vocabulary). It does **not** depend
 //! on `neenee-code` — frontends depend on this crate, never the reverse.
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod agent_loop;
 pub mod agent_setup;

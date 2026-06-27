@@ -22,3 +22,6 @@ httpdate = { workspace = true }
 # only call pure parser functions) cannot reach.
 mockito = "1"
 tokio = { workspace = true }
+
+[lints]
+workspace = true

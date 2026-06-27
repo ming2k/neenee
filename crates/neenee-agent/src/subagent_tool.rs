@@ -39,6 +39,8 @@ impl SubagentRegistry {
     /// Register a steering handle for the subagent spawned by the
     /// `parent_call_id` tool call. Replaces any prior entry for that id.
     pub fn register(&self, parent_call_id: &str, handle: SubagentHandle) {
+        #[allow(clippy::expect_used)]
+        // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
             .expect("SubagentRegistry poisoned")
@@ -49,6 +51,8 @@ impl SubagentRegistry {
     /// Returns a cloned handle (cheap) so the caller can reply without holding
     /// the lock.
     pub fn get(&self, parent_call_id: &str) -> Option<SubagentHandle> {
+        #[allow(clippy::expect_used)]
+        // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
             .expect("SubagentRegistry poisoned")
@@ -60,6 +64,8 @@ impl SubagentRegistry {
     /// returns, so the registry never accumulates dead handles for completed
     /// calls (a handle whose `Weak` already expired is harmless but useless).
     pub fn remove(&self, parent_call_id: &str) {
+        #[allow(clippy::expect_used)]
+        // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
             .expect("SubagentRegistry poisoned")
@@ -531,16 +537,14 @@ mod tests {
             .unwrap();
 
         // messages[0] is the rebuilt system message: EXPLORE persona opens it,
-        // then the tone and todo sections compose in.
+        // then the todo section composes in.
         let system = &outcome.messages[0];
         assert_eq!(system.role, neenee_core::Role::System);
         assert!(
-            system.content.starts_with("You are a focused research subagent"),
+            system
+                .content
+                .starts_with("You are a focused research subagent"),
             "system message should open with the EXPLORE persona"
-        );
-        assert!(
-            system.content.contains("Tone and output:"),
-            "mission-neutral tone section composes in"
         );
         assert!(
             system.content.contains("Task tracking:"),

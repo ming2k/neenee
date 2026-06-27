@@ -97,6 +97,8 @@ fn diff_row(draws: &mut Vec<Draw>, back: &Grid, front: &Grid, y: u16, start: u16
 
     let mut x = start;
     while x < w {
+        #[allow(clippy::unwrap_used)]
+        // fallible only as the fallback branch of unwrap_or_else; never panics
         let back_cell = back.get(x, y).unwrap_or_else(|| front.get(x, y).unwrap());
         let front_cell = front.get(x, y).unwrap_or(back_cell);
 

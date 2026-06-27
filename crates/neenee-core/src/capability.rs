@@ -288,7 +288,7 @@ impl CommandScope {
             return true;
         }
         let program = leading_program(command);
-        self.allowed.iter().any(|p| *p == program)
+        self.allowed.contains(&program)
     }
 }
 

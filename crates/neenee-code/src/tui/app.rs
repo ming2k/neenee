@@ -826,7 +826,10 @@ impl App {
             offset: self.scroll,
             follow_bottom: self.follow_bottom,
         };
-        self.focus_stack.push(ZoomFrame { call_id, saved_scroll });
+        self.focus_stack.push(ZoomFrame {
+            call_id,
+            saved_scroll,
+        });
         self.reset_view_state();
     }
 

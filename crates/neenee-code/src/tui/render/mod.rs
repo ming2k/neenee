@@ -608,8 +608,7 @@ pub fn draw_transcript(
     // Sticky pinned summary: if an expanded step's body covers the top of the
     // viewport (its summary is scrolled out of view), pin its summary to the
     // line directly under the HUD bar so the user can always collapse it.
-    let sticky_info =
-        draw_sticky_summary_if_needed(frame, band, &sticky_steps, scroll, theme);
+    let sticky_info = draw_sticky_summary_if_needed(frame, band, &sticky_steps, scroll, theme);
 
     TranscriptRender {
         input_rect,
@@ -1502,11 +1501,11 @@ mod tests {
         let drag = SelectionState::Range { anchor, head };
         let bgs = row_bgs(input, rect, text_row, &theme, &drag);
         // cols 0,1 = prefix; 2..8 = "中文测" (selected); 8,9 = tail (panel).
-        for col in 2..8usize {
-            assert_eq!(bgs[col], sel_bg, "col {col} should be selected");
+        for (col, &bg) in bgs[2..8].iter().enumerate() {
+            assert_eq!(bg, sel_bg, "col {} should be selected", col + 2);
         }
-        for col in 8..10usize {
-            assert_eq!(bgs[col], panel_bg, "col {col} should be panel tail");
+        for (col, &bg) in bgs[8..10].iter().enumerate() {
+            assert_eq!(bg, panel_bg, "col {} should be panel tail", col + 8);
         }
 
         // 3) Drag to the second visual column of 中. The hit-test cursor maps
@@ -1516,11 +1515,11 @@ mod tests {
         assert_eq!(head.byte_offset, 1);
         let drag = SelectionState::Range { anchor, head };
         let bgs = row_bgs(input, rect, text_row, &theme, &drag);
-        for col in 2..4usize {
-            assert_eq!(bgs[col], sel_bg, "col {col} should select 中");
+        for (col, &bg) in bgs[2..4].iter().enumerate() {
+            assert_eq!(bg, sel_bg, "col {} should select 中", col + 2);
         }
-        for col in 4..8usize {
-            assert_eq!(bgs[col], panel_bg, "col {col} should remain unselected");
+        for (col, &bg) in bgs[4..8].iter().enumerate() {
+            assert_eq!(bg, panel_bg, "col {} should remain unselected", col + 4);
         }
     }
 
@@ -1951,15 +1950,15 @@ mod tests {
         use crate::tui::document::TableAlignment;
 
         let plain = build_table_render(
-            &vec!["a".to_string(), "b".to_string()],
-            &vec![vec!["bold".to_string(), "code".to_string()]],
-            &vec![TableAlignment::None, TableAlignment::None],
+            &["a".to_string(), "b".to_string()],
+            &[vec!["bold".to_string(), "code".to_string()]],
+            &[TableAlignment::None, TableAlignment::None],
             80,
         );
         let markup = build_table_render(
-            &vec!["a".to_string(), "b".to_string()],
-            &vec![vec!["**bold**".to_string(), "`code`".to_string()]],
-            &vec![TableAlignment::None, TableAlignment::None],
+            &["a".to_string(), "b".to_string()],
+            &[vec!["**bold**".to_string(), "`code`".to_string()]],
+            &[TableAlignment::None, TableAlignment::None],
             80,
         );
 

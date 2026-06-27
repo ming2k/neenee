@@ -13,6 +13,8 @@
 //! rest of the stack is built on. Pursuit persistence moved onto
 //! `SessionStore` (`SessionData.pursuit`) in ADR-0032.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub use async_trait::async_trait;
 
 pub mod cron;

@@ -26,6 +26,8 @@
 //! [`QUANT`](neenee_core::QUANT) profile for the matching admission policy for
 //! quant sub-agents.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod backtest;
 pub mod market_data;
 pub mod orders;
@@ -48,4 +50,44 @@ pub fn default_tools() -> Vec<std::sync::Arc<dyn neenee_core::Tool>> {
         Arc::new(PlaceOrderTool::new()),
         Arc::new(ListPositionsTool::new()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tools_returns_all_four_quant_tools() {
+        let tools = default_tools();
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["backtest", "list_positions", "market_data", "place_order"],
+            "default_tools must expose the complete quant toolset"
+        );
+    }
+
+    #[test]
+    fn default_tools_has_no_duplicate_names() {
+        let tools = default_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "duplicate tool names would shadow at registration"
+        );
+    }
+
+    #[test]
+    fn default_tools_includes_the_live_trading_tool() {
+        // The full set deliberately includes place_order; profile-based
+        // admission (not default_tools) is what hides it from analysts.
+        let tools = default_tools();
+        assert!(
+            tools.iter().any(|t| t.name() == "place_order"),
+            "default_tools is the unrestricted set"
+        );
+    }
 }

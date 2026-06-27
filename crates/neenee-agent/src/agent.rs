@@ -268,12 +268,23 @@ pub(crate) struct TurnState {
     /// so a hook can act on "exploration without progress". Reset to 0 by any
     /// round containing an `Execute`/`Write` call.
     pub(crate) consecutive_readonly_rounds: u32,
-    /// Classification of the round just dispatched, fed to [`loop_guard`] at the
-    /// round boundary. Set in `dispatch_tool_calls`; consumed once per round.
-    pub(crate) pending_round: crate::loop_guard::RoundClass,
-    /// Deterministic read-loop detector (see [`crate::loop_guard`]). Per-turn:
-    /// lives and dies with this `TurnState` so loop state never crosses turns.
-    pub(crate) loop_guard: crate::loop_guard::ReadLoopGuard,
+    /// The turn-guard registry: holds one or more [`RoundGuard`]s (e.g.
+    /// [`ReadLoopGuard`]) and the tool-call data for the round just dispatched.
+    /// Per-turn: lives and dies with this `TurnState` so loop state never
+    /// crosses turns.
+    pub(crate) guards: crate::loop_guard::RoundGuardState,
+}
+
+impl TurnState {
+    /// Build a fresh per-turn guard state with the standard guard set. Whether
+    /// the guard is *enabled* (allowed to inject) is controlled by the
+    /// `loop_guard_enabled` AtomicBool on `Agent`, checked at the round
+    /// boundary — so the guard state is always present even when disabled.
+    fn guards_default() -> crate::loop_guard::RoundGuardState {
+        let mut registry = crate::loop_guard::GuardRegistry::new();
+        registry.register(Box::new(crate::loop_guard::ReadLoopGuard::new()));
+        crate::loop_guard::RoundGuardState::new(registry)
+    }
 }
 
 impl Agent {
@@ -1029,7 +1040,10 @@ impl Agent {
         let visible = self.visible_tools();
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
-        let mut state = TurnState::default();
+        let mut state = TurnState {
+            guards: TurnState::guards_default(),
+            ..TurnState::default()
+        };
         let mut tool_rounds = 0;
         // Take the steering inbox receiver for this turn (ADR-0029). `None` for
         // a non-steerable agent (no `install_inbox` call) → `drain_inbox` is a
@@ -1106,7 +1120,7 @@ impl Agent {
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 // Mid-turn save point (ADR-0035): see the streaming path.
                 self.fire_round_persist(messages).await?;
-                self.maybe_inject_loop_nudge(messages, &mut state);
+                self.apply_guard_actions(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1148,7 +1162,10 @@ impl Agent {
         let visible = self.visible_tools();
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
-        let mut state = TurnState::default();
+        let mut state = TurnState {
+            guards: TurnState::guards_default(),
+            ..TurnState::default()
+        };
         let mut tool_rounds = 0;
         // Take the steering inbox receiver for this turn (ADR-0029). See
         // `run_with_events` for rationale; same dual-no-op contract for a
@@ -1344,7 +1361,7 @@ impl Agent {
                 // any further work, so a crash leaves the transcript in sync
                 // with filesystem side effects.
                 self.fire_round_persist(messages).await?;
-                self.maybe_inject_loop_nudge(messages, &mut state);
+                self.apply_guard_actions(messages, &mut state);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1397,11 +1414,6 @@ impl Agent {
     where
         F: FnMut(AgentEvent) + Send,
     {
-        // Default this round to "progress" so a stale Read signature from a prior
-        // round never leaks into a text-fallback round; the native all-read arm
-        // below overrides it when applicable.
-        state.pending_round = crate::loop_guard::RoundClass::Progress;
-
         // Native tool calls (OpenAI-style function calling). An empty list is
         // treated as "no tool calls" so we fall through to the text fallback.
         if let Some(tool_calls) = response
@@ -1411,26 +1423,25 @@ impl Agent {
         {
             // Classify this round once, for two consumers: the round-hook axis
             // (consecutive read-only streak, surfaced to user hooks) and the
-            // deterministic read-loop guard (a canonical signature of an all-read
-            // round, checked at the round boundary). Any call whose target is a
-            // real Path/Command (i.e. not Unspecified) makes the round
-            // "progress", resetting both.
+            // turn-guard registry (checked at the round boundary). Any call
+            // whose target is a real Path/Command (i.e. not Unspecified) makes
+            // the round "progress", resetting both.
             let all_read = tool_calls
                 .iter()
                 .all(|c| self.tool_target_is_unspecified(&c.name, &c.arguments));
             if all_read {
                 state.consecutive_readonly_rounds =
                     state.consecutive_readonly_rounds.saturating_add(1);
-                let signature = crate::loop_guard::read_signature(
-                    tool_calls
-                        .iter()
-                        .map(|c| (c.name.as_str(), c.arguments.as_str())),
-                );
-                state.pending_round = crate::loop_guard::RoundClass::Read(signature);
             } else {
                 state.consecutive_readonly_rounds = 0;
-                state.pending_round = crate::loop_guard::RoundClass::Progress;
             }
+            // Feed the round's tool-call data to the guard state. The guards
+            // consume it at the round boundary.
+            let round_calls: Vec<(String, String)> = tool_calls
+                .iter()
+                .map(|c| (c.name.clone(), c.arguments.clone()))
+                .collect();
+            state.guards.set_round(round_calls, all_read);
             // Emit all ToolCall events up front.
             let call_ids: Vec<String> = tool_calls
                 .iter()
@@ -1691,27 +1702,33 @@ impl Agent {
         }
     }
 
-    /// Consult the deterministic read-loop guard for the round just dispatched
-    /// (classified into [`TurnState::pending_round`]) and, when it has tipped
-    /// into a repeated-read loop, append the anti-anchoring nudge as a hidden
-    /// user message. Non-terminating by design (ADR-0009): it steers the model
-    /// off the loop without capping the turn — `Esc`, `hard_stop_rounds`, and
-    /// `abort` remain the hard backstops. Mirrored at both loop boundaries.
-    fn maybe_inject_loop_nudge(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
-        let round = std::mem::take(&mut state.pending_round);
+    /// Consult the turn-guard registry for the round just dispatched and apply
+    /// the resulting action. `Inject` appends a steering nudge as a hidden user
+    /// message (non-terminating); `Abort` would terminate the turn. Gated by
+    /// `loop_guard_enabled` so sub-agents and the review diagnostic run
+    /// unobstructed. Mirrored at both loop boundaries.
+    fn apply_guard_actions(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
         if !self
             .loop_guard_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return;
         }
-        if let Some(nudge) = state.loop_guard.observe(round) {
-            tracing::debug!("read-loop guard tripped; injecting anti-anchoring nudge");
-            messages.push(Message::injected(
-                Role::User,
-                nudge,
-                InjectionOrigin::new(InjectionKind::LoopReviewNudge),
-            ));
+        match state.guards.take_action() {
+            crate::loop_guard::GuardAction::Continue => {}
+            crate::loop_guard::GuardAction::Inject(nudge) => {
+                tracing::debug!("turn guard tripped; injecting steering nudge");
+                messages.push(Message::injected(
+                    Role::User,
+                    nudge,
+                    InjectionOrigin::new(InjectionKind::LoopReviewNudge),
+                ));
+            }
+            crate::loop_guard::GuardAction::Abort(reason) => {
+                tracing::warn!("turn guard aborted turn: {reason}");
+                // Abort is surfaced as a terminal nudge for now; a future
+                // guard that needs a hard turn-kill can return Err here.
+            }
         }
     }
 

@@ -28,3 +28,6 @@ chrono = { workspace = true }
 [dev-dependencies]
 toml = { workspace = true }
 uuid = { workspace = true }
+
+[lints]
+workspace = true

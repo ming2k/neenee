@@ -1855,8 +1855,9 @@ pub fn draw_reasoning_trace(
         // The leading indent is all that remains now that the horizontal
         // gutter is applied once at the stream entry point.
         let body_prefix = " ".repeat(TRANSCRIPT_BODY_LEADING_INDENT as usize);
-        let body_wrap_width =
-            transcript_area.width.saturating_sub(TRANSCRIPT_BODY_LEADING_INDENT) as usize;
+        let body_wrap_width = transcript_area
+            .width
+            .saturating_sub(TRANSCRIPT_BODY_LEADING_INDENT) as usize;
 
         advance_plain_blank_rows(
             transcript_area,
@@ -1920,7 +1921,14 @@ pub fn draw_reasoning_trace(
                         padded_tail(ctx.full_width, used),
                         Style::default(),
                     ));
-                    ctx.paint_text_row(line, mi, bi, &block_wl, TRANSCRIPT_BODY_LEADING_INDENT as u16, &[]);
+                    ctx.paint_text_row(
+                        line,
+                        mi,
+                        bi,
+                        &block_wl,
+                        TRANSCRIPT_BODY_LEADING_INDENT,
+                        &[],
+                    );
                 }
             }
         }

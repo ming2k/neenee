@@ -749,7 +749,6 @@ pub async fn dispatch(
                     condition,
                 )
                 .await;
-                return;
             }
             // `/pursue status` / unsupported-subcommand paths reach here. None
             // of them mutate harness state, so there is nothing to mirror and

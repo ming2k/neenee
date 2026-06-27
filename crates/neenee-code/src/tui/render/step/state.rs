@@ -210,9 +210,21 @@ mod tests {
     /// keyboard cue never yields to the incidental hover affordance.
     #[test]
     fn focus_beats_hover_beats_idle() {
-        assert_eq!(Interaction::from_hover_focused(false, false), Interaction::Idle);
-        assert_eq!(Interaction::from_hover_focused(true, false), Interaction::Hovered);
-        assert_eq!(Interaction::from_hover_focused(false, true), Interaction::Focused);
-        assert_eq!(Interaction::from_hover_focused(true, true), Interaction::Focused);
+        assert_eq!(
+            Interaction::from_hover_focused(false, false),
+            Interaction::Idle
+        );
+        assert_eq!(
+            Interaction::from_hover_focused(true, false),
+            Interaction::Hovered
+        );
+        assert_eq!(
+            Interaction::from_hover_focused(false, true),
+            Interaction::Focused
+        );
+        assert_eq!(
+            Interaction::from_hover_focused(true, true),
+            Interaction::Focused
+        );
     }
 }

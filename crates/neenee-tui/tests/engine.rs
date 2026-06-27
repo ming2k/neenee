@@ -1,3 +1,8 @@
+//! Integration test: panicking on assertion failure is the desired
+//! behaviour here, so the workspace `unwrap_used`/`expect_used` lints
+//! are relaxed for this file. (Lib/bin code stays linted.)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end engine tests: the full write → diff → render → promote cycle,
 //! plus the two scenarios the engine exists to fix (ADR-0038):
 //!
@@ -308,13 +313,17 @@ fn invalidate_emits_real_sgr_reset() {
         }],
     };
     let mut buf = Vec::new();
-    let mut be = Backend::with_bce(&mut buf, Bce::Yes);
-    be.render(&bold_cmd).unwrap();
-    // Now simulate a resize: the app calls invalidate, which must push a real
-    // reset to the terminal so the stale BOLD cannot bleed into the repaint.
-    be.invalidate().unwrap();
-    drop(be);
-    let s = String::from_utf8(buf).unwrap();
+    let s = {
+        let mut be = Backend::with_bce(&mut buf, Bce::Yes);
+        be.render(&bold_cmd).unwrap();
+        // Now simulate a resize: the app calls invalidate, which must push a real
+        // reset to the terminal so the stale BOLD cannot bleed into the repaint.
+        be.invalidate().unwrap();
+        // `be` borrows `buf`; ending the block releases the borrow (Backend has
+        // no Drop impl, so a scope is enough — no `std::mem::drop` needed) before
+        // `buf` is moved into the decoded String below.
+        String::from_utf8(buf).unwrap()
+    };
     assert!(
         s.contains("\x1b[0m"),
         "invalidate must emit a real SGR reset, got: {s:?}"
