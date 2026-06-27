@@ -100,7 +100,7 @@ sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 - `Enter` on a focused tool step opens the [detail overlay](#detail-overlay)
   (clicking the header toggles it inline).
 - `Ctrl+T` expands or collapses all tool steps.
-- `↑` / `↓` in Browse zone includes visible tool steps in the keyboard focus order.
+- `↑` / `↓` while a step is focused includes visible tool steps in the keyboard focus order.
 
 ## Sub-agent children
 
@@ -122,4 +122,4 @@ payload comes from `ToolOutput`
 ([ADR-0001](../../adr/0001-tool-rendering-redesign.md)); header data from
 `tool_step_header()` and `parse_arguments_kv()` in `document.rs`. The detail
 overlay is `draw_tool_step_detail_overlay` in
-`crates/neenee-code/src/tui/render/overlays.rs`.
+`crates/neenee-code/src/tui/render/overlays/tool_step_detail.rs`.

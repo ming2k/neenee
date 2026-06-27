@@ -74,22 +74,22 @@ is visible):
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ ● turn 4 · round 2 · making edits   ⟴ ship docs   2/5   │  ← activity bar
+│ ● making edits   ⟴ ship docs   todos 2/5   23s            │  ← activity bar
 ├────────────────────────────────────────────────────────────┤
 │  > type here…                                               │  ← input box
 ├────────────────────────────────────────────────────────────┤
-│ [ COMPOSE ]            Kimi K2.7 Code   89.2k (8%)         │  ← hint bar
+│                  Kimi K2.7 Code   89.2k (8%)              │  ← hint bar
 └────────────────────────────────────────────────────────────┘
 ```
 
 The activity bar carries the breathing-dot liveness anchor plus the live
-turn/round/phase label, the active pursuit objective and its `[done/total]`
-progress, and a todos `d/t` segment — each surfaced as it applies. The pursuit
-and plan summaries that used to occupy their own footer rows now live inside
-the Activity modal (opened by clicking the bar) and as inline transcript
-notices. The footer is inset by `FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols
-on each side; all rows share the same horizontal extent so their left and
-right edges line up.
+status label, the active pursuit objective, a todos `d/t` segment, and the
+turn elapsed timer — each surfaced only while it applies. The structural
+counters (`turn N · round M · <model>`) deliberately do **not** appear on the
+bar; they live inside the Activity modal (opened by clicking the bar), along
+with the per-item todo breakdown. The footer is inset by
+`FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols on each side; all rows share
+the same horizontal extent so their left and right edges line up.
 
 ### Sticky pinned step summary
 

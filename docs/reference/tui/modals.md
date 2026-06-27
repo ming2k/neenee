@@ -65,6 +65,7 @@ are non-modal and use a different `toast` helper.
 | [Permission sheet](#permission-sheet) | Automatic | (inline, not centered) | `draw_permission_sheet` |
 | [Tool-step detail](#tool-step-detail-overlay) | `Enter` on focused tool step | 92 × 84 | `draw_tool_step_detail_overlay` |
 | [Help](#help-modal) | `Ctrl+H` / `/help` | 58 × 70 | `draw_help_modal` |
+| [Config](#config-modal) | `/config` | 58 × 36 | `draw_config_modal` |
 | [Activity](#activity-modal) | Click activity bar | 72 × 70 | `draw_activity_modal` |
 | [Toasts](#toasts) | Transient | top-right, 3 rows | `draw_armed_toast`, `draw_copy_toast` |
 
@@ -74,6 +75,14 @@ are non-modal and use a different `toast` helper.
 - Permission sheet: `Esc` rejects; `Ctrl+C` closes and rejects.
 - Model editor: `Ctrl+C` restores the stashed composer input and exits the
   configuration flow.
+
+**Click-outside-to-dismiss.** Read-only / info modals — Help, Tool-step
+detail, Session, Sessions, Permissions, Config, Activity, and History — close when
+the user clicks outside their panel, mirroring `Esc`. Entry modals that
+hold precious in-progress input (Models, Model editor) and the decision
+modals (Question, Permission sheet) stay open so an accidental click never
+discards an API key or a pending decision. The single source of truth is
+`Modal::dismissable_by_outside_click()`.
 
 ## Models modal
 
@@ -133,6 +142,20 @@ The API key is masked as `•` per character whenever it is not focused.
 | `Enter` | Save the focused field and switch to the other |
 | `Esc` / `Ctrl+C` | Cancel and restore the stashed composer input |
 
+## Config modal
+
+User configuration surface, opened by `/config`.
+
+| Row | Effect |
+|-----|--------|
+| `Progress updates` | Toggles the `progress_update` tool and persists `agent.progress_updates.enabled` |
+| `Max chars` | Shows `agent.progress_updates.max_chars` |
+
+| Key | Effect |
+|-----|--------|
+| `Space` / `Enter` | Toggle the selected setting |
+| `Esc` / `Ctrl+C` | Close |
+
 ## Sessions modal
 
 Sessions picker. Each row shows an overview plus created/active relative
@@ -188,24 +211,57 @@ Placeholders show `Loading…` until the snapshot arrives.
 
 ## History search modal
 
-Input-history fuzzy search. Borrows the composer input as the query.
+Two-mode input-history browser, opened with `Ctrl+R`. It opens in **browse**
+mode and drops into a **search** sub-layer on `/`. `Enter` always inserts the
+selected entry into the composer for editing — it never sends.
 
 ```text
-╭──────────────────────────────────────────────────╮
-│ Input History  ❯ open                            │  ← caret here
+╭──────────────────────────────────────────────────╮   browse mode
+│ Input History  · / to search                     │   (no query field)
 │                                                  │
-│   1  /pursue fix the auth module                  │
-│   2  h̲o̲w̲ do I open the file?                    │  ← matched chars branded
-│   3  explain t̲h̲i̲s̲ function                     │
+│   1  /pursue fix the auth module                  │   newest first
+│   2  how do I open the file?                     │
+│   3  explain this function ↵                      │   ↵ = multi-line entry
 │                                                  │
-│ type to filter · ↑↓ navigate · Enter insert · Esc│
+│ ↑↓ navigate · / search · Tab preview · Enter insert · Esc│
 ╰──────────────────────────────────────────────────╯
 ```
 
+Pressing `/` borrows the composer line as a live fuzzy query (the composer
+draft is stashed and restored on close):
+
+```text
+╭──────────────────────────────────────────────────╮   search mode
+│ Input History  ❯ open                            │   ← caret here
+│                                                  │
+│   1  h̲o̲w̲ do I open the file?                    │   best score first
+│   2  explain t̲h̲i̲s̲ function                     │   matched chars branded
+│                                                  │
+│ type filter · ↑↓ navigate · Tab preview · Enter insert · Esc back│
+╰──────────────────────────────────────────────────╯
+```
+
+The single source of truth for the rows is `App::history_rows()` — recomputed
+each call, so the cursor, the list, and `Enter`-insert all index into the same
+vector. In browse mode (or in search mode before any query) the list is
+reverse-chronological — newest first. Once a query is present in search mode
+the rows are the fuzzy-ranked matches, best score first, with input order as
+the stable tiebreaker.
+
+| Key | Effect |
+|-----|--------|
+| `/` (browse) | Enter search mode (borrow the composer line as the query) |
+| `↑` / `↓` | Move selection |
+| `Tab` | Toggle a full-text **preview** of the selected entry |
+| `Enter` | Insert the focused entry into the composer (browse or search) |
+| `Esc` (search) | Leave search → back to browse |
+| `Esc` (browse) | Close the modal |
+
 Characters whose char-index is in `FuzzyMatch.positions` are styled
 differently (brand + bold when unselected, contrast + underlined when
-selected) so the user sees why each entry surfaced. Fuzzy ranking is
-pre-computed by `App::history_filtered` to avoid a second pass per frame.
+selected) so the user sees why each entry surfaced. The modal is
+click-outside-to-dismissable: clicking outside the panel closes it and
+restores the stashed draft, exactly like a second `Esc`.
 
 ## Question modal
 
@@ -337,18 +393,19 @@ Keybindings cheat sheet (`Ctrl+H`). The narrowest centered modal: 58 × 70.
 │ enter     send message               │
 │ …                                    │
 │                                      │
-│ Focus zones                          │
-│ tab/shift+tab  cycle focus           │
-│ ↑↓             walk steps            │
-│ esc            back / interrupt      │
+│ Transcript focus                     │
+│ ctrl+↑/↓   focus a step              │
+│ ↑↓         cycle steps               │
+│ enter      open the focused step     │
+│ esc        clear the focus           │
 │ …                                    │
 │                                      │
 │ esc · close                          │
 ╰──────────────────────────────────────╯
 ```
 
-Sections: **General**, **Line editing**, **Focus zones**, **Views & tools**,
-**Modes**. Closes with a one-line note: `Drag to select · Ctrl+C or
+Sections: **General**, **Line editing**, **Transcript focus**, **Views &
+tools**, **Modes**. Closes with a one-line note: `Drag to select · Ctrl+C or
 Ctrl+Shift+C to copy.`
 
 ## Activity modal
@@ -388,8 +445,10 @@ left+right borders colored by variant.
 
 ## Source
 
-All modals live in `crates/neenee-code/src/tui/render/overlays.rs`. Shared
-primitives (`recess_backdrop`, `centered_rect`, `modal_frame`,
-`panel_block`, `toast`) are in `crates/neenee-code/src/tui/render/primitives.rs`.
-The chrome-hiding flag is read by `draw_transcript` in
-`crates/neenee-code/src/tui/render/mod.rs`.
+All modals live in `crates/neenee-code/src/tui/render/overlays/` (one
+renderer file per modal: `provider`, `permission`, `history`, `help`,
+`session`, `permissions_manager`, `activity`, `tool_step_detail`, `toast`,
+plus shared `common`). Shared primitives (`recess_backdrop`, `centered_rect`,
+`modal_frame`, `panel_block`, `toast`) are in
+`crates/neenee-code/src/tui/render/primitives.rs`. The chrome-hiding flag is
+read by `draw_transcript` in `crates/neenee-code/src/tui/render/mod.rs`.

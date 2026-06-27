@@ -230,16 +230,19 @@ was just reading" path; a finished reasoning trace is left exactly where
 the user had it. This is what prevents the historical class of bug where
 "the model finished thinking and yanked away the content I was reading."
 
-### Two focus zones instead of two modes
+### No modes: a single optional focused step
 
 The application deliberately does not have a `vi`-style modal-vs-insert
-split. Instead there are two **focus zones** — Compose (the input box) and
-Browse (the transcript) — and the same key means one thing per zone:
-`Enter` sends in Compose and toggles in Browse, `↑`/`↓` move the caret in
-Compose and walk steps in Browse. `Ctrl+B` is the explicit zone toggle and
-the hint bar carries a `[ COMPOSE ]` / `[ BROWSE ]` pill. The benefit is
-that keyboard navigation never silently changes meaning, and the user never
-has to remember "which mode am I in" to predict what a key will do.
+split, nor even two navigable "zones." There is one navigation state — an
+optional **focused step** in the transcript (`App::focused_target`). When it
+is set, `Ctrl+↑`/`Ctrl+↓` and bare `↑`/`↓` cycle steps, `Enter` opens the
+focused one, and `Esc` clears it; when it is unset, every key has ordinary
+input-box meaning. There is no toggle key to enter or leave a "mode":
+`Ctrl+↑`/`Ctrl+↓` simply highlight a step, and typing any printable
+character falls through to the prompt. The benefit is that the user never
+has to remember "which mode am I in" to predict what a key will do, and the
+composer panel quietly drops to a dimmer palette while a step is focused so
+the state is legible at a glance.
 
 ### A breathing dot, not a spinner
 
