@@ -1365,9 +1365,9 @@ fn ctrl_w_is_noop_at_line_start() {
 }
 
 #[test]
-fn ctrl_w_does_not_cross_newline() {
-    // Multi-line draft: Ctrl+W on the second line must not eat into the
-    // first line. "line1\nworld" -> caret at end (11 chars).
+fn ctrl_w_crosses_newline() {
+    // Ctrl+W now crosses newline boundaries. "line1\nworld" with caret
+    // at the end → first Ctrl+W deletes "world", second deletes "line1".
     let mut input = "line1\nworld".to_string();
     let mut cursor = 11;
     run_key(
@@ -1380,6 +1380,18 @@ fn ctrl_w_does_not_cross_newline() {
     );
     assert_eq!(input, "line1\n");
     assert_eq!(cursor, 6);
+
+    // Second Ctrl+W eats the newline and "line1".
+    run_key(
+        &mut input,
+        &mut cursor,
+        KeyCode::Char('w'),
+        KeyModifiers::CONTROL,
+        crate::tui::Modal::None,
+        false,
+    );
+    assert_eq!(input, "");
+    assert_eq!(cursor, 0);
 }
 
 #[test]

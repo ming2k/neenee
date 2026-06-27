@@ -344,40 +344,45 @@ fn cursor_line_end(input: &str, cursor_position: &mut usize) {
     }
 }
 
-/// Find the start char index of the previous whitespace-delimited word,
-/// stopping at the beginning of the current logical line so multi-line
-/// drafts never leak kills across newlines. Matches readline's
-/// `unix-word-rubout` (Ctrl+W) and the `backward-word` /
-/// `backward-kill-word` motions users expect from shells and editors.
+/// Find the start char index of the previous whitespace-delimited word.
+/// Skips trailing whitespace (including newlines), then removes the
+/// contiguous run of non-whitespace before the caret.  Returns 0 when
+/// the caret is at the very start of the buffer; otherwise the returned
+/// position can cross newline boundaries.
+///
+/// Matches readline's `unix-word-rubout` (Ctrl+W) and the
+/// `backward-word` / `backward-kill-word` motions users expect from
+/// shells and editors.
 fn prev_word_start(input: &str, cursor_position: usize) -> usize {
     let chars: Vec<char> = input.chars().collect();
-    let line_start = cursor_line_start_char(&chars, cursor_position);
     let mut i = cursor_position.min(chars.len());
-    // Skip whitespace between caret and the previous word.
-    while i > line_start && chars[i - 1].is_whitespace() && chars[i - 1] != '\n' {
+    // Skip whitespace between caret and the previous word (includes \n).
+    while i > 0 && chars[i - 1].is_whitespace() {
         i -= 1;
     }
     // Skip the contiguous run of non-whitespace that forms the word.
-    while i > line_start && !chars[i - 1].is_whitespace() {
+    while i > 0 && !chars[i - 1].is_whitespace() {
         i -= 1;
     }
     i
 }
 
-/// Find the end char index of the next whitespace-delimited word, stopping
-/// at the end of the current logical line so the caret never crosses a
-/// newline. Matches readline's `kill-word` (Alt+D) and `forward-word`
-/// motions.
+/// Find the end char index of the next whitespace-delimited word.
+/// Skips leading whitespace (including newlines), then skips the
+/// contiguous run of non-whitespace.  Returns [`input.len()`] when the
+/// caret is at the very end; otherwise the returned position can cross
+/// newline boundaries.
+///
+/// Matches readline's `kill-word` (Alt+D) and `forward-word` motions.
 fn next_word_end(input: &str, cursor_position: usize) -> usize {
     let chars: Vec<char> = input.chars().collect();
-    let line_end = cursor_line_end_char(&chars, cursor_position);
     let mut i = cursor_position.min(chars.len());
-    // Skip whitespace between caret and the next word.
-    while i < line_end && chars[i].is_whitespace() {
+    // Skip whitespace between caret and the next word (includes \n).
+    while i < chars.len() && chars[i].is_whitespace() {
         i += 1;
     }
     // Skip the contiguous run of non-whitespace that forms the word.
-    while i < line_end && !chars[i].is_whitespace() {
+    while i < chars.len() && !chars[i].is_whitespace() {
         i += 1;
     }
     i
@@ -870,10 +875,9 @@ pub fn process_event(
                 // Ctrl+W: delete the previous whitespace-delimited word
                 // (readline `unix-word-rubout`). Skips trailing whitespace
                 // then removes the contiguous run of non-whitespace before
-                // the caret, stopping at the start of the current logical
-                // line so multi-line drafts never leak kills across
-                // newlines. No-op outside free-text surfaces so it never
-                // closes a modal or inserts a literal 'w'.
+                // the caret, crossing newline boundaries.
+                // No-op outside free-text surfaces so it never closes a
+                // modal or inserts a literal 'w'.
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let start = prev_word_start(input, *cursor_position);
@@ -2795,9 +2799,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_does_not_cross_newline() {
-        // Multi-line draft: Ctrl+W on the second line must not eat into the
-        // first line. "line1\nworld" -> caret at end (11 chars).
+    fn ctrl_w_crosses_newline() {
+        // Ctrl+W now crosses newline boundaries. "line1\nworld" with caret
+        // at the end → first Ctrl+W deletes "world", second deletes "line1".
         let mut input = "line1\nworld".to_string();
         let mut cursor = 11;
         run_key(
@@ -2810,6 +2814,18 @@ mod tests {
         );
         assert_eq!(input, "line1\n");
         assert_eq!(cursor, 6);
+
+        // Second Ctrl+W eats the newline and "line1".
+        run_key(
+            &mut input,
+            &mut cursor,
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            crate::tui::Modal::None,
+            false,
+        );
+        assert_eq!(input, "");
+        assert_eq!(cursor, 0);
     }
 
     #[test]
