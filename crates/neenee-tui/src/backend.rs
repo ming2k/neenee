@@ -85,16 +85,10 @@ impl Bce {
             "xterm-direct",
             "foot",
             "foot-extra",
-            "tmux",
-            "tmux-256color",
-            "screen",
-            "screen-256color",
             "kitty",
             "kitty-direct",
             "wezterm",
             "alacritty",
-            "rxvt-unicode",
-            "rxvt-unicode-256color",
         ];
         let base = term.split('+').next().unwrap_or(term);
         if BCE_TERMS.contains(&base) || BCE_TERMS.contains(&term) {
@@ -169,20 +163,18 @@ impl<W: Write> Backend<W> {
                 Draw::ClearEol { x, y, style, width } => {
                     self.move_to(*x, *y)?;
                     self.apply_style(*style)?;
-                    match self.bce {
-                        Bce::Yes => {
-                            // `\x1b[K` clears from the cursor to EOL with the
-                            // currently-set background.
-                            self.out.queue(terminal::Clear(ClearType::UntilNewLine))?;
+                    let use_bce = matches!(self.bce, Bce::Yes) && style.bg == Color::Reset;
+                    if use_bce {
+                        // `\x1b[K` clears from the cursor to EOL with the
+                        // currently-set background (which is default/reset here).
+                        self.out.queue(terminal::Clear(ClearType::UntilNewLine))?;
+                    } else {
+                        // No BCE or non-default background: paint explicit styled spaces to the edge.
+                        for _ in 0..*width {
+                            self.out.queue(crossterm::style::Print(" "))?;
                         }
-                        Bce::No => {
-                            // No BCE: paint explicit styled spaces to the edge.
-                            for _ in 0..*width {
-                                self.out.queue(crossterm::style::Print(" "))?;
-                            }
-                            if let Some((cx, _cy)) = self.cur.as_mut() {
-                                *cx = cx.saturating_add(*width);
-                            }
+                        if let Some((cx, _cy)) = self.cur.as_mut() {
+                            *cx = cx.saturating_add(*width);
                         }
                     }
                 }
@@ -371,7 +363,7 @@ mod tests {
     #[test]
     fn bce_detection_defaults_for_known_terms() {
         assert_eq!(Bce::for_term("xterm-256color", None), Bce::Yes);
-        assert_eq!(Bce::for_term("tmux-256color", None), Bce::Yes);
+        assert_eq!(Bce::for_term("tmux-256color", None), Bce::No);
         assert_eq!(Bce::for_term("foot", None), Bce::Yes);
         assert_eq!(Bce::for_term("dumb", None), Bce::No);
         assert_eq!(Bce::for_term("unknown-term", None), Bce::No);

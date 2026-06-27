@@ -209,8 +209,8 @@ fn resize_preserves_content_and_converges() {
 }
 
 #[test]
-fn bce_clear_to_end_uses_clr_eol() {
-    // When bce is on, a dirty row whose tail resolves to the current
+fn bce_clear_to_end_uses_clr_eol_only_for_default_bg() {
+    // When bce is on, a dirty row whose tail resolves to the default
     // background can be cleared with a single \x1b[K. We verify the backend
     // emits that sequence when handed an explicit ClearEol command.
     use neenee_tui::diff::{Draw, DrawCmd};
@@ -219,7 +219,7 @@ fn bce_clear_to_end_uses_clr_eol() {
         draws: vec![Draw::ClearEol {
             x: 2,
             y: 1,
-            style: Style::default().bg(Color::Rgb(10, 10, 10)),
+            style: Style::default().bg(Color::Reset),
             width: 4,
         }],
     };
@@ -230,10 +230,6 @@ fn bce_clear_to_end_uses_clr_eol() {
     }
     let s = String::from_utf8(buf).unwrap();
     assert!(s.contains("\x1b[K"), "clr_eol emitted under bce: {s:?}");
-    assert!(
-        s.contains("\x1b[48;2;10;10;10m"),
-        "clr_eol applies the target background first: {s:?}"
-    );
 }
 
 #[test]
