@@ -1436,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-agent"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-code"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "arboard",
  "async-trait",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-providers"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-quant"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "neenee-agent",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-server"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-tools"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "neenee-tui"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "bitflags",
  "crossterm",

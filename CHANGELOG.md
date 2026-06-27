@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-29
+
+### Added
+
+- **Structured `AgentNotice` turn events.** A typed notice (kind/severity/surface/source)
+  is now emitted as `TurnEvent::Notice` and `SubagentEvent::Notice`, replacing ad-hoc
+  banners for provider retries and session-review alerts.
+
+- **One-line installer (`install.sh`).** A `curl | bash` installer detects the host
+  platform, resolves the latest GitHub Release, and drops the prebuilt `neenee-code`
+  binary into `~/.local/bin` (or `$INSTALL_DIR`).
+
+### Changed
+
+- **Provider→model picker flattened.** The two-stage provider→model picker is now a
+  single flat list of every `(provider, model)` pair; multi-model providers fan out into
+  one ranked entry each. The picker mirrors the input-history modal's two-mode design —
+  browse mode (favorites→last-used→name) and a `/` fuzzy-search sub-layer borrowing the
+  composer line.
+
+- **Disclosure/permission rendering reworked.** The render `step` module is renamed to
+  `disclosure`, with summary colors modeled as three orthogonal axes (lifecycle,
+  disclosure, interaction) under a disclosure-first monotonic weight model that fixes
+  focused/expanded steps reading as too dim. The permission overlay becomes a modal sheet
+  with Allow/Always/Reject/Details actions, queued-request handoff, and turn-aborting
+  rejection of the remaining batch.
+
+- **Spinner timed on wall-clock.** The per-frame `spinner_tick` counter is replaced with a
+  wall-clock `spinner_epoch`, so the breathing-indicator cadence stays constant regardless
+  of redraw frequency.
+
+### Fixed
+
+- **Tagged release builds failed.** The release workflow still built `--bin neenee` after
+  the binary was renamed to `neenee-code`, so every tagged build since v0.6.1 failed with
+  `no bin target named 'neenee'`. It now builds and packages `neenee-code`.
+
 ## [0.9.0] - 2026-06-27
 
 ### Added
@@ -554,7 +591,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/ming2k/neenee/releases/tag/v0.9.1
 [0.9.0]: https://github.com/ming2k/neenee/releases/tag/v0.9.0
 [0.8.0]: https://github.com/ming2k/neenee/releases/tag/v0.8.0
 [0.7.1]: https://github.com/ming2k/neenee/releases/tag/v0.7.1
