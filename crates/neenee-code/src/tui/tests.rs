@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
-use crate::tui::app::{ActivityTab, App, Modal, SessionTab};
+use crate::tui::app::{ActivityTab, App, Modal};
 use crate::tui::completion::CompletionKind;
 use crate::tui::completion::{manual_walk, mention_range_at, path_query_match};
 use crate::tui::config;
@@ -542,9 +542,12 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         input_scroll: 0,
         active_modal: Modal::None,
         modal_index: 0,
-        session_tab: SessionTab::Model,
         session_scroll: 0,
+        session_modal_follow: true,
         permissions_scroll: 0,
+        history_scroll: 0,
+        history_modal_follow: true,
+        history_preview: false,
         current_provider: "mock".to_string(),
         current_model: "mock".to_string(),
         cwd: cwd.clone(),

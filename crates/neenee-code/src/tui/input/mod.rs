@@ -92,16 +92,11 @@ pub enum InputAction {
     /// Clear every cached "always allow" rule. Bound to `c` in the
     /// permissions manager modal.
     PermissionsClearAll,
-    /// Cycle the active pane inside the session-context modal. `forward` picks
-    /// the direction so Left/Right (and later Tab/Shift+Tab) share one action.
-    SessionTabCycle { forward: bool },
-
-    /// Move the row cursor inside the session-context modal's list panes
-    /// (Skills / Permissions / Tools). `forward` = down, else up.
+    /// Move the tool-selection cursor in the session-context dashboard.
+    /// `forward` = down, else up.
     SessionSelect { forward: bool },
-    /// Tab-aware primary action on the selected row: revoke the selected
-    /// permission rule, or toggle the selected tool's enabled flag. No-op on
-    /// read-only panes (Model / MCP / Skills). Bound to `Space`.
+    /// Toggle the selected tool's enabled flag in the session dashboard. Bound
+    /// to `Space`.
     SessionActivate,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
@@ -187,6 +182,10 @@ pub enum InputAction {
     /// close the modal. The message is not sent — the user can edit and press
     /// Enter again to ship it.
     HistoryInsert,
+    /// Toggle the "full prompt" preview of the selected history entry inside
+    /// the Ctrl+R modal. In preview mode the body shows the entry's complete
+    /// (possibly multi-line) text; ↑/↓ re-renders the newly focused entry.
+    HistoryTogglePreview,
     /// Select modal item up.
     ModalUp,
     /// Select modal item down.
@@ -740,6 +739,11 @@ pub fn process_event(
                         // Tab cycles focus between the editor's API-key and
                         // model-id fields.
                         InputAction::ModelEditorNextField
+                    } else if context.active_modal == super::Modal::HistorySearch {
+                        // Tab toggles the full-prompt preview of the selected
+                        // entry. The fuzzy filter is a free-text field, so an
+                        // alpha key would clash; Tab is the unambiguous gesture.
+                        InputAction::HistoryTogglePreview
                     } else {
                         // No completion open and no modal field to cycle: Tab
                         // is a no-op. Zone switching is Ctrl+B / `p`, not Tab.
@@ -991,9 +995,8 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Question && c == ' ' {
                         return InputAction::QuestionToggle;
                     }
-                    // Space inside the session modal is the tab-aware primary
-                    // action: revoke the selected permission / toggle the
-                    // selected tool. No-op on read-only panes.
+                    // Space inside the session dashboard toggles the selected
+                    // tool's enabled flag.
                     if context.active_modal == super::Modal::Session && c == ' ' {
                         return InputAction::SessionActivate;
                     }
@@ -1141,9 +1144,6 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalUp;
                     }
-                    if context.active_modal == super::Modal::Session {
-                        return InputAction::SessionTabCycle { forward: false };
-                    }
 
                     if matches!(
                         context.active_modal,
@@ -1170,9 +1170,6 @@ pub fn process_event(
                 KeyCode::Right => {
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalDown;
-                    }
-                    if context.active_modal == super::Modal::Session {
-                        return InputAction::SessionTabCycle { forward: true };
                     }
 
                     if matches!(

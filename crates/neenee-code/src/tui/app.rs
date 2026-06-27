@@ -83,9 +83,10 @@ pub enum Modal {
     /// identified by `App::tool_detail_message_idx`; `tool_detail_scroll`
     /// holds the overlay's own scroll offset.
     ToolStepDetail,
-    /// Session context modal: a tabbed overview of the live session's model,
-    /// MCP servers, tools, and skills. Opened with the `/session` slash
-    /// command; the active pane is [`App::session_tab`].
+    /// Session context modal: a single scrollable dashboard of the live
+    /// session's model, MCP servers, skills, and tools. Opened with the
+    /// `/session` slash command. The tool list is the only interactive surface;
+    /// [`App::modal_index`] is its selection cursor.
     Session,
     /// Permissions manager modal: a centered, dismissable overlay listing the
     /// session's cached "always allow" rules with per-row revoke and a
@@ -160,49 +161,6 @@ impl Modal {
                 | Modal::Permissions
                 | Modal::Activity
         )
-    }
-}
-
-/// Active pane inside the session-context modal. The variant order defines the
-/// tab-strip order (left → right) and the Left/Right cycle order.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum SessionTab {
-    Model,
-    Mcp,
-    Skills,
-    Tools,
-}
-
-impl SessionTab {
-    /// All panes in tab-strip order. Used by the renderer to build the strip
-    /// and by the Left/Right cycle to step through them.
-    pub const ALL: [SessionTab; 4] = [
-        SessionTab::Model,
-        SessionTab::Mcp,
-        SessionTab::Skills,
-        SessionTab::Tools,
-    ];
-
-    /// Short label shown in the tab strip.
-    pub fn label(self) -> &'static str {
-        match self {
-            SessionTab::Model => "Model",
-            SessionTab::Mcp => "MCP",
-            SessionTab::Skills => "Skills",
-            SessionTab::Tools => "Tools",
-        }
-    }
-
-    /// Step to the neighbouring pane. `forward` = right, else left. Wraps.
-    pub fn cycle(self, forward: bool) -> SessionTab {
-        let idx = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
-        let n = Self::ALL.len();
-        let next = if forward {
-            (idx + 1) % n
-        } else {
-            (idx + n - 1) % n
-        };
-        Self::ALL[next]
     }
 }
 
@@ -329,17 +287,31 @@ pub struct App {
     pub input_scroll: usize,
     pub active_modal: Modal,
     pub modal_index: usize,
-    /// Active pane inside the session-context modal ([`Modal::Session`]).
-    /// Ignored while any other modal is open.
-    pub session_tab: SessionTab,
-    /// Body scroll offset of the session modal's active pane. Reset to 0 on
-    /// open and tab change. Clamped (and, for list panes, auto-followed to the
-    /// selection) by the renderer each frame.
+    /// Body scroll offset of the session-context dashboard ([`Modal::Session`]).
+    /// Reset to 0 on open. Clamped (and, when `session_modal_follow` is set,
+    /// auto-followed to the tool selection) by the renderer each frame.
     pub session_scroll: usize,
+    /// When true, the session dashboard's body scroll follows the ↑/↓ tool
+    /// selection cursor (the default after open / navigation). Cleared the
+    /// moment the user scrolls manually (wheel / page keys) so they can browse
+    /// freely, and re-set the moment they navigate again.
+    pub session_modal_follow: bool,
     /// Body scroll offset of the permissions manager modal. Reset to 0 each
     /// time the modal opens; clamped and auto-followed to the selection by the
     /// renderer each frame.
     pub permissions_scroll: usize,
+    /// Body scroll offset of the history search modal (Ctrl+R). Reset to 0
+    /// each time the modal opens; clamped and auto-followed to the selection
+    /// by the renderer each frame.
+    pub history_scroll: usize,
+    /// When true, the history modal's body scroll follows the ↑/↓ selection
+    /// cursor. Cleared on manual scroll (free browse), re-set on navigation.
+    pub history_modal_follow: bool,
+    /// When true, the history modal shows the full (multi-line) text of the
+    /// selected entry instead of the one-line-per-row fuzzy list. Toggled by
+    /// Tab; ↑/↓ re-shows the focused entry's complete prompt. `history_scroll`
+    /// is reused as the per-entry scroll inside preview mode.
+    pub history_preview: bool,
     pub current_provider: String,
     pub current_model: String,
     /// Raw current working directory captured at startup. Used to resolve
@@ -923,34 +895,24 @@ impl App {
         providers_filtered_from(PROVIDERS, &self.provider_picker, self.input.trim())
     }
 
-    /// Number of selectable rows in the session modal's active pane. Used to
-    /// clamp the Up/Down row cursor. Read-only panes (Model / MCP) report 0
-    /// since they have no list to navigate.
-    pub fn session_tab_list_len(&self) -> usize {
-        let Some(snapshot) = self.session_context.as_ref() else {
-            return 0;
-        };
-        match self.session_tab {
-            SessionTab::Skills => snapshot.skills.len(),
-            SessionTab::Tools => snapshot.tools.len(),
-            SessionTab::Model | SessionTab::Mcp => 0,
-        }
+    /// Number of selectable rows in the session dashboard — the tool list, the
+    /// only interactive surface. Used to clamp the Up/Down selection cursor.
+    pub fn session_tools_len(&self) -> usize {
+        self.session_context
+            .as_ref()
+            .map(|s| s.tools.len())
+            .unwrap_or(0)
     }
 
-    /// Build the mutation request implied by activating the selected row in the
-    /// active pane, or `None` when the pane is read-only or the selection is
-    /// out of range. The harness applies it and replies with a fresh snapshot.
+    /// Build the mutation request implied by toggling the selected tool in the
+    /// session dashboard, or `None` when there is no snapshot or the selection
+    /// is out of range. The harness applies it and replies with a fresh
+    /// snapshot that re-renders the dashboard.
     pub fn session_activate_request(&self) -> Option<AgentRequest> {
-        let snapshot = self.session_context.as_ref()?;
-        match self.session_tab {
-            SessionTab::Tools => {
-                let tool = snapshot.tools.get(self.modal_index)?;
-                Some(AgentRequest::ToggleTool {
-                    name: tool.name.clone(),
-                    enabled: !tool.enabled,
-                })
-            }
-            SessionTab::Model | SessionTab::Mcp | SessionTab::Skills => None,
-        }
+        let tool = self.session_context.as_ref()?.tools.get(self.modal_index)?;
+        Some(AgentRequest::ToggleTool {
+            name: tool.name.clone(),
+            enabled: !tool.enabled,
+        })
     }
 }

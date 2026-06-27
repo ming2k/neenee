@@ -35,7 +35,7 @@ use crate::tui::selection::{
     inclusive_grapheme_end,
 };
 use crate::tui::step_interaction::StepKind;
-use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess, SessionTab};
+use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess};
 
 use neenee_core::AgentResponse;
 use tokio::sync::{Mutex, broadcast};
@@ -491,18 +491,15 @@ pub(super) async fn run_app_loop(
                         app.permission_scroll =
                             app.permission_scroll.min(app.permission_max_scroll);
                     }
-                } else if matches!(
-                    app.active_modal,
-                    Modal::Provider | Modal::ModelEditor | Modal::HistorySearch
-                ) {
+                } else if matches!(app.active_modal, Modal::Provider | Modal::ModelEditor) {
                     // These modals borrow the input line as their own field
-                    // (filter / key+model / search), so the composer underneath
-                    // would only duplicate the same `app.input` the modal
-                    // already shows. Its rect stays mounted (so the footer
-                    // layout is stable) but is left as recessed surface — the
-                    // dim pass darkens it like the rest of the background. For
-                    // the editor's key field the composer would also panic:
-                    // the masked key's byte cursor is computed against the
+                    // (filter / key+model), so the composer underneath would
+                    // only duplicate the same `app.input` the modal already
+                    // shows. Its rect stays mounted (so the footer layout is
+                    // stable) but is left as recessed surface — the dim pass
+                    // darkens it like the rest of the background. For the
+                    // editor's key field the composer would also panic: the
+                    // masked key's byte cursor is computed against the
                     // unmasked string.
                 } else if !app.in_subagent_view() {
                     // The composer stays mounted for the dim-recess modals
@@ -625,6 +622,9 @@ pub(super) async fn run_app_loop(
                         app.cursor_position,
                         &ranked,
                         app.modal_index,
+                        &mut app.history_scroll,
+                        app.history_modal_follow,
+                        app.history_preview,
                         &app.theme,
                     );
                 }
@@ -683,7 +683,6 @@ pub(super) async fn run_app_loop(
                 ),
                 Modal::Session => render::draw_session_modal(
                     f,
-                    app.session_tab,
                     &app.current_provider,
                     &app.current_model,
                     &app.key_status,
@@ -691,6 +690,7 @@ pub(super) async fn run_app_loop(
                     app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.session_scroll,
+                    app.session_modal_follow,
                     &app.theme,
                 ),
                 Modal::Permissions => render::draw_permissions_manager(
@@ -1343,6 +1343,8 @@ pub(super) async fn run_app_loop(
                     // Default to the most-recent entry so an immediate Enter
                     // re-inserts the last-typed item. Empty history → 0.
                     app.modal_index = app.input_history.len().saturating_sub(1);
+                    app.history_scroll = 0;
+                    app.history_modal_follow = true;
                 }
                 input::InputAction::HistoryInsert => {
                     // Enter inside the Ctrl+R modal: pull the highlighted fuzzy
@@ -1368,6 +1370,15 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                     app.active_modal = Modal::None;
                 }
+                input::InputAction::HistoryTogglePreview => {
+                    // Tab inside the Ctrl+R modal: flip between the fuzzy list
+                    // and a full-text view of the selected entry. Reusing
+                    // `history_scroll` as the per-entry scroll means entering
+                    // preview or moving to another entry starts from the top.
+                    app.history_preview = !app.history_preview;
+                    app.history_scroll = 0;
+                    app.history_modal_follow = true;
+                }
                 input::InputAction::OpenCommands => {
                     // Command palette: seed the input with "/" so the existing
                     // slash-suggestion popup acts as a filterable palette.
@@ -1391,9 +1402,9 @@ pub(super) async fn run_app_loop(
                     // populate as soon as the harness replies; until then the
                     // modal renders a lightweight placeholder.
                     app.active_modal = Modal::Session;
-                    app.session_tab = SessionTab::Model;
                     app.modal_index = 0;
                     app.session_scroll = 0;
+                    app.session_modal_follow = true;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
                 input::InputAction::OpenPermissions => {
@@ -1425,19 +1436,12 @@ pub(super) async fn run_app_loop(
                     let _ = app.tx.send(AgentRequest::ClearAllPermissions);
                     app.modal_index = 0;
                 }
-                input::InputAction::SessionTabCycle { forward } => {
-                    app.session_tab = app.session_tab.cycle(forward);
-                    // Reset the row cursor and scroll whenever the pane changes
-                    // so a stale index from a longer list does not land past
-                    // the end of the new pane's list.
-                    app.modal_index = 0;
-                    app.session_scroll = 0;
-                }
                 input::InputAction::SessionSelect { forward } => {
-                    // List panes: move the selection cursor (the body scroll
-                    // follows it). Read-only panes: no selection, so Up/Down
-                    // scrolls the body directly.
-                    let list_len = app.session_tab_list_len();
+                    // Move the tool-selection cursor (the body scroll follows
+                    // it). When there are no tools yet (still loading / none),
+                    // Up/Down scrolls the dashboard body directly so the other
+                    // sections stay reachable.
+                    let list_len = app.session_tools_len();
                     if list_len > 0 {
                         app.modal_index = if forward {
                             (app.modal_index + 1) % list_len
@@ -1446,6 +1450,7 @@ pub(super) async fn run_app_loop(
                         } else {
                             app.modal_index - 1
                         };
+                        app.session_modal_follow = true;
                     } else {
                         app.session_scroll = if forward {
                             app.session_scroll.saturating_add(1)
@@ -1455,9 +1460,9 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::SessionActivate => {
-                    // Tab-aware mutate on the selected row. The actual request
-                    // is sent through the normal agent channel; the harness
-                    // replies with a fresh snapshot that re-renders the pane.
+                    // Toggle the selected tool. The request is sent through the
+                    // normal agent channel; the harness replies with a fresh
+                    // snapshot that re-renders the dashboard.
                     if let Some(req) = app.session_activate_request() {
                         let _ = app.tx.send(req);
                     }
@@ -1548,6 +1553,14 @@ pub(super) async fn run_app_loop(
                         app.activity_scroll = app.activity_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = app.session_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll = app.permissions_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = app.history_scroll.saturating_sub(1);
                     } else {
                         // While a permission sheet is open the transcript stays
                         // scrollable, so the wheel / page keys drive the
@@ -1566,6 +1579,14 @@ pub(super) async fn run_app_loop(
                         app.activity_scroll = app.activity_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = app.session_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll = app.permissions_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = app.history_scroll.saturating_add(1);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -1575,29 +1596,88 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ScrollPageUp => {
-                    app.follow_bottom = false;
-                    app.pin_summary_line = None;
-                    // Leave one line of overlap so the reader keeps context.
                     let step = app.view_height.saturating_sub(1).max(1);
-                    app.scroll = app.scroll.saturating_sub(step);
+                    if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = app.session_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll =
+                            app.permissions_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = app.history_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = app.help_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = app.activity_scroll.saturating_sub(step as usize);
+                    } else {
+                        app.follow_bottom = false;
+                        app.pin_summary_line = None;
+                        app.scroll = app.scroll.saturating_sub(step);
+                    }
                 }
                 input::InputAction::ScrollPageDown => {
-                    app.pin_summary_line = None;
                     let step = app.view_height.saturating_sub(1).max(1);
-                    app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
-                    if app.scroll >= app.max_scroll {
-                        app.follow_bottom = true;
+                    if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = app.session_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll =
+                            app.permissions_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = app.history_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = app.help_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = app.activity_scroll.saturating_add(step as usize);
+                    } else {
+                        app.pin_summary_line = None;
+                        app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
+                        if app.scroll >= app.max_scroll {
+                            app.follow_bottom = true;
+                        }
                     }
                 }
                 input::InputAction::ScrollTop => {
-                    app.follow_bottom = false;
-                    app.pin_summary_line = None;
-                    app.scroll = 0;
+                    if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = 0;
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll = 0;
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = 0;
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = 0;
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = 0;
+                    } else {
+                        app.follow_bottom = false;
+                        app.pin_summary_line = None;
+                        app.scroll = 0;
+                    }
                 }
                 input::InputAction::ScrollBottom => {
-                    app.pin_summary_line = None;
-                    app.scroll = app.max_scroll;
-                    app.follow_bottom = true;
+                    // Modal scroll bounds are clamped by render_body each
+                    // frame, so a large number here just means "go to end".
+                    if app.active_modal == Modal::Session {
+                        app.session_modal_follow = false;
+                        app.session_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::Permissions {
+                        app.permissions_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::HistorySearch {
+                        app.history_modal_follow = false;
+                        app.history_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::Help {
+                        app.help_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::Activity {
+                        app.activity_scroll = usize::MAX;
+                    } else {
+                        app.pin_summary_line = None;
+                        app.scroll = app.max_scroll;
+                        app.follow_bottom = true;
+                    }
                 }
                 input::InputAction::PermissionDetailsUp => {
                     app.permission_scroll = app.permission_scroll.saturating_sub(1);
@@ -1983,6 +2063,13 @@ pub(super) async fn run_app_loop(
                         } else {
                             app.modal_index - 1
                         };
+                        app.history_modal_follow = true;
+                        // In preview mode the body shows the focused entry's
+                        // full text, so moving to another entry re-anchors it
+                        // to the top.
+                        if app.history_preview {
+                            app.history_scroll = 0;
+                        }
                     }
                     Modal::Permission => {
                         let count = if app.permission_confirm_always { 2 } else { 4 };
@@ -2037,6 +2124,10 @@ pub(super) async fn run_app_loop(
                     Modal::HistorySearch => {
                         let count = app.history_filtered().len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
+                        app.history_modal_follow = true;
+                        if app.history_preview {
+                            app.history_scroll = 0;
+                        }
                     }
                     Modal::Permission => {
                         let count = if app.permission_confirm_always { 2 } else { 4 };

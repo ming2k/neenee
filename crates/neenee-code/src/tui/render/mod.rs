@@ -792,6 +792,9 @@ mod tests {
                 0,
                 &ranked,
                 0,
+                &mut 0,
+                true,
+                false,
                 &theme,
             );
             draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
@@ -892,15 +895,9 @@ mod tests {
             };
             let mut key_status = HashMap::new();
             key_status.insert("gemini".to_string(), true);
-            for (tab, idx) in [
-                (crate::tui::SessionTab::Model, 0),
-                (crate::tui::SessionTab::Mcp, 0),
-                (crate::tui::SessionTab::Skills, 0),
-                (crate::tui::SessionTab::Tools, 0),
-            ] {
+            for idx in [0usize, 2] {
                 draw_session_modal(
                     f,
-                    tab,
                     "custom-unknown",
                     "some-model",
                     &key_status,
@@ -908,13 +905,13 @@ mod tests {
                     Some(&snapshot),
                     idx,
                     &mut 0,
+                    true,
                     &theme,
                 );
             }
             // And once with no snapshot, to cover the placeholder fallbacks.
             draw_session_modal(
                 f,
-                crate::tui::SessionTab::Model,
                 "custom-unknown",
                 "some-model",
                 &key_status,
@@ -922,6 +919,7 @@ mod tests {
                 None,
                 0,
                 &mut 0,
+                true,
                 &theme,
             );
         });
@@ -2054,6 +2052,9 @@ mod tests {
                     query.chars().count(),
                     &ranked,
                     0,
+                    &mut 0,
+                    true,
+                    false,
                     &theme,
                 );
             });
@@ -2066,7 +2067,74 @@ mod tests {
         let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> =
             crate::tui::fuzzy::rank(&empty, "");
         terminal.draw(|f| {
-            draw_history_modal(f, &mut LayoutMap::new(), &empty, "", 0, &ranked, 0, &theme);
+            draw_history_modal(
+                f,
+                &mut LayoutMap::new(),
+                &empty,
+                "",
+                0,
+                &ranked,
+                0,
+                &mut 0,
+                true,
+                false,
+                &theme,
+            );
+        });
+    }
+
+    /// A multi-line history entry collapses to its first line in the fuzzy
+    /// list (so a long prompt never breaks the single-row grid), and the
+    /// preview mode renders the full text verbatim. Both modes must consume a
+    /// real buffer without panicking.
+    #[test]
+    fn history_modal_folds_multiline_and_previews_full_text() {
+        let theme = Theme::default();
+        let history = vec![
+            "first line\nsecond line\nthird line".to_string(),
+            "single line".to_string(),
+        ];
+
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
+        let ranked = crate::tui::fuzzy::rank(&history, "");
+
+        // List mode: the multi-line entry must render as one row.
+        terminal.draw(|f| {
+            draw_history_modal(
+                f,
+                &mut LayoutMap::new(),
+                &history,
+                "",
+                0,
+                &ranked,
+                0,
+                &mut 0,
+                true,
+                false,
+                &theme,
+            );
+        });
+        let buf = terminal.buffer();
+        // The continuation marker `↵` should appear somewhere — proving the
+        // folded entry advertises its hidden content.
+        let has_marker = buf.content.iter().any(|c| c.symbol() == "↵");
+        assert!(has_marker, "multi-line entry should show the ↵ fold marker");
+
+        // Preview mode: the full multi-line text renders without panic.
+        terminal.draw(|f| {
+            draw_history_modal(
+                f,
+                &mut LayoutMap::new(),
+                &history,
+                "",
+                0,
+                &ranked,
+                0,
+                &mut 0,
+                true,
+                true,
+                &theme,
+            );
         });
     }
 

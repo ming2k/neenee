@@ -24,7 +24,7 @@ pub mod step_interaction;
 mod terminal;
 mod transcript;
 
-pub(crate) use app::{ActivityTab, App, Modal, Recess, SessionTab};
+pub(crate) use app::{ActivityTab, App, Modal, Recess};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
     PROVIDERS, ProviderPreset, model_display_name, provider_context_window, providers_filtered_from,
@@ -814,9 +814,12 @@ pub async fn run_tui(
         input_scroll: 0,
         active_modal: Modal::None,
         modal_index: 0,
-        session_tab: SessionTab::Model,
         session_scroll: 0,
+        session_modal_follow: true,
         permissions_scroll: 0,
+        history_scroll: 0,
+        history_modal_follow: true,
+        history_preview: false,
         current_provider: initial_provider,
         current_model: initial_model,
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),

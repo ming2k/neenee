@@ -25,7 +25,7 @@ use crate::tui::render::{
     draw_history_modal, draw_model_editor, draw_models_modal, draw_session_modal,
     draw_sessions_modal,
 };
-use crate::tui::{ActivityTab, PROVIDERS, SessionTab};
+use crate::tui::{ActivityTab, PROVIDERS};
 
 // ─────────────────────────── provider picker ──────────────────────────────
 
@@ -252,8 +252,19 @@ pub fn history() -> io::Result<()> {
             let hint = " type to filter · ↑↓ navigate · Esc clear/quit ";
             common::draw_with_chrome(f, &title, hint, &theme, |f| {
                 let mut lm = LayoutMap::new();
+                let mut scroll = 0;
                 draw_history_modal(
-                    f, &mut lm, &s.history, &s.query, s.cursor, &ranked, index, &theme,
+                    f,
+                    &mut lm,
+                    &s.history,
+                    &s.query,
+                    s.cursor,
+                    &ranked,
+                    index,
+                    &mut scroll,
+                    true,
+                    false,
+                    &theme,
                 );
             });
         },
@@ -371,7 +382,6 @@ pub fn sessions() -> io::Result<()> {
 
 struct SessionState {
     snapshot: SessionContextSnapshot,
-    tab: SessionTab,
     index: usize,
     scroll: Cell<usize>,
     key_status: HashMap<String, bool>,
@@ -438,7 +448,6 @@ pub fn session() -> io::Result<()> {
     };
     let mut state = SessionState {
         snapshot,
-        tab: SessionTab::Model,
         index: 0,
         scroll: Cell::new(0),
         key_status: HashMap::new(),
@@ -448,13 +457,12 @@ pub fn session() -> io::Result<()> {
     common::run_showcase(
         &mut state,
         |f, s| {
-            let title = format!(" session-context · tab: {} · q/Ctrl+C=quit", s.tab.label());
-            let hint = " ←→ / Tab cycle panes · ↑↓ navigate · Esc quit ";
-            common::draw_with_chrome(f, &title, hint, &theme, |f| {
+            let title = " session-context dashboard · q/Ctrl+C=quit";
+            let hint = " ↑↓ select tool · Space toggle · Esc quit ";
+            common::draw_with_chrome(f, title, hint, &theme, |f| {
                 let mut scroll = s.scroll.get();
                 draw_session_modal(
                     f,
-                    s.tab,
                     "anthropic",
                     "claude-sonnet-4-5",
                     &s.key_status,
@@ -462,34 +470,22 @@ pub fn session() -> io::Result<()> {
                     Some(&s.snapshot),
                     s.index,
                     &mut scroll,
+                    true,
                     &theme,
                 );
                 s.scroll.set(scroll);
             });
         },
         |s, key| -> ShowAction {
+            let tools = s.snapshot.tools.len().max(1);
             match key.code {
                 KeyCode::Esc => ShowAction::Exit,
-                KeyCode::Left | KeyCode::Char('h') => {
-                    s.tab = s.tab.cycle(false);
-                    s.index = 0;
-                    s.scroll.set(0);
-                    ShowAction::Continue
-                }
-                KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => {
-                    s.tab = s.tab.cycle(true);
-                    s.index = 0;
-                    s.scroll.set(0);
-                    ShowAction::Continue
-                }
                 KeyCode::Up => {
-                    if s.index > 0 {
-                        s.index -= 1;
-                    }
+                    s.index = if s.index == 0 { tools - 1 } else { s.index - 1 };
                     ShowAction::Continue
                 }
                 KeyCode::Down => {
-                    s.index += 1;
+                    s.index = (s.index + 1) % tools;
                     ShowAction::Continue
                 }
                 _ => ShowAction::Continue,

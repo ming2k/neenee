@@ -47,6 +47,30 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Like [`centered_rect`] but the vertical extent is an explicit row count
+/// instead of a percentage, so a modal can size to its content rather than
+/// reserve a fixed slab of the viewport. `height` is clamped to `r`'s height
+/// and the band is centered vertically; the width is still a percentage so the
+/// modal keeps a consistent horizontal footprint regardless of how tall it is.
+pub(super) fn centered_rect_h(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let height = height.min(r.height);
+    let top = r.y + r.height.saturating_sub(height) / 2;
+    let band = Rect {
+        x: r.x,
+        y: top,
+        width: r.width,
+        height,
+    };
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(band)[1]
+}
+
 /// Recess the live surface behind a modal, per its [`Recess`] policy.
 ///
 /// A terminal cannot alpha-blend, so the event loop calls this exactly once

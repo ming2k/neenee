@@ -96,23 +96,18 @@ impl McpRow {
         Self::Failed(reason)
     }
 
-    /// One-line status summary + color, shown next to the server name.
-    pub(crate) fn summary(&self, theme: &Theme) -> (String, Color) {
+    /// Compact one-line status for the session dashboard: a status glyph, a
+    /// short word, and the color shared by both. The connected variant folds
+    /// the tool count into the word so the dashboard needs no second line.
+    pub(crate) fn dashboard_summary(&self, theme: &Theme) -> (String, Color, &'static str) {
         match self {
-            Self::Connected(tools) => (format!("Connected · {} tools", tools.len()), theme.ok()),
-            Self::Disabled => ("Disabled".to_string(), theme.muted()),
-            Self::Failed(reason) => (format!("Failed: {}", reason), theme.err()),
-        }
-    }
-
-    /// Optional second line (the tool-name list for a connected server).
-    pub(crate) fn detail(&self) -> Option<String> {
-        match self {
-            Self::Connected(tools) if !tools.is_empty() => {
-                let names: String = tools.join(", ");
-                Some(format!("tools: {}", names))
-            }
-            _ => None,
+            Self::Connected(tools) => (
+                format!("connected · {} tools", tools.len()),
+                theme.ok(),
+                "●",
+            ),
+            Self::Disabled => ("disabled".to_string(), theme.muted(), "○"),
+            Self::Failed(reason) => (format!("failed · {reason}"), theme.err(), "●"),
         }
     }
 }

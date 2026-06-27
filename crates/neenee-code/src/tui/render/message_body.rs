@@ -412,9 +412,11 @@ pub(super) fn draw_message_body(
                 // columns, and draw the grid line-by-line. This keeps borders
                 // intact even for wide/CJK tables instead of letting the
                 // generic line wrapper mangle `│` separators.
-                let indent = 3usize;
+                let indent = TRANSCRIPT_BODY_LEADING_INDENT as usize;
                 let full_width = area.width as usize;
-                // The area is already inset; `indent` is the table's left visual indent.
+                // The area is already inset; `indent` is the table's left visual
+                // indent, matching body prose so a table's left edge lines up
+                // with the text above and below it rather than drifting right.
                 let available = full_width.saturating_sub(indent);
                 let table = build_table_render(headers, rows, aligns, available);
                 let ncols = headers.len().max(1);
