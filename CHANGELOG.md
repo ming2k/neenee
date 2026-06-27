@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-27
+
+### Added
+
+- **Tools manager overlay (`/tools`).** A new slash command opens a focused modal listing
+  every session tool — builtins, `mcp:<server>`, `pursuit`, and `plan` — each with a
+  `Space` toggle to enable/disable it. The tool list is pulled out of the session dashboard
+  so that overview stays a glanceable summary while per-tool control lives in its own
+  surface.
+
+### Changed
+
+- **`auto_approve` renamed to `unattended`.** The no-prompt permission flag is renamed
+  across the agent, permission store, events, server, and docs. The hint bar no longer
+  renders a separate `AUTO-APPROVE` pill — the shell-mode pill now conveys the active state
+  on its own.
+
+- **History modal (Ctrl+R) redesigned.** The modal now opens in a reverse-chronological
+  browse mode by default and drops into a fuzzy-search sub-layer on `/` (borrowing the
+  composer line as a live query). Rows are recomputed each frame from a single source of
+  truth (`App::history_rows`), and the input draft is stashed and restored on open/close.
+  Read-only overlays like this are now click-outside-to-dismissable, while entry modals
+  holding in-progress input stay put.
+
+- **Step summary colour reworked to a three-tone, hover-priority model.** `summary_weight`
+  now maps hover/focus to the hover tone, an expanded (open) body to the primary foreground,
+  and a collapsed idle step to muted. Expanded and collapsed are mutually exclusive peers
+  decided only when idle, so closing a step darkens it immediately instead of staying bright
+  under a stale focus override. Accent blend factors were updated to mirror the new weight
+  ladder.
+
+### Fixed
+
+- **Long footer hints spilled past modal panels.** Non-wrapped `Paragraph` spans are now
+  clipped to the panel rect (`clip_to_cols`), so long footer hints can no longer overflow
+  past modal panels into the backdrop. Clipping is grapheme-aware.
+
+- **Mouse wheel leaked through the question modal.** When a question modal is open, the
+  wheel now drives option selection (`QuestionUp`/`QuestionDown`) instead of scrolling the
+  transcript behind the modal.
+
 ### Removed
 
 - **Removed the `progress_update` tool and the `/config` modal.** The model-facing
@@ -14,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AgentEvent`/`TurnEvent::ProgressUpdate` events, the `ConfigSnapshot` request/response
   pair, and the now-empty configuration modal (`/config`, `Modal::Config`) are gone. The
   activity bar now shows only the harness liveness status; the glanceable model-authored
-  status line is no longer surfaced. (These were added in the same unreleased cycle, so
-  nothing is dropped from a prior release.)
+  status line is no longer surfaced. (These were added in the same cycle, so nothing is
+  dropped from a prior release.)
 
 ## [0.8.0] - 2026-07-14
 
@@ -513,7 +554,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ming2k/neenee/releases/tag/v0.9.0
 [0.8.0]: https://github.com/ming2k/neenee/releases/tag/v0.8.0
 [0.7.1]: https://github.com/ming2k/neenee/releases/tag/v0.7.1
 [0.7.0]: https://github.com/ming2k/neenee/releases/tag/v0.7.0
