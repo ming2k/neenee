@@ -116,6 +116,19 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
             header: true,
             footer: true,
         },
+        // Tools manager: a content-sized list like the session dashboard, but
+        // narrower (no multi-column MODEL/MCP/SKILLS table — just a flat tool
+        // list) and with a taller min so a handful of tools never shrinks it to
+        // a sliver.
+        Modal::Tools => ModalSpec {
+            width_percent: 64,
+            height: ModalHeight::Content {
+                min_rows: 11,
+                max_viewport_percent: 84,
+            },
+            header: true,
+            footer: true,
+        },
         Modal::None | Modal::Permission => return None,
     })
 }
@@ -667,6 +680,7 @@ mod tests {
             Modal::ToolStepDetail,
             Modal::Sessions,
             Modal::Session,
+            Modal::Tools,
             Modal::Permissions,
             Modal::Activity,
         ] {

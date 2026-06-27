@@ -503,7 +503,7 @@ impl Provider for OpenAiCompatProvider {
     fn prepare_tools_with(
         &self,
         tools: &[Arc<dyn Tool>],
-        overrides: &neenee_core::ToolDescriptionOverrides,
+        overrides: &neenee_core::ToolOverrides,
     ) {
         let schemas: Vec<Value> = tools
             .iter()
@@ -1159,8 +1159,14 @@ mod tests {
         ];
 
         // Override read_file only; bash keeps its built-in description.
-        let mut overrides = neenee_core::ToolDescriptionOverrides::new();
-        overrides.insert("read_file".to_string(), "model-specific wording".to_string());
+        let mut overrides = neenee_core::ToolOverrides::new();
+        overrides.insert(
+            "read_file".to_string(),
+            neenee_core::ToolOverride {
+                description: Some("model-specific wording".to_string()),
+                params: std::collections::HashMap::new(),
+            },
+        );
         provider.prepare_tools_with(&tools, &overrides);
 
         let body = provider.request_body(vec![Message::new(Role::User, "go")], false);
@@ -1187,7 +1193,7 @@ mod tests {
         let plain_body = plain.request_body(vec![Message::new(Role::User, "go")], false);
 
         let with = mk();
-        with.prepare_tools_with(&tools, &neenee_core::ToolDescriptionOverrides::new());
+        with.prepare_tools_with(&tools, &neenee_core::ToolOverrides::new());
         let with_body = with.request_body(vec![Message::new(Role::User, "go")], false);
 
         assert_eq!(plain_body, with_body);

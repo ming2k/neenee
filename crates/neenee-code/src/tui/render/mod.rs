@@ -46,9 +46,9 @@ use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
-    draw_history_modal, draw_model_editor, draw_models_modal,
-    draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
-    draw_sessions_modal, draw_tool_step_detail_overlay,
+    draw_history_modal, draw_model_editor, draw_models_modal, draw_permission_sheet,
+    draw_permissions_manager, draw_question_modal, draw_session_modal, draw_sessions_modal,
+    draw_tool_step_detail_overlay, draw_tools_modal,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
@@ -147,6 +147,56 @@ pub struct TranscriptView<'a> {
     /// Ignored entirely when the transcript is non-empty.
     pub logo: Option<&'a [String]>,
     pub theme: &'a Theme,
+    /// Per-message laid-out height cache (Stage 2). Lets the transcript pass
+    /// skip the expensive text-wrapping of messages that are entirely outside
+    /// the viewport, turning per-frame layout from O(transcript) into
+    /// O(visible). The caller clears it whenever the transcript mutates, so an
+    /// entry is only ever read while its message's content is unchanged.
+    /// `None` outside the app loop (tests / showcase), where every lookup is a
+    /// miss — correct, just unoptimized.
+    pub height_cache: Option<&'a mut HeightCache>,
+}
+
+/// Caches each transcript message's fully-laid-out height (in rows), keyed by
+/// the message's stable [`TranscriptMessage::id`](crate::tui::document::TranscriptMessage::id).
+///
+/// Correctness rests on one invariant, enforced by the caller: the cache is
+/// cleared whenever the transcript could have changed (any `messages_version`
+/// bump) and whenever the wrap width changes ([`Self::prepare`]). So a cached
+/// height is only ever consulted while the message's content **and** the
+/// layout width are identical to when it was measured — making the cached row
+/// count exactly reproduce a fresh layout.
+#[derive(Default)]
+pub struct HeightCache {
+    width: u16,
+    heights: std::collections::HashMap<u64, u16>,
+}
+
+impl HeightCache {
+    /// Reset the cache if the wrap width changed since the last frame; heights
+    /// are width-dependent, so a resize invalidates every entry. Call once at
+    /// the start of a transcript pass before any [`Self::get`]/[`Self::set`].
+    pub fn prepare(&mut self, width: u16) {
+        if self.width != width {
+            self.heights.clear();
+            self.width = width;
+        }
+    }
+
+    /// The cached height for message `id`, or `None` if it must be measured.
+    pub fn get(&self, id: u64) -> Option<u16> {
+        self.heights.get(&id).copied()
+    }
+
+    /// Record the freshly-measured height for message `id`.
+    pub fn set(&mut self, id: u64, height: u16) {
+        self.heights.insert(id, height);
+    }
+
+    /// Drop every entry. Called when the transcript mutates (the version moved).
+    pub fn clear(&mut self) {
+        self.heights.clear();
+    }
 }
 
 /// Info for the subagent navigation bar (shown when zoomed into a task).
@@ -221,7 +271,13 @@ pub fn draw_transcript(
         focused_target,
         logo,
         theme,
+        height_cache,
     } = view;
+    // Outside the app loop (tests/showcase) no persistent cache is supplied;
+    // fall back to a throwaway so every lookup simply misses and the renderer
+    // behaves exactly as before the cache existed.
+    let mut fallback_height_cache = HeightCache::default();
+    let height_cache = height_cache.unwrap_or(&mut fallback_height_cache);
     let full = frame.area();
     // Components render inside the vertical viewport margins (1 cell top and
     // bottom); only the background fill uses the full terminal rect.
@@ -366,6 +422,12 @@ pub fn draw_transcript(
         // zero-height stream (which would mis-pin the scroll position).
         content_lines = empty_state::empty_state_content_lines(logo);
     } else {
+        // Stage 2: heights are wrap-width-dependent, so drop the cache on a
+        // resize. Within a stable width + unchanged transcript every entry
+        // reproduces a fresh layout exactly, so off-screen messages can be
+        // advanced from their cached height instead of being re-wrapped.
+        height_cache.prepare(band.width);
+        let viewport_bottom = band.y + band.height;
         for (mi, msg) in messages.iter().enumerate() {
             // Model attribution badge: shown above the first assistant-side
             // message of a turn (reasoning, text, or tool step) and whenever the
@@ -391,8 +453,36 @@ pub fn draw_transcript(
                 }
             }
 
-            // Render blocks
-            if msg.is_notice() {
+            // Render blocks.
+            //
+            // Stage 2 off-screen fast path: a plain text body or notice carries
+            // no sticky-header candidacy and no interactive regions, so once its
+            // height is cached it can be advanced without re-wrapping whenever it
+            // is entirely outside the viewport. Tool steps and reasoning traces
+            // are deliberately excluded — they feed `sticky_steps` and hover/click
+            // regions even while scrolled above the viewport, so they always draw.
+            let body_before = content_lines;
+            let skippable = msg.is_notice()
+                || (!msg.is_subagent_task() && !msg.is_tool_step() && !msg.is_thinking());
+            let cached_height = if skippable {
+                height_cache.get(msg.id)
+            } else {
+                None
+            };
+            let fully_above = cached_height.is_some_and(|h| (h as usize) <= skip_rows);
+            let fully_below = current_y >= viewport_bottom;
+            if let Some(h) = cached_height.filter(|_| fully_above || fully_below) {
+                // Reproduce exactly the counter mutations a fully-clipped body
+                // draw would make, minus the wrapping work. `content_lines` is
+                // always the true (un-clipped) height; `skip_rows` is consumed
+                // only for content above the viewport; `current_y` does not
+                // advance for off-screen rows (it stops at the viewport bottom),
+                // so it is left untouched here.
+                content_lines += h as usize;
+                if fully_above {
+                    skip_rows -= h as usize;
+                }
+            } else if msg.is_notice() {
                 draw_notice(
                     frame,
                     band,
@@ -465,6 +555,12 @@ pub fn draw_transcript(
                     &mut content_lines,
                     true,
                 );
+            }
+            // Record the freshly-measured body height so future frames can skip
+            // this message while it is off-screen and unchanged. Only skippable
+            // kinds are cached; tool/thinking/subagent rows always redraw.
+            if skippable && cached_height.is_none() {
+                height_cache.set(msg.id, (content_lines - body_before) as u16);
             }
 
             // Spacing between messages. A user message's panel already ends with a
@@ -720,6 +816,7 @@ mod tests {
                         focused_target: None,
                         logo: None,
                         theme: &theme,
+                        height_cache: None,
                     },
                 );
                 draw_composer(
@@ -903,9 +1000,7 @@ mod tests {
                     &key_status,
                     &[],
                     Some(&snapshot),
-                    idx,
                     &mut 0,
-                    true,
                     &theme,
                 );
             }
@@ -917,9 +1012,7 @@ mod tests {
                 &key_status,
                 &[],
                 None,
-                0,
                 &mut 0,
-                true,
                 &theme,
             );
         });
@@ -994,6 +1087,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -1030,9 +1124,101 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
+    }
+
+    #[test]
+    fn height_cache_skip_path_matches_full_layout() {
+        // Stage 2 invariant: a warm height cache (which lets the transcript
+        // pass *skip* re-wrapping off-screen messages) must produce byte-for-
+        // byte the same frame — and the same total `content_lines` — as a cold
+        // render that lays every message out in full. If the skip arithmetic
+        // (`skip_rows` / `current_y` / `content_lines`) drifted, this fails.
+        use crate::tui::layout::LayoutMap;
+        let theme = Theme::default();
+
+        // A tall transcript: enough wrapped plain-text messages to overflow an
+        // 80x24 viewport several times, so both skip branches are exercised —
+        // messages scrolled above the viewport (fully_above) and messages below
+        // its bottom (fully_below).
+        let messages: Vec<TranscriptMessage> = (0..40)
+            .map(|i| {
+                TranscriptMessage::new(
+                    neenee_core::Role::Assistant,
+                    format!(
+                        "Message number {i} with enough words to wrap across a \
+                         couple of lines in an eighty column terminal so the \
+                         per-message heights are non-trivial and varied."
+                    ),
+                )
+            })
+            .collect();
+        let (width, height, scroll) = (80u16, 24u16, 30u16);
+
+        let dump = |cache: &mut HeightCache| -> (String, usize) {
+            let mut terminal = neenee_tui::TestTerminal::new(width, height);
+            let mut layout_map = LayoutMap::new();
+            let mut content_lines = 0usize;
+            terminal.draw(|f| {
+                let r = draw_transcript(
+                    f,
+                    &mut layout_map,
+                    TranscriptView {
+                        messages: &messages,
+                        scroll,
+                        selection: &SelectionState::None,
+                        cell_selection: None,
+                        activity: "",
+                        spinner_phase: 0,
+                        input: "",
+                        byte_cursor: 0,
+                        chrome_hidden: false,
+                        subagent_bar: None,
+                        side_banner: None,
+                        pursuit: None,
+                        todos: None,
+                        review_alert: String::new(),
+                        turn_started_at: None,
+                        hovered_step: None,
+                        focused_target: None,
+                        logo: None,
+                        theme: &theme,
+                        height_cache: Some(cache),
+                    },
+                );
+                content_lines = r.content_lines;
+            });
+            let buf = terminal.buffer();
+            let bw = buf.area().width as usize;
+            let mut s = String::new();
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    s.push_str(buf.content[y * bw + x].symbol());
+                }
+                s.push('\n');
+            }
+            (s, content_lines)
+        };
+
+        let mut cache = HeightCache::default();
+        // Cold: cache empty, every message laid out in full (and measured).
+        let (cold_grid, cold_lines) = dump(&mut cache);
+        // Warm: off-screen messages now take the skip path.
+        let (warm_grid, warm_lines) = dump(&mut cache);
+
+        assert_eq!(
+            cold_lines, warm_lines,
+            "content_lines must match between full and skip layout"
+        );
+        assert_eq!(
+            cold_grid, warm_grid,
+            "rendered frame must be identical between full and skip layout"
+        );
+        // The skip path must actually have been reachable (cache populated).
+        assert!(cache.get(messages[0].id).is_some());
     }
 
     #[test]
@@ -1153,6 +1339,7 @@ mod tests {
                         focused_target: None,
                         logo: None,
                         theme,
+                        height_cache: None,
                     },
                 );
                 rect = r.input_rect;
@@ -1568,6 +1755,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
             let mut input_scroll = 0;
@@ -1709,6 +1897,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -1784,6 +1973,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -2224,6 +2414,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             ));
         });
@@ -2276,6 +2467,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             ));
         });
@@ -2337,6 +2529,7 @@ mod tests {
                     focused_target: None,
                     logo: Some(&logo),
                     theme: &theme,
+                    height_cache: None,
                 },
             ));
         });
@@ -2385,6 +2578,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -2458,6 +2652,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -2527,6 +2722,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });
@@ -2595,6 +2791,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
         });

@@ -50,6 +50,7 @@ macro_rules! define_builtin_commands {
 
 define_builtin_commands! {
     Provider    = "/provider"     : "Select an LLM provider",
+    Tools       = "/tools"        : "Manage session tools (enable/disable)",
     Mcp         = "/mcp"          : "Show configured MCP server status",
     Compact     = "/compact"      : "Compact older complete turns now",
     Clear       = "/clear"        : "Clear the conversation history",

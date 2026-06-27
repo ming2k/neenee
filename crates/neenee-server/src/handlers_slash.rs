@@ -88,6 +88,10 @@ pub async fn dispatch(
         Some(BuiltinCmd::Config) => {
             // Handled in TUI
         }
+        Some(BuiltinCmd::Tools) => {
+            // Handled in TUI (`/tools` opens the tools manager modal
+            // locally; it is never forwarded here as a SlashCommand).
+        }
         Some(BuiltinCmd::Mcp) => {
             let message = if mcp_statuses.is_empty() {
                 "No MCP servers configured.".to_string()

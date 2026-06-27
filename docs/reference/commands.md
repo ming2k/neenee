@@ -28,6 +28,7 @@ Project and user-defined commands are covered under
 | `/init [path]` | Initialize a `.neenee/` config tree |
 | `/skills [list\|reload]` | List or reload available skills |
 | `/skill <name>` | Load a skill by name |
+| `/tools` | Toggle individual session tools on or off |
 | `/export` | Export the current conversation to the clipboard as Markdown |
 | `/debug network [on\|off]` | Toggle per-project network capture for debugging |
 | `/help` | Show available commands and keybindings |
@@ -89,6 +90,20 @@ clock-driven scheduler, independent of `/pursue`. See
 |------|--------|
 | `/permissions` | List always-allowed tool rules for this process |
 | `/permissions clear` | Clear process-local always-allow rules |
+
+### `/tools`
+
+| Form | Effect |
+|------|--------|
+| `/tools` | Open the tools manager overlay |
+
+Opens a centered, scrollable list of every tool available to the live session —
+builtins, `mcp:<server>`, `pursuit`, and `plan` — each with its source and an
+`[on]`/`[off]` badge. `↑`/`↓` move the selection, `Space` toggles a tool on or
+off (the harness applies it and replies with a fresh snapshot), and `Esc`
+closes. The same list is reachable from the `/session` dashboard's `TOOLS` line
+via `t`. `/tools` is handled entirely in the TUI and is never forwarded to the
+backend.
 
 ### `/unattended`
 

@@ -63,6 +63,7 @@ pub fn run() -> io::Result<()> {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    height_cache: None,
                 },
             );
             s.messages.set(messages);

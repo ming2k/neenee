@@ -145,8 +145,8 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Draw the session-context modal: a single scrollable **dashboard** of the
-/// live session — no tabs.
+/// Draw the session-context modal: a single scrollable, **read-only** dashboard
+/// of the live session — no tabs.
 ///
 /// Layout: a borderless solid-bg panel sized to its content (clamped to the
 /// viewport), split into **header** (`Session` title), **body**, and **footer**
@@ -160,10 +160,9 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 /// `key_status` and MCP falls back to `mcp_statuses`, while Skills / Tools show a
 /// "Loading…" placeholder.
 ///
-/// Only the `TOOLS` rows are interactive: `modal_index` is the selection cursor
-/// over the tool list (the sole toggleable surface), the selected row takes the
-/// brand highlight, and the body auto-scrolls to keep it in view while
-/// `follow_selection` is latched (cleared the moment the user scrolls manually).
+/// The dashboard is read-only: it summarizes tools with a one-line count and a
+/// `t → /tools` hint rather than listing them. Interactive tool toggling lives
+/// in the dedicated [`Modal::Tools`](crate::tui::Modal::Tools) manager.
 /// `scroll` is read AND written back, clamped to the body's real height.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_session_modal(
@@ -173,9 +172,7 @@ pub fn draw_session_modal(
     key_status: &HashMap<String, bool>,
     mcp_statuses: &[(String, neenee_core::mcp::McpConnectionStatus)],
     session_context: Option<&neenee_core::SessionContextSnapshot>,
-    modal_index: usize,
     scroll: &mut usize,
-    follow_selection: bool,
     theme: &Theme,
 ) -> neenee_tui::Rect {
     // Width is independent of height, so probe a full-height rect first to learn
@@ -211,8 +208,6 @@ pub fn draw_session_modal(
     };
 
     let mut body: Vec<Line> = Vec::new();
-    // Body line index of the selected tool row, for follow-scroll.
-    let mut selected_line: Option<usize> = None;
 
     // ── MODEL ──
     body.push(heading("MODEL", None));
@@ -408,62 +403,31 @@ pub fn draw_session_modal(
         }
     }
 
-    // ── TOOLS (interactive) ──
+    // ── TOOLS (read-only summary; toggling lives in the Tools modal) ──
     let tools = session_context.map(|s| s.tools.as_slice()).unwrap_or(&[]);
     body.push(blank());
     body.push(heading("TOOLS", session_context.map(|_| tools.len())));
-    if session_context.is_none() {
-        body.push(muted_row("Loading…".to_string()));
+    // A single summary line: how many tools are enabled out of the total. The
+    // interactive toggle surface was pulled out into its own `/tools` modal so
+    // this dashboard stays a glanceable overview — press `t` (or `/tools`) to
+    // manage them.
+    let summary = if session_context.is_none() {
+        "Loading…".to_string()
     } else if tools.is_empty() {
-        body.push(muted_row("No tools available.".to_string()));
+        "No tools available.".to_string()
     } else {
-        for (i, tool) in tools.iter().enumerate() {
-            let is_sel = i == modal_index;
-            let bg = if is_sel { theme.brand() } else { theme.panel() };
-            let fg = if is_sel {
-                contrast_fg(theme.brand())
-            } else {
-                theme.fg()
-            };
-            let dim = if is_sel {
-                contrast_fg(theme.brand())
-            } else {
-                theme.muted()
-            };
-            let glyph_color = if is_sel {
-                fg
-            } else if tool.enabled {
-                theme.ok()
-            } else {
-                theme.muted()
-            };
-            let glyph = if tool.enabled { "●" } else { "○" };
-            let state = if tool.enabled { "on" } else { "off" };
-            let name = truncate_ellipsis(&tool.name, name_col);
-            // `[state]` pinned to the row's right edge; the source fills the gap
-            // between the name column and that badge.
-            let badge = format!("[{state}]");
-            let src = truncate_ellipsis(&tool.source, second_col.saturating_sub(badge.width() + 1));
-            // Left-packed content: gutter + glyph + name col + source.
-            let left_w = GUTTER_W + 2 + name_col + 2 + src.width();
-            let pad = body_width.saturating_sub(MODAL_BODY_LEADING_INDENT + left_w + badge.width());
-            let caret = if is_sel { "▸ " } else { "  " };
-            if is_sel {
-                selected_line = Some(body.len());
-            }
-            body.push(Line::from(vec![
-                Span::styled(indent.clone(), Style::default().bg(bg)),
-                Span::styled(caret, Style::default().bg(bg).fg(fg)),
-                Span::styled(format!("{glyph} "), Style::default().bg(bg).fg(glyph_color)),
-                Span::styled(
-                    format!("{:<w$}  ", name, w = name_col),
-                    Style::default().bg(bg).fg(fg),
-                ),
-                Span::styled(src, Style::default().bg(bg).fg(dim)),
-                Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                Span::styled(badge, Style::default().bg(bg).fg(dim)),
-            ]));
-        }
+        let enabled = tools.iter().filter(|t| t.enabled).count();
+        format!("{enabled} of {} enabled", tools.len())
+    };
+    body.push(Line::from(vec![
+        Span::styled(format!("{indent}{gutter}"), Style::default()),
+        Span::styled(summary, Style::default().fg(theme.muted())),
+    ]));
+    if session_context.is_some() && !tools.is_empty() {
+        body.push(Line::from(Span::styled(
+            format!("{indent}{gutter}press t to manage →"),
+            Style::default().fg(theme.dim()),
+        )));
     }
 
     // ── Size the panel to the content and paint it ──
@@ -491,20 +455,16 @@ pub fn draw_session_modal(
     let has_tools = session_context
         .map(|s| !s.tools.is_empty())
         .unwrap_or(false);
-    let follow = if has_tools && follow_selection {
-        selected_line
-    } else {
-        None
-    };
-    render_body(frame, body_rect, body, scroll, follow, false, theme);
+    // Read-only dashboard: no selection cursor to follow, so never auto-scroll.
+    render_body(frame, body_rect, body, scroll, None, false, theme);
 
     if let Some(fo) = f.footer {
         let mut hints = Vec::new();
-        if has_tools {
-            hints.push(FooterHint::navigation("↑↓", "select"));
-            hints.push(FooterHint::primary("Space", "toggle"));
-        } else if content_lines > visible {
+        if content_lines > visible {
             hints.push(FooterHint::navigation("↑↓", "scroll"));
+        }
+        if has_tools {
+            hints.push(FooterHint::primary("t", "tools"));
         }
         hints.push(FooterHint::always("Esc", "close"));
         render_modal_footer(frame, fo, &hints, theme);

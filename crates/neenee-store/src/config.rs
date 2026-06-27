@@ -9,8 +9,7 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::{
-    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, ToolDescriptionOverrides,
-    WebSearchConfig,
+    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, ToolOverrides, WebSearchConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -285,41 +284,44 @@ pub struct Config {
     pub tool_overrides: ToolOverridesConfig,
 }
 
-/// Per-model tool-description overrides, deserialized from the
-/// `[tool_overrides]` section of `config.toml`. Maps a model id to a set of
-/// `{ tool_name = "replacement description" }` pairs; when the agent is
-/// talking to that model, each listed tool's built-in description is replaced
-/// in the function schema sent to the provider.
+/// Per-model tool overrides, deserialized from the `[tool_overrides]` section
+/// of `config.toml`. Maps a model id to a `tool_name → ToolOverride` map. Each
+/// override can replace the tool's `description` and/or deep-merge
+/// per-parameter patches into the tool's `parameters` JSON Schema.
 ///
 /// ```toml
-/// # Re-word how `read_file` is pitched to kimi-k2.7-code.
-/// [tool_overrides."kimi-k2.7-code"]
-/// read_file = "Read a file. Pass offset/limit for large files. Never omit them."
-/// todo = "Maintain the task list…"
+/// [tool_overrides."kimi-k2.7-code"]            # model id (quoted: has dots)
+/// # A bare string replaces the tool's description.
+/// read_file = "Read a file. Always pass offset/limit for large files."
+///
+/// [tool_overrides."glm-5.2".read_file]         # tool name as a sub-table
+/// description = "读取文件……"
+/// [tool_overrides."glm-5.2".read_file.params.limit]
+/// description = "不得低于 10"                   # merged into limit's schema
+/// minimum = 10                                 # adds a constraint
 /// ```
 ///
-/// Tools not listed keep their built-in description; models with no entry are
-/// unaffected. Only the `description` field of the function schema changes —
-/// the tool name and parameters are untouched.
+/// For a given tool you may use *either* the bare-string form (description
+/// only) *or* the sub-table form (description + params) — not both. Tools and
+/// models not listed are unaffected.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolOverridesConfig(pub HashMap<String, ModelToolOverrides>);
 
-/// One model's tool-description overrides. A transparent wrapper around the
-/// `tool_name → description` map so it serializes directly as a TOML table.
+/// One model's tool overrides: a transparent wrapper around the
+/// `tool_name → ToolOverride` map so it serializes directly as a TOML table.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ModelToolOverrides(pub ToolDescriptionOverrides);
+pub struct ModelToolOverrides(pub ToolOverrides);
 
 impl ToolOverridesConfig {
-    /// Look up the description overrides for `model_id`, if any. Returns an
-    /// empty map (not `None`) for unknown models so callers can always borrow
-    /// `&ToolDescriptionOverrides`.
-    pub fn for_model(&self, model_id: &str) -> &ToolDescriptionOverrides {
+    /// Look up the tool overrides for `model_id`, if any. Returns an empty map
+    /// (not `None`) for unknown models so callers can always borrow `&ToolOverrides`.
+    pub fn for_model(&self, model_id: &str) -> &ToolOverrides {
         self.0
             .get(model_id)
             .map(|m| &m.0)
-            .unwrap_or_else(|| neenee_core::empty_tool_description_overrides())
+            .unwrap_or_else(|| neenee_core::empty_tool_overrides())
     }
 }
 
@@ -496,26 +498,38 @@ mod tests {
         // The table name mirrors the Config field name (`tool_overrides`), as
         // serde maps struct fields to TOML keys verbatim — same convention as
         // `[websearch]`, `[skills]`, etc. The model id is quoted because it
-        // contains dots/hyphens.
+        // contains dots/hyphens. Each tool is a sub-table carrying an optional
+        // `description` and optional `[.params.<name>]` patches.
         let toml_src = r#"
-            [tool_overrides."kimi-k2.7-code"]
-            read_file = "Always pass offset and limit."
-            todo = "Keep the list honest."
+            [tool_overrides."kimi-k2.7-code".read_file]
+            description = "Always pass offset and limit."
 
-            [tool_overrides."glm-5.2"]
-            bash = "Prefer explicit, idempotent commands."
+            [tool_overrides."kimi-k2.7-code".todo]
+            description = "Keep the list honest."
+
+            [tool_overrides."glm-5.2".bash]
+            description = "Prefer explicit, idempotent commands."
         "#;
         let cfg: Config = toml::from_str(toml_src).unwrap();
 
         // Known model → its map; unknown tool within a known model → absent.
         let kimi = cfg.tool_overrides.for_model("kimi-k2.7-code");
-        assert_eq!(kimi.get("read_file").unwrap(), "Always pass offset and limit.");
-        assert_eq!(kimi.get("todo").unwrap(), "Keep the list honest.");
+        assert_eq!(
+            kimi.get("read_file").unwrap().description.as_deref(),
+            Some("Always pass offset and limit.")
+        );
+        assert_eq!(
+            kimi.get("todo").unwrap().description.as_deref(),
+            Some("Keep the list honest.")
+        );
         assert!(kimi.get("bash").is_none());
 
         // A different model gets its own independent map.
         let glm = cfg.tool_overrides.for_model("glm-5.2");
-        assert_eq!(glm.get("bash").unwrap(), "Prefer explicit, idempotent commands.");
+        assert_eq!(
+            glm.get("bash").unwrap().description.as_deref(),
+            Some("Prefer explicit, idempotent commands.")
+        );
         assert!(glm.get("read_file").is_none());
 
         // Unknown model → empty (but borrowable without an Option).
@@ -528,22 +542,60 @@ mod tests {
     }
 
     #[test]
+    fn tool_overrides_param_patches_parse() {
+        // The motivating use case: for glm-5.2, re-word read_file AND patch the
+        // `limit` parameter's description + add a `minimum` constraint.
+        let toml_src = r#"
+            [tool_overrides."glm-5.2".read_file]
+            description = "读取文件。"
+            [tool_overrides."glm-5.2".read_file.params.limit]
+            description = "不得低于 10"
+            minimum = 10
+        "#;
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let rf = cfg
+            .tool_overrides
+            .for_model("glm-5.2")
+            .get("read_file")
+            .unwrap();
+        assert_eq!(rf.description.as_deref(), Some("读取文件。"));
+        let limit = rf.params.get("limit").unwrap();
+        assert_eq!(limit["description"], "不得低于 10");
+        assert_eq!(limit["minimum"], 10);
+    }
+
+    #[test]
     fn tool_overrides_round_trip_through_serialise() {
         let mut cfg = Config::default();
-        let map = ModelToolOverrides(
-            [
-                ("read_file".to_string(), "desc A".to_string()),
-                ("bash".to_string(), "desc B".to_string()),
-            ]
-            .into_iter()
-            .collect(),
+        let mut tools = neenee_core::ToolOverrides::new();
+        tools.insert(
+            "read_file".to_string(),
+            neenee_core::ToolOverride {
+                description: Some("desc A".to_string()),
+                params: std::collections::HashMap::new(),
+            },
         );
-        cfg.tool_overrides.0.insert("kimi-k2.7-code".to_string(), map);
+        tools.insert(
+            "bash".to_string(),
+            neenee_core::ToolOverride {
+                description: Some("desc B".to_string()),
+                params: std::collections::HashMap::new(),
+            },
+        );
+        cfg.tool_overrides
+            .0
+            .insert("kimi-k2.7-code".to_string(), ModelToolOverrides(tools));
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
         let resolved = parsed.tool_overrides.for_model("kimi-k2.7-code");
-        assert_eq!(resolved.get("read_file").unwrap(), "desc A");
-        assert_eq!(resolved.get("bash").unwrap(), "desc B");
+        assert_eq!(
+            resolved.get("read_file").unwrap().description.as_deref(),
+            Some("desc A")
+        );
+        assert_eq!(
+            resolved.get("bash").unwrap().description.as_deref(),
+            Some("desc B")
+        );
     }
 }
 

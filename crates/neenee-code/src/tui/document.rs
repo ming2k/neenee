@@ -297,8 +297,23 @@ pub enum UserMessageOrigin {
     Shell,
 }
 
+/// Monotonic source of per-message identities. A message keeps its `id` across
+/// the per-frame clone into [`crate::tui::app::App::messages`], so the renderer
+/// can use it as a stable cache key for the message's laid-out height (see the
+/// height cache in `render`). Ids are process-unique; cloning a message copies
+/// its id (a clone represents the same logical message), which is exactly what
+/// the height cache wants.
+static NEXT_MESSAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_message_id() -> u64 {
+    NEXT_MESSAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone)]
 pub struct TranscriptMessage {
+    /// Stable, process-unique identity used as the renderer's height-cache key.
+    /// Assigned at construction and preserved across clones.
+    pub id: u64,
     pub role: Role,
     pub blocks: Vec<Block>,
     /// The original raw markdown/text, preserved for exact copy.
@@ -335,6 +350,7 @@ impl TranscriptMessage {
             parse_blocks(&raw)
         };
         Self {
+            id: next_message_id(),
             role,
             blocks,
             raw,
@@ -389,6 +405,7 @@ impl TranscriptMessage {
         arguments: impl Into<String>,
     ) -> Self {
         let mut message = Self {
+            id: next_message_id(),
             role: Role::Tool,
             blocks: Vec::new(),
             raw: String::new(),
@@ -842,6 +859,7 @@ impl TranscriptMessage {
     pub fn thinking(content: impl Into<String>) -> Self {
         let content = content.into();
         let mut message = Self {
+            id: next_message_id(),
             role: Role::Assistant,
             blocks: Vec::new(),
             raw: String::new(),
@@ -877,6 +895,7 @@ impl TranscriptMessage {
         let raw = raw.into();
         let blocks = parse_blocks(&raw);
         Self {
+            id: next_message_id(),
             role: Role::System,
             blocks,
             raw,

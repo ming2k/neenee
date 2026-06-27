@@ -343,7 +343,7 @@ impl Provider for AnthropicMessagesProvider {
     fn prepare_tools_with(
         &self,
         tools: &[Arc<dyn Tool>],
-        overrides: &neenee_core::ToolDescriptionOverrides,
+        overrides: &neenee_core::ToolOverrides,
     ) {
         let schemas: Vec<Value> = tools
             .iter()

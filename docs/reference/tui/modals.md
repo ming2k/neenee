@@ -59,7 +59,8 @@ are non-modal and use a different `toast` helper.
 | [Models](#models-modal) | `Ctrl+M` / `/provider` | 72 × 60 | `draw_models_modal` |
 | [Model editor](#model-editor) | Models modal `e` | 60 × 36 | `draw_model_editor` |
 | [Sessions](#sessions-modal) | `/sessions` | 80 × 64 | `draw_sessions_modal` |
-| [Session](#session-modal) | `/session` | 76 × 70 | `draw_session_modal` |
+| [Session](#session-modal) | `/session` | 76 × content | `draw_session_modal` |
+| [Tools](#tools-modal) | `/tools` | 64 × content | `draw_tools_modal` |
 | [History search](#history-search-modal) | `Ctrl+R` | 70 × 72 | `draw_history_modal` |
 | [Question](#question-modal) | `ask_user` tool | 78 × 70 | `draw_question_modal` |
 | [Permission sheet](#permission-sheet) | Automatic | (inline, not centered) | `draw_permission_sheet` |
@@ -76,7 +77,7 @@ are non-modal and use a different `toast` helper.
   configuration flow.
 
 **Click-outside-to-dismiss.** Read-only / info modals — Help, Tool-step
-detail, Session, Sessions, Permissions, Config, Activity, and History — close when
+detail, Session, Tools, Sessions, Permissions, Activity, and History — close when
 the user clicks outside their panel, mirroring `Esc`. Entry modals that
 hold precious in-progress input (Models, Model editor) and the decision
 modals (Question, Permission sheet) stay open so an accidental click never
@@ -163,35 +164,70 @@ truncated with `…` when it would collide with the meta column.
 
 ## Session modal
 
-Tabbed live-session context viewer, opened by `/session`. Five tabs:
-**Model**, **Mcp**, **Skills**, **Permissions**, **Tools**. List panes
-(Skills / Permissions / Tools) keep the selected row in view via the
-shared `follow` mechanism.
+Read-only live-session dashboard, opened by `/session`. Four stacked sections
+— **Model**, **Mcp**, **Skills**, **Tools** — each a brand-colored heading with
+a count, so the whole session reads at a glance instead of hiding most of it
+behind tab switches. The panel is content-sized (clamped to the viewport) and
+scrolls when the body overflows.
 
 ```text
 ╭──────────────────────────────────────────────────────╮
-│ Session    Model  Mcp  Skills  Permissions  Tools     │  ← active tab underlined
-│                                                      │
-│  Provider     openai                                 │
-│  Model        GPT-4o  (gpt-4o-2024-08-06)            │
-│  Context      128k tokens                            │
-│  API key      ✓ ready                                │
-│  Capabilities  tools · vision                        │
-│                                                      │
-│ ← → switch tab [· ↑↓ select · Space act][· ↑↓ scroll]│
-│ · Esc close                                          │
+│ Session                                               │
+│                                                       │
+│ MODEL                                                 │
+│   GPT-4o  ·  openai                                   │
+│   128K context  ·  ✓ key ready  ·  tools · vision     │
+│                                                       │
+│ MCP  ·  2                                             │
+│   ●  fs          connected (+2 more)                  │
+│                                                       │
+│ SKILLS  ·  3                                          │
+│   ●  pdf           Read and manipulate PDF files      │
+│                                                       │
+│ TOOLS  ·  18                                          │
+│   16 of 18 enabled                                    │
+│   press t to manage →                                 │
+│                                                       │
+│ ↑↓ scroll · t tools · Esc close                       │
 ╰──────────────────────────────────────────────────────╯
 ```
 
-The footer hint adapts to the tab: interactive panes (Permissions / Tools)
-advertise `↑↓ select · Space act`; the others advertise `↑↓ scroll`.
-Placeholders show `Loading…` until the snapshot arrives.
+The `TOOLS` line is a one-row summary (enabled/total) plus a hint; interactive
+toggling lives in the dedicated [Tools modal](#tools-modal), reached via `t`
+(or `/tools`). Until the snapshot arrives, Skills/Tools show `Loading…`.
 
 | Key | Effect |
 |-----|--------|
-| `←` / `→` | Switch tab |
-| `↑` / `↓` | Scroll (read-only panes) or move selection (interactive panes) |
-| `Space` | Act on the selected row (interactive panes only) |
+| `↑` / `↓` | Scroll the body |
+| `t` | Open the Tools modal (when tools exist) |
+| `Esc` | Close |
+
+## Tools modal
+
+Interactive tool manager, opened by `/tools` (or `t`/`Enter` from the Session
+dashboard's `TOOLS` line). A centered, scrollable list of every tool available
+to the live session — builtins, `mcp:<server>`, `pursuit`, `plan` — each with
+its source, a short description, and an `[on]`/`[off]` badge. `Space` toggles a
+tool; the harness applies it and replies with a fresh snapshot that re-renders
+the list. Data comes from the same session-context snapshot `/session` uses.
+
+```text
+╭────────────────────────────────────────────────────────╮
+│ Tools                                                  │
+│                                                        │
+│  ●  bash              builtin    run a shell command[on]│  ← selected → brand bg
+│  ●  read_file         builtin    read a text file    [on]│
+│  ○  mcp__fs__search   mcp:fs     semantic file search[off]│
+│  …                                                     │
+│                                                        │
+│ ↑↓ select · Space toggle · Esc close                   │
+╰────────────────────────────────────────────────────────╯
+```
+
+| Key | Effect |
+|-----|--------|
+| `↑` / `↓` | Move selection |
+| `Space` | Toggle the selected tool on/off |
 | `Esc` | Close |
 
 ## History search modal
@@ -432,7 +468,7 @@ left+right borders colored by variant.
 
 All modals live in `crates/neenee-code/src/tui/render/overlays/` (one
 renderer file per modal: `provider`, `permission`, `history`, `help`,
-`session`, `permissions_manager`, `activity`, `tool_step_detail`, `toast`,
+`session`, `tools`, `permissions_manager`, `activity`, `tool_step_detail`, `toast`,
 plus shared `common`). Shared primitives (`recess_backdrop`, `centered_rect`,
 `modal_frame`, `panel_block`, `toast`) are in
 `crates/neenee-code/src/tui/render/primitives.rs`. The chrome-hiding flag is

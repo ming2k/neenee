@@ -276,6 +276,202 @@ fn diff_collapses_uniform_blank_tail_to_clear_eol() {
     ));
 }
 
+/// A model terminal that replays the backend's emitted escape stream so a test
+/// can assert "what the terminal actually shows" against the back grid. It
+/// understands exactly the sequences the backend emits: cursor moves (CUP),
+/// erase-to-end-of-line (EL), printable glyphs (advancing by display width,
+/// with a wide glyph blanking its trailing column the way real terminals do),
+/// and newlines. SGR (`…m`) and every other CSI are consumed but ignored — we
+/// care about *which glyph sits in which cell*, which is what ghosting is.
+struct ModelTerminal {
+    w: u16,
+    h: u16,
+    cells: Vec<String>,
+    cx: u16,
+    cy: u16,
+}
+
+impl ModelTerminal {
+    fn new(w: u16, h: u16) -> Self {
+        Self {
+            w,
+            h,
+            cells: vec![" ".to_string(); (w as usize) * (h as usize)],
+            cx: 0,
+            cy: 0,
+        }
+    }
+
+    fn set(&mut self, x: u16, y: u16, s: &str) {
+        if x < self.w && y < self.h {
+            self.cells[y as usize * self.w as usize + x as usize] = s.to_string();
+        }
+    }
+
+    fn apply(&mut self, bytes: &str) {
+        let mut it = bytes.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\x1b' {
+                // Only CSI (`\x1b[`) sequences are emitted by the backend.
+                if it.peek() == Some(&'[') {
+                    it.next();
+                    let mut params = String::new();
+                    let final_byte = loop {
+                        match it.next() {
+                            Some(d) if d.is_ascii_alphabetic() || d == '@' => break d,
+                            Some(d) => params.push(d),
+                            None => return,
+                        }
+                    };
+                    match final_byte {
+                        'H' | 'f' => {
+                            let mut p = params.split(';');
+                            let row =
+                                p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
+                            let col =
+                                p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
+                            self.cy = row.saturating_sub(1);
+                            self.cx = col.saturating_sub(1);
+                        }
+                        // Erase from cursor to end of line (default param = 0).
+                        'K' => {
+                            for x in self.cx..self.w {
+                                self.set(x, self.cy, " ");
+                            }
+                        }
+                        _ => {} // SGR and friends: ignore.
+                    }
+                }
+                continue;
+            }
+            if c == '\n' {
+                self.cx = 0;
+                self.cy = self.cy.saturating_add(1);
+                continue;
+            }
+            // A printable glyph. Real terminals overwrite a narrow glyph onto a
+            // cell; a wide glyph occupies its cell plus the next column.
+            let g = c.to_string();
+            let width = neenee_tui::text::grapheme_width(&g).max(1) as u16;
+            if self.cx < self.w {
+                self.set(self.cx, self.cy, &g);
+                if width == 2 && self.cx + 1 < self.w {
+                    // The trailing column is owned by the wide glyph; model it as
+                    // empty so it never compares as a stray glyph.
+                    self.set(self.cx + 1, self.cy, "");
+                }
+                self.cx = self.cx.saturating_add(width);
+            }
+        }
+    }
+
+    /// One row as the sequence of visible head glyphs (wide-continuation columns
+    /// collapse to "" on both sides so they never count as a mismatch).
+    fn row(&self, y: u16) -> Vec<String> {
+        (0..self.w)
+            .map(|x| self.cells[y as usize * self.w as usize + x as usize].clone())
+            .collect()
+    }
+}
+
+/// The same row projection for the back grid: a wide-continuation cell collapses
+/// to "" so it lines up with [`ModelTerminal::row`].
+fn back_row(back: &Grid, y: u16) -> Vec<String> {
+    (0..back.size().0)
+        .map(|x| {
+            let cell = back.get(x, y).unwrap();
+            if cell.is_wide_continuation() {
+                String::new()
+            } else {
+                cell.symbol.clone()
+            }
+        })
+        .collect()
+}
+
+/// Drive a sequence of frames, replaying every emitted byte into one persistent
+/// model terminal, and assert after each frame that the terminal shows exactly
+/// what the back grid holds. A ghost — a cell the backend believes it painted
+/// but never actually wrote — surfaces here as a row mismatch.
+fn assert_terminal_tracks_back(w: u16, h: u16, bce: Bce, frames: &[&str]) {
+    let mut back = Grid::new(w, h);
+    let mut front = Grid::new(w, h);
+    let mut term = ModelTerminal::new(w, h);
+
+    for (n, text) in frames.iter().enumerate() {
+        // Full repaint of the back grid each frame (what the app does via its
+        // background fill + component redraw): clear, then write the row.
+        back.fill_rect(0, 0, w, h, Style::default());
+        back.put(0, 0, Fit::Clip, Style::default(), text);
+
+        let bytes = render_cycle(&mut back, &mut front, bce);
+        term.apply(&bytes);
+
+        for y in 0..h {
+            assert_eq!(
+                term.row(y),
+                back_row(&back, y),
+                "frame {n} ({text:?}): terminal row {y} diverged from back grid \
+                 — a ghost that only a full repaint (resize) would clear",
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_tracks_back_across_wide_narrow_transitions() {
+    // Each frame fully repaints; the model terminal must always match the back
+    // grid. Covers wide→narrow, narrow→wide, and shrinking content — the
+    // CJK/IME transitions that were leaving ghosts on screen.
+    for bce in [Bce::Yes, Bce::No] {
+        assert_terminal_tracks_back(
+            8,
+            2,
+            bce,
+            &[
+                "值。ab", // wide, wide, narrow, narrow
+                "x",      // collapse to a single narrow glyph + blanks
+                "ab值。", // narrow, narrow, wide, wide
+                "值",     // single wide glyph + blanks
+                "abcdef", // all narrow
+                "",       // empty
+            ],
+        );
+    }
+}
+
+#[test]
+fn bottom_right_cell_is_reserved_and_never_written() {
+    // The very last cell of the bottom row is *intentionally* not written: the
+    // backend breaks out of the run there to avoid the auto-wrap+scroll that
+    // would otherwise corrupt the screen (ratatui has the same limitation). The
+    // app keeps that cell blank via its viewport bottom margin, so the
+    // limitation is invisible in practice.
+    //
+    // This test pins that contract: everything up to the last cell renders, and
+    // only the bottom-right cell is left unwritten. If a future change writes
+    // it (e.g. disabling DECAWM to lift the limitation), update this test.
+    for bce in [Bce::Yes, Bce::No] {
+        let (w, h) = (4u16, 2u16);
+        let mut back = Grid::new(w, h);
+        let mut front = Grid::new(w, h);
+        let mut term = ModelTerminal::new(w, h);
+
+        back.fill_rect(0, 0, w, h, Style::default());
+        back.put(0, 1, Fit::Clip, Style::default(), "wxyz"); // bottom row, incl. corner
+        let bytes = render_cycle(&mut back, &mut front, bce);
+        term.apply(&bytes);
+
+        // Non-bottom rows track the back grid exactly.
+        assert_eq!(term.row(0), back_row(&back, 0), "row 0 (bce={bce:?})");
+        // Bottom row tracks back for every cell except the reserved corner,
+        // which stays blank.
+        let mut expected = back_row(&back, 1);
+        *expected.last_mut().unwrap() = " ".to_string();
+        assert_eq!(term.row(1), expected, "bottom row reserved corner (bce={bce:?})");
+    }
+}
+
 /// A trivial sanity check that the cell-level types compose as documented.
 #[test]
 fn cell_constructors() {

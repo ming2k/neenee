@@ -12,7 +12,8 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crossterm::event;
+use crossterm::event::EventStream;
+use futures::{FutureExt, StreamExt};
 use neenee_tui::Terminal;
 use tokio::sync::mpsc;
 
@@ -35,6 +36,7 @@ use crate::tui::selection::{
     inclusive_grapheme_end,
 };
 use crate::tui::step_interaction::StepKind;
+use crate::tui::versioned::Versioned;
 use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess};
 
 use neenee_core::AgentResponse;
@@ -52,6 +54,19 @@ pub(super) struct UiRuntime {
     pub pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
     pub pending_question: Arc<Mutex<VecDeque<UserQuestionRequest>>>,
     pub is_responding: Arc<AtomicBool>,
+    /// Stage 3 redraw signal. The response listener sets this on every handled
+    /// response (the only off-loop source of shared-state change), so the event
+    /// loop can skip the per-frame draw entirely while nothing has changed —
+    /// turning an idle session from ~10 full relayouts/second into zero. The
+    /// loop also draws on input, background clipboard results, and active
+    /// animation; this flag covers everything the listener mutates.
+    pub dirty: Arc<AtomicBool>,
+    /// Stage 4 wakeup. Companion to [`Self::dirty`]: the listener notifies this
+    /// after a response so the event loop's `select!` wakes *immediately* to
+    /// redraw, instead of waiting out a fixed poll. `notify_one` keeps one
+    /// permit, so a notification raised while the loop is mid-render is not
+    /// lost — the next `notified()` returns at once.
+    pub dirty_notify: Arc<tokio::sync::Notify>,
     /// Full-duplex (ADR-0029): request_id → the parent tool-call id of the
     /// subagent that surfaced a permission or `ask_user` request (carried up
     /// as a `TurnEvent::SubAgent`). When the user answers in the modal, the
@@ -62,12 +77,12 @@ pub(super) struct UiRuntime {
     pub subagent_permission_parent: Arc<Mutex<HashMap<String, String>>>,
     /// Companion to [`Self::subagent_permission_parent`] for `ask_user` replies.
     pub subagent_question_parent: Arc<Mutex<HashMap<String, String>>>,
-    pub messages: Arc<Mutex<Vec<TranscriptMessage>>>,
+    pub messages: Arc<Versioned<Vec<TranscriptMessage>>>,
     /// Side-conversation transcript buffer (ADR-0017). The listener appends
     /// per-turn events tagged with the side `session_id` here; the loop
     /// clones it into [`App::side_messages`] each frame while the side view
     /// is active.
-    pub side_messages: Arc<Mutex<Vec<TranscriptMessage>>>,
+    pub side_messages: Arc<Versioned<Vec<TranscriptMessage>>>,
     /// Coarse primary-session status, written by the listener from
     /// [`AgentResponse::ParentStatus`] and read into [`App::parent_status`]
     /// for the side banner (ADR-0017).
@@ -221,21 +236,45 @@ pub(super) async fn run_app_loop(
     // reason: arboard/wl-paste must never block the event loop.
     let (paste_tx, mut paste_rx) = mpsc::unbounded_channel::<clipboard::ClipboardRead>();
 
+    // Stage 4: async terminal input. The loop awaits events from this stream
+    // inside a `select!` alongside listener wakeups and the animation tick, so
+    // input intake is decoupled from rendering — a slow frame never starves
+    // input, and a listener update no longer waits out a fixed poll interval.
+    let mut events = EventStream::new();
+
+    // Stage 3: carries "an input event was handled last iteration, so a frame
+    // is due" across the loop boundary, since input is drained at the *end* of
+    // an iteration but rendered at the *start* of the next.
+    let mut input_redraw_pending = true;
+    // Whether the previous frame was animating. When animation stops (spinner
+    // ends, a toast/armed timer expires) we still owe one final draw to clear
+    // its last visual, so a true→false transition forces exactly one more frame.
+    let mut was_animating = true;
+
     loop {
         if app.should_quit.load(Ordering::SeqCst) {
             return Ok(());
         }
+
+        // Stage 3 redraw bookkeeping. Start from any input handled last
+        // iteration; background results and active animation are folded in
+        // below. When nothing here is true, the per-frame draw is skipped
+        // entirely so an idle session does no rendering work.
+        let mut frame_dirty = input_redraw_pending;
+        input_redraw_pending = false;
 
         // Apply any completed background clipboard copies.
         while let Ok(result) = copy_rx.try_recv() {
             clipboard_ops::set_copy_feedback(app, result);
             app.copy_toast_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(1800));
+            frame_dirty = true;
         }
 
         // Apply any completed clipboard paste reads.
         while let Ok(read) = paste_rx.try_recv() {
             clipboard_ops::apply_clipboard_paste(app, read);
+            frame_dirty = true;
         }
 
         // Sync provider/model from listener
@@ -349,13 +388,34 @@ pub(super) async fn run_app_loop(
             }
         }
 
-        // Pull messages from the shared lock into app state for rendering
-        app.messages = runtime.messages.lock().await.clone();
-        // Mirror the side buffer + parent status for the `/btw` banner
-        // (ADR-0017). Cloned unconditionally: cheap relative to a frame, and
-        // the side buffer may update while the view is open even if the user
-        // briefly returns to the primary transcript.
-        app.side_messages = runtime.side_messages.lock().await.clone();
+        // Pull messages from the shared buffer into app state for rendering,
+        // but only when they actually changed. `Versioned` advances a counter
+        // on every mutation, so an unchanged transcript — the common case while
+        // the user is typing into a long session — skips the O(n) deep clone
+        // entirely. This is the single biggest source of the "slows down the
+        // longer you use it" sluggishness.
+        let messages_version = runtime.messages.version();
+        if messages_version != app.messages_version {
+            app.messages = runtime.messages.read().await.clone();
+            app.messages_version = messages_version;
+            // The transcript changed, so cached per-message heights may be
+            // stale; drop them. While the user is merely typing (no transcript
+            // mutation) this is skipped, keeping the height cache warm so the
+            // render pass can skip re-wrapping off-screen messages.
+            app.layout_height_cache.clear();
+        }
+        // Mirror the side buffer for the `/btw` banner (ADR-0017), likewise
+        // gated on its version so it is cloned only when it changes — even
+        // while the side view is open and the user briefly returns to the
+        // primary transcript.
+        let side_messages_version = runtime.side_messages.version();
+        if side_messages_version != app.side_messages_version {
+            app.side_messages = runtime.side_messages.read().await.clone();
+            app.side_messages_version = side_messages_version;
+            // The side view shares the same height cache (keyed by message id),
+            // so a side-buffer change invalidates it too.
+            app.layout_height_cache.clear();
+        }
         app.parent_status = *runtime.parent_status.lock().await;
         // Drain a pending side-view transition (enter/leave `/btw`).
         match runtime.side_view_signal.lock().await.take() {
@@ -383,7 +443,7 @@ pub(super) async fn run_app_loop(
                 .pending_dispatch
                 .pop_front()
                 .expect("checked non-empty above");
-            let mut messages = runtime.messages.lock().await;
+            let mut messages = runtime.messages.write().await;
             let flipped = messages
                 .iter_mut()
                 .find(|m| {
@@ -418,16 +478,45 @@ pub(super) async fn run_app_loop(
             app.scroll = app.max_scroll;
         }
 
+        // Stage 3: decide whether this frame needs drawing at all. An idle
+        // session — no input handled, no streaming, no active animation — skips
+        // the draw entirely and just blocks on the input poll below, doing zero
+        // rendering work instead of ~10 full relayouts per second. While a turn
+        // runs (or a toast/armed timer is live) `animating` keeps the spinner
+        // and timers advancing at the existing poll cadence.
+        let animating = runtime.is_responding.load(Ordering::SeqCst)
+            || app.turn_started_at.is_some()
+            || app.copy_toast_until.is_some()
+            || app.ctrl_c_armed_ticks > 0
+            || app.esc_armed_ticks > 0
+            || !app.pending_images.is_empty()
+            || copy_pending.load(Ordering::SeqCst) > 0;
+        // `swap` consumes the listener's signal exactly once. Folded in: input
+        // handled last iteration, background clipboard results this one, and one
+        // trailing frame after animation stops (`was_animating`) so the spinner
+        // and expiring toasts are actually cleared from the screen.
+        let needs_draw = frame_dirty
+            || animating
+            || was_animating
+            || runtime.dirty.swap(false, Ordering::AcqRel);
+        was_animating = animating;
+
         // The breathing indicator's phase is derived from wall-clock time at
         // the draw site (see `spinner_epoch`), not advanced per frame: the loop
         // wakes at irregular intervals (mouse-move/hover floods, streaming,
         // paste), so a per-frame counter would make the breathing speed up and
         // stutter with input activity instead of holding a steady cadence.
 
-        // Draw frame
+        // Draw frame (skipped when nothing changed — see `needs_draw`).
+        if needs_draw {
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
             app.modal_hit_map.clear();
+            // Borrow the height cache out of `app` for the duration of the draw:
+            // `view_messages` borrows `app` immutably below, so the cache cannot
+            // also be reached through `app` at the same time. It is restored once
+            // `view_messages` is no longer borrowed (see below).
+            let mut height_cache = std::mem::take(&mut app.layout_height_cache);
             let activity_for_display = app.activity_status.as_str();
             let status = display_status(
                 &app.loop_status,
@@ -517,6 +606,7 @@ pub(super) async fn run_app_loop(
                     focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                     logo: app.logo.as_deref(),
                     theme: &app.theme,
+                    height_cache: Some(&mut height_cache),
                 },
             );
             let input_rect = transcript_render.input_rect;
@@ -627,6 +717,9 @@ pub(super) async fn run_app_loop(
             // Now that `view_messages` is no longer borrowed, persist the
             // per-frame layout state back onto `app` for the next iteration
             // and for click routing.
+            // Restore the height cache (populated/refreshed during this draw)
+            // so the next frame can reuse it.
+            app.layout_height_cache = height_cache;
             app.content_lines = content_lines;
             app.view_height = view_height;
             app.activity_rect = activity_rect;
@@ -774,6 +867,12 @@ pub(super) async fn run_app_loop(
                     &app.key_status,
                     &app.mcp_statuses,
                     app.session_context.as_ref(),
+                    &mut app.session_scroll,
+                    &app.theme,
+                )),
+                Modal::Tools => Some(render::draw_tools_modal(
+                    f,
+                    app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.session_scroll,
                     app.session_modal_follow,
@@ -856,6 +955,7 @@ pub(super) async fn run_app_loop(
                 None
             };
         })?;
+        } // end `if needs_draw`
 
         // Cursor visibility follows the focus zone so the caret only shows up
         // where keys actually land. While a modal is open the modal itself
@@ -897,27 +997,64 @@ pub(super) async fn run_app_loop(
         app.retain_visible_focused_target();
 
         // Drain all currently-ready input events before redrawing. The first
-        // event blocks for the normal poll interval; any further events the
-        // terminal has already queued are coalesced with non-blocking polls
-        // so they share a single redraw. Without this, pasting text triggers
-        // one full screen redraw per pasted character.
-        //
-        // While a clipboard copy is in flight, shorten the idle poll so the
-        // "copied" toast shows within ~16ms of the copy finishing.
+        // event is awaited (alongside non-input wakeups); any further events the
+        // terminal has already queued are coalesced with non-blocking polls so
+        // they share a single redraw. Without this, pasting text triggers one
+        // full screen redraw per pasted character.
         let mut events_drained = false;
         loop {
-            let timeout = if events_drained {
-                std::time::Duration::ZERO
-            } else if copy_pending.load(Ordering::SeqCst) > 0 {
-                std::time::Duration::from_millis(16)
+            let event = if events_drained {
+                // Coalesce already-queued events into this same redraw. A
+                // ready event is taken; a not-ready stream ends the drain.
+                match events.next().now_or_never() {
+                    Some(Some(Ok(ev))) => ev,
+                    Some(Some(Err(_))) | Some(None) => return Ok(()),
+                    None => break,
+                }
             } else {
-                std::time::Duration::from_millis(100)
+                // First wakeup of the iteration: await an input event OR a
+                // non-input signal that warrants a redraw — a listener state
+                // change (immediate, via `Notify`), the animation tick (only
+                // while something is animating), or a completed background
+                // clipboard read/copy. Anything other than an input event just
+                // breaks out so the top of the loop re-renders.
+                tokio::select! {
+                    biased;
+                    maybe = events.next() => match maybe {
+                        Some(Ok(ev)) => ev,
+                        // Stream error or end: the terminal went away — exit.
+                        Some(Err(_)) | None => return Ok(()),
+                    },
+                    _ = runtime.dirty_notify.notified() => break,
+                    // Adaptive heartbeat: ~10fps while animating (advances the
+                    // spinner / expires toasts), and a slow 1s idle tick that
+                    // re-checks `should_quit` and any state a wakeup might have
+                    // missed. The idle tick is cheap — with nothing dirty the
+                    // top of the loop skips the draw entirely.
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(
+                        if animating { 100 } else { 1000 },
+                    )) => break,
+                    Some(result) = copy_rx.recv() => {
+                        clipboard_ops::set_copy_feedback(app, result);
+                        app.copy_toast_until = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(1800),
+                        );
+                        input_redraw_pending = true;
+                        break;
+                    }
+                    Some(read) = paste_rx.recv() => {
+                        clipboard_ops::apply_clipboard_paste(app, read);
+                        input_redraw_pending = true;
+                        break;
+                    }
+                }
             };
-            if !event::poll(timeout)? {
-                break;
-            }
             events_drained = true;
-            let event = event::read()?;
+            // Any input this iteration means the next frame must redraw (input
+            // is drained here, at the end of the iteration, but rendered at the
+            // start of the next one).
+            input_redraw_pending = true;
             // The Ctrl+R history modal's search sub-layer borrows the input line
             // as its fuzzy query, so a literal `/foo` query must NOT trigger the
             // slash completion popup (or `@path` mentions); browse mode keeps the
@@ -1013,7 +1150,7 @@ pub(super) async fn run_app_loop(
                                 });
                             runtime
                                 .messages
-                                .lock()
+                                .write()
                                 .await
                                 .push(TranscriptMessage::new(Role::User, text.clone()).queued());
                             if !text.is_empty() && app.input_history.last() != Some(&text) {
@@ -1034,7 +1171,7 @@ pub(super) async fn run_app_loop(
                             *runtime.activity_status.lock().await = "queued".to_string();
                             runtime
                                 .messages
-                                .lock()
+                                .write()
                                 .await
                                 .push(TranscriptMessage::new(Role::User, text.clone()));
                             if !text.is_empty() && app.input_history.last() != Some(&text) {
@@ -1053,7 +1190,7 @@ pub(super) async fn run_app_loop(
                         // task, otherwise toggle that step's expansion.
                         if start.message_idx == end.message_idx {
                             let mi = start.message_idx;
-                            let mut messages = runtime.messages.lock().await;
+                            let mut messages = runtime.messages.write().await;
                             // A subagent task navigates into its view instead
                             // of expanding.
                             let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
@@ -1086,7 +1223,7 @@ pub(super) async fn run_app_loop(
                     app.pin_summary_line = None;
                     runtime
                         .messages
-                        .lock()
+                        .write()
                         .await
                         // A slash command is surfaced as a user turn in the
                         // transcript (so history recall shows the `/cmd`), but
@@ -1118,7 +1255,7 @@ pub(super) async fn run_app_loop(
                                 if let Some(ct) = app.serve_cancel.take() {
                                     ct.cancel();
                                 }
-                                runtime.messages.lock().await.push(
+                                runtime.messages.write().await.push(
                                     TranscriptMessage::new(
                                         Role::Assistant,
                                         "Serve mode stopped.".to_string(),
@@ -1126,7 +1263,7 @@ pub(super) async fn run_app_loop(
                                     .with_origin(UserMessageOrigin::Slash),
                                 );
                             } else {
-                                runtime.messages.lock().await.push(
+                                runtime.messages.write().await.push(
                                     TranscriptMessage::new(
                                         Role::Assistant,
                                         "Serve already active. Use /serve (no port) to stop."
@@ -1155,7 +1292,7 @@ pub(super) async fn run_app_loop(
                                  Open ws://localhost:{} in a WebSocket client.",
                                 actual_port, actual_port,
                             );
-                            runtime.messages.lock().await.push(
+                            runtime.messages.write().await.push(
                                 TranscriptMessage::new(Role::Assistant, msg)
                                     .with_origin(UserMessageOrigin::Slash),
                             );
@@ -1180,7 +1317,7 @@ pub(super) async fn run_app_loop(
                     let display = format!("!{}", command);
                     runtime
                         .messages
-                        .lock()
+                        .write()
                         .await
                         // A `!command` shell passthrough runs directly through
                         // the bash tool, bypassing the model entirely — it is
@@ -1506,6 +1643,18 @@ pub(super) async fn run_app_loop(
                     app.active_modal = Modal::Permissions;
                     app.modal_index = 0;
                     app.permissions_scroll = 0;
+                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::OpenTools => {
+                    // The tools manager modal. Reached via `/tools` (intercepted
+                    // locally) or `t`/Enter from the session dashboard's TOOLS
+                    // line. It shares the session-context snapshot, so (re)kick
+                    // a query so the list is fresh — the prior modal may have
+                    // been the read-only session dashboard.
+                    app.active_modal = Modal::Tools;
+                    app.modal_index = 0;
+                    app.session_scroll = 0;
+                    app.session_modal_follow = true;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
                 input::InputAction::PermissionsActivate => {
@@ -1871,7 +2020,7 @@ pub(super) async fn run_app_loop(
                     let expand = app.focused_messages().iter().any(|message| {
                         !message.is_subagent_task() && message.tool_step_expanded() == Some(false)
                     });
-                    let mut messages = runtime.messages.lock().await;
+                    let mut messages = runtime.messages.write().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
                         // Subagent task steps are navigated, not expanded.
                         // This is a user bulk action → pin each step so the
@@ -1905,7 +2054,7 @@ pub(super) async fn run_app_loop(
                     if let Some(target) = app.focused_target {
                         match target.kind {
                             InteractiveTargetKind::ToolStep => {
-                                let mut messages = runtime.messages.lock().await;
+                                let mut messages = runtime.messages.write().await;
                                 let enter_id = resolve_focused_mut(
                                     &mut messages,
                                     &app.focus_stack,
@@ -1934,7 +2083,7 @@ pub(super) async fn run_app_loop(
                                 }
                             }
                             InteractiveTargetKind::Thinking => {
-                                let mut messages = runtime.messages.lock().await;
+                                let mut messages = runtime.messages.write().await;
                                 let toggled =
                                     app.toggle_step_pinned(&mut messages, target.message_idx);
                                 drop(messages);
@@ -2105,7 +2254,7 @@ pub(super) async fn run_app_loop(
                     // user can edit and resend. The actual state mutation
                     // lives on [`App::recall_queued`] so it is unit-testable
                     // against a plain transcript Vec.
-                    let mut messages = runtime.messages.lock().await;
+                    let mut messages = runtime.messages.write().await;
                     app.recall_queued(&mut messages);
                 }
                 input::InputAction::HistoryNext => {
@@ -2202,12 +2351,13 @@ pub(super) async fn run_app_loop(
                         };
                     }
                     Modal::Help
-                    | Modal::ToolStepDetail
-                    | Modal::Question
-                    | Modal::ModelEditor
-                    | Modal::Session
-                    | Modal::Activity
-                    | Modal::None => {}
+                        | Modal::ToolStepDetail
+                        | Modal::Question
+                        | Modal::ModelEditor
+                        | Modal::Session
+                        | Modal::Tools
+                        | Modal::Activity
+                        | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
                     Modal::Provider => {
@@ -2245,6 +2395,7 @@ pub(super) async fn run_app_loop(
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
+                    | Modal::Tools
                     | Modal::Activity
                     | Modal::None => {}
                 },
@@ -2455,7 +2606,7 @@ pub(super) async fn run_app_loop(
                         r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
                     }) {
                         if let Some(mi) = app.sticky_step {
-                            let mut messages = runtime.messages.lock().await;
+                            let mut messages = runtime.messages.write().await;
                             app.focused_target =
                                 app.focused_messages().get(mi).and_then(|message| {
                                     if message.is_thinking() {
@@ -2492,7 +2643,7 @@ pub(super) async fn run_app_loop(
                                 // task, otherwise toggle that step's disclosure.
                                 let mi = message_idx;
                                 app.focused_target = Some(kind.focus_target(mi));
-                                let mut messages = runtime.messages.lock().await;
+                                let mut messages = runtime.messages.write().await;
                                 match kind {
                                     StepKind::ToolStep => {
                                         let enter_id = resolve_focused_mut(
@@ -2619,7 +2770,7 @@ pub(super) async fn run_app_loop(
                         if let Some(mi) = app.sticky_step {
                             let is_step = runtime
                                 .messages
-                                .lock()
+                                .read()
                                 .await
                                 .get(mi)
                                 .map(|m| {

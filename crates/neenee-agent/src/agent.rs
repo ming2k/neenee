@@ -195,7 +195,7 @@ pub struct Agent {
     /// here has its built-in description replaced. Seeded from
     /// `[tool_overrides."<model-id>"]` config via [`Agent::set_tool_overrides`]
     /// and re-seeded on model switch so it always tracks the live model.
-    tool_overrides: std::sync::Mutex<neenee_core::ToolDescriptionOverrides>,
+    tool_overrides: std::sync::Mutex<neenee_core::ToolOverrides>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -343,7 +343,7 @@ impl Agent {
             identity,
             round_persist: std::sync::Mutex::new(None),
             prompt_registry: crate::prompt::default_prompt_registry(),
-            tool_overrides: std::sync::Mutex::new(neenee_core::ToolDescriptionOverrides::new()),
+            tool_overrides: std::sync::Mutex::new(neenee_core::ToolOverrides::new()),
         }
     }
 
@@ -362,7 +362,7 @@ impl Agent {
     /// re-applied on model switch so the wording always tracks the live model.
     /// An empty map (the default) leaves every tool's built-in description
     /// untouched.
-    pub fn set_tool_overrides(&self, overrides: neenee_core::ToolDescriptionOverrides) {
+    pub fn set_tool_overrides(&self, overrides: neenee_core::ToolOverrides) {
         *self
             .tool_overrides
             .lock()

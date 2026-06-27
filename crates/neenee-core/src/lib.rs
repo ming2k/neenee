@@ -58,7 +58,7 @@ pub mod tool_registry;
 pub mod webconfig;
 pub use capability::{
     CommandScope, ContextReliefGate, OperationScope, Provider, ProviderStreamEvent, ScopeTarget,
-    Tool, ToolDescriptionOverrides, empty_tool_description_overrides,
+    Tool, ToolOverride, ToolOverrides, deep_merge_json, empty_tool_overrides,
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use dynamic::DynamicCatalog;

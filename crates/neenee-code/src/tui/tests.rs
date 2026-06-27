@@ -554,7 +554,10 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
     let app = App {
         input: String::new(),
         messages: Vec::new(),
+        messages_version: 0,
         side_messages: Vec::new(),
+        side_messages_version: 0,
+        layout_height_cache: Default::default(),
         in_side_view: false,
         side_session_id: None,
         parent_status: neenee_core::ParentStatus::Idle,

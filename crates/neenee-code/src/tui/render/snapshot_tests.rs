@@ -570,6 +570,7 @@ fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) 
                 focused_target: None,
                 logo: None,
                 theme: &theme,
+                height_cache: None,
             },
         );
     });

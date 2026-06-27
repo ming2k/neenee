@@ -23,6 +23,7 @@ pub mod selection;
 pub mod step_interaction;
 mod terminal;
 mod transcript;
+mod versioned;
 
 pub(crate) use app::{ActivityTab, App, Modal, Recess};
 pub(crate) use completion::{Completion, CompletionKind};
@@ -103,8 +104,17 @@ pub async fn run_tui(
     terminal::spawn_signal_guard();
     let tui_config = Arc::new(tui_config);
     let restored = transcript_messages_from_core(initial_messages, &tui_config);
-    let messages = Arc::new(Mutex::new(restored));
+    let messages = Arc::new(versioned::Versioned::new(restored));
     let messages_clone = messages.clone();
+    // Stage 3 redraw signal: the listener flips this on every handled response
+    // so the event loop knows shared state changed and a frame is due. Starts
+    // `true` so the very first frame always renders.
+    let dirty = Arc::new(AtomicBool::new(true));
+    let dirty_clone = dirty.clone();
+    // Stage 4 wakeup: the listener notifies this so the loop's `select!` wakes
+    // immediately on a response instead of waiting out a poll interval.
+    let dirty_notify = Arc::new(tokio::sync::Notify::new());
+    let dirty_notify_clone = dirty_notify.clone();
     let should_quit = Arc::new(AtomicBool::new(false));
     let should_quit_clone = should_quit.clone();
 
@@ -181,7 +191,7 @@ pub async fn run_tui(
     // `/btw` side-conversation shared state (ADR-0017). The side transcript
     // buffer, the parent-status mirror, and the one-shot view-transition
     // signal all cross the listener → loop boundary here.
-    let side_messages = Arc::new(Mutex::new(Vec::<TranscriptMessage>::new()));
+    let side_messages = Arc::new(versioned::Versioned::new(Vec::<TranscriptMessage>::new()));
     let side_messages_clone = side_messages.clone();
     let parent_status = Arc::new(Mutex::new(ParentStatus::Idle));
     let parent_status_clone = parent_status.clone();
@@ -206,6 +216,12 @@ pub async fn run_tui(
         // `side_messages` buffer.
         let mut listener_side_id: Option<String> = None;
         while let Some(resp) = rx.recv().await {
+            // Stage 3/4: any handled response can change shared state the loop
+            // renders from, so signal a redraw (the flag) and wake the loop's
+            // `select!` immediately (the notify). One pair here covers every
+            // listener mutation (transcript, activity, todos, modals, …).
+            dirty_clone.store(true, Ordering::Release);
+            dirty_notify_clone.notify_one();
             // `/serve` hot-attach: clone the response into the broadcast
             // channel so WebSocket clients see the live stream. No-op when
             // serve is inactive (the lock holds None).
@@ -237,13 +253,13 @@ pub async fn run_tui(
                     };
                     match event {
                         TurnEvent::Notice(notice) => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             push_core_notice(&mut msgs, &notice);
                         }
                         TurnEvent::Text(t) => {
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             msgs.push(
                                 TranscriptMessage::new(Role::Assistant, t)
                                     .with_attribution(provider, model),
@@ -269,7 +285,7 @@ pub async fn run_tui(
                         TurnEvent::StreamStart => {
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             msgs.push(
                                 TranscriptMessage::new(Role::Assistant, "")
                                     .with_attribution(provider, model),
@@ -280,7 +296,7 @@ pub async fn run_tui(
                             }
                         }
                         TurnEvent::StreamDelta(delta) => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if let Some(last) = msgs.last_mut() {
                                 last.push_stream(&delta);
                             }
@@ -290,14 +306,14 @@ pub async fn run_tui(
                                 ir_clone.store(true, Ordering::SeqCst);
                                 *activity_clone.lock().await = "finalizing response".to_string();
                             }
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if let Some(last) = msgs.last_mut() {
                                 last.raw = final_content;
                                 last.reparse();
                             }
                         }
                         TurnEvent::StreamDiscard => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if msgs
                                 .last()
                                 .is_some_and(|message| message.role == Role::Assistant)
@@ -306,7 +322,7 @@ pub async fn run_tui(
                             }
                         }
                         TurnEvent::StreamReasoningDelta(delta) => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if let Some(last) =
                                 msgs.last_mut().filter(|message| message.is_thinking())
                             {
@@ -348,7 +364,7 @@ pub async fn run_tui(
                             let duration_ms = reasoning_start
                                 .take()
                                 .map(|started| started.elapsed().as_millis() as u64);
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             // The round closes with `AssistantEnd` *before* `ReasoningEnd`
                             // (see golden_reasoning_precedes_text_in_the_same_round), so by
                             // the time this arrives the assistant's text message is usually
@@ -392,7 +408,7 @@ pub async fn run_tui(
                             }
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             // A tool step starts collapsed: there's no result to show
                             // yet. The lifecycle-aware default (see `step_interaction`)
                             // expands it on completion — Ok follows per-tool density,
@@ -417,7 +433,7 @@ pub async fn run_tui(
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
                             let density = tool_density_clone.load(Ordering::SeqCst);
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             let mut finished = false;
                             for existing in msgs.iter_mut() {
                                 if existing.finish_tool_step(
@@ -467,7 +483,7 @@ pub async fn run_tui(
                             // Convergence: an in-flight call was aborted by an
                             // interrupt. Flip its step (and any nested subagent
                             // children) to Cancelled so it never stays "running".
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             let mut cancelled = false;
                             for message in msgs.iter_mut() {
                                 if message.cancel_tool_step(&id) {
@@ -493,7 +509,7 @@ pub async fn run_tui(
                             // Live partial output from a running tool (e.g. bash
                             // stdout). Accumulate into the running step so it updates
                             // in place instead of freezing on a spinner.
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if !msgs
                                 .iter_mut()
                                 .any(|message| message.push_tool_stream(&id, &stream))
@@ -541,7 +557,7 @@ pub async fn run_tui(
                                 }
                                 _ => {}
                             }
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             if let Some(message) = msgs
                         .iter_mut()
                         .find(|m| m.is_tool_step() && matches!(&m.kind, crate::tui::document::MessageKind::ToolStep { id, .. } if id == &parent_call_id))
@@ -575,7 +591,7 @@ pub async fn run_tui(
                             before_chars,
                             after_chars,
                         } => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             push_local_notice(
                                 &mut msgs,
                                 NoticeSeverity::Info,
@@ -631,7 +647,7 @@ pub async fn run_tui(
                             let duration_ms = reasoning_start
                                 .take()
                                 .map(|started| started.elapsed().as_millis() as u64);
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             finalize_streaming_reasoning(&mut msgs, duration_ms);
                         }
                         TurnEvent::PursuitUpdated(pursuit) => {
@@ -641,7 +657,7 @@ pub async fn run_tui(
                                 None
                             };
                             if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
-                                let mut msgs = buf.lock().await;
+                                let mut msgs = buf.write().await;
                                 push_local_notice(&mut msgs, NoticeSeverity::Info, text);
                             }
                             if !routes_to_side {
@@ -690,7 +706,7 @@ pub async fn run_tui(
                             }
                         }
                         TurnEvent::Error(e) => {
-                            let mut msgs = buf.lock().await;
+                            let mut msgs = buf.write().await;
                             push_local_notice(&mut msgs, NoticeSeverity::Error, e);
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
@@ -720,7 +736,7 @@ pub async fn run_tui(
                     // subsequent per-turn events stream into the side buffer,
                     // and queue the view transition for the event loop.
                     listener_side_id = Some(side_id.clone());
-                    side_messages_clone.lock().await.clear();
+                    side_messages_clone.write().await.clear();
                     *side_view_signal_clone.lock().await =
                         Some(event_loop::SideViewSignal::Opened { side_id });
                 }
@@ -741,10 +757,10 @@ pub async fn run_tui(
                     *provider_picker_clone.lock().await = snapshot;
                 }
                 AgentResponse::ConversationCleared => {
-                    messages_clone.lock().await.clear();
+                    messages_clone.write().await.clear();
                 }
                 AgentResponse::ConversationReplaced(messages) => {
-                    *messages_clone.lock().await =
+                    *messages_clone.write().await =
                         transcript_messages_from_core(messages, &tui_config_clone);
                 }
                 AgentResponse::SessionsOverview(sessions) => {
@@ -758,7 +774,7 @@ pub async fn run_tui(
                     should_quit_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::ProviderSwitched { provider, model } => {
-                    let mut msgs = messages_clone.lock().await;
+                    let mut msgs = messages_clone.write().await;
                     push_local_notice(
                         &mut msgs,
                         NoticeSeverity::Info,
@@ -768,7 +784,7 @@ pub async fn run_tui(
                     *cm_clone.lock().await = model;
                 }
                 AgentResponse::Error(msg) => {
-                    let mut msgs = messages_clone.lock().await;
+                    let mut msgs = messages_clone.write().await;
                     push_local_notice(&mut msgs, NoticeSeverity::Error, msg);
                 }
             }
@@ -780,7 +796,10 @@ pub async fn run_tui(
     let mut app = App {
         input: String::new(),
         messages: Vec::new(),
+        messages_version: 0,
         side_messages: Vec::new(),
+        side_messages_version: 0,
+        layout_height_cache: Default::default(),
         in_side_view: false,
         side_session_id: None,
         parent_status: ParentStatus::Idle,
@@ -890,6 +909,8 @@ pub async fn run_tui(
             pending_permission,
             pending_question,
             is_responding,
+            dirty,
+            dirty_notify,
             subagent_permission_parent,
             subagent_question_parent,
             messages: messages_for_loop,

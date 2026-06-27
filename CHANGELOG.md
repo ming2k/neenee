@@ -75,8 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tools manager overlay (`/tools`).** A new slash command opens a focused modal listing
   every session tool — builtins, `mcp:<server>`, `pursuit`, and `plan` — each with a
   `Space` toggle to enable/disable it. The tool list is pulled out of the session dashboard
-  so that overview stays a glanceable summary while per-tool control lives in its own
-  surface.
+  so that overview stays a glanceable, read-only summary (a one-line `enabled/total` count
+  plus a `t → /tools` hint) while per-tool control lives in its own surface.
 
 ### Changed
 

@@ -120,7 +120,7 @@ impl Provider for ProxyProvider {
     fn prepare_tools_with(
         &self,
         tools: &[Arc<dyn neenee_core::Tool>],
-        overrides: &neenee_core::ToolDescriptionOverrides,
+        overrides: &neenee_core::ToolOverrides,
     ) {
         let p = self
             .holder

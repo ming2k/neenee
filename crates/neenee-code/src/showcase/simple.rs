@@ -404,7 +404,6 @@ pub fn sessions() -> io::Result<()> {
 
 struct SessionState {
     snapshot: SessionContextSnapshot,
-    index: usize,
     scroll: Cell<usize>,
     key_status: HashMap<String, bool>,
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
@@ -470,7 +469,6 @@ pub fn session() -> io::Result<()> {
     };
     let mut state = SessionState {
         snapshot,
-        index: 0,
         scroll: Cell::new(0),
         key_status: HashMap::new(),
         mcp_statuses: vec![("fs".into(), McpConnectionStatus::Connected { tools: 2 })],
@@ -490,24 +488,26 @@ pub fn session() -> io::Result<()> {
                     &s.key_status,
                     &s.mcp_statuses,
                     Some(&s.snapshot),
-                    s.index,
                     &mut scroll,
-                    true,
                     &theme,
                 );
                 s.scroll.set(scroll);
             });
         },
         |s, key| -> ShowAction {
-            let tools = s.snapshot.tools.len().max(1);
+            // The session dashboard is read-only; Up/Down scroll its body.
             match key.code {
                 KeyCode::Esc => ShowAction::Exit,
                 KeyCode::Up => {
-                    s.index = if s.index == 0 { tools - 1 } else { s.index - 1 };
+                    let mut scroll = s.scroll.get();
+                    scroll = scroll.saturating_sub(1);
+                    s.scroll.set(scroll);
                     ShowAction::Continue
                 }
                 KeyCode::Down => {
-                    s.index = (s.index + 1) % tools;
+                    let mut scroll = s.scroll.get();
+                    scroll = scroll.saturating_add(1);
+                    s.scroll.set(scroll);
                     ShowAction::Continue
                 }
                 _ => ShowAction::Continue,

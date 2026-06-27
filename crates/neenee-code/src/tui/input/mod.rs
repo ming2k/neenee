@@ -114,17 +114,24 @@ pub enum InputAction {
     /// `/permissions` slash command (intercepted locally, never sent to the
     /// backend). `/permissions clear` still goes to the backend.
     OpenPermissions,
+    /// Open the tools manager modal: a centered, selectable list of every
+    /// session tool with a `Space` toggle. Reached via the `/tools` slash
+    /// command (intercepted locally, never sent to the backend), and via `t` /
+    /// Enter from the session dashboard's TOOLS line. The request is never
+    /// forwarded — it only opens the overlay.
+    OpenTools,
     /// Revoke the selected "always allow" rule in the permissions manager
     /// modal. Bound to `Space`.
     PermissionsActivate,
     /// Clear every cached "always allow" rule. Bound to `c` in the
     /// permissions manager modal.
     PermissionsClearAll,
-    /// Move the tool-selection cursor in the session-context dashboard.
+    /// Move the tool-selection cursor in the session-context dashboard when it
+    /// still hosts the tools list, and in the tools manager modal otherwise.
     /// `forward` = down, else up.
     SessionSelect { forward: bool },
-    /// Toggle the selected tool's enabled flag in the session dashboard. Bound
-    /// to `Space`.
+    /// Toggle the selected tool's enabled flag in the session dashboard or
+    /// tools manager modal. Bound to `Space`.
     SessionActivate,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
@@ -724,6 +731,7 @@ pub fn process_event(
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
+                    super::Modal::Tools => InputAction::CloseModal,
                     super::Modal::Permissions => InputAction::CloseModal,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
@@ -767,6 +775,7 @@ pub fn process_event(
                                 "/provider" => InputAction::OpenProvider,
                                 "/session" => InputAction::OpenSession,
                                 "/permissions" => InputAction::OpenPermissions,
+                                "/tools" => InputAction::OpenTools,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
                             }
@@ -1002,9 +1011,11 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Question && c == ' ' {
                         return InputAction::QuestionToggle;
                     }
-                    // Space inside the session dashboard toggles the selected
-                    // tool's enabled flag.
-                    if context.active_modal == super::Modal::Session && c == ' ' {
+                    // Space inside the tools manager toggles the selected
+                    // tool's enabled flag. (The session dashboard used to host
+                    // this, but is now read-only; the toggle surface lives in
+                    // the dedicated Tools modal.)
+                    if context.active_modal == super::Modal::Tools && c == ' ' {
                         return InputAction::SessionActivate;
                     }
                     // Space inside the permissions manager revokes the
@@ -1048,6 +1059,10 @@ pub fn process_event(
                         InputAction::OpenModelEditor
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
+                    } else if context.active_modal == super::Modal::Session && c == 't' {
+                        // The dashboard's TOOLS line is read-only; `t` hands off
+                        // to the dedicated tools manager for toggling.
+                        InputAction::OpenTools
                     } else if context.active_modal == super::Modal::Permissions && c == 'c' {
                         InputAction::PermissionsClearAll
                     } else if context.active_modal == super::Modal::Question {
@@ -1232,7 +1247,10 @@ pub fn process_event(
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::Activity => InputAction::ScrollUp,
-                    super::Modal::Session => InputAction::SessionSelect { forward: false },
+                    // The session dashboard is now read-only; Up/Down scroll its
+                    // body. Tool selection lives in the Tools modal.
+                    super::Modal::Session => InputAction::ScrollUp,
+                    super::Modal::Tools => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
@@ -1276,7 +1294,9 @@ pub fn process_event(
                     }
                     super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::Activity => InputAction::ScrollDown,
-                    super::Modal::Session => InputAction::SessionSelect { forward: true },
+                    // Read-only dashboard: Up/Down scroll, not select.
+                    super::Modal::Session => InputAction::ScrollDown,
+                    super::Modal::Tools => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,

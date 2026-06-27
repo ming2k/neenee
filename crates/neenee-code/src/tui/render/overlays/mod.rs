@@ -3,6 +3,7 @@
 //! Sub-modules:
 //! - [`provider`] — provider picker + API-key / model-id editor
 //! - [`session`] — sessions picker + session-context dashboard modal
+//! - [`tools`] — tools manager modal (the interactive tool-list surface)
 //! - [`activity`] — activity modal (pursuit, prompt, status, or todos)
 //! - [`permission`] — permission sheet + question modal
 //! - [`history`] — history search modal
@@ -21,6 +22,7 @@ pub(crate) mod provider;
 pub(crate) mod session;
 pub(crate) mod toast;
 pub(crate) mod tool_step_detail;
+pub(crate) mod tools;
 
 // Re-export the public API so `render::overlays::draw_*` callers are unchanged.
 pub use activity::{ActivityModalView, draw_activity_modal};
@@ -30,5 +32,6 @@ pub use permission::{draw_permission_sheet, draw_question_modal};
 pub(crate) use permissions_manager::draw_permissions_manager;
 pub(crate) use provider::{draw_model_editor, draw_models_modal};
 pub use session::{draw_session_modal, draw_sessions_modal};
+pub(crate) use tools::draw_tools_modal;
 pub use toast::{draw_armed_toast, draw_copy_toast};
 pub use tool_step_detail::draw_tool_step_detail_overlay;

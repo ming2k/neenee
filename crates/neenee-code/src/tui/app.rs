@@ -95,11 +95,19 @@ pub enum Modal {
     /// identified by `App::tool_detail_message_idx`; `tool_detail_scroll`
     /// holds the overlay's own scroll offset.
     ToolStepDetail,
-    /// Session context modal: a single scrollable dashboard of the live
-    /// session's model, MCP servers, skills, and tools. Opened with the
-    /// `/session` slash command. The tool list is the only interactive surface;
-    /// [`App::modal_index`] is its selection cursor.
+    /// Session context modal: a single scrollable **read-only** dashboard of
+    /// the live session's model, MCP servers, and skills. Opened with the
+    /// `/session` slash command. The dashboard's `TOOLS` line is a one-row
+    /// summary (count) whose `t`/Enter action hands off to [`Modal::Tools`] for
+    /// the interactive toggle surface — tools no longer live inline here.
     Session,
+    /// Tools manager modal: a centered, dismissable, selectable list of every
+    /// session tool — builtins, `mcp:<server>`, `pursuit`, `plan` — each with a
+    /// `Space` toggle to enable/disable it. Opened with the `/tools` slash
+    /// command (and via `t`/Enter from the session dashboard's TOOLS line).
+    /// [`App::modal_index`] is its selection cursor; data comes from the same
+    /// session-context snapshot `/session` uses.
+    Tools,
     /// Permissions manager modal: a centered, dismissable overlay listing the
     /// session's cached "always allow" rules with per-row revoke and a
     /// clear-all action. Opened with the `/permissions` slash command. This
@@ -172,6 +180,7 @@ impl Modal {
             Modal::Help
                 | Modal::ToolStepDetail
                 | Modal::Session
+                | Modal::Tools
                 | Modal::Sessions
                 | Modal::Permissions
                 | Modal::Activity
@@ -221,10 +230,23 @@ pub struct App {
     pub input: String,
     /// Structured transcript messages (semantic document model).
     pub messages: Vec<TranscriptMessage>,
+    /// Version of the shared runtime buffer that [`messages`] was last synced
+    /// from. The loop re-clones the buffer only when the runtime version moves
+    /// past this, so an unchanged transcript costs no per-frame deep clone.
+    /// Starts at 0 (the `Versioned` sentinel) so the first frame always syncs.
+    pub messages_version: u64,
     /// Side-conversation transcript (ADR-0017). Populated only while a `/btw`
     /// side session is live; per-turn events tagged with the side `session_id`
     /// route here instead of into [`messages`].
     pub side_messages: Vec<TranscriptMessage>,
+    /// Companion to [`messages_version`] for the side buffer.
+    pub side_messages_version: u64,
+    /// Per-message laid-out height cache (Stage 2). Lets the transcript renderer
+    /// skip re-wrapping off-screen messages, making per-frame layout O(visible)
+    /// instead of O(transcript). Cleared whenever the transcript changes (a
+    /// `messages_version` / `side_messages_version` bump) so a cached height is
+    /// only ever read while the message's content is unchanged.
+    pub layout_height_cache: crate::tui::render::HeightCache,
     /// True while the user is composing into the `/btw` side conversation
     /// (ADR-0017). Drives [`App::focused_messages`] to swap the viewed
     /// transcript to [`App::side_messages`] and reserves the side banner.
