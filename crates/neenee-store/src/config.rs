@@ -323,13 +323,6 @@ impl ToolOverridesConfig {
     }
 }
 
-impl ModelToolOverrides {
-    /// Construct from an iterator of `(tool_name, description)` pairs.
-    pub fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
 /// One lifecycle event hook entry (ADR-0025). Deserialized from a `[[hooks]]`
 /// table in `config.toml`:
 ///
@@ -537,10 +530,14 @@ mod tests {
     #[test]
     fn tool_overrides_round_trip_through_serialise() {
         let mut cfg = Config::default();
-        let map = ModelToolOverrides::from_iter([
-            ("read_file".to_string(), "desc A".to_string()),
-            ("bash".to_string(), "desc B".to_string()),
-        ]);
+        let map = ModelToolOverrides(
+            [
+                ("read_file".to_string(), "desc A".to_string()),
+                ("bash".to_string(), "desc B".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
         cfg.tool_overrides.0.insert("kimi-k2.7-code".to_string(), map);
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();

@@ -1112,4 +1112,84 @@ mod tests {
         assert_eq!(msgs[1]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(msgs[4]["content"], "all done");
     }
+
+    // --- per-model tool-description override end-to-end ---
+
+    /// Minimal Tool stand-in so the override wiring can be exercised without
+    /// pulling in the whole tools crate. Mirrors the one in neenee-core's tests.
+    struct DummyTool {
+        name: &'static str,
+        desc: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl Tool for DummyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.desc
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn call(&self, _: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn tool_desc_at(body: &Value, idx: usize) -> &str {
+        body["tools"][idx]["function"]["description"]
+            .as_str()
+            .unwrap_or("")
+    }
+
+    #[test]
+    fn prepare_tools_with_threads_overrides_into_request_body() {
+        let provider =
+            OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DummyTool {
+                name: "read_file",
+                desc: "built-in description",
+            }),
+            Arc::new(DummyTool {
+                name: "bash",
+                desc: "built-in bash",
+            }),
+        ];
+
+        // Override read_file only; bash keeps its built-in description.
+        let mut overrides = neenee_core::ToolDescriptionOverrides::new();
+        overrides.insert("read_file".to_string(), "model-specific wording".to_string());
+        provider.prepare_tools_with(&tools, &overrides);
+
+        let body = provider.request_body(vec![Message::new(Role::User, "go")], false);
+        assert_eq!(tool_desc_at(&body, 0), "model-specific wording");
+        assert_eq!(tool_desc_at(&body, 1), "built-in bash");
+        // Name and type are untouched.
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(body["tools"][0]["type"], "function");
+    }
+
+    #[test]
+    fn prepare_tools_without_overrides_matches_plain_prepare_tools() {
+        // The override path with an empty map must be byte-identical to the
+        // plain path, so existing behaviour is preserved when no overrides are
+        // configured for the active model.
+        let mk = || OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DummyTool {
+            name: "read_file",
+            desc: "built-in description",
+        })];
+
+        let plain = mk();
+        plain.prepare_tools(&tools);
+        let plain_body = plain.request_body(vec![Message::new(Role::User, "go")], false);
+
+        let with = mk();
+        with.prepare_tools_with(&tools, &neenee_core::ToolDescriptionOverrides::new());
+        let with_body = with.request_body(vec![Message::new(Role::User, "go")], false);
+
+        assert_eq!(plain_body, with_body);
+    }
 }
