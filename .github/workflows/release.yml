@@ -67,14 +67,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin neenee
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin neenee-code
       - name: Package
         id: package
         run: |
           version="${GITHUB_REF_NAME#v}"
           dirname="neenee-${version}-${{ matrix.target }}"
           mkdir "$dirname"
-          cp target/${{ matrix.target }}/release/neenee "$dirname/"
+          cp target/${{ matrix.target }}/release/neenee-code "$dirname/"
           cp README.md LICENSE "$dirname/"
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
             tar -czf "$dirname.tar.gz" "$dirname"

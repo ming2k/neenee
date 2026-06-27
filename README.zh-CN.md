@@ -27,6 +27,16 @@
 
 ## 快速开始
 
+**一键安装**（macOS 与 Linux）—— 自动下载预编译二进制到 `~/.local/bin`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ming2k/neenee/main/install.sh | bash
+```
+
+> 可用 `NEENEE_VERSION=0.9.0` 指定版本，或用 `INSTALL_DIR=/usr/local/bin` 自定义安装目录。
+
+**或从源码编译**：
+
 ```bash
 git clone https://github.com/ming2k/neenee.git
 cd neenee
