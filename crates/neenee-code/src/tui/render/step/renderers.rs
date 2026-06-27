@@ -1207,9 +1207,10 @@ pub fn draw_subagent_inline_step(
     // from the summary color (a steady accent, matching every other step per
     // the single-breathing-anchor rule in ADR 0008). Color is resolved through
     // the shared state machine: a non-completed lifecycle supplies an accent
-    // that wins outright; the completed case falls through to the disclosure ×
-    // interaction weight ladder (a task never expands inline, so it is bright
-    // when focused or under the pointer and calm otherwise).
+    // that supplies the hue, while the disclosure × interaction weight channel
+    // still modulates its brightness; the completed case yields no accent and
+    // falls fully through to the weight ladder (a task never expands inline, so
+    // it is bright when focused or under the pointer and calm otherwise).
     let accent = match status {
         ToolStatus::Failed => Some(theme.error_fg),
         ToolStatus::Denied => Some(theme.warn()),
@@ -1405,10 +1406,11 @@ pub fn draw_tool_step(
     // running, red on failure, muted when cancelled, and neutral on success.
     // There is no status glyph or per-tool icon in the summary. The summary
     // text color is resolved through the shared state machine: a non-completed
-    // lifecycle supplies an accent that wins outright; the completed case falls
-    // through to the disclosure × interaction weight ladder so a finished call
-    // reads as calm when idle — bright while its body is open, focused, or the
-    // pointer rests on it.
+    // lifecycle supplies an accent that supplies the hue while the disclosure ×
+    // interaction weight channel modulates its brightness; the completed case
+    // yields no accent and falls fully through to the weight ladder so a
+    // finished call reads as calm when idle — bright while its body is open,
+    // focused, or the pointer rests on it.
     //
     // The activity bar is the single breathing anchor (ADR 0008); per-step
     // liveness rides on hue alone so a transcript full of running steps does
@@ -1620,10 +1622,14 @@ pub fn draw_tool_step(
             }
         }
 
-        // No trailing bottom gap here: the message-level separator
-        // (`MESSAGE_GAP_ROWS`) already provides a single blank row between
-        // this step and the next component. Adding another would double the
-        // gap when expanded, diverging from the collapsed layout.
+        // No trailing bottom gap here: spacing is owned by the body, not the
+        // step boundary. The message-level separator (`MESSAGE_GAP_ROWS`)
+        // supplies the single blank row that closes this step's expanded body
+        // against the next component — but it is suppressed when this step is
+        // collapsed and the next is also a tool step (see `draw_transcript`),
+        // so a collapsed batch stays flush. Adding another gap here would
+        // double the separator when expanded and break the flush stack when
+        // collapsed.
     }
 
     if expanded {
@@ -1741,7 +1747,6 @@ fn draw_reasoning_summary(
     expanded: bool,
     marker_override: Option<&str>,
     summary: &str,
-    marker_color: Color,
     hovered: bool,
     focused: bool,
 ) -> usize {
@@ -1754,6 +1759,12 @@ fn draw_reasoning_summary(
     // weight from the shared state machine: open → primary foreground,
     // collapsed + focused → primary foreground, collapsed + hovered →
     // intermediate hover tone, otherwise muted.
+    //
+    // The marker shares that same color so the disclosure affordance reads as
+    // one visual unit with the summary text — matching how tool steps render
+    // their marker (a single `fg` for marker + text). Previously the marker
+    // was pinned to a fixed `info` hue, which made it read as a detached blue
+    // glyph that ignored disclosure/focus state.
     let summary_color = summary_text_color(
         None,
         Disclosure::from_expanded(expanded),
@@ -1761,7 +1772,7 @@ fn draw_reasoning_summary(
         ctx.theme,
     );
 
-    let line = reasoning_summary_line(marker, summary, marker_color, summary_color, ctx.full_width);
+    let line = reasoning_summary_line(marker, summary, summary_color, summary_color, ctx.full_width);
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1841,11 +1852,12 @@ pub fn draw_reasoning_trace(
             // `●`. With the activity bar as the single breathing anchor
             // (ADR 0008), nothing about the marker needs to change between
             // streaming and finished — the lifecycle reads from the summary
-            // text (duration omitted while streaming) and the steady `info`
-            // hue alone.
+            // text (duration omitted while streaming) and the steady hue
+            // alone. The marker color now follows the disclosure ×
+            // interaction weight, so it tracks the highlight like the
+            // summary text and like tool-step markers (no fixed hue).
             None,
             &summary,
-            theme.info(),
             hovered,
             focused,
         )

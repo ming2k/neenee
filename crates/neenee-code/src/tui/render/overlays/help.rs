@@ -76,7 +76,6 @@ pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) -> 
         Line::from(""),
         Line::from(section("Views & tools")),
         row("ctrl+h", "this help"),
-        row("/config", "configuration"),
         row("/session", "session context"),
         row("ctrl+m", "switch model"),
         row("ctrl+r", "search history"),

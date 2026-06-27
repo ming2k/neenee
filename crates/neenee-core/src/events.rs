@@ -61,9 +61,6 @@ pub enum AgentRequest {
     /// skills / mcp). The harness replies with [`AgentResponse::SessionContext`].
     /// Sent by the TUI when the session modal opens.
     QuerySessionContext,
-    /// Request the live user-config snapshot for the configuration modal.
-    /// The harness replies with [`AgentResponse::ConfigSnapshot`].
-    QueryConfig,
     /// Revoke a single cached "always allow" permission rule. The harness
     /// removes it from the in-memory allowlist and replies with an updated
     /// [`AgentResponse::SessionContext`] so the modal reflects the change.
@@ -82,11 +79,6 @@ pub enum AgentRequest {
     /// [`AgentResponse::SessionContext`].
     ToggleTool {
         name: String,
-        enabled: bool,
-    },
-    /// Enable or disable the model-facing `progress_update` tool and persist
-    /// the choice in `config.toml`.
-    SetProgressUpdates {
         enabled: bool,
     },
     /// Run a shell command directly through the `bash` tool, bypassing the
@@ -170,8 +162,6 @@ pub enum AgentResponse {
     /// and re-sent after any mutation handled by the harness
     /// ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`]).
     SessionContext(SessionContextSnapshot),
-    /// Live user-config snapshot for the TUI configuration modal.
-    ConfigSnapshot(ConfigSnapshot),
 }
 
 /// The session-scoped shapes a single turn/stream emits, carried under an
@@ -230,11 +220,6 @@ pub enum TurnEvent {
     /// `todo_update`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
     /// means "no active task list" and hides the sticky panel.
     TodosUpdated(crate::todos::TodoList),
-    /// A short, model-authored work-status update intended for glanceable UI
-    /// surfaces. Unlike [`TurnEvent::Activity`], this is durable within the
-    /// active turn and is not overwritten by harness liveness phases such as
-    /// "waiting for model".
-    ProgressUpdate(String),
     /// The unattended toggle changed. Emitted by `/unattended` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
     UnattendedChanged(bool),
@@ -462,10 +447,6 @@ pub enum AgentEvent {
     /// The task list changed (`todo` / `todo_update`). The TUI uses this to refresh the
     /// unified sticky panel above the input box.
     TodosUpdated(crate::todos::TodoList),
-    /// A short, model-authored work-status update intended for glanceable UI
-    /// surfaces. Unlike [`AgentEvent::ModelRequestStarted`], this represents
-    /// what the model says it is working on, not harness transport state.
-    ProgressUpdate(String),
     /// The unattended toggle changed (via `/unattended`).
     UnattendedChanged(bool),
     /// An on-demand session-review diagnostic ran (ADR-0018, superseding the
@@ -485,24 +466,6 @@ pub enum AgentEvent {
         parent_call_id: String,
         event: SubagentEvent,
     },
-}
-
-/// Live configuration values currently surfaced by the TUI configuration
-/// modal. This is intentionally small and frontend-oriented; the durable TOML
-/// schema lives in `neenee-store`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigSnapshot {
-    pub progress_updates_enabled: bool,
-    pub progress_update_max_chars: usize,
-}
-
-impl Default for ConfigSnapshot {
-    fn default() -> Self {
-        Self {
-            progress_updates_enabled: true,
-            progress_update_max_chars: 60,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -27,41 +27,6 @@ impl Provider for TestProvider {
     }
 }
 
-#[test]
-fn configure_progress_updates_toggles_tool_visibility() {
-    let agent = Agent::new(
-        Arc::new(TestProvider),
-        Vec::new(),
-        skills::SkillRegistry::empty(),
-        AgentIdentity::default(),
-    );
-
-    assert!(
-        agent
-            .snapshot_tools()
-            .iter()
-            .any(|tool| tool.name == "progress_update" && tool.enabled)
-    );
-
-    agent.configure_progress_updates(false, 42);
-    assert_eq!(agent.progress_update_max_chars(), 42);
-    assert!(
-        agent
-            .snapshot_tools()
-            .iter()
-            .any(|tool| tool.name == "progress_update" && !tool.enabled)
-    );
-
-    agent.configure_progress_updates(true, 0);
-    assert_eq!(agent.progress_update_max_chars(), 1);
-    assert!(
-        agent
-            .snapshot_tools()
-            .iter()
-            .any(|tool| tool.name == "progress_update" && tool.enabled)
-    );
-}
-
 #[async_trait]
 impl Provider for PermissionTestProvider {
     async fn chat(&self, _messages: Vec<Message>) -> Result<Message, String> {
@@ -293,12 +258,7 @@ fn system_prompt_registry_reproduces_legacy_layout() {
          Skip the list entirely for single-step requests.\n\
          \n\
          Active harness pursuit (active):\n\
-         ship the harness\n\
-         \n\
-         Use the progress_update tool at key phase changes so the user can glance at what \
-         you are doing while multitasking. Keep each update extremely short and concrete, \
-         such as 'Inspect config flow' or 'Refactor config modal'. Do not use markdown, \
-         explanations, or routine chatter; skip it for very small one-step requests.";
+         ship the harness";
     assert_eq!(prompt, expected, "registry output must match legacy layout");
 
     // Origin is the channel canonical kind, regardless of how many sections
@@ -1044,7 +1004,6 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("tool-cancelled {name}")
             }
             AgentEvent::PursuitUpdated(_) => "pursuit-updated".to_string(),
-            AgentEvent::ProgressUpdate(summary) => format!("progress-update {summary:?}"),
             AgentEvent::UnattendedChanged(enabled) => format!("unattended {enabled}"),
             AgentEvent::SessionReview { alert } => {
                 format!("session-review alert={alert:?}")

@@ -481,3 +481,183 @@ fn edit_file_diff_renders_from_structured_patch() {
     );
     insta::assert_snapshot!(render_grid(&m, 80, 30));
 }
+
+// ── Tool-step batch spacing (ADR-0001, "spacing belongs to the body") ──
+//
+// Collapsed tool steps stack flush — no blank row between adjacent headers —
+// so a batch of parallel/sequential tool calls reads as one compact log block.
+// Only an expanded body is padded: one row above (its own header) and one row
+// below (the next step's header). These tests render the full transcript
+// (`draw_transcript`, which owns the inter-message gap) so the suppression
+// logic itself is exercised — the single-step `render_grid` helper above only
+// draws one step and so cannot observe inter-step spacing.
+
+/// Render `steps` (already finalized tool-step messages) through the full
+/// transcript pipeline and return the painted grid as trimmed rows. Unlike
+/// [`render_grid`], this exercises `draw_transcript` so the message-level
+/// spacing between consecutive steps is captured. Backgrounds are omitted:
+/// these tests are about row counts, not palette.
+fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) -> String {
+    use crate::tui::layout::LayoutMap;
+    use super::{Theme, TranscriptView, draw_transcript};
+
+    let theme = Theme::default();
+    let selection = SelectionState::default();
+    let mut terminal = neenee_tui::TestTerminal::new(width, height);
+    let mut layout_map = LayoutMap::new();
+    terminal.draw(|f| {
+        let _ = draw_transcript(
+            f,
+            &mut layout_map,
+            TranscriptView {
+                messages: steps,
+                scroll: 0,
+                selection: &selection,
+                cell_selection: None,
+                activity: "",
+                spinner_phase: 0,
+                input: "",
+                byte_cursor: 0,
+                chrome_hidden: false,
+                subagent_bar: None,
+                side_banner: None,
+                pursuit: None,
+                todos: None,
+                review_alert: String::new(),
+                turn_started_at: None,
+                hovered_step: None,
+                focused_target: None,
+                logo: None,
+                theme: &theme,
+            },
+        );
+    });
+
+    let buf = terminal.buffer();
+    let bw = buf.area().width as usize;
+    let mut rows: Vec<String> = Vec::with_capacity(height as usize);
+    for y in 0..height as usize {
+        let mut row = String::new();
+        for x in 0..width as usize {
+            row.push_str(buf.content[y * bw + x].symbol());
+        }
+        rows.push(row.trim_end().to_string());
+    }
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    rows.join("\n")
+}
+
+/// A batch of collapsed tool steps renders with no blank rows between headers.
+#[test]
+fn collapsed_tool_steps_stack_flush() {
+    let steps = vec![
+        tool_step_structured(
+            "read_file",
+            r#"{"path":"a.rs"}"#,
+            neenee_core::ToolOutput::Code {
+                lang: None,
+                text: "x".into(),
+                start_line: 1,
+                prefix: None,
+                suffix: None,
+            },
+            false,
+        ),
+        tool_step_structured(
+            "read_file",
+            r#"{"path":"b.rs"}"#,
+            neenee_core::ToolOutput::Code {
+                lang: None,
+                text: "y".into(),
+                start_line: 1,
+                prefix: None,
+                suffix: None,
+            },
+            false,
+        ),
+        tool_step_structured(
+            "read_file",
+            r#"{"path":"c.rs"}"#,
+            neenee_core::ToolOutput::Code {
+                lang: None,
+                text: "z".into(),
+                start_line: 1,
+                prefix: None,
+                suffix: None,
+            },
+            false,
+        ),
+    ];
+    let grid = render_transcript_grid(&steps, 60, 12);
+    // The three headers must be adjacent: no blank row between any pair. Each
+    // header carries the disclosure marker (`+` collapsed) somewhere in the
+    // line, so locate their row indices and assert they are consecutive.
+    let header_idx: Vec<usize> = grid
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains("Read ") && (l.contains('+') || l.contains('-')))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        header_idx.len(),
+        3,
+        "expected three Read headers:\n{grid}"
+    );
+    assert_eq!(
+        header_idx[1] - header_idx[0],
+        1,
+        "first two collapsed headers must be flush (no blank row):\n{grid}"
+    );
+    assert_eq!(
+        header_idx[2] - header_idx[1],
+        1,
+        "last two collapsed headers must be flush (no blank row):\n{grid}"
+    );
+}
+
+/// An expanded body is padded one row from its own header (top) and one row
+/// from the next header (bottom); collapsed neighbours around it stay flush.
+#[test]
+fn expanded_body_pads_itself_neighbours_stay_flush() {
+    let steps = vec![
+        tool_step_structured(
+            "read_file",
+            r#"{"path":"a.rs"}"#,
+            neenee_core::ToolOutput::Code {
+                lang: None,
+                text: "x".into(),
+                start_line: 1,
+                prefix: None,
+                suffix: None,
+            },
+            false, // collapsed — flush against the next step's header
+        ),
+        tool_step_structured(
+            "grep",
+            r#"{"pattern":"foo","path":"src"}"#,
+            neenee_core::ToolOutput::Matches {
+                pattern: "foo".into(),
+                lines: vec![
+                    "src/a.rs:10:1:foo".into(),
+                    "src/b.rs:5:1:foo".into(),
+                ],
+            },
+            true, // expanded — body padded above + below
+        ),
+        tool_step_structured(
+            "read_file",
+            r#"{"path":"c.rs"}"#,
+            neenee_core::ToolOutput::Code {
+                lang: None,
+                text: "z".into(),
+                start_line: 1,
+                prefix: None,
+                suffix: None,
+            },
+            false, // collapsed — flush below the expanded body's trailing gap
+        ),
+    ];
+    insta::assert_snapshot!(render_transcript_grid(&steps, 60, 16));
+}

@@ -51,7 +51,6 @@ impl SideSession {
         base_tools: &[Arc<dyn Tool>],
         provider_holder: &Arc<RwLock<Arc<dyn Provider>>>,
         skills: SkillRegistry,
-        config: &Config,
         project_root: &std::path::Path,
         identity: AgentIdentity,
     ) -> Result<Self, String> {
@@ -75,10 +74,6 @@ impl SideSession {
         ));
         agent.set_thread_id(&side_id);
         agent.set_project_root(Some(project_root.to_path_buf()));
-        agent.configure_progress_updates(
-            config.agent.progress_updates.enabled,
-            config.agent.progress_updates.max_chars,
-        );
         // A side conversation is a quick aside; unattended its write tools so
         // it never raises a permission modal whose reply could not be routed
         // back to the side `Agent` through the shared permission channel. This

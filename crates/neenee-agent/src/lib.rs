@@ -67,7 +67,7 @@ pub use neenee_store::RepeatStore;
 // the Agent struct expects at the crate root have to be listed here by name.
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
-    AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ConfigSnapshot, ContextReliefGate,
+    AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextReliefGate,
     EXPLORE, HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig,
     Message, PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision, PermissionRequest,
     PromptChannel, PromptContext, PromptRegistry, PromptSection, Provider, ProviderEntry,
@@ -138,7 +138,6 @@ mod permission_store;
 // Shadows core's `prompt` module under the `pub use neenee_core::*` glob
 // above; deliberate — see the note there. The prompt *types* are re-exported
 // by name in the explicit list.
-mod progress_tool;
 #[allow(hidden_glob_reexports)]
 mod prompt;
 mod pursuit_state;

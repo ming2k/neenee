@@ -100,14 +100,13 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
     Some(match modal {
         Modal::Provider => fixed(72, 60),
         Modal::ModelPicker => fixed(64, 60),
-        Modal::HistorySearch => fixed(70, 55),
+        Modal::HistorySearch => fixed(70, 72),
         Modal::Question => fixed(78, 70),
         Modal::ModelEditor => fixed(60, 36),
         Modal::Help => fixed(58, 70),
         Modal::ToolStepDetail => fixed(92, 84),
         Modal::Sessions => fixed(80, 64),
         Modal::Permissions => fixed(64, 60),
-        Modal::Config => fixed(58, 36),
         Modal::Activity => fixed(72, 70),
         Modal::Session => ModalSpec {
             width_percent: 76,
@@ -671,7 +670,6 @@ mod tests {
             Modal::Sessions,
             Modal::Session,
             Modal::Permissions,
-            Modal::Config,
             Modal::Activity,
         ] {
             assert!(modal_spec(modal).is_some());

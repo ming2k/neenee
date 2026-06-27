@@ -60,12 +60,11 @@ are non-modal and use a different `toast` helper.
 | [Model editor](#model-editor) | Models modal `e` | 60 × 36 | `draw_model_editor` |
 | [Sessions](#sessions-modal) | `/sessions` | 80 × 64 | `draw_sessions_modal` |
 | [Session](#session-modal) | `/session` | 76 × 70 | `draw_session_modal` |
-| [History search](#history-search-modal) | `Ctrl+R` | 70 × 55 | `draw_history_modal` |
+| [History search](#history-search-modal) | `Ctrl+R` | 70 × 72 | `draw_history_modal` |
 | [Question](#question-modal) | `ask_user` tool | 78 × 70 | `draw_question_modal` |
 | [Permission sheet](#permission-sheet) | Automatic | (inline, not centered) | `draw_permission_sheet` |
 | [Tool-step detail](#tool-step-detail-overlay) | `Enter` on focused tool step | 92 × 84 | `draw_tool_step_detail_overlay` |
 | [Help](#help-modal) | `Ctrl+H` / `/help` | 58 × 70 | `draw_help_modal` |
-| [Config](#config-modal) | `/config` | 58 × 36 | `draw_config_modal` |
 | [Activity](#activity-modal) | Click activity bar | 72 × 70 | `draw_activity_modal` |
 | [Toasts](#toasts) | Transient | top-right, 3 rows | `draw_armed_toast`, `draw_copy_toast` |
 
@@ -141,20 +140,6 @@ The API key is masked as `•` per character whenever it is not focused.
 | `Tab` | Cycle focus between API key and Model id |
 | `Enter` | Save the focused field and switch to the other |
 | `Esc` / `Ctrl+C` | Cancel and restore the stashed composer input |
-
-## Config modal
-
-User configuration surface, opened by `/config`.
-
-| Row | Effect |
-|-----|--------|
-| `Progress updates` | Toggles the `progress_update` tool and persists `agent.progress_updates.enabled` |
-| `Max chars` | Shows `agent.progress_updates.max_chars` |
-
-| Key | Effect |
-|-----|--------|
-| `Space` / `Enter` | Toggle the selected setting |
-| `Esc` / `Ctrl+C` | Close |
 
 ## Sessions modal
 

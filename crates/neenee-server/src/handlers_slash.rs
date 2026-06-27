@@ -408,8 +408,13 @@ pub async fn dispatch(
                     token.cancel();
                 }
                 history.lock().await.clear();
+                agent.clear_todos();
                 match session.reset().await {
                     Ok(id) => {
+                        let _ = resp_tx.send(turn(
+                            &session.id().await,
+                            TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+                        ));
                         let _ = resp_tx.send(AgentResponse::ConversationCleared);
                         let _ = resp_tx.send(turn(
                             &session.id().await,
@@ -457,7 +462,6 @@ pub async fn dispatch(
                 base_tools_for_side,
                 provider_for_task,
                 (*skills_registry).clone(),
-                config,
                 project_root_for_side,
                 AgentIdentity::new(crate::NEENEE_NAME, crate::NEENEE_MISSION),
             )
@@ -961,7 +965,13 @@ pub async fn dispatch(
         Some(BuiltinCmd::Clear) => {
             history.lock().await.clear();
             let _ = session.replace_messages(Vec::new()).await;
+            agent.clear_todos();
+            let _ = session.set_todos(neenee_core::TodoList::default()).await;
             let _ = resp_tx.send(AgentResponse::ConversationCleared);
+            let _ = resp_tx.send(turn(
+                &session.id().await,
+                TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+            ));
             let _ = resp_tx.send(turn(
                 &session.id().await,
                 TurnEvent::Text("Conversation history cleared.".to_string()),

@@ -207,33 +207,6 @@ impl PromptSection for AskUserGuidance {
     }
 }
 
-/// Guidance for the `progress_update` tool, only when that tool is admitted
-/// this turn. Leading `\n` separates it from the paragraphs above.
-struct ProgressUpdateGuidance;
-
-const PROGRESS_UPDATE: &str = "\nUse the progress_update tool at key phase changes so the user can glance at what you are doing while multitasking. Keep each update extremely short and concrete, such as 'Inspect config flow' or 'Refactor config modal'. Do not use markdown, explanations, or routine chatter; skip it for very small one-step requests.";
-
-impl PromptSection for ProgressUpdateGuidance {
-    fn id(&self) -> &'static str {
-        "system.progress_update_guidance"
-    }
-    fn channel(&self) -> PromptChannel {
-        PromptChannel::System
-    }
-    fn kind(&self) -> InjectionKind {
-        InjectionKind::SystemPrompt
-    }
-    fn rank(&self) -> u32 {
-        45
-    }
-    fn is_active(&self, ctx: &PromptContext) -> bool {
-        ctx.tool_names.iter().any(|name| name == "progress_update")
-    }
-    fn render(&self, _ctx: &PromptContext) -> Option<String> {
-        Some(String::from(PROGRESS_UPDATE))
-    }
-}
-
 /// The skills catalog, when any skills are registered. Leading `\n`
 /// separates it from the paragraphs above.
 struct SkillsIndex;
@@ -270,7 +243,6 @@ pub(crate) fn default_prompt_registry() -> PromptRegistry {
     registry.register(ModelGuidance);
     registry.register(TodoGuidance);
     registry.register(PursuitObjective);
-    registry.register(ProgressUpdateGuidance);
     registry.register(AskUserGuidance);
     registry.register(SkillsIndex);
     registry

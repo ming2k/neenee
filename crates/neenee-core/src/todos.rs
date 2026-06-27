@@ -120,7 +120,7 @@ pub struct TodoList {
     /// Next id to hand out. Monotonic for the life of the list so ids are
     /// never reused after a removal, even across save/resume.
     #[serde(default = "default_next_id")]
-    next_id: u64,
+    pub next_id: u64,
     /// Harness turn counter value the last time the list changed. The TUI
     /// compares this against the current turn counter to flag a stale panel.
     #[serde(default)]
@@ -158,6 +158,16 @@ impl TodoList {
     /// `done_count/total`).
     pub fn count(&self, status: TodoStatus) -> usize {
         self.items.iter().filter(|i| i.status == status).count()
+    }
+
+    /// Whether every item is terminal (`Completed` or `Cancelled`) — i.e. no
+    /// `Pending` / `InProgress` work remains. True for an empty list too.
+    /// Used by the harness to auto-clear the list once everything is wrapped
+    /// up, so a finished task list does not linger in the panel forever.
+    pub fn is_all_done(&self) -> bool {
+        self.items
+            .iter()
+            .all(|i| matches!(i.status, TodoStatus::Completed | TodoStatus::Cancelled))
     }
 
     /// Replace the whole list with `desired`, preserving identity for items
@@ -453,5 +463,37 @@ mod tests {
         assert!(out.contains("2. [~] implement"));
         assert!(out.contains("3. [ ] verify"));
         assert!(out.contains("4. [-] docs"));
+    }
+
+    #[test]
+    fn is_all_done_detects_terminal_list() {
+        let mut list = TodoList::new();
+        // Empty list is trivially "all done".
+        assert!(list.is_all_done());
+
+        list.reconcile(
+            &desired(&[("design", TodoStatus::Completed), ("docs", TodoStatus::Cancelled)]),
+            100,
+            1,
+        );
+        assert!(list.is_all_done());
+
+        // Any non-terminal item means not all done.
+        list.reconcile(
+            &desired(&[
+                ("design", TodoStatus::Completed),
+                ("implement", TodoStatus::InProgress),
+            ]),
+            100,
+            1,
+        );
+        assert!(!list.is_all_done());
+
+        list.reconcile(
+            &desired(&[("verify", TodoStatus::Pending)]),
+            100,
+            1,
+        );
+        assert!(!list.is_all_done());
     }
 }

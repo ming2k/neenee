@@ -89,14 +89,27 @@ pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &
 
 /// Resolve the final summary text color from both channels:
 ///
-/// - A **non-completed lifecycle** supplies an accent (hue) which wins outright
-///   so a running / failed / denied step stays visibly accented even when
-///   collapsed and idle. The caller computes the accent from its kind-specific
-///   lifecycle source (e.g. `ToolStatus::color`); per ADR 0008 the accent is a
-///   steady hue, never a breathing sweep — the activity bar owns the only
-///   motion in the TUI.
+/// - A **non-completed lifecycle** supplies an accent (hue) which stays in
+///   force so a running / failed / denied step remains visibly accented even
+///   when collapsed and idle. The caller computes the accent from its
+///   kind-specific lifecycle source (e.g. `ToolStatus::color`); per ADR 0008
+///   the accent is a steady hue, never a breathing sweep — the activity bar
+///   owns the only motion in the TUI.
 /// - `None` (completed, or a kind whose lifecycle only affects its marker —
-///   reasoning) hands control to [`summary_weight`].
+///   reasoning) hands control fully to [`summary_weight`].
+///
+/// The two channels compose: when an accent is present it supplies the **hue**
+/// while the disclosure × interaction weight channel still modulates the
+/// **brightness**. Without that composition a long-lived accent — like the
+/// `info` hue on a running subagent task — would pin the summary to one flat
+/// color for its whole lifetime and the hover/focus affordance would never
+/// show, which is exactly the bug where hovering an `explore` step did
+/// nothing. The accent is nudged toward the weight-ladder color by a per-rung
+/// factor (`accent_idle_blend`, `accent_hover_blend`, `accent_focus_blend`):
+/// idle leaves the accent essentially intact (the running step stays vivid),
+/// hover leans a little toward `theme.hover()`, and focus / an open body lean
+/// toward the primary foreground so the deliberate cue reads clearly on top of
+/// the hue.
 ///
 /// This is the single entry point renderers use for the summary text color,
 /// keeping the accent/weight separation in one auditable place.
@@ -106,11 +119,40 @@ pub fn summary_text_color(
     interaction: Interaction,
     theme: &Theme,
 ) -> Color {
-    match accent {
-        Some(color) => color,
-        None => summary_weight(disclosure, interaction, theme),
+    let Some(accent) = accent else {
+        return summary_weight(disclosure, interaction, theme);
+    };
+    // The weight-ladder color for this disclosure × interaction gives the
+    // brightness target. Blend the accent toward it by a rung-specific factor
+    // so the hue dominates but hover / focus still produce a visible shift.
+    let weight = summary_weight(disclosure, interaction, theme);
+    let t = accent_blend_factor(disclosure, interaction);
+    accent.blend(weight, t)
+}
+
+/// How strongly a lifecycle accent yields to the disclosure × interaction
+/// weight color. Kept small so the hue (running / failed / denied) stays the
+/// dominant signal: idle leaves the accent untouched, hover adds a gentle
+/// nudge, and focus / an open body push it harder toward the primary
+/// foreground. `Expanded` reads as the active (focused) state since an open
+/// body is the strongest signal regardless of interaction, mirroring
+/// [`summary_weight`].
+fn accent_blend_factor(disclosure: Disclosure, interaction: Interaction) -> f32 {
+    match (disclosure, interaction) {
+        (Disclosure::Expanded, _) | (Disclosure::Collapsed, Interaction::Focused) => {
+            ACCENT_FOCUS_BLEND
+        }
+        (Disclosure::Collapsed, Interaction::Hovered) => ACCENT_HOVER_BLEND,
+        (Disclosure::Collapsed, Interaction::Idle) => ACCENT_IDLE_BLEND,
     }
 }
+
+/// Blend factors used to compose a lifecycle accent with the weight ladder.
+/// Exposed as module consts so the unit tests assert the exact composed color
+/// rather than only "it changed".
+const ACCENT_IDLE_BLEND: f32 = 0.0;
+const ACCENT_HOVER_BLEND: f32 = 0.35;
+const ACCENT_FOCUS_BLEND: f32 = 0.6;
 
 #[cfg(test)]
 mod tests {
@@ -157,28 +199,63 @@ mod tests {
         assert_ne!(focused, theme.muted(), "focused must not read as idle");
     }
 
-    /// A lifecycle accent overrides the weight channel entirely.
+    /// A lifecycle accent is *not* discarded: idle + accent returns the accent
+    /// untouched (the running / failed step stays vivid), while the weight
+    /// channel still nudges the brightness on hover / focus. This is the
+    /// composition contract — the hue dominates, the luminance shifts.
     #[test]
-    fn accent_overrides_weight() {
+    fn accent_idle_is_intact_hover_focus_blend() {
         let theme = Theme::default();
-        let accent = Color::Rgb(255, 0, 0);
+        let accent = Color::Rgb(128, 153, 156); // matches theme.info (a running step)
+        // Idle: the accent is returned unchanged.
         assert_eq!(
-            summary_text_color(
-                Some(accent),
-                Disclosure::Collapsed,
-                Interaction::Idle,
-                &theme
-            ),
+            summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Idle, &theme),
             accent
         );
+        // Hover: the accent leans toward theme.hover() but keeps its hue, so it
+        // is distinct from both the idle accent and the plain hover tone.
+        let hovered =
+            summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Hovered, &theme);
+        assert_ne!(hovered, accent, "hover must visibly shift an accent step");
+        assert_ne!(hovered, theme.hover());
         assert_eq!(
-            summary_text_color(
-                Some(accent),
-                Disclosure::Expanded,
-                Interaction::Hovered,
-                &theme
-            ),
-            accent
+            hovered,
+            accent.blend(theme.hover(), ACCENT_HOVER_BLEND)
+        );
+        // Focus / expanded: leans harder toward the primary foreground.
+        let focused =
+            summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Focused, &theme);
+        assert_ne!(focused, accent);
+        assert_eq!(focused, accent.blend(theme.fg(), ACCENT_FOCUS_BLEND));
+        let expanded =
+            summary_text_color(Some(accent), Disclosure::Expanded, Interaction::Idle, &theme);
+        assert_eq!(expanded, accent.blend(theme.fg(), ACCENT_FOCUS_BLEND));
+    }
+
+    /// Regression: an accent step must brighten on hover. Before the fix a
+    /// running subagent (`explore`) pinned the summary to a flat accent for its
+    /// whole lifetime and hovering did nothing, because the accent won outright
+    /// and the weight channel was bypassed. The composed result must differ
+    /// between idle and hover.
+    #[test]
+    fn accent_step_hover_is_visible() {
+        let theme = Theme::default();
+        let accent = theme.info();
+        let idle = summary_text_color(
+            Some(accent),
+            Disclosure::Collapsed,
+            Interaction::Idle,
+            &theme,
+        );
+        let hover = summary_text_color(
+            Some(accent),
+            Disclosure::Collapsed,
+            Interaction::Hovered,
+            &theme,
+        );
+        assert_ne!(
+            idle, hover,
+            "hovering an accent (running) step must change its color"
         );
     }
 

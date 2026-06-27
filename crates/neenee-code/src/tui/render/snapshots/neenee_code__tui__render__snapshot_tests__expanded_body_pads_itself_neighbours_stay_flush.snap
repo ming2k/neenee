@@ -1,0 +1,14 @@
+---
+source: crates/neenee-code/src/tui/render/snapshot_tests.rs
+expression: "render_transcript_grid(&steps, 60, 16)"
+---
+
+  + Read a.rs · 0ms
+  - Grep "foo" in src · 0ms
+
+    src/a.rs
+    10  1:foo
+    src/b.rs
+     5  1:foo
+
+  + Read c.rs · 0ms

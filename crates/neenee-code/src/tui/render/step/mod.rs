@@ -27,7 +27,8 @@
 //!    ([`Interaction`]). Recomputed from input each draw, never persisted.
 //!    Shared by every kind.
 //!
-//! The presentation contract is two **independent channels**:
+//! The presentation contract is two **composable channels**, joined in
+//! [`state::summary_text_color`]:
 //!
 //! - **accent** (hue) — from Lifecycle. A non-completed lifecycle stays
 //!   visibly accented even when the step is collapsed and idle, because a
@@ -40,9 +41,13 @@
 //!   the pointer (but not focused) reads as the intermediate hover tone, and
 //!   an idle collapsed step reads as muted — never which color.
 //!
-//! Keeping the channels separate is what makes the behavior consistent across
-//! step kinds: a step brightens when it is open, focused, or hovered, and each
-//! cause flows through the single [`state::summary_weight`] entry point.
+//! When an accent is present it supplies the hue and the weight channel
+//! modulates its brightness (see [`state::summary_text_color`]), so an accent
+//! step — e.g. a long-running subagent task — still brightens on hover / focus
+//! instead of sitting at one flat color. Keeping the channels composable is
+//! what makes the behavior consistent across step kinds: a step brightens when
+//! it is open, focused, or hovered, and each cause flows through the single
+//! [`state::summary_weight`] entry point.
 
 use super::Theme;
 

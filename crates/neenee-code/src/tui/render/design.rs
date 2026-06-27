@@ -22,10 +22,16 @@ pub(super) const MESSAGE_GAP_ROWS: usize = 1;
 /// row and one bottom transition row.
 pub(super) const USER_MESSAGE_TRANSITION_ROWS: usize = 1;
 
-/// Breathing room inside expanded tool steps. There is no bottom-gap token:
-/// the message-level separator (`MESSAGE_GAP_ROWS`) already supplies the single
-/// blank row between a step and the next component, so an extra trailing gap
-/// would double it.
+/// Breathing room around an expanded tool step's body. The gap belongs to the
+/// *body*, not the step boundary: collapsed tool steps stack flush (no blank
+/// row between adjacent headers — see `draw_transcript`'s
+/// `collapsed_tool_into_tool_step` suppression), so a batch of parallel /
+/// sequential tool calls reads as one compact log block. Only an expanded body
+/// is padded — `TOOL_STEP_BODY_TOP_GAP_ROWS` rows above it (separating it from
+/// its own header) and one `MESSAGE_GAP_ROWS` row below it (separating it from
+/// the next step's header). There is no dedicated bottom-gap token: the
+/// message-level separator supplies that single trailing row, so an extra
+/// trailing gap here would double it.
 pub(super) const TOOL_STEP_BODY_TOP_GAP_ROWS: usize = 1;
 pub(super) const TOOL_STEP_SECTION_GAP_ROWS: usize = 1;
 pub(super) const TOOL_STEP_CHILDREN_GAP_ROWS: usize = TOOL_STEP_SECTION_GAP_ROWS;

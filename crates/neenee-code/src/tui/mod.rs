@@ -39,7 +39,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neenee_core::{
-    AgentRequest, AgentResponse, ConfigSnapshot, HarnessSnapshot, Message, ParentStatus,
+    AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus,
     PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
     SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
     mcp::McpConnectionStatus,
@@ -143,8 +143,6 @@ pub async fn run_tui(
     let turn_started_at_clone = turn_started_at.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
-    let progress_status = Arc::new(Mutex::new(String::new()));
-    let progress_clone = progress_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
     let pending_permission_clone = pending_permission.clone();
     let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
@@ -170,8 +168,6 @@ pub async fn run_tui(
     // harness applies (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
-    let config_snapshot = Arc::new(Mutex::new(ConfigSnapshot::default()));
-    let config_snapshot_clone = config_snapshot.clone();
     // Global tool-step density (true = Comfortable: new tool steps spawn
     // expanded). Shared with the response listener so steps created mid-turn
     // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
@@ -249,18 +245,11 @@ pub async fn run_tui(
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
                                 activity_clone.lock().await.clear();
-                                progress_clone.lock().await.clear();
                             }
                         }
                         TurnEvent::Activity(status) => {
                             if !routes_to_side {
                                 *activity_clone.lock().await = status;
-                                ir_clone.store(true, Ordering::SeqCst);
-                            }
-                        }
-                        TurnEvent::ProgressUpdate(summary) => {
-                            if !routes_to_side {
-                                *progress_clone.lock().await = summary;
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
@@ -613,7 +602,6 @@ pub async fn run_tui(
                                 ir_clone.store(running, Ordering::SeqCst);
                                 if !running {
                                     activity_clone.lock().await.clear();
-                                    progress_clone.lock().await.clear();
                                     *current_round_clone.lock().await = 0;
                                     *review_alert_clone.lock().await = String::new();
                                     *turn_started_at_clone.lock().await = None;
@@ -672,18 +660,14 @@ pub async fn run_tui(
                             } else {
                                 None
                             };
-                            let notices = describe_todos_change(prev.as_ref(), Some(&list));
+                            if let Some(text) = describe_todos_change(prev.as_ref(), Some(&list)) {
+                                buf.lock().await.push(TranscriptMessage::notice(
+                                    NoticeSeverity::Info,
+                                    text,
+                                ));
+                            }
                             if !routes_to_side {
                                 *todos_clone.lock().await = Some(list);
-                            }
-                            if !notices.is_empty() {
-                                let mut msgs = buf.lock().await;
-                                for text in notices {
-                                    msgs.push(TranscriptMessage::notice(
-                                        NoticeSeverity::Info,
-                                        text,
-                                    ));
-                                }
                             }
                         }
                         TurnEvent::UnattendedChanged(enabled) => {
@@ -715,7 +699,6 @@ pub async fn run_tui(
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
                                 activity_clone.lock().await.clear();
-                                progress_clone.lock().await.clear();
                             }
                         }
                         TurnEvent::SessionReview { alert } => {
@@ -754,7 +737,6 @@ pub async fn run_tui(
                 AgentResponse::PermissionsCleared => {
                     pending_permission_clone.lock().await.clear();
                     activity_clone.lock().await.clear();
-                    progress_clone.lock().await.clear();
                 }
                 AgentResponse::ProviderKeys(status) => {
                     *key_status_clone.lock().await = status.into_iter().collect();
@@ -775,9 +757,6 @@ pub async fn run_tui(
                 }
                 AgentResponse::SessionContext(snapshot) => {
                     *session_context_clone.lock().await = Some(snapshot);
-                }
-                AgentResponse::ConfigSnapshot(snapshot) => {
-                    *config_snapshot_clone.lock().await = snapshot;
                 }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
@@ -835,7 +814,6 @@ pub async fn run_tui(
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
-        config_scroll: 0,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -846,10 +824,8 @@ pub async fn run_tui(
         path_scan_cache: None,
         current_pursuit: None,
         session_context: None,
-        config_snapshot: ConfigSnapshot::default(),
         loop_status: "idle".to_string(),
         activity_status: String::new(),
-        progress_status: String::new(),
         unattended: false,
         todos: None,
         turn_count: 0,
@@ -910,7 +886,6 @@ pub async fn run_tui(
             current_model,
             harness,
             activity_status,
-            progress_status,
             pending_permission,
             pending_question,
             is_responding,
@@ -925,7 +900,6 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
-            config_snapshot,
             todos,
             turn_count,
             current_round,
@@ -997,40 +971,150 @@ fn describe_pursuit_change(prev: Option<&Pursuit>, new: &Pursuit) -> Option<Stri
     None
 }
 
-/// Lowercase word for a todo status, used in inline transcript notices so a
-/// status change reads as `Design UI → completed`.
-fn todo_status_label(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::Pending => "pending",
-        TodoStatus::InProgress => "in progress",
-        TodoStatus::Completed => "completed",
-        TodoStatus::Cancelled => "cancelled",
-    }
-}
-
-/// Format inline-transcript notices for a task-list update. Returns one line
-/// per item whose status changed (so each step the model ticks off leaves a
-/// breadcrumb in the transcript), plus a tally line when a list first appears
-/// or its size changes. Empty when nothing changed.
-fn describe_todos_change(prev: Option<&TodoList>, new: Option<&TodoList>) -> Vec<String> {
-    let Some(new) = new.filter(|l| !l.items.is_empty()) else {
-        return Vec::new();
-    };
+/// Format a single inline-transcript notice for a task-list update. Task-list
+/// changes are the agent's own bookkeeping — full per-item detail lives in the
+/// Activity modal — so the transcript never fans them out into one line per
+/// changed step. Instead every update collapses to **at most one** summary line:
+/// the running `done/total` tally, optionally annotated with how many items
+/// changed status this turn. Returns `None` when nothing changed.
+fn describe_todos_change(prev: Option<&TodoList>, new: Option<&TodoList>) -> Option<String> {
+    let new = new.filter(|l| !l.items.is_empty())?;
     let done = new.count(TodoStatus::Completed);
     let total = new.items.len();
     let Some(prev) = prev.filter(|l| !l.items.is_empty()) else {
-        return vec![format!("tasks started · {done}/{total}")];
+        return Some(format!("tasks started · {done}/{total}"));
     };
-    let mut out = Vec::new();
-    for (a, b) in prev.items.iter().zip(new.items.iter()) {
-        if a.status != b.status {
-            out.push(format!("{} → {}", b.content, todo_status_label(b.status)));
+    // Count status transitions across the items present in both snapshots.
+    // Newly added items (no positional counterpart) do not read as a status
+    // *change* and are absorbed into the tally rather than flagged here.
+    let changed = prev
+        .items
+        .iter()
+        .zip(new.items.iter())
+        .filter(|(a, b)| a.status != b.status)
+        .count();
+    if changed == 0 && prev.items.len() == new.items.len() {
+        return None;
+    }
+    // One compact line: progress tally plus — only when something actually
+    // moved — how many steps changed this turn.
+    if changed > 0 {
+        Some(format!("tasks · {done}/{total} · {changed} updated"))
+    } else {
+        Some(format!("tasks · {done}/{total}"))
+    }
+}
+
+#[cfg(test)]
+mod describe_todos_change_tests {
+    //! Behaviour contract for the single-line task-list transcript notice.
+    //! The point of condensing is that *every* update — even one that ticks
+    //! five steps at once — yields at most one `ℹ` line, not a fan-out.
+    use super::*;
+    use neenee_core::{TodoId, TodoItem, TodoStatus};
+
+    fn item(id: u64, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            id: TodoId(id),
+            content: format!("step {id}"),
+            status,
+            created_at: 0,
+            updated_at: 0,
         }
     }
-    if prev.items.len() != new.items.len() {
-        out.push(format!("tasks · {done}/{total}"));
+
+    fn list(items: &[TodoItem]) -> TodoList {
+        TodoList {
+            items: items.to_vec(),
+            ..TodoList::default()
+        }
     }
-    out
+
+    #[test]
+    fn first_appearance_announces_started_with_tally() {
+        let new = list(&[
+            item(1, TodoStatus::InProgress),
+            item(2, TodoStatus::Pending),
+            item(3, TodoStatus::Pending),
+        ]);
+        // No previous list → the "started" line, counting completed (0/3).
+        assert_eq!(
+            describe_todos_change(None, Some(&new)),
+            Some("tasks started · 0/3".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_status_changes_collapse_to_one_line() {
+        // The regression this guards: previously each changed step emitted its
+        // own `ℹ` line. Now five simultaneous ticks produce exactly one.
+        let prev = list(&[
+            item(1, TodoStatus::Pending),
+            item(2, TodoStatus::Pending),
+            item(3, TodoStatus::InProgress),
+            item(4, TodoStatus::Pending),
+            item(5, TodoStatus::Pending),
+        ]);
+        let new = list(&[
+            item(1, TodoStatus::Completed),
+            item(2, TodoStatus::Completed),
+            item(3, TodoStatus::Completed),
+            item(4, TodoStatus::InProgress),
+            item(5, TodoStatus::Cancelled),
+        ]);
+        assert_eq!(
+            describe_todos_change(Some(&prev), Some(&new)),
+            Some("tasks · 3/5 · 5 updated".to_string())
+        );
+    }
+
+    #[test]
+    fn single_status_change_counts_one() {
+        let prev = list(&[
+            item(1, TodoStatus::Pending),
+            item(2, TodoStatus::InProgress),
+        ]);
+        let new = list(&[
+            item(1, TodoStatus::Pending),
+            item(2, TodoStatus::Completed),
+        ]);
+        assert_eq!(
+            describe_todos_change(Some(&prev), Some(&new)),
+            Some("tasks · 1/2 · 1 updated".to_string())
+        );
+    }
+
+    #[test]
+    fn no_change_emits_nothing() {
+        let same = list(&[
+            item(1, TodoStatus::InProgress),
+            item(2, TodoStatus::Pending),
+        ]);
+        assert_eq!(describe_todos_change(Some(&same), Some(&same)), None);
+    }
+
+    #[test]
+    fn size_only_change_drops_the_updated_suffix() {
+        // Items added without any positional status change: still one line,
+        // but without the "N updated" suffix since nothing transitioned.
+        let prev = list(&[item(1, TodoStatus::Pending)]);
+        let new = list(&[
+            item(1, TodoStatus::Pending),
+            item(2, TodoStatus::Pending),
+            item(3, TodoStatus::Pending),
+        ]);
+        assert_eq!(
+            describe_todos_change(Some(&prev), Some(&new)),
+            Some("tasks · 0/3".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_new_list_emits_nothing() {
+        let prev = list(&[item(1, TodoStatus::Pending)]);
+        assert_eq!(describe_todos_change(Some(&prev), Some(&TodoList::default())), None);
+        assert_eq!(describe_todos_change(None, Some(&TodoList::default())), None);
+    }
 }
 
 /// Load the user-supplied ASCII logo from `$XDG_CONFIG_HOME/neenee/logo.txt`,

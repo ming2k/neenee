@@ -13,9 +13,7 @@ live in `neenee-agent`. The `Tool` trait is defined in
 
 Registration order is the literal in `crates/neenee-code/src/main.rs`.
 `Agent::new` (`crates/neenee-agent/src/agent.rs`) appends the `todo` /
-`todo_update` tools so they share the agent's live task-list cell. It also
-appends `progress_update`, which is hidden when
-`agent.progress_updates.enabled = false`.
+`todo_update` tools so they share the agent's live task-list cell.
 `SubagentTool` is pushed last so it can capture a snapshot of the assembled
 toolset.
 
@@ -35,7 +33,6 @@ own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 | `glob` | `Read` | `*` | [filesystem](filesystem.md) |
 | `list_dir` | `Read` | `*` | [filesystem](filesystem.md) |
 | `ask_user` | `Read` | `*` | [interaction](interaction.md) |
-| `progress_update` | `Read` | `*` | [interaction](interaction.md) |
 | `todo` | `Read` | `*` | [interaction](interaction.md) |
 | `todo_update` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |

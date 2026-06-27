@@ -13,7 +13,6 @@
 
 pub(crate) mod activity;
 pub(crate) mod common;
-pub(crate) mod config;
 pub(crate) mod help;
 pub(crate) mod history;
 pub(crate) mod permission;
@@ -25,7 +24,6 @@ pub(crate) mod tool_step_detail;
 
 // Re-export the public API so `render::overlays::draw_*` callers are unchanged.
 pub use activity::{ActivityModalView, draw_activity_modal};
-pub use config::draw_config_modal;
 pub use help::draw_help_modal;
 pub use history::draw_history_modal;
 pub use permission::{draw_permission_sheet, draw_question_modal};

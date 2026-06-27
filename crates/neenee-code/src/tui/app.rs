@@ -103,9 +103,6 @@ pub enum Modal {
     /// is the management surface — distinct from [`Modal::Permission`] (the
     /// inline real-time approval sheet).
     Permissions,
-    /// User configuration modal. Opened with `/config`; currently owns the
-    /// progress-update toggle.
-    Config,
     /// Activity overview: the current pursuit (objective + checklist), the live
     /// plan-progress breakdown, and the running turn/round/model/elapsed/
     /// status. Opened by clicking the activity bar. The body scrolls via
@@ -174,7 +171,6 @@ impl Modal {
                 | Modal::Session
                 | Modal::Sessions
                 | Modal::Permissions
-                | Modal::Config
                 | Modal::Activity
                 | Modal::HistorySearch
         )
@@ -317,8 +313,6 @@ pub struct App {
     /// time the modal opens; clamped and auto-followed to the selection by the
     /// renderer each frame.
     pub permissions_scroll: usize,
-    /// Body scroll offset of the configuration modal.
-    pub config_scroll: usize,
     /// Body scroll offset of the history modal (Ctrl+R). Reset to 0 each time
     /// the modal opens (and when toggling browse/search/preview); clamped and
     /// auto-followed to the selection by the renderer each frame.
@@ -353,17 +347,12 @@ pub struct App {
     /// the first `QuerySessionContext` round-trip completes. Refreshed each
     /// frame from the response listener.
     pub session_context: Option<neenee_core::SessionContextSnapshot>,
-    /// Latest user-config snapshot for the config modal.
-    pub config_snapshot: neenee_core::ConfigSnapshot,
     pub loop_status: String,
     pub activity_status: String,
-    /// Short model-authored work status from `progress_update`. It persists
-    /// through transport phases within a turn and clears when the turn idles.
-    pub progress_status: String,
     /// Whether write-tool permission prompts are bypassed this session
     /// (`--unattended` / `/unattended on`). Mirrored from the harness
-    /// snapshot; surfaced by recoloring the composer `>` prompt glyph in
-    /// the warning tone so the elevated state is unmissable.
+    /// snapshot; surfaced by the hint bar's flat `UNATTENDED` label (warning
+    /// tone) below the input so the elevated state is unmissable.
     pub unattended: bool,
     /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. Shown
     /// inside the Activity modal (and no longer pinned above the input box) so

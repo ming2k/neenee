@@ -70,7 +70,14 @@ pub struct ActivityBarHit {
 /// is dropped (the header already shows it) and the static `⟳` glyph is
 /// replaced by a breathing-dot indicator so the harness never looks frozen.
 ///
-/// Layout: `<spinner> <status> [· ⟴ <pursuit>] [· todos d/t] · <elapsed>`.
+/// Layout:
+/// ```text
+/// active:  <spinner> <status> [· ⟴ <pursuit>] [· <elapsed>] [⚠ <alert>]      todos d/t
+/// idle:                                                                   todos d/t
+/// ```
+/// The left half is transient (turn-scoped); the right-pinned `todos d/t`
+/// badge is persistent and shows whenever a non-empty task list exists — even
+/// when the harness is idle.
 ///
 /// The bar surfaces what the user most wants to know mid-turn — the live
 /// status, whether a pursuit/plan is in flight, and how long the turn has
@@ -82,15 +89,15 @@ pub struct ActivityBarHit {
 /// bar is a glance surface. Segments are omitted when there is nothing to
 /// report:
 /// - pursuit badge only when a pursuit is armed (`⟴ <truncated objective>`);
-/// - `todos d/t` only when a non-empty task list exists;
-/// - elapsed only while the turn timer is running.
+/// - elapsed only while the turn timer is running;
+/// - the whole left half only while a turn is active.
 ///
 /// When the status string already carries a reason (e.g.
 /// `retry 1/4 in 3s · <message>`), it flows through unchanged as the lead.
 ///
 /// Returns `Some(ActivityBarHit)` when the bar is drawn so the event loop
 /// can hit-test clicks and open the Activity modal; `None` when the bar is
-/// hidden.
+/// hidden (no transient activity AND no todos).
 #[allow(clippy::too_many_arguments)]
 pub fn draw_activity_bar(
     frame: &mut Frame,
@@ -103,97 +110,119 @@ pub fn draw_activity_bar(
     spinner_phase: usize,
     theme: &Theme,
 ) -> Option<ActivityBarHit> {
-    // The bar is the TUI's single liveness anchor (ADR-0008). It stays up
-    // for *every* active phase — including "responding" (streaming text),
-    // which is often the longest phase and the one most in need of a
-    // persistent liveness signal. It hides only when the harness is truly
-    // idle (empty status or "idle"), never on a transient activity value.
-    if status.is_empty() || status == "idle" {
+    // The bar has two halves: a transient LEFT segment (spinner + status +
+    // pursuit + elapsed + review alert) shown only while a turn is active,
+    // and a persistent RIGHT-pinned todos badge shown whenever a non-empty
+    // task list exists — including when idle. If neither half has content,
+    // the bar is hidden entirely.
+    let status_active = !status.is_empty() && status != "idle";
+    let dim = Style::default().fg(theme.muted());
+
+    // ── Build the right-pinned todos badge ──
+    // `todos d/t`, always right-aligned so it reads as a persistent status
+    // chip distinct from the transient activity on the left.
+    let mut todos_rect: Option<Rect> = None;
+    let todos_badge: Option<(String, usize)> = todos
+        .filter(|l| !l.items.is_empty())
+        .map(|list| {
+            use neenee_core::TodoStatus;
+            let done = list.count(TodoStatus::Completed);
+            let total = list.items.len();
+            let badge = format!("todos {done}/{total}");
+            let w = UnicodeWidthStr::width(badge.as_str());
+            (badge, w)
+        });
+
+    // If there is nothing to show at all (no transient activity and no todos),
+    // hide the bar — no point painting a blank row.
+    if !status_active && todos_badge.is_none() {
         return None;
     }
-    let spinner = spinner_glyph();
-    let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
 
-    let mut spans: Vec<Span> = vec![
-        Span::raw(" "),
-        Span::styled(
+    // ── Build the transient left segment ──
+    let mut spans: Vec<Span> = Vec::new();
+    if status_active {
+        let spinner = spinner_glyph();
+        let spinner_color = breathing_color(spinner_phase, theme.brand(), theme.surface());
+
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
             spinner,
             Style::default()
                 .fg(spinner_color)
                 .add_modifier(Modifier::BOLD),
-        ),
-    ];
+        ));
 
-    // Lead segment: the live status — the thing that changes frame to frame,
-    // so it is the visual focus (brand + italic). The structural counters
-    // (turn/round/model) are deliberately absent; they live in the Activity
-    // modal that this bar opens on click.
-    let dim = Style::default().fg(theme.muted());
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        status,
-        Style::default()
-            .fg(theme.brand())
-            .add_modifier(Modifier::ITALIC),
-    ));
+        // Lead segment: the live status — the thing that changes frame to
+        // frame, so it is the visual focus (brand + italic). The structural
+        // counters (turn/round/model) are deliberately absent; they live in
+        // the Activity modal that this bar opens on click.
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            status,
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::ITALIC),
+        ));
 
-    // Pursuit badge: shown only while a pursuit is armed, as `⟴ <objective>`,
-    // so the user can tell at a glance that the turn is part of a larger
-    // goal. The objective is truncated to keep the single-line bar compact;
-    // the full text is one click away in the Activity modal.
-    if let Some(p) = pursuit.filter(|p| !p.is_complete) {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled("⟴ ", dim));
-        spans.push(Span::styled(truncate_for_bar(&p.objective, 32), dim));
+        // Pursuit badge: shown only while a pursuit is armed, as
+        // `⟴ <objective>`, so the user can tell at a glance that the turn is
+        // part of a larger goal. The objective is truncated to keep the
+        // single-line bar compact; the full text is one click away in the
+        // Activity modal.
+        if let Some(p) = pursuit.filter(|p| !p.is_complete) {
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled("⟴ ", dim));
+            spans.push(Span::styled(truncate_for_bar(&p.objective, 32), dim));
+        }
+
+        // Elapsed: the only live counter on the bar, shown while the turn
+        // timer runs. Dropped between turns (no `turn_started_at`).
+        if let Some(started) = turn_started_at {
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(format_elapsed(started.elapsed()), dim));
+        }
+
+        // Session-review alert (ADR-0016): surfaced when a periodic
+        // diagnostic judged the turn watch-worthy or stuck. Rendered with
+        // the same breathing luminance sweep as the running-indicator dot so
+        // the alert pulses gently rather than sitting as a flat warning chip
+        // — the motion draws the eye without being frantic. An `Esc to
+        // interrupt` hint tells the user they can stop it. Empty alert =
+        // clear (nothing rendered).
+        if !review_alert.is_empty() {
+            let warn = breathing_color(spinner_phase, theme.warning, theme.surface());
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("⚠ {review_alert}"),
+                Style::default().fg(warn).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
 
-    // Todos progress: `todos d/t` while a non-empty task list exists, so
-    // a glance answers "are there todos, and how far along?". The per-item
-    // breakdown lives in the modal. Track the column offset so we can build
-    // a hit-test rect for this segment.
-    let mut todos_rect: Option<Rect> = None;
-    if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
-        use neenee_core::TodoStatus;
-        let done = list.count(TodoStatus::Completed);
-        let total = list.items.len();
-        // Compute the display-width of everything already in `spans` so we
-        // know the column at which the todos segment starts.
-        let col_before: usize = spans
+    // ── Right-pin the todos badge ──
+    if let Some((badge, badge_w)) = todos_badge {
+        let left_w: usize = spans
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
-        let sep = " · ";
-        let badge = format!("todos {done}/{total}");
-        let badge_width = UnicodeWidthStr::width(badge.as_str());
-        spans.push(Span::styled(sep, dim));
+        let row_w = rect.width as usize;
+        // Place the badge flush against the right edge with a 1-cell margin.
+        let right_margin = 1;
+        let gap = row_w
+            .saturating_sub(left_w + badge_w + right_margin);
+        // The badge's absolute column = left_w + gap.
+        let badge_col = rect.x + (left_w + gap) as u16;
+        if status_active && gap > 0 {
+            // Pad between the transient segment and the badge.
+            spans.push(Span::raw(" ".repeat(gap)));
+        } else if !status_active {
+            // Idle: the badge is the only content; push it to the right edge
+            // with leading padding rather than leaving it left-aligned.
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
         spans.push(Span::styled(badge, dim));
-        // The todos hit-test rect covers the `todos d/t` text (not the
-        // leading ` · ` separator) so the click target is the badge itself.
-        let sep_width = UnicodeWidthStr::width(sep);
-        let col_start = rect.x + (col_before + sep_width) as u16;
-        todos_rect = Some(Rect::new(col_start, rect.y, badge_width as u16, 1));
-    }
-
-    // Elapsed: the only live counter on the bar, shown while the turn timer
-    // runs. Dropped between turns (no `turn_started_at`).
-    if let Some(started) = turn_started_at {
-        spans.push(Span::styled(" · ", dim));
-        spans.push(Span::styled(format_elapsed(started.elapsed()), dim));
-    }
-
-    // Session-review alert (ADR-0016): surfaced when a periodic diagnostic
-    // judged the turn watch-worthy or stuck. Rendered with the same breathing
-    // luminance sweep as the running-indicator dot so the alert pulses gently
-    // rather than sitting as a flat warning chip — the motion draws the eye
-    // without being frantic. An `Esc to interrupt` hint tells the user they
-    // can stop it. Empty alert = clear (nothing rendered).
-    if !review_alert.is_empty() {
-        let warn = breathing_color(spinner_phase, theme.warning, theme.surface());
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("⚠ {review_alert}"),
-            Style::default().fg(warn).add_modifier(Modifier::BOLD),
-        ));
+        todos_rect = Some(Rect::new(badge_col, rect.y, badge_w as u16, 1));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
@@ -364,9 +393,16 @@ pub struct HintBarView<'a> {
     /// step is focused. Renders a `[ SHELL ]` pill at the start of the bar in
     /// the warning tone so the user can tell at a glance the next Enter runs
     /// the rest of the line directly through the bash tool — no LLM roundtrip.
-    /// When false the left of the bar is empty: there is no compose/browse
-    /// mode to advertise, the focused-step highlight indicates navigation.
+    /// When false (and unattended is off) the left of the bar is empty: there
+    /// is no compose/browse mode to advertise, the focused-step highlight
+    /// indicates navigation.
     pub shell_active: bool,
+    /// True while write-tool permission prompts are bypassed this session
+    /// (`--unattended` / `/unattended on`). Renders a flat `UNATTENDED` label
+    /// in the warning tone at the left edge of the bar so the elevated,
+    /// no-prompt state is unmissable without occupying a raised pill — plain
+    /// text that carries its meaning without any chrome.
+    pub unattended: bool,
 }
 
 /// Draw the single-line hint bar pinned below the input box. Carries the model
@@ -381,37 +417,57 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
         current_model,
         messages,
         shell_active,
+        unattended,
     } = view;
 
     let bg = theme.surface();
     let accent_bg = theme.raised();
     let full_w = rect.width as usize;
 
-    // --- Shell pill (leftmost, only when a `!`-prefixed command is staged).
-    // The single left-side surface badge now that there is no compose/browse
-    // mode: in the warning tone, it tells the user at a glance that the next
-    // Enter bypasses the LLM and runs `!…` via the bash tool. Absent during
-    // ordinary chat so the bar stays clean — the focused-step highlight, not a
-    // pill, indicates transcript navigation.
-    let shell_fg = theme.warn();
+    // --- Left cluster: unattended label and/or shell pill.
+    //
+    // The left edge carries up to two warning-tone signals. `UNATTENDED` is a
+    // flat label (no bracket chrome) so it reads as a persistent state flag,
+    // while `[ SHELL ]` is a raised pill that advertises an active input
+    // mode. When both are on they sit side by side, separated by a segment
+    // gap, sharing the warning tone so the left cluster still reads as one
+    // warning group.
+    let warn_fg = theme.warn();
+    let mut zone_spans: Vec<Span<'static>> = Vec::new();
+
+    if unattended {
+        zone_spans.push(Span::styled(
+            "UNATTENDED",
+            Style::default()
+                .fg(warn_fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let shell_text = " SHELL ";
-    let shell_pill_width = shell_text.width() + 2; // +2 for the surrounding brackets
-    let zone_spans: Vec<Span<'static>> = if shell_active {
-        vec![
-            Span::styled("[", Style::default().fg(shell_fg).bg(accent_bg)),
-            Span::styled(
-                shell_text,
-                Style::default()
-                    .fg(shell_fg)
-                    .bg(accent_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("]", Style::default().fg(shell_fg).bg(accent_bg)),
-        ]
-    } else {
-        Vec::new()
-    };
-    let zone_pill_width = if shell_active { shell_pill_width } else { 0 };
+    if shell_active {
+        if !zone_spans.is_empty() {
+            zone_spans.push(Span::styled(
+                " ".repeat(HINT_BAR_SEGMENT_GAP),
+                Style::default().bg(bg),
+            ));
+        }
+        zone_spans.push(Span::styled("[", Style::default().fg(warn_fg).bg(accent_bg)));
+        zone_spans.push(Span::styled(
+            shell_text,
+            Style::default()
+                .fg(warn_fg)
+                .bg(accent_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        zone_spans.push(Span::styled("]", Style::default().fg(warn_fg).bg(accent_bg)));
+    }
+
+    let zone_pill_width = zone_spans
+        .iter()
+        .map(|s| s.content.width())
+        .sum::<usize>();
 
     // --- Right cluster: model name and context bar.
     // Build each segment separately so we can drop optional ones when the
@@ -587,6 +643,7 @@ mod tests {
                     current_model: "mock-model",
                     messages: &messages,
                     shell_active: false,
+                    unattended: false,
                 },
                 &theme,
             );
@@ -607,6 +664,7 @@ mod tests {
                     current_model: "",
                     messages: &Vec::<TranscriptMessage>::new(),
                     shell_active,
+                    unattended: false,
                 };
                 draw_hint_bar(f, Rect::new(0, 0, 80, 1), view, &Theme::default());
             });

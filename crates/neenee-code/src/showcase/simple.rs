@@ -511,8 +511,8 @@ pub fn activity() -> io::Result<()> {
         objective: "Land the component showcase framework".into(),
         is_complete: false,
     };
-    let mut todos = TodoList::default();
-    todos.items = vec![
+    let todos = TodoList {
+        items: vec![
         TodoItem {
             id: TodoId(1),
             content: "Restructure showcase into a directory module".into(),
@@ -541,7 +541,9 @@ pub fn activity() -> io::Result<()> {
             created_at: 0,
             updated_at: 0,
         },
-    ];
+        ],
+        ..Default::default()
+    };
     let mut state = ActivityState {
         pursuit,
         todos,

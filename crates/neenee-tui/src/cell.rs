@@ -106,6 +106,50 @@ impl Color {
             Color::White
         }
     }
+
+    /// Linearly interpolate between two colors in RGB space.
+    ///
+    /// `t = 0.0` returns `self` unchanged, `t = 1.0` returns `other` unchanged,
+    /// values in between blend each channel. Named colors are mapped to their
+    /// xterm-256 approximations first, so the blend is well defined for any
+    /// palette token. `Color::Reset` (no color) is treated as a hole rather
+    /// than black: if exactly one side is `Reset`, the other side's color is
+    /// returned (i.e. there is nothing to blend with); if both are `Reset`,
+    /// `Reset` is returned. `t` is clamped to `[0, 1]`.
+    ///
+    /// Used by the step state machine to carry a lifecycle accent's **hue**
+    /// while still letting the disclosure × interaction **weight** channel
+    /// brighten/darken it — so a running step (steady accent) still shows a
+    /// visible hover/focus affordance instead of a flat color.
+    pub fn blend(self, other: Color, t: f32) -> Color {
+        let t = t.clamp(0.0, 1.0);
+        // Identity endpoints: t=0 → self, t=1 → other. Checked before the
+        // Reset-hole special case so the blend contract holds exactly.
+        if t == 0.0 {
+            return self;
+        }
+        if t == 1.0 {
+            return other;
+        }
+        // Holes: Reset has no color to interpolate against, so a blend that
+        // leans partway into a Reset side falls back to the colored side.
+        if self == Color::Reset && other == Color::Reset {
+            return Color::Reset;
+        }
+        if self == Color::Reset {
+            return other;
+        }
+        if other == Color::Reset {
+            return self;
+        }
+        let (r1, g1, b1) = self.to_rgb_approx();
+        let (r2, g2, b2) = other.to_rgb_approx();
+        Color::Rgb(
+            (r1 as f32 + (r2 as f32 - r1 as f32) * t).round() as u8,
+            (g1 as f32 + (g2 as f32 - g1 as f32) * t).round() as u8,
+            (b1 as f32 + (b2 as f32 - b1 as f32) * t).round() as u8,
+        )
+    }
 }
 
 impl fmt::Display for Color {
@@ -327,5 +371,51 @@ impl Cell {
 impl Default for Cell {
     fn default() -> Self {
         Self::blank()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blend_endpoints_are_identity() {
+        let a = Color::Rgb(10, 20, 30);
+        let b = Color::Rgb(200, 100, 50);
+        assert_eq!(a.blend(b, 0.0), a);
+        assert_eq!(a.blend(b, 1.0), b);
+    }
+
+    #[test]
+    fn blend_midpoint_is_average() {
+        let a = Color::Rgb(0, 0, 0);
+        let b = Color::Rgb(100, 200, 60);
+        assert_eq!(a.blend(b, 0.5), Color::Rgb(50, 100, 30));
+    }
+
+    #[test]
+    fn blend_clamps_out_of_range_t() {
+        let a = Color::Rgb(10, 20, 30);
+        let b = Color::Rgb(200, 100, 50);
+        assert_eq!(a.blend(b, -1.0), a);
+        assert_eq!(a.blend(b, 2.0), b);
+    }
+
+    #[test]
+    fn blend_named_color_uses_approximate_rgb() {
+        // White ≈ (255,255,255), Black ≈ (0,0,0): midpoint is (128,128,128).
+        assert_eq!(Color::White.blend(Color::Black, 0.5), Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn blend_treats_reset_as_a_hole() {
+        let rgb = Color::Rgb(1, 2, 3);
+        // Reset on one side returns the other color (nothing to blend with).
+        assert_eq!(Color::Reset.blend(rgb, 0.5), rgb);
+        assert_eq!(rgb.blend(Color::Reset, 0.5), rgb);
+        // Reset on both sides stays Reset.
+        assert_eq!(Color::Reset.blend(Color::Reset, 0.5), Color::Reset);
+        // At the endpoints a Reset side is still honored.
+        assert_eq!(Color::Rgb(9, 9, 9).blend(Color::Reset, 1.0), Color::Reset);
     }
 }

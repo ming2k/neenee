@@ -13,6 +13,7 @@ pub mod common;
 mod permission;
 mod question;
 mod simple;
+mod tool_step;
 
 use std::io;
 
@@ -24,6 +25,7 @@ pub fn run(component: &str) -> Result<(), Box<dyn std::error::Error>> {
     match component {
         "question" => question::run().map_err(Into::into),
         "permission" => permission::run().map_err(Into::into),
+        "tool-step" => tool_step::run().map_err(Into::into),
         "provider" => simple::provider().map_err(Into::into),
         "model-editor" => simple::model_editor().map_err(Into::into),
         "history" => simple::history().map_err(Into::into),
@@ -39,6 +41,7 @@ pub fn run(component: &str) -> Result<(), Box<dyn std::error::Error>> {
                  Available showcases:\n  \
                  question     the ask_user multi-choice / free-text modal\n  \
                  permission   the tool-permission sheet (inline)\n  \
+                 tool-step    the parallel tools transcript (spacing + lifecycles)\n  \
                  provider     the /provider model picker\n  \
                  model-editor the API-key / model-id editor\n  \
                  history      the Ctrl+R input-history search\n  \

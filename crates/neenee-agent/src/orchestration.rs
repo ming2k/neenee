@@ -838,11 +838,27 @@ pub async fn execute_turn(
     // value is compared against the session's current list to skip the write
     // (and avoid an event-log entry) on turns where nothing changed — the
     // common case.
+    //
+    // Auto-clear: once every item reaches a terminal status (completed or
+    // cancelled), the task is finished and the list is dropped so a done list
+    // does not linger in the panel (and the prompt) indefinitely. An empty
+    // list is a no-op here.
     let agent_todos = agent.todos();
-    let stored_todos = session.todos().await;
-    if agent_todos != stored_todos {
-        if let Err(err) = session.set_todos(agent_todos).await {
-            tracing::warn!(error = %err, "could not persist todos");
+    if !agent_todos.items.is_empty() && agent_todos.is_all_done() {
+        agent.clear_todos();
+        let _ = tx.send(turn(
+            &session_id,
+            TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+        ));
+        if let Err(err) = session.set_todos(neenee_core::TodoList::default()).await {
+            tracing::warn!(error = %err, "could not clear todos");
+        }
+    } else {
+        let stored_todos = session.todos().await;
+        if agent_todos != stored_todos {
+            if let Err(err) = session.set_todos(agent_todos).await {
+                tracing::warn!(error = %err, "could not persist todos");
+            }
         }
     }
 
@@ -945,7 +961,6 @@ pub fn relay_agent_event(
         }
         AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
         AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
-        AgentEvent::ProgressUpdate(summary) => turn(session_id, TurnEvent::ProgressUpdate(summary)),
         AgentEvent::UnattendedChanged(enabled) => {
             turn(session_id, TurnEvent::UnattendedChanged(enabled))
         }

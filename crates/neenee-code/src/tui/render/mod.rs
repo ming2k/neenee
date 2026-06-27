@@ -41,7 +41,7 @@ use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
-    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_config_modal, draw_copy_toast,
+    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast,
     draw_help_modal, draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
     draw_sessions_modal, draw_tool_step_detail_overlay,
@@ -248,7 +248,12 @@ pub fn draw_transcript(
     // only when the harness is idle, so the row returns to the transcript.
     let status_active =
         !chrome_hidden && !in_subagent && !activity.is_empty() && activity != "idle";
-    let status_height: u16 = if status_active { STATUS_BAR_ROWS } else { 0 };
+    // The persistent todos badge (right-pinned) keeps the activity row alive
+    // even when the harness is idle, so an active task list is always visible
+    // — not only while a turn is running.
+    let has_visible_todos = todos.map(|l| !l.items.is_empty()).unwrap_or(false);
+    let activity_row_needed = status_active || (has_visible_todos && !chrome_hidden && !in_subagent);
+    let status_height: u16 = if activity_row_needed { STATUS_BAR_ROWS } else { 0 };
 
     // The input box grows with its content: the typed text wraps onto new
     // lines and the box expands to fit, up to roughly half the terminal so the
@@ -465,10 +470,28 @@ pub fn draw_transcript(
             // step): a blank row between the user panel's transition and the step
             // header keeps the two visually distinct. This matches the spacing
             // produced by live reasoning streams and restored history.
+            //
+            // Collapsed tool steps stack flush: a batch of parallel/sequential
+            // collapsed tool-call headers forms a compact log block with no blank
+            // rows between them. The separating row is supplied *only* by an
+            // expanded step's body — its top gap (`TOOL_STEP_BODY_TOP_GAP_ROWS`)
+            // separates it from its own header, and this message-level row supplies
+            // its bottom separator to the next step's header. So a collapsed tool
+            // step followed by any tool step suppresses the row.
+            let next_is_tool_step = messages
+                .get(mi + 1)
+                .is_some_and(|next| next.is_tool_step() || next.is_subagent_task());
+            let collapsed_tool_into_tool_step = msg.is_tool_step()
+                && msg.tool_step_expanded() == Some(false)
+                && next_is_tool_step;
             let next_is_step = messages.get(mi + 1).is_some_and(|next| {
                 next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
             });
-            if msg.role != neenee_core::Role::User || next_is_step {
+            if collapsed_tool_into_tool_step {
+                // Flush stack: no separating row between adjacent collapsed tool
+                // steps. Scroll accounting (content_lines / current_y) is left
+                // untouched because no rows are consumed.
+            } else if msg.role != neenee_core::Role::User || next_is_step {
                 content_lines += MESSAGE_GAP_ROWS;
                 if skip_rows > 0 {
                     skip_rows = skip_rows.saturating_sub(1);
@@ -529,7 +552,7 @@ pub fn draw_transcript(
     // `draw_activity_bar` returns an `ActivityBarHit` carrying both the full
     // bar rect (→ `activity_rect`) and the `todos d/t` segment rect
     // (→ `todos_rect`, so a click there opens the Todos section directly).
-    let (activity_rect, todos_rect) = if status_active {
+    let (activity_rect, todos_rect) = if activity_row_needed {
         draw_activity_bar(
             frame,
             Rect::new(footer_x, status_y, footer_w, STATUS_BAR_ROWS),
@@ -702,7 +725,6 @@ mod tests {
                     5,
                     true,
                     true,
-                    false,
                     &theme,
                     &mut LayoutMap::new(),
                     true,
@@ -1161,7 +1183,6 @@ mod tests {
                 0,
                 true,
                 true,
-                false,
                 &theme,
                 &mut layout_map,
                 true,
@@ -1198,7 +1219,6 @@ mod tests {
                 input.len(),
                 true,
                 true,
-                false,
                 &theme,
                 &mut LayoutMap::new(),
                 true,
@@ -1232,7 +1252,6 @@ mod tests {
                     input.len(),
                     true,
                     true,
-                    false,
                     &theme,
                     &mut LayoutMap::new(),
                     false,
@@ -1282,7 +1301,6 @@ mod tests {
                 input,
                 input.len(),
                 true,
-                false,
                 false,
                 &theme,
                 &mut LayoutMap::new(),
@@ -1342,7 +1360,6 @@ mod tests {
                 input,
                 input.len(),
                 true,
-                false,
                 false,
                 &theme,
                 &mut LayoutMap::new(),
@@ -1414,7 +1431,6 @@ mod tests {
                 input.len(),
                 true,
                 false,
-                false,
                 &theme,
                 &mut layout_map,
                 true,
@@ -1440,7 +1456,6 @@ mod tests {
                     input,
                     input.len(),
                     true,
-                    false,
                     false,
                     theme,
                     &mut LayoutMap::new(),
@@ -1551,7 +1566,6 @@ mod tests {
                 0,
                 true,
                 true,
-                false,
                 &theme,
                 &mut layout_map,
                 false,

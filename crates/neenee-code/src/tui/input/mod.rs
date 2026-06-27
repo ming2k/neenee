@@ -106,10 +106,6 @@ pub enum InputAction {
     /// `/permissions` slash command (intercepted locally, never sent to the
     /// backend). `/permissions clear` still goes to the backend.
     OpenPermissions,
-    /// Open the user configuration modal.
-    OpenConfig,
-    /// Toggle the selected configuration row.
-    ConfigActivate,
     /// Revoke the selected "always allow" rule in the permissions manager
     /// modal. Bound to `Space`.
     PermissionsActivate,
@@ -697,7 +693,6 @@ pub fn process_event(
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
                     super::Modal::Permissions => InputAction::CloseModal,
-                    super::Modal::Config => InputAction::ConfigActivate,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.has_focused_target {
@@ -738,7 +733,6 @@ pub fn process_event(
                             // exact-match arm instead of silently no-op'ing.
                             match text.trim() {
                                 "/provider" => InputAction::OpenProvider,
-                                "/config" => InputAction::OpenConfig,
                                 "/session" => InputAction::OpenSession,
                                 "/permissions" => InputAction::OpenPermissions,
                                 "/exit" => InputAction::Quit,
@@ -987,9 +981,6 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permissions && c == ' ' {
                         return InputAction::PermissionsActivate;
                     }
-                    if context.active_modal == super::Modal::Config && c == ' ' {
-                        return InputAction::ConfigActivate;
-                    }
                     if context.active_modal == super::Modal::Question {
                         if let Some(d) = c.to_digit(10) {
                             if (1..=9).contains(&d) {
@@ -1207,7 +1198,6 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
-                    super::Modal::Config => InputAction::None,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::None => {
@@ -1253,7 +1243,6 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
-                    super::Modal::Config => InputAction::None,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::None => {
@@ -1432,12 +1421,6 @@ mod tests {
             enter(&mut input, true),
             InputAction::SendSlash("/pursue".to_string())
         );
-    }
-
-    #[test]
-    fn enter_opens_config_modal_locally() {
-        let mut input = "/config".to_string();
-        assert_eq!(enter(&mut input, true), InputAction::OpenConfig);
     }
 
     #[test]

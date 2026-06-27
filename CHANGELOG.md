@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Removed
 
-- **Glanceable model-authored progress updates.** A new `progress_update` tool
-  lets the model publish terse current-work status such as "Refactor config
-  modal" to the activity bar without mixing that status into assistant prose.
-  `/config` opens a modal that toggles the feature at runtime and persists
-  `[agent.progress_updates] enabled`; `max_chars` defaults to 60.
+- **Removed the `progress_update` tool and the `/config` modal.** The model-facing
+  `progress_update` tool (and its `[agent.progress_updates]` config table), the
+  `AgentEvent`/`TurnEvent::ProgressUpdate` events, the `ConfigSnapshot` request/response
+  pair, and the now-empty configuration modal (`/config`, `Modal::Config`) are gone. The
+  activity bar now shows only the harness liveness status; the glanceable model-authored
+  status line is no longer surfaced. (These were added in the same unreleased cycle, so
+  nothing is dropped from a prior release.)
 
 ## [0.8.0] - 2026-07-14
 
