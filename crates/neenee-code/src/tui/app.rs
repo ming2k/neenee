@@ -24,7 +24,7 @@ use crate::tui::composer_attachments;
 use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
-use crate::tui::layout::{InteractiveTarget, LayoutMap};
+use crate::tui::layout::{InteractiveTarget, LayoutMap, ModalHitMap};
 use crate::tui::providers::{PROVIDERS, providers_filtered_from};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
@@ -397,9 +397,16 @@ pub struct App {
     /// `App`; all interaction now flows through [`QuestionModel::update`].
     pub question: Option<crate::tui::question_model::QuestionModel>,
     /// Scroll offset inside `Modal::Question`. Reset to 0 each time a question
-    /// modal opens; clamped each frame by the modal's body renderer and nudged
-    /// so the highlighted option stays on screen.
+    /// modal opens; clamped each frame by the modal's body renderer and, when
+    /// `question_modal_follow` is set, nudged so the highlighted option stays on
+    /// screen.
     pub question_scroll: usize,
+    /// When true, the question modal's body scroll follows the ↑/↓ option
+    /// highlight (the default after open / navigation). Cleared the moment the
+    /// user scrolls manually (wheel / page keys) so they can browse a long
+    /// option list freely, and re-set the moment they navigate again. Mirrors
+    /// `session_modal_follow` / `history_modal_follow`.
+    pub question_modal_follow: bool,
     /// Rows shown in the sessions picker (`/sessions` or `neenee resume`).
     pub sessions_overview: Vec<SessionOverview>,
     pub permission_confirm_always: bool,
@@ -439,6 +446,8 @@ pub struct App {
     pub drag: SelectionDrag,
     /// Layout map for the current frame (updated each draw).
     pub layout_map: LayoutMap,
+    /// Modal-local click targets for the current frame.
+    pub modal_hit_map: ModalHitMap,
     /// Message index of the step (tool step or reasoning trace) whose header
     /// currently rests under the mouse pointer (inline or sticky pinned), so
     /// the next draw lights it up to the intermediate hover tone as a click

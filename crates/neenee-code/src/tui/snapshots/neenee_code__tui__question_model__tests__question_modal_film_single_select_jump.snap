@@ -12,9 +12,9 @@ expression: film
           Style
           Which error handling crate?
 
-            ● anyhow
+            ● anyhow                                   ▼
 
-          ↑↓ navigate · Space select · Enter submit ·
+          ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === down + space → select 'thiserror' ===
 
@@ -23,9 +23,9 @@ expression: film
 
           Question
 
-          Style
-          Which error handling crate?
+                                                       ▲
+            ○ anyhow
+               Simple
+            ● thiserror                                ▼
 
-            ● thiserror
-
-          ↑↓ navigate · Space select · Enter submit ·
+          ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc

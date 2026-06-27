@@ -164,6 +164,101 @@ pub enum AgentResponse {
     SessionContext(SessionContextSnapshot),
 }
 
+/// A user-visible notice emitted by the agent or harness.
+///
+/// This is distinct from state-sync events such as [`TurnEvent::TodosUpdated`]
+/// and blocking interaction events such as [`TurnEvent::PermissionRequest`]:
+/// those events update UI state or require a reply, while a notice means
+/// "surface this fact to the user".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentNotice {
+    pub id: String,
+    pub kind: NoticeKind,
+    pub severity: NoticeSeverity,
+    /// Preferred UI surface. Frontends may degrade this when a surface is not
+    /// available, e.g. render a toast as an inline notice.
+    pub surface: NoticeSurface,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub source: NoticeSource,
+}
+
+impl AgentNotice {
+    pub fn new(
+        kind: NoticeKind,
+        severity: NoticeSeverity,
+        title: impl Into<String>,
+        source: NoticeSource,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            severity,
+            surface: NoticeSurface::Inline,
+            title: title.into(),
+            body: None,
+            source,
+        }
+    }
+
+    pub fn with_body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    pub fn with_surface(mut self, surface: NoticeSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub fn render_text(&self) -> String {
+        match self.body.as_deref().filter(|body| !body.trim().is_empty()) {
+            Some(body) => format!("{}\n{}", self.title, body),
+            None => self.title.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    ProviderRetry,
+    NudgeInjected,
+    ReviewAlert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSurface {
+    /// Render inline in the current conversation or event feed.
+    Inline,
+    /// Show as a transient bubble/toast.
+    Toast,
+    /// Show in a retained alert area until the related condition clears or is
+    /// superseded.
+    Banner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSource {
+    Agent,
+    TurnGuard,
+    Todo,
+    Review,
+    Pursuit,
+    Harness,
+}
+
 /// The session-scoped shapes a single turn/stream emits, carried under an
 /// [`AgentResponse::Turn`] envelope (ADR-0017). Splitting these off
 /// `AgentResponse` makes "which session does this belong to" a first-class
@@ -172,6 +267,7 @@ pub enum AgentResponse {
 /// top-level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnEvent {
+    Notice(AgentNotice),
     Text(String),
     /// Turn-level error (e.g. a provider failure mid-turn). Distinct from the
     /// global [`AgentResponse::Error`] only in that it belongs to a specific
@@ -332,6 +428,8 @@ pub enum SubagentEvent {
     /// subagent by its role rather than a generic "Subagent", so a user can
     /// tell a planning subagent from a research one at a glance.
     Started { profile: String },
+    /// A user-visible notice from the subagent.
+    Notice(AgentNotice),
     /// The subagent started a new response stream.
     StreamStart,
     /// New text token from the subagent.
@@ -408,6 +506,7 @@ pub enum AgentOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentEvent {
+    Notice(AgentNotice),
     ModelRequestStarted {
         tool_round: usize,
     },

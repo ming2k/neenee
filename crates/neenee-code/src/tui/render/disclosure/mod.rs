@@ -1,7 +1,11 @@
-//! Step state machine and presentation primitives.
+//! Disclosure state machine and presentation primitives.
 //!
-//! A "step" is any collapsible block in the transcript — a tool step, a
-//! subagent task, or a reasoning trace. Historically each kind computed its
+//! A **disclosure** is any collapsible block in the transcript — a tool step, a
+//! subagent task, or a reasoning trace — sharing one summary/body model and one
+//! color contract. (The leaf renderers keep their kind-specific names —
+//! [`draw_tool_step`], [`draw_reasoning_trace`], [`draw_subagent_inline_step`] —
+//! since only a tool call really reads as a "step"; this module is the umbrella
+//! abstraction over all three.) Historically each kind computed its
 //! summary-line color from a tangle of ad-hoc flags (`expanded`, `focused`,
 //! `hovered`, status…) scattered across the data, interaction, and render
 //! layers. That conflation was the root cause of bugs like "the focused step's
@@ -36,23 +40,29 @@
 //!   lifecycle only affects its marker) yield no accent, handing control to
 //!   the weight channel.
 //! - **weight** (luminance) — from Disclosure × Interaction, via
-//!   [`state::summary_weight`]. A **three-tone, hover-priority model** decides
-//!   how bright the summary reads:
-//!   1. Hover (highest priority) → the intermediate hover tone, regardless of
-//!      open/closed. Keyboard focus shares this tone.
-//!   2. Expanded (idle) → the primary foreground (an open body is active).
-//!   3. Collapsed (idle) → muted (a closed step recedes).
-//!   Expanded and collapsed are mutually exclusive peers, decided only when
-//!   idle; hover overrides both. This keeps the three states visually distinct
-//!   and means closing a step immediately darkens it instead of staying bright.
+//!   [`state::summary_weight`]. A **disclosure-first, monotonic model** decides
+//!   how bright the summary reads — interaction may only ever *lift* a summary,
+//!   never darken it:
+//!   1. Expanded → the primary foreground, **pinned**. An open body is already
+//!      the active state, so hover/focus on it is a no-op (the old rule dropped
+//!      an expanded summary to the dimmer hover tone, making it recede when you
+//!      pointed at it — the bug this model removes).
+//!   2. Collapsed + hover/focus → the intermediate hover tone (the "this opens"
+//!      affordance). Keyboard focus shares this tone.
+//!   3. Collapsed + idle → muted (a closed step recedes).
+//!
+//!   The three tones stay distinct and ordered (`muted` < `hover` < `fg`):
+//!   closing a step immediately darkens it to muted, and the only way to reach
+//!   `fg` is to open it.
 //!
 //! When an accent is present it supplies the hue and the weight channel
 //! modulates its brightness (see [`state::summary_text_color`]), so an accent
-//! step — e.g. a long-running subagent task — still shifts tone on hover / when
-//! open instead of sitting at one flat color. Keeping the channels composable is
-//! what makes the behavior consistent across step kinds: a step shifts toward
-//! the hover tone when hovered or focused, toward the foreground when open, and
-//! each cause flows through the single [`state::summary_weight`] entry point.
+//! step — e.g. a long-running subagent task — still shifts tone on hover (while
+//! collapsed) and leans to the foreground when open, instead of sitting at one
+//! flat color. Keeping the channels composable is what makes the behavior
+//! consistent across step kinds: a collapsed step lifts toward the hover tone
+//! when hovered or focused, an open step pins to the foreground, and each cause
+//! flows through the single [`state::summary_weight`] entry point.
 
 use super::Theme;
 

@@ -5,15 +5,15 @@
 //! Enter activates (Details toggles the body; Allow-once / Always land on the
 //! confirm-always gate; Reject exits), ↑↓ scrolls the expanded Details body.
 
+use std::cell::{Cell, RefCell};
 use std::io;
 
 use crossterm::event::KeyCode;
 
 use neenee_core::PermissionRequest;
 
-use std::cell::Cell;
-
-use crate::showcase::common::{self, ShowAction};
+use crate::showcase::common::{self, ShowAction, ShowEvent};
+use crate::tui::layout::ModalHitMap;
 use crate::tui::render::{Theme, draw_permission_sheet};
 
 /// Permission fixtures spanning different tools, scopes, and argument shapes.
@@ -56,6 +56,7 @@ struct State {
     // old value and returning the new one) while `run_showcase` only hands the
     // render closure a `&State`.
     scroll: Cell<usize>,
+    hit_map: RefCell<ModalHitMap>,
 }
 
 pub fn run() -> io::Result<()> {
@@ -67,10 +68,11 @@ pub fn run() -> io::Result<()> {
         confirm_always: false,
         show_details: false,
         scroll: Cell::new(0),
+        hit_map: RefCell::new(ModalHitMap::new()),
     };
     let theme = Theme::default();
 
-    common::run_showcase(
+    common::run_showcase_events(
         &mut state,
         |f, s| {
             let mode = if s.confirm_always {
@@ -91,8 +93,11 @@ pub fn run() -> io::Result<()> {
                 let h = (f.area().height as usize / 2).max(6) as u16;
                 let y = f.area().height.saturating_sub(h);
                 let rect = neenee_tui::Rect::new(f.area().x, y, f.area().width, h);
+                let mut hit_map = s.hit_map.borrow_mut();
+                hit_map.clear();
                 let clamped = draw_permission_sheet(
                     f,
+                    &mut hit_map,
                     &s.fx[s.idx],
                     s.selected,
                     s.confirm_always,
@@ -104,7 +109,30 @@ pub fn run() -> io::Result<()> {
                 s.scroll.set(clamped);
             });
         },
-        |s, key| -> ShowAction {
+        |s, event| -> ShowAction {
+            let key = match event {
+                ShowEvent::Click { x, y } => {
+                    let hit = { s.hit_map.borrow().permission_action_at(x, y) };
+                    if let Some(hit) = hit {
+                        s.selected = hit.action_index;
+                        return activate(s);
+                    }
+                    return ShowAction::Continue;
+                }
+                ShowEvent::ScrollUp => {
+                    if s.show_details && s.scroll.get() > 0 {
+                        s.scroll.set(s.scroll.get().saturating_sub(1));
+                    }
+                    return ShowAction::Continue;
+                }
+                ShowEvent::ScrollDown => {
+                    if s.show_details {
+                        s.scroll.set(s.scroll.get() + 1);
+                    }
+                    return ShowAction::Continue;
+                }
+                ShowEvent::Key(key) => key,
+            };
             match key.code {
                 KeyCode::Tab => {
                     s.idx = (s.idx + 1) % s.fx.len();
@@ -152,40 +180,42 @@ pub fn run() -> io::Result<()> {
                     }
                     ShowAction::Continue
                 }
-                KeyCode::Enter => {
-                    if s.confirm_always {
-                        // 0=Confirm always (exit), 1=Cancel (back to normal).
-                        if s.selected == 0 {
-                            ShowAction::Exit
-                        } else {
-                            s.confirm_always = false;
-                            s.selected = 1;
-                            ShowAction::Continue
-                        }
-                    } else {
-                        match s.selected {
-                            // Allow once → exit.
-                            0 => ShowAction::Exit,
-                            // Always allow → confirm gate.
-                            1 => {
-                                s.confirm_always = true;
-                                s.selected = 0;
-                                ShowAction::Continue
-                            }
-                            // Reject → exit.
-                            2 => ShowAction::Exit,
-                            // Details → toggle.
-                            3 => {
-                                s.show_details = !s.show_details;
-                                s.scroll.set(0);
-                                ShowAction::Continue
-                            }
-                            _ => ShowAction::Continue,
-                        }
-                    }
-                }
+                KeyCode::Enter => activate(s),
                 _ => ShowAction::Continue,
             }
         },
     )
+}
+
+fn activate(s: &mut State) -> ShowAction {
+    if s.confirm_always {
+        // 0=Confirm always (exit), 1=Cancel (back to normal).
+        if s.selected == 0 {
+            ShowAction::Exit
+        } else {
+            s.confirm_always = false;
+            s.selected = 1;
+            ShowAction::Continue
+        }
+    } else {
+        match s.selected {
+            // Allow once → exit.
+            0 => ShowAction::Exit,
+            // Always allow → confirm gate.
+            1 => {
+                s.confirm_always = true;
+                s.selected = 0;
+                ShowAction::Continue
+            }
+            // Reject → exit.
+            2 => ShowAction::Exit,
+            // Details → toggle.
+            3 => {
+                s.show_details = !s.show_details;
+                s.scroll.set(0);
+                ShowAction::Continue
+            }
+            _ => ShowAction::Continue,
+        }
+    }
 }

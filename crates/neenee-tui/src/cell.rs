@@ -404,7 +404,10 @@ mod tests {
     #[test]
     fn blend_named_color_uses_approximate_rgb() {
         // White ≈ (255,255,255), Black ≈ (0,0,0): midpoint is (128,128,128).
-        assert_eq!(Color::White.blend(Color::Black, 0.5), Color::Rgb(128, 128, 128));
+        assert_eq!(
+            Color::White.blend(Color::Black, 0.5),
+            Color::Rgb(128, 128, 128)
+        );
     }
 
     #[test]

@@ -513,34 +513,34 @@ pub fn activity() -> io::Result<()> {
     };
     let todos = TodoList {
         items: vec![
-        TodoItem {
-            id: TodoId(1),
-            content: "Restructure showcase into a directory module".into(),
-            status: TodoStatus::Completed,
-            created_at: 0,
-            updated_at: 0,
-        },
-        TodoItem {
-            id: TodoId(2),
-            content: "Implement permission sheet showcase".into(),
-            status: TodoStatus::InProgress,
-            created_at: 0,
-            updated_at: 0,
-        },
-        TodoItem {
-            id: TodoId(3),
-            content: "Wire all modals into the dispatcher".into(),
-            status: TodoStatus::Pending,
-            created_at: 0,
-            updated_at: 0,
-        },
-        TodoItem {
-            id: TodoId(4),
-            content: "Verify build + clippy".into(),
-            status: TodoStatus::Pending,
-            created_at: 0,
-            updated_at: 0,
-        },
+            TodoItem {
+                id: TodoId(1),
+                content: "Restructure showcase into a directory module".into(),
+                status: TodoStatus::Completed,
+                created_at: 0,
+                updated_at: 0,
+            },
+            TodoItem {
+                id: TodoId(2),
+                content: "Implement permission sheet showcase".into(),
+                status: TodoStatus::InProgress,
+                created_at: 0,
+                updated_at: 0,
+            },
+            TodoItem {
+                id: TodoId(3),
+                content: "Wire all modals into the dispatcher".into(),
+                status: TodoStatus::Pending,
+                created_at: 0,
+                updated_at: 0,
+            },
+            TodoItem {
+                id: TodoId(4),
+                content: "Verify build + clippy".into(),
+                status: TodoStatus::Pending,
+                created_at: 0,
+                updated_at: 0,
+            },
         ],
         ..Default::default()
     };

@@ -393,6 +393,9 @@ impl SubagentTool {
         on_event: &mut dyn FnMut(neenee_core::SubagentEvent),
     ) {
         match event {
+            neenee_core::AgentEvent::Notice(notice) => {
+                on_event(neenee_core::SubagentEvent::Notice(notice));
+            }
             neenee_core::AgentEvent::ModelRequestStarted { tool_round } => {
                 let status = if tool_round == 0 {
                     "waiting for model".to_string()

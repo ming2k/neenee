@@ -104,8 +104,18 @@ pub enum NoticeSeverity {
     /// Neutral status (compaction summary, provider switch, …). Replaces the
     /// old `Role::System` + `system_text()` rendering.
     Info,
+    /// A non-terminal condition that needs attention.
+    Warning,
     /// A terminal failure surfaced from the harness or a tool.
     Error,
+}
+
+pub(crate) fn notice_severity_from_core(severity: neenee_core::NoticeSeverity) -> NoticeSeverity {
+    match severity {
+        neenee_core::NoticeSeverity::Info => NoticeSeverity::Info,
+        neenee_core::NoticeSeverity::Warning => NoticeSeverity::Warning,
+        neenee_core::NoticeSeverity::Error => NoticeSeverity::Error,
+    }
 }
 
 /// Table column text alignment for GFM tables parsed by the in-house parser,
@@ -646,6 +656,12 @@ impl TranscriptMessage {
                     );
                     children.push(msg);
                 }
+            }
+            SubagentEvent::Notice(notice) => {
+                children.push(TranscriptMessage::notice(
+                    notice_severity_from_core(notice.severity),
+                    notice.render_text(),
+                ));
             }
             SubagentEvent::Activity(_) => {}
             // Full-duplex (ADR-0029): a subagent surfaced a permission /

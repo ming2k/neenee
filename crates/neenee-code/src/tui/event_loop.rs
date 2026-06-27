@@ -118,6 +118,89 @@ pub(super) enum SideViewSignal {
     Closed,
 }
 
+async fn handle_permission_submit(app: &mut App, runtime: &UiRuntime) {
+    if app.permission_confirm_always {
+        // Confirm-always sub-step: index 0 = Confirm, 1 = Cancel.
+        if app.modal_index == 1 {
+            app.permission_confirm_always = false;
+            app.modal_index = 1;
+            return;
+        }
+        // index 0: fall through to send Always.
+    } else {
+        // "Details" (index 3): expand/collapse the body without deciding, so
+        // the user can review before acting.
+        if app.modal_index == 3 {
+            app.permission_show_details = !app.permission_show_details;
+            app.permission_scroll = 0;
+            return;
+        }
+        // "Always allow" (index 1): gate behind a confirm step.
+        if app.modal_index == 1 {
+            app.permission_confirm_always = true;
+            app.permission_show_details = false;
+            app.modal_index = 0;
+            return;
+        }
+    }
+    if let Some(request) = app.pending_permission.take() {
+        let decision = if app.permission_confirm_always {
+            PermissionDecision::Always
+        } else {
+            // index 0 = Allow once, index 2 = Reject.
+            match app.modal_index {
+                0 => PermissionDecision::Once,
+                _ => PermissionDecision::Reject,
+            }
+        };
+        let request_id = request.id;
+        let parent_call_id = runtime
+            .subagent_permission_parent
+            .lock()
+            .await
+            .remove(&request_id);
+        let _ = app.tx.send(AgentRequest::PermissionReply {
+            request_id: request_id.clone(),
+            decision,
+            parent_call_id,
+        });
+        if decision == PermissionDecision::Reject {
+            // A rejection aborts the turn: resolve every other queued request
+            // too, otherwise their tool futures stay blocked and the batch
+            // deadlocks.
+            let queued: Vec<PermissionRequest> =
+                runtime.pending_permission.lock().await.drain(..).collect();
+            let mut parents = runtime.subagent_permission_parent.lock().await;
+            for pending in queued {
+                let parent_call_id = parents.remove(&pending.id);
+                let _ = app.tx.send(AgentRequest::PermissionReply {
+                    request_id: pending.id,
+                    decision: PermissionDecision::Reject,
+                    parent_call_id,
+                });
+            }
+            app.pending_permission = None;
+            app.active_modal = Modal::None;
+        } else {
+            // Drop the request we just answered and surface the next one (if
+            // any) so the sheet hands off without flashing the composer for a
+            // frame.
+            let mut queue = runtime.pending_permission.lock().await;
+            queue.retain(|r| r.id != request_id);
+            app.pending_permission = queue.front().cloned();
+            drop(queue);
+            if app.pending_permission.is_none() {
+                app.active_modal = Modal::None;
+            }
+        }
+        app.modal_index = 0;
+        app.permission_scroll = 0;
+        app.permission_max_scroll = 0;
+        app.permission_confirm_always = false;
+        app.permission_show_details = false;
+    }
+}
+
 pub(super) async fn run_app_loop(
     terminal: &mut Terminal<std::io::Stdout>,
     app: &mut App,
@@ -206,6 +289,7 @@ pub(super) async fn run_app_loop(
                     if let Some(req) = front {
                         app.question = Some(crate::tui::question_model::QuestionModel::open(req));
                         app.question_scroll = 0;
+                        app.question_modal_follow = true;
                         app.active_modal = Modal::Question;
                         app.modal_index = 0;
                         app.focused_target = None;
@@ -241,13 +325,15 @@ pub(super) async fn run_app_loop(
         // is not immediately overwritten by the per-frame image reminder.
         if !app.pending_images.is_empty() && app.ctrl_c_armed_ticks == 0 {
             let n = app.pending_images.len();
-            app.copy_toast_message = format!(
-                "{n} image{} attached — enter to send",
-                if n == 1 { "" } else { "s" }
+            show_local_toast(
+                app,
+                format!(
+                    "{n} image{} attached — enter to send",
+                    if n == 1 { "" } else { "s" }
+                ),
+                false,
+                std::time::Duration::from_millis(600),
             );
-            app.copy_toast_failed = false;
-            app.copy_toast_until =
-                Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
         }
         if app.ctrl_c_armed_ticks > 0 {
             app.ctrl_c_armed_ticks -= 1;
@@ -340,6 +426,7 @@ pub(super) async fn run_app_loop(
         // Draw frame
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
+            app.modal_hit_map.clear();
             let activity_for_display = app.activity_status.as_str();
             let status = display_status(
                 &app.loop_status,
@@ -480,6 +567,7 @@ pub(super) async fn run_app_loop(
                         );
                         let max_scroll = render::draw_permission_sheet(
                             f,
+                            &mut app.modal_hit_map,
                             request,
                             app.modal_index,
                             app.permission_confirm_always,
@@ -637,12 +725,14 @@ pub(super) async fn run_app_loop(
                     if let Some(ref qmodel) = app.question {
                         Some(render::draw_question_modal(
                             f,
+                            &mut app.modal_hit_map,
                             qmodel.request(),
                             qmodel.current(),
                             qmodel.selected(),
                             qmodel.other_text(),
                             qmodel.highlight(),
                             &mut app.question_scroll,
+                            app.question_modal_follow,
                             &app.theme,
                         ))
                     } else {
@@ -827,7 +917,7 @@ pub(super) async fn run_app_loop(
         // While a clipboard copy is in flight, shorten the idle poll so the
         // "copied" toast shows within ~16ms of the copy finishing.
         let mut events_drained = false;
-        'event_batch: loop {
+        loop {
             let timeout = if events_drained {
                 std::time::Duration::ZERO
             } else if copy_pending.load(Ordering::SeqCst) > 0 {
@@ -1599,6 +1689,9 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = app.question_scroll.saturating_sub(1);
                     } else {
                         // While a permission sheet is open the transcript stays
                         // scrollable, so the wheel / page keys drive the
@@ -1625,6 +1718,9 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = app.question_scroll.saturating_add(1);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -1648,6 +1744,9 @@ pub(super) async fn run_app_loop(
                         app.help_scroll = app.help_scroll.saturating_sub(step as usize);
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = app.question_scroll.saturating_sub(step as usize);
                     } else {
                         app.follow_bottom = false;
                         app.pin_summary_line = None;
@@ -1669,6 +1768,9 @@ pub(super) async fn run_app_loop(
                         app.help_scroll = app.help_scroll.saturating_add(step as usize);
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = app.question_scroll.saturating_add(step as usize);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(step).min(app.max_scroll);
@@ -1690,6 +1792,9 @@ pub(super) async fn run_app_loop(
                         app.help_scroll = 0;
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = 0;
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = 0;
                     } else {
                         app.follow_bottom = false;
                         app.pin_summary_line = None;
@@ -1711,6 +1816,9 @@ pub(super) async fn run_app_loop(
                         app.help_scroll = usize::MAX;
                     } else if app.active_modal == Modal::Activity {
                         app.activity_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::Question {
+                        app.question_modal_follow = false;
+                        app.question_scroll = usize::MAX;
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.max_scroll;
@@ -1780,10 +1888,11 @@ pub(super) async fn run_app_loop(
                         app.input.clear();
                         app.cursor_position = 0;
                         app.input_scroll = 0;
-                        app.copy_toast_message = "input cleared — Ctrl+C again to exit".to_string();
-                        app.copy_toast_failed = false;
-                        app.copy_toast_until = Some(
-                            std::time::Instant::now() + std::time::Duration::from_millis(2000),
+                        show_local_toast(
+                            app,
+                            "input cleared — Ctrl+C again to exit",
+                            false,
+                            std::time::Duration::from_millis(2000),
                         );
                         app.ctrl_c_armed_ticks = 20;
                     } else if app.ctrl_c_armed_ticks > 0 {
@@ -2194,6 +2303,9 @@ pub(super) async fn run_app_loop(
                         if let Some(qm) = app.question.take() {
                             app.question =
                                 Some(qm.update(crate::tui::question_model::QuestionAction::Up).0);
+                            // Moving the highlight re-enables follow so the body
+                            // scrolls to keep the cursor visible.
+                            app.question_modal_follow = true;
                         }
                     }
                 }
@@ -2204,6 +2316,7 @@ pub(super) async fn run_app_loop(
                                 qm.update(crate::tui::question_model::QuestionAction::Down)
                                     .0,
                             );
+                            app.question_modal_follow = true;
                         }
                     }
                 }
@@ -2224,6 +2337,8 @@ pub(super) async fn run_app_loop(
                                 qm.update(crate::tui::question_model::QuestionAction::Select(n))
                                     .0,
                             );
+                            // A digit jump moves the highlight, so follow it.
+                            app.question_modal_follow = true;
                         }
                     }
                 }
@@ -2273,86 +2388,7 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::PermissionSubmit => {
-                    if app.permission_confirm_always {
-                        // Confirm-always sub-step: index 0 = Confirm, 1 = Cancel.
-                        if app.modal_index == 1 {
-                            app.permission_confirm_always = false;
-                            app.modal_index = 1;
-                            break 'event_batch;
-                        }
-                        // index 0: fall through to send Always.
-                    } else {
-                        // "Details" (index 3): expand/collapse the body without
-                        // deciding, so the user can review before acting.
-                        if app.modal_index == 3 {
-                            app.permission_show_details = !app.permission_show_details;
-                            app.permission_scroll = 0;
-                            break 'event_batch;
-                        }
-                        // "Always allow" (index 1): gate behind a confirm step.
-                        if app.modal_index == 1 {
-                            app.permission_confirm_always = true;
-                            app.permission_show_details = false;
-                            app.modal_index = 0;
-                            break 'event_batch;
-                        }
-                    }
-                    if let Some(request) = app.pending_permission.take() {
-                        let decision = if app.permission_confirm_always {
-                            PermissionDecision::Always
-                        } else {
-                            // index 0 = Allow once, index 2 = Reject.
-                            match app.modal_index {
-                                0 => PermissionDecision::Once,
-                                _ => PermissionDecision::Reject,
-                            }
-                        };
-                        let request_id = request.id;
-                        let parent_call_id = runtime
-                            .subagent_permission_parent
-                            .lock()
-                            .await
-                            .remove(&request_id);
-                        let _ = app.tx.send(AgentRequest::PermissionReply {
-                            request_id: request_id.clone(),
-                            decision,
-                            parent_call_id,
-                        });
-                        if decision == PermissionDecision::Reject {
-                            // A rejection aborts the turn: resolve every other
-                            // queued request too, otherwise their tool futures
-                            // stay blocked and the batch deadlocks.
-                            let queued: Vec<PermissionRequest> =
-                                runtime.pending_permission.lock().await.drain(..).collect();
-                            let mut parents = runtime.subagent_permission_parent.lock().await;
-                            for pending in queued {
-                                let parent_call_id = parents.remove(&pending.id);
-                                let _ = app.tx.send(AgentRequest::PermissionReply {
-                                    request_id: pending.id,
-                                    decision: PermissionDecision::Reject,
-                                    parent_call_id,
-                                });
-                            }
-                            app.pending_permission = None;
-                            app.active_modal = Modal::None;
-                        } else {
-                            // Drop the request we just answered and surface the
-                            // next one (if any) so the sheet hands off without
-                            // flashing the composer for a frame.
-                            let mut queue = runtime.pending_permission.lock().await;
-                            queue.retain(|r| r.id != request_id);
-                            app.pending_permission = queue.front().cloned();
-                            drop(queue);
-                            if app.pending_permission.is_none() {
-                                app.active_modal = Modal::None;
-                            }
-                        }
-                        app.modal_index = 0;
-                        app.permission_scroll = 0;
-                        app.permission_max_scroll = 0;
-                        app.permission_confirm_always = false;
-                        app.permission_show_details = false;
-                    }
+                    handle_permission_submit(app, &runtime).await;
                 }
                 input::InputAction::PermissionReject => {
                     // Rejecting aborts the turn; resolve every queued request
@@ -2379,19 +2415,48 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 1;
                 }
                 input::InputAction::SelectionStart { x, y } => {
-                    // Click-to-dismiss: while a dismissable overlay modal is
-                    // open, the full-screen backdrop owns the click — a press
-                    // outside the panel closes the modal (mirroring Esc), and a
-                    // press inside is a no-op (these info modals have no click
-                    // targets yet). Either way the click is consumed so it does
-                    // not also fall through to the transcript behind the
-                    // backdrop. Modals that hold precious input and need their
-                    // own restore path (Provider / ModelEditor) report no rect
-                    // and are skipped here, so a stray click never discards an
-                    // API key. HistorySearch *is* dismissable: its filter is
-                    // ephemeral and the draft is parked, so an outside click
-                    // restores the draft (mirroring Esc / CloseModal).
-                    if let Some(r) = app.modal_rect {
+                    if app.active_modal == Modal::Question {
+                        if let Some(hit) = app.modal_hit_map.question_option_at(x, y) {
+                            if let Some(qm) = app.question.take() {
+                                app.question = Some(
+                                    qm.update(crate::tui::question_model::QuestionAction::Select(
+                                        hit.option_index + 1,
+                                    ))
+                                    .0,
+                                );
+                                app.question_modal_follow = true;
+                            }
+                        }
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.active_modal == Modal::Permission
+                        && let Some(hit) = app.modal_hit_map.permission_action_at(x, y)
+                    {
+                        app.modal_index = hit.action_index;
+                        handle_permission_submit(app, &runtime).await;
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.active_modal == Modal::Permission
+                        && app.modal_hit_map.permission_sheet_contains(x, y)
+                    {
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if let Some(r) = app.modal_rect {
+                        // Click-to-dismiss: while a dismissable overlay modal is
+                        // open, the full-screen backdrop owns the click — a press
+                        // outside the panel closes the modal (mirroring Esc), and a
+                        // press inside is a no-op (these info modals have no click
+                        // targets yet). Either way the click is consumed so it does
+                        // not also fall through to the transcript behind the
+                        // backdrop. Modals that hold precious input and need their
+                        // own restore path (Provider / ModelEditor) report no rect
+                        // and are skipped here, so a stray click never discards an
+                        // API key. HistorySearch *is* dismissable: its filter is
+                        // ephemeral and the draft is parked, so an outside click
+                        // restores the draft (mirroring Esc / CloseModal).
                         let inside =
                             r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height;
                         if !inside {
@@ -2800,6 +2865,17 @@ fn model_picker_count(app: &App) -> usize {
         .and_then(|idx| PROVIDERS.get(idx))
         .map(|solution| solution.models.len())
         .unwrap_or(0)
+}
+
+fn show_local_toast(
+    app: &mut App,
+    message: impl Into<String>,
+    failed: bool,
+    duration: std::time::Duration,
+) {
+    app.copy_toast_message = message.into();
+    app.copy_toast_failed = failed;
+    app.copy_toast_until = Some(std::time::Instant::now() + duration);
 }
 
 pub(super) fn display_status(

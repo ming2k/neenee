@@ -1104,10 +1104,13 @@ fn mouse_ctx_for(modal: crate::tui::Modal) -> InputContext {
 }
 
 #[test]
-fn mouse_wheel_moves_selection_in_question_modal() {
-    // The question modal's option selection is driven by ↑/↓. The mouse wheel
-    // must route there too (QuestionUp/QuestionDown) instead of leaking through
-    // to a transcript ScrollUp/ScrollDown behind the modal — the bug this guards.
+fn mouse_wheel_scrolls_body_in_question_modal() {
+    // The wheel scrolls the question modal's *body* (its overflowing option
+    // list), decoupled from the ↑/↓ option highlight: it maps to the generic
+    // ScrollUp/ScrollDown, which the event loop translates to `question_scroll`
+    // (and clears the follow flag) — like every other scrollable modal. It must
+    // NOT move the selection cursor, and must NOT leak through to the transcript
+    // behind the modal.
     use crossterm::event::{MouseEvent, MouseEventKind};
 
     let mk = |kind| {
@@ -1128,8 +1131,8 @@ fn mouse_wheel_moves_selection_in_question_modal() {
         )
     };
 
-    assert_eq!(mk(MouseEventKind::ScrollUp), InputAction::QuestionUp);
-    assert_eq!(mk(MouseEventKind::ScrollDown), InputAction::QuestionDown);
+    assert_eq!(mk(MouseEventKind::ScrollUp), InputAction::ScrollUp);
+    assert_eq!(mk(MouseEventKind::ScrollDown), InputAction::ScrollDown);
 }
 
 #[test]

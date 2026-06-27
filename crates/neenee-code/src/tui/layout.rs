@@ -115,6 +115,31 @@ pub struct LayoutMap {
     transcript_content_rect: Option<Rect>,
 }
 
+/// Per-frame hit boxes for modal-local controls that are not part of the
+/// transcript semantic document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModalHitMap {
+    question_options: Vec<QuestionOptionHit>,
+    permission_actions: Vec<PermissionActionHit>,
+    permission_sheet: Option<Rect>,
+}
+
+/// A visible row range belonging to one selectable question option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuestionOptionHit {
+    /// Zero-based option index for the active question. The synthetic `Other`
+    /// row uses `question.options.len()`.
+    pub option_index: usize,
+    pub rect: Rect,
+}
+
+/// Permission-sheet footer action hit box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionActionHit {
+    pub action_index: usize,
+    pub rect: Rect,
+}
+
 /// A clickable region belonging to one logical table cell.
 ///
 /// One rendered line segment belonging to a logical table cell.
@@ -306,6 +331,52 @@ impl LayoutMap {
     }
 }
 
+impl ModalHitMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.question_options.clear();
+        self.permission_actions.clear();
+        self.permission_sheet = None;
+    }
+
+    pub fn push_question_option(&mut self, hit: QuestionOptionHit) {
+        self.question_options.push(hit);
+    }
+
+    pub fn push_permission_action(&mut self, hit: PermissionActionHit) {
+        self.permission_actions.push(hit);
+    }
+
+    pub fn set_permission_sheet(&mut self, rect: Rect) {
+        self.permission_sheet = Some(rect);
+    }
+
+    pub fn question_option_at(&self, x: u16, y: u16) -> Option<QuestionOptionHit> {
+        self.question_options
+            .iter()
+            .copied()
+            .find(|hit| contains(hit.rect, x, y))
+    }
+
+    pub fn permission_action_at(&self, x: u16, y: u16) -> Option<PermissionActionHit> {
+        self.permission_actions
+            .iter()
+            .copied()
+            .find(|hit| contains(hit.rect, x, y))
+    }
+
+    pub fn permission_sheet_contains(&self, x: u16, y: u16) -> bool {
+        self.permission_sheet.is_some_and(|rect| contains(rect, x, y))
+    }
+}
+
+fn contains(rect: Rect, x: u16, y: u16) -> bool {
+    rect.x <= x && x < rect.x + rect.width && rect.y <= y && y < rect.y + rect.height
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +493,31 @@ mod tests {
                 InteractiveTarget::thinking(3)
             ]
         );
+    }
+
+    #[test]
+    fn modal_hit_map_resolves_question_options_and_permission_actions() {
+        let mut map = ModalHitMap::new();
+        map.push_question_option(QuestionOptionHit {
+            option_index: 2,
+            rect: Rect::new(4, 5, 20, 2),
+        });
+        map.push_permission_action(PermissionActionHit {
+            action_index: 1,
+            rect: Rect::new(2, 10, 12, 1),
+        });
+        map.set_permission_sheet(Rect::new(0, 9, 40, 4));
+
+        assert_eq!(
+            map.question_option_at(8, 6).map(|hit| hit.option_index),
+            Some(2)
+        );
+        assert_eq!(
+            map.permission_action_at(6, 10).map(|hit| hit.action_index),
+            Some(1)
+        );
+        assert!(map.permission_sheet_contains(30, 12));
+        assert!(map.question_option_at(8, 7).is_none());
+        assert!(map.permission_action_at(14, 10).is_none());
     }
 }

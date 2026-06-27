@@ -1773,7 +1773,13 @@ fn draw_reasoning_summary(
         ctx.theme,
     );
 
-    let line = reasoning_summary_line(marker, summary, summary_color, summary_color, ctx.full_width);
+    let line = reasoning_summary_line(
+        marker,
+        summary,
+        summary_color,
+        summary_color,
+        ctx.full_width,
+    );
     if let Some(rect) = ctx.paint(line) {
         ctx.layout_map.push(BlockRegion {
             message_idx: mi,
@@ -1846,9 +1852,7 @@ pub fn draw_reasoning_trace(
             content_lines,
         );
         draw_reasoning_summary(
-            &mut ctx,
-            mi,
-            expanded,
+            &mut ctx, mi, expanded,
             // Always use the disclosure marker (`+`/`-`), never a streaming
             // `●`. With the activity bar as the single breathing anchor
             // (ADR 0008), nothing about the marker needs to change between
@@ -1857,10 +1861,7 @@ pub fn draw_reasoning_trace(
             // alone. The marker color now follows the disclosure ×
             // interaction weight, so it tracks the highlight like the
             // summary text and like tool-step markers (no fixed hue).
-            None,
-            &summary,
-            hovered,
-            focused,
+            None, &summary, hovered, focused,
         )
     };
 

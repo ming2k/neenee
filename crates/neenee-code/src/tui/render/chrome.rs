@@ -122,16 +122,14 @@ pub fn draw_activity_bar(
     // `todos d/t`, always right-aligned so it reads as a persistent status
     // chip distinct from the transient activity on the left.
     let mut todos_rect: Option<Rect> = None;
-    let todos_badge: Option<(String, usize)> = todos
-        .filter(|l| !l.items.is_empty())
-        .map(|list| {
-            use neenee_core::TodoStatus;
-            let done = list.count(TodoStatus::Completed);
-            let total = list.items.len();
-            let badge = format!("todos {done}/{total}");
-            let w = UnicodeWidthStr::width(badge.as_str());
-            (badge, w)
-        });
+    let todos_badge: Option<(String, usize)> = todos.filter(|l| !l.items.is_empty()).map(|list| {
+        use neenee_core::TodoStatus;
+        let done = list.count(TodoStatus::Completed);
+        let total = list.items.len();
+        let badge = format!("todos {done}/{total}");
+        let w = UnicodeWidthStr::width(badge.as_str());
+        (badge, w)
+    });
 
     // If there is nothing to show at all (no transient activity and no todos),
     // hide the bar — no point painting a blank row.
@@ -209,8 +207,7 @@ pub fn draw_activity_bar(
         let row_w = rect.width as usize;
         // Place the badge flush against the right edge with a 1-cell margin.
         let right_margin = 1;
-        let gap = row_w
-            .saturating_sub(left_w + badge_w + right_margin);
+        let gap = row_w.saturating_sub(left_w + badge_w + right_margin);
         // The badge's absolute column = left_w + gap.
         let badge_col = rect.x + (left_w + gap) as u16;
         if status_active && gap > 0 {
@@ -453,7 +450,10 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
                 Style::default().bg(bg),
             ));
         }
-        zone_spans.push(Span::styled("[", Style::default().fg(warn_fg).bg(accent_bg)));
+        zone_spans.push(Span::styled(
+            "[",
+            Style::default().fg(warn_fg).bg(accent_bg),
+        ));
         zone_spans.push(Span::styled(
             shell_text,
             Style::default()
@@ -461,13 +461,13 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
                 .bg(accent_bg)
                 .add_modifier(Modifier::BOLD),
         ));
-        zone_spans.push(Span::styled("]", Style::default().fg(warn_fg).bg(accent_bg)));
+        zone_spans.push(Span::styled(
+            "]",
+            Style::default().fg(warn_fg).bg(accent_bg),
+        ));
     }
 
-    let zone_pill_width = zone_spans
-        .iter()
-        .map(|s| s.content.width())
-        .sum::<usize>();
+    let zone_pill_width = zone_spans.iter().map(|s| s.content.width()).sum::<usize>();
 
     // --- Right cluster: model name and context bar.
     // Build each segment separately so we can drop optional ones when the

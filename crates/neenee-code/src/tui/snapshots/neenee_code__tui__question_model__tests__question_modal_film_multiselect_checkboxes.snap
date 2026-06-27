@@ -23,7 +23,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === 1,2,3 → select all three ===
 
@@ -46,7 +46,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === '2' again → deselect 'b' ===
 
@@ -69,4 +69,4 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc

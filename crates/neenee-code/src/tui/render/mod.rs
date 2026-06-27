@@ -4,13 +4,13 @@
 mod chrome;
 mod composer;
 mod design;
+mod disclosure;
 mod empty_state;
 mod markdown_table;
 mod message_body;
 mod notice;
 mod overlays;
 mod primitives;
-mod step;
 mod text_layout;
 mod theme;
 /// Per-tool presentation registry: each tool's icon, collapsed summary,
@@ -33,6 +33,10 @@ use design::{
     TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
     TRANSCRIPT_H_INSET,
 };
+use disclosure::{
+    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
+    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
+};
 /// Parse a raw logo file into clamped display lines for the empty-state hero.
 /// Re-exported so the startup loader and the renderer share one clamp rule.
 pub(crate) use empty_state::parse_logo;
@@ -41,17 +45,13 @@ use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
-    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast,
-    draw_help_modal, draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
+    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
+    draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
     draw_sessions_modal, draw_tool_step_detail_overlay,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
-use step::{
-    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
-    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
-};
 #[cfg(test)]
 use text_layout::WrappedLine;
 #[cfg(test)]
@@ -252,8 +252,13 @@ pub fn draw_transcript(
     // even when the harness is idle, so an active task list is always visible
     // — not only while a turn is running.
     let has_visible_todos = todos.map(|l| !l.items.is_empty()).unwrap_or(false);
-    let activity_row_needed = status_active || (has_visible_todos && !chrome_hidden && !in_subagent);
-    let status_height: u16 = if activity_row_needed { STATUS_BAR_ROWS } else { 0 };
+    let activity_row_needed =
+        status_active || (has_visible_todos && !chrome_hidden && !in_subagent);
+    let status_height: u16 = if activity_row_needed {
+        STATUS_BAR_ROWS
+    } else {
+        0
+    };
 
     // The input box grows with its content: the typed text wraps onto new
     // lines and the box expands to fit, up to roughly half the terminal so the
@@ -481,9 +486,8 @@ pub fn draw_transcript(
             let next_is_tool_step = messages
                 .get(mi + 1)
                 .is_some_and(|next| next.is_tool_step() || next.is_subagent_task());
-            let collapsed_tool_into_tool_step = msg.is_tool_step()
-                && msg.tool_step_expanded() == Some(false)
-                && next_is_tool_step;
+            let collapsed_tool_into_tool_step =
+                msg.is_tool_step() && msg.tool_step_expanded() == Some(false) && next_is_tool_step;
             let next_is_step = messages.get(mi + 1).is_some_and(|next| {
                 next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
             });
@@ -833,14 +837,17 @@ mod tests {
                     multi_select: false,
                 }],
             };
+            let mut hit_map = crate::tui::layout::ModalHitMap::new();
             draw_question_modal(
                 f,
+                &mut hit_map,
                 &question_request,
                 0,
                 &[vec![1]],
                 &[String::new()],
                 1,
                 &mut 0,
+                true,
                 &theme,
             );
             // Session context modal: every pane must render without panicking
@@ -924,7 +931,9 @@ mod tests {
                 scope: "*".to_string(),
             };
             let rect = neenee_tui::Rect::new(0, 0, 60, 3);
-            let _ = draw_permission_sheet(f, &request, 0, false, false, 0, rect, &theme);
+            let mut hit_map = crate::tui::layout::ModalHitMap::new();
+            let _ =
+                draw_permission_sheet(f, &mut hit_map, &request, 0, false, false, 0, rect, &theme);
         });
     }
 

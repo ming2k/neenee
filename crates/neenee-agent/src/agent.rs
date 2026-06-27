@@ -1120,7 +1120,7 @@ impl Agent {
                 self.relieve_pressure_if_needed(messages, cancel).await?;
                 // Mid-turn save point (ADR-0035): see the streaming path.
                 self.fire_round_persist(messages).await?;
-                self.apply_guard_actions(messages, &mut state);
+                self.apply_guard_actions(messages, &mut state, &mut on_event);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1361,7 +1361,7 @@ impl Agent {
                 // any further work, so a crash leaves the transcript in sync
                 // with filesystem side effects.
                 self.fire_round_persist(messages).await?;
-                self.apply_guard_actions(messages, &mut state);
+                self.apply_guard_actions(messages, &mut state, &mut on_event);
                 self.run_round_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
@@ -1707,7 +1707,14 @@ impl Agent {
     /// message (non-terminating); `Abort` would terminate the turn. Gated by
     /// `loop_guard_enabled` so sub-agents and the review diagnostic run
     /// unobstructed. Mirrored at both loop boundaries.
-    fn apply_guard_actions(&self, messages: &mut Vec<Message>, state: &mut TurnState) {
+    fn apply_guard_actions<F>(
+        &self,
+        messages: &mut Vec<Message>,
+        state: &mut TurnState,
+        on_event: &mut F,
+    ) where
+        F: FnMut(AgentEvent) + Send,
+    {
         if !self
             .loop_guard_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1718,6 +1725,18 @@ impl Agent {
             crate::loop_guard::GuardAction::Continue => {}
             crate::loop_guard::GuardAction::Inject(nudge) => {
                 tracing::debug!("turn guard tripped; injecting steering nudge");
+                on_event(AgentEvent::Notice(
+                    AgentNotice::new(
+                        NoticeKind::NudgeInjected,
+                        NoticeSeverity::Warning,
+                        "Steering nudge injected",
+                        NoticeSource::TurnGuard,
+                    )
+                    .with_body(
+                        "The agent repeated a read pattern, so a hidden steering note was added before the next model request.",
+                    )
+                    .with_surface(NoticeSurface::Toast),
+                ));
                 messages.push(Message::injected(
                     Role::User,
                     nudge,
@@ -1726,6 +1745,16 @@ impl Agent {
             }
             crate::loop_guard::GuardAction::Abort(reason) => {
                 tracing::warn!("turn guard aborted turn: {reason}");
+                on_event(AgentEvent::Notice(
+                    AgentNotice::new(
+                        NoticeKind::NudgeInjected,
+                        NoticeSeverity::Error,
+                        "Turn guard aborted the turn",
+                        NoticeSource::TurnGuard,
+                    )
+                    .with_body(reason)
+                    .with_surface(NoticeSurface::Banner),
+                ));
                 // Abort is surfaced as a terminal nudge for now; a future
                 // guard that needs a hard turn-kill can return Err here.
             }

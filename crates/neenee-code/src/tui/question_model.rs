@@ -881,15 +881,18 @@ mod tests {
 
         let mut terminal = neenee_tui::TestTerminal::new(width, height);
         terminal.draw(|f| {
+            let mut hit_map = crate::tui::layout::ModalHitMap::new();
             let mut scroll = 0;
             draw_question_modal(
                 f,
+                &mut hit_map,
                 model.request(),
                 model.current(),
                 model.selected(),
                 model.other_text(),
                 model.highlight(),
                 &mut scroll,
+                true,
                 &Theme::default(),
             );
         });

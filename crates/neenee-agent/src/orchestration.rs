@@ -33,8 +33,9 @@ use tokio_util::sync::CancellationToken;
 use crate::Agent;
 use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
-    InjectionKind, InjectionOrigin, Message, PURSUIT_COMPLETE_MARKER, Provider,
-    ProviderStreamEvent, Pursuit, Role, TurnEvent,
+    InjectionKind, InjectionOrigin, Message, NoticeKind, NoticeSeverity, NoticeSource,
+    NoticeSurface, PURSUIT_COMPLETE_MARKER, Provider, ProviderStreamEvent, Pursuit, Role,
+    TurnEvent,
 };
 use neenee_store::{
     RepeatStore,
@@ -761,6 +762,23 @@ pub async fn execute_turn(
         );
         let _ = tx.send(turn(
             &session_id,
+            TurnEvent::Notice(
+                neenee_core::AgentNotice::new(
+                    NoticeKind::ProviderRetry,
+                    NoticeSeverity::Warning,
+                    format!("Retrying provider request ({}/{retry_limit})", attempt + 1),
+                    NoticeSource::Harness,
+                )
+                .with_body(format!(
+                    "Waiting {}s before retrying: {}",
+                    delay_ms.div_ceil(1_000),
+                    public_retry_reason(&message)
+                ))
+                .with_surface(NoticeSurface::Toast),
+            ),
+        ));
+        let _ = tx.send(turn(
+            &session_id,
             TurnEvent::RetryScheduled {
                 attempt: attempt + 1,
                 max_attempts: retry_limit,
@@ -877,6 +895,22 @@ pub fn retry_delay_ms(
         .min(max_ms.max(1))
 }
 
+fn public_retry_reason(message: &str) -> String {
+    let first = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("transient provider error");
+    const MAX_CHARS: usize = 96;
+    if first.chars().count() <= MAX_CHARS {
+        first.to_string()
+    } else {
+        let mut compact: String = first.chars().take(MAX_CHARS.saturating_sub(1)).collect();
+        compact.push('…');
+        compact
+    }
+}
+
 pub fn relay_agent_event(
     tx: &mpsc::UnboundedSender<AgentResponse>,
     session_id: &str,
@@ -884,6 +918,7 @@ pub fn relay_agent_event(
     streamed_text: &std::sync::atomic::AtomicBool,
 ) {
     let response = match event {
+        AgentEvent::Notice(notice) => turn(session_id, TurnEvent::Notice(notice)),
         AgentEvent::ModelRequestStarted { tool_round } => {
             // Structured round signal first, so the Activity modal can show
             // `turn N · round M · waiting for model` with the round as a
@@ -964,7 +999,24 @@ pub fn relay_agent_event(
         AgentEvent::UnattendedChanged(enabled) => {
             turn(session_id, TurnEvent::UnattendedChanged(enabled))
         }
-        AgentEvent::SessionReview { alert } => turn(session_id, TurnEvent::SessionReview { alert }),
+        AgentEvent::SessionReview { alert } => {
+            if !alert.trim().is_empty() {
+                let _ = tx.send(turn(
+                    session_id,
+                    TurnEvent::Notice(
+                        neenee_core::AgentNotice::new(
+                            neenee_core::NoticeKind::ReviewAlert,
+                            neenee_core::NoticeSeverity::Warning,
+                            "Session review needs attention",
+                            neenee_core::NoticeSource::Review,
+                        )
+                        .with_body(alert.clone())
+                        .with_surface(neenee_core::NoticeSurface::Banner),
+                    ),
+                ));
+            }
+            turn(session_id, TurnEvent::SessionReview { alert })
+        }
         AgentEvent::PermissionRequest(request) => {
             turn(session_id, TurnEvent::PermissionRequest(request))
         }

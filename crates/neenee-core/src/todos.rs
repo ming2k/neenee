@@ -472,7 +472,10 @@ mod tests {
         assert!(list.is_all_done());
 
         list.reconcile(
-            &desired(&[("design", TodoStatus::Completed), ("docs", TodoStatus::Cancelled)]),
+            &desired(&[
+                ("design", TodoStatus::Completed),
+                ("docs", TodoStatus::Cancelled),
+            ]),
             100,
             1,
         );
@@ -489,11 +492,7 @@ mod tests {
         );
         assert!(!list.is_all_done());
 
-        list.reconcile(
-            &desired(&[("verify", TodoStatus::Pending)]),
-            100,
-            1,
-        );
+        list.reconcile(&desired(&[("verify", TodoStatus::Pending)]), 100, 1);
         assert!(!list.is_all_done());
     }
 }

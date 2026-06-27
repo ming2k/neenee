@@ -29,6 +29,7 @@ use super::text_layout::wrap_text;
 fn severity_presentation(severity: NoticeSeverity, theme: &Theme) -> (&'static str, Color) {
     match severity {
         NoticeSeverity::Error => ("✖", theme.err()),
+        NoticeSeverity::Warning => ("!", theme.warn()),
         NoticeSeverity::Info => ("ℹ", theme.info()),
     }
 }

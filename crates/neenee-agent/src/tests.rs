@@ -977,6 +977,9 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
     events
         .iter()
         .map(|event| match event {
+            AgentEvent::Notice(notice) => {
+                format!("notice {:?} {:?}", notice.kind, notice.title)
+            }
             AgentEvent::ModelRequestStarted { tool_round } => {
                 format!("model-request round={tool_round}")
             }

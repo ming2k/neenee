@@ -39,10 +39,9 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neenee_core::{
-    AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus,
-    PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
-    SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
-    mcp::McpConnectionStatus,
+    AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
+    ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
+    TurnEvent, UserQuestionRequest, mcp::McpConnectionStatus,
 };
 use neenee_tui::{Backend, Terminal};
 use std::{
@@ -54,7 +53,9 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc};
 
-use crate::tui::document::{MessageKind, NoticeSeverity, TranscriptMessage};
+use crate::tui::document::{
+    MessageKind, NoticeSeverity, TranscriptMessage, notice_severity_from_core,
+};
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
@@ -234,6 +235,10 @@ pub async fn run_tui(
                         &messages_clone
                     };
                     match event {
+                        TurnEvent::Notice(notice) => {
+                            let mut msgs = buf.lock().await;
+                            push_core_notice(&mut msgs, &notice);
+                        }
                         TurnEvent::Text(t) => {
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
@@ -569,13 +574,15 @@ pub async fn run_tui(
                             before_chars,
                             after_chars,
                         } => {
-                            buf.lock().await.push(TranscriptMessage::notice(
+                            let mut msgs = buf.lock().await;
+                            push_local_notice(
+                                &mut msgs,
                                 NoticeSeverity::Info,
                                 format!(
                                     "Compacted {} messages: {} -> {} chars.",
                                     archived_messages, before_chars, after_chars
                                 ),
-                            ));
+                            );
                         }
                         TurnEvent::HarnessState(snapshot) => {
                             let running = snapshot.loop_status != "idle";
@@ -633,9 +640,8 @@ pub async fn run_tui(
                                 None
                             };
                             if let Some(text) = describe_pursuit_change(prev.as_ref(), &pursuit) {
-                                buf.lock()
-                                    .await
-                                    .push(TranscriptMessage::notice(NoticeSeverity::Info, text));
+                                let mut msgs = buf.lock().await;
+                                push_local_notice(&mut msgs, NoticeSeverity::Info, text);
                             }
                             if !routes_to_side {
                                 harness_clone.lock().await.pursuit = Some(pursuit);
@@ -655,17 +661,6 @@ pub async fn run_tui(
                             }
                         }
                         TurnEvent::TodosUpdated(list) => {
-                            let prev = if !routes_to_side {
-                                todos_clone.lock().await.clone()
-                            } else {
-                                None
-                            };
-                            if let Some(text) = describe_todos_change(prev.as_ref(), Some(&list)) {
-                                buf.lock().await.push(TranscriptMessage::notice(
-                                    NoticeSeverity::Info,
-                                    text,
-                                ));
-                            }
                             if !routes_to_side {
                                 *todos_clone.lock().await = Some(list);
                             }
@@ -695,7 +690,7 @@ pub async fn run_tui(
                         }
                         TurnEvent::Error(e) => {
                             let mut msgs = buf.lock().await;
-                            msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, e));
+                            push_local_notice(&mut msgs, NoticeSeverity::Error, e);
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
                                 activity_clone.lock().await.clear();
@@ -763,16 +758,17 @@ pub async fn run_tui(
                 }
                 AgentResponse::ProviderSwitched { provider, model } => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::notice(
+                    push_local_notice(
+                        &mut msgs,
                         NoticeSeverity::Info,
                         format!("Provider switched to {} ({})", provider, model),
-                    ));
+                    );
                     *cp_clone.lock().await = provider;
                     *cm_clone.lock().await = model;
                 }
                 AgentResponse::Error(msg) => {
                     let mut msgs = messages_clone.lock().await;
-                    msgs.push(TranscriptMessage::notice(NoticeSeverity::Error, msg));
+                    push_local_notice(&mut msgs, NoticeSeverity::Error, msg);
                 }
             }
         }
@@ -838,6 +834,7 @@ pub async fn run_tui(
         pending_permission: None,
         question: None,
         question_scroll: 0,
+        question_modal_follow: true,
         sessions_overview: Vec::new(),
         permission_confirm_always: false,
         permission_show_details: false,
@@ -852,6 +849,7 @@ pub async fn run_tui(
         selection: SelectionState::None,
         drag: SelectionDrag::default(),
         layout_map: LayoutMap::new(),
+        modal_hit_map: crate::tui::layout::ModalHitMap::new(),
         hovered_step: None,
         tool_density: tool_density.clone(),
         tool_detail_message_idx: None,
@@ -955,6 +953,22 @@ pub async fn start_tui(
     .await
 }
 
+fn push_core_notice(messages: &mut Vec<TranscriptMessage>, notice: &neenee_core::AgentNotice) {
+    let _surface = notice.surface;
+    messages.push(TranscriptMessage::notice(
+        notice_severity_from_core(notice.severity),
+        notice.render_text(),
+    ));
+}
+
+fn push_local_notice(
+    messages: &mut Vec<TranscriptMessage>,
+    severity: NoticeSeverity,
+    text: impl Into<String>,
+) {
+    messages.push(TranscriptMessage::notice(severity, text));
+}
+
 /// Format an inline-transcript notice for a pursuit update, or `None` when the
 /// update carries nothing user-visible (a no-op re-broadcast of the same
 /// pursuit). The pursuit bar is gone from the footer; these notices are how pursuit
@@ -977,9 +991,10 @@ fn describe_pursuit_change(prev: Option<&Pursuit>, new: &Pursuit) -> Option<Stri
 /// changed step. Instead every update collapses to **at most one** summary line:
 /// the running `done/total` tally, optionally annotated with how many items
 /// changed status this turn. Returns `None` when nothing changed.
+#[cfg(test)]
 fn describe_todos_change(prev: Option<&TodoList>, new: Option<&TodoList>) -> Option<String> {
     let new = new.filter(|l| !l.items.is_empty())?;
-    let done = new.count(TodoStatus::Completed);
+    let done = new.count(neenee_core::TodoStatus::Completed);
     let total = new.items.len();
     let Some(prev) = prev.filter(|l| !l.items.is_empty()) else {
         return Some(format!("tasks started · {done}/{total}"));
@@ -1074,10 +1089,7 @@ mod describe_todos_change_tests {
             item(1, TodoStatus::Pending),
             item(2, TodoStatus::InProgress),
         ]);
-        let new = list(&[
-            item(1, TodoStatus::Pending),
-            item(2, TodoStatus::Completed),
-        ]);
+        let new = list(&[item(1, TodoStatus::Pending), item(2, TodoStatus::Completed)]);
         assert_eq!(
             describe_todos_change(Some(&prev), Some(&new)),
             Some("tasks · 1/2 · 1 updated".to_string())
@@ -1112,8 +1124,14 @@ mod describe_todos_change_tests {
     #[test]
     fn empty_new_list_emits_nothing() {
         let prev = list(&[item(1, TodoStatus::Pending)]);
-        assert_eq!(describe_todos_change(Some(&prev), Some(&TodoList::default())), None);
-        assert_eq!(describe_todos_change(None, Some(&TodoList::default())), None);
+        assert_eq!(
+            describe_todos_change(Some(&prev), Some(&TodoList::default())),
+            None
+        );
+        assert_eq!(
+            describe_todos_change(None, Some(&TodoList::default())),
+            None
+        );
     }
 }
 

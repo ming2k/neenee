@@ -142,7 +142,10 @@ pub fn run() -> io::Result<()> {
                     s.scroll.set(s.scroll.get().saturating_sub(1));
                     ShowAction::Continue
                 }
-                KeyCode::Char('t') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                KeyCode::Char('t')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
                 {
                     // Mirror the app's Ctrl+T: toggle every step's disclosure
                     // (any collapsed → expand all; else collapse all).
@@ -195,9 +198,9 @@ fn flush_batch() -> Vec<TranscriptMessage> {
 /// header and one from the next; the collapsed neighbours stay flush.
 fn expanded_body() -> Vec<TranscriptMessage> {
     vec![
-        read("call_a", "src/lib.rs", true),    // collapsed
-        grep_expanded("call_b", "foo", "src"), // expanded mid-batch
-        read("call_c", "src/main.rs", true),   // collapsed
+        read("call_a", "src/lib.rs", true),      // collapsed
+        grep_expanded("call_b", "foo", "src"),   // expanded mid-batch
+        read("call_c", "src/main.rs", true),     // collapsed
         read("call_d", "tests/basic.rs", false), // collapsed
     ]
 }
@@ -333,7 +336,8 @@ mod tests {
             "every step must be collapsed so the headers stack flush"
         );
         assert!(
-            msgs.iter().all(|m| m.tool_step_status() == Some(ToolStepStatus::Ok)),
+            msgs.iter()
+                .all(|m| m.tool_step_status() == Some(ToolStepStatus::Ok)),
             "flush batch is a successful fan-out"
         );
     }

@@ -23,7 +23,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === down → highlight 'b' ===
 
@@ -46,7 +46,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === space → toggle 'b' selected ===
 
@@ -69,7 +69,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === '1' → select 'a' ===
 
@@ -92,7 +92,7 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
 
 === '4' + 'custom' → focus 'Other', type ===
 
@@ -115,4 +115,4 @@ expression: film
 
 
 
-           ↑↓ navigate · Space select · Enter submit · 1-9 ju
+           ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc

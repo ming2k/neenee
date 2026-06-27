@@ -8,7 +8,7 @@
 //! - [`history`] — history search modal
 //! - [`help`] — help / keybindings modal
 //! - [`tool_step_detail`] — full-output detail overlay for a focused tool step
-//! - [`toast`] — copy / armed-action notification bubbles
+//! - [`toast`] — copy / armed-action notice bubbles
 //! - [`common`] — shared helpers (time formatting, truncation, caret, glyphs)
 
 pub(crate) mod activity;

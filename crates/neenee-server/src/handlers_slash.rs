@@ -28,8 +28,8 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 use neenee_core::{
-    AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, Provider, Pursuit, Tool,
-    TurnEvent,
+    AgentNotice, AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, NoticeKind,
+    NoticeSeverity, NoticeSource, NoticeSurface, Provider, Pursuit, Tool, TurnEvent,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
 use neenee_tools::commands::{CustomCommand, expand_command};
@@ -191,6 +191,21 @@ pub async fn dispatch(
             // Mirror the worst verdict into the activity-bar
             // banner (empty alert clears it when healthy).
             let alert = Agent::render_review_alert(&verdicts, rounds);
+            if !alert.trim().is_empty() {
+                let _ = resp_tx.send(turn(
+                    &session.id().await,
+                    TurnEvent::Notice(
+                        AgentNotice::new(
+                            NoticeKind::ReviewAlert,
+                            NoticeSeverity::Warning,
+                            "Session review needs attention",
+                            NoticeSource::Review,
+                        )
+                        .with_body(alert.clone())
+                        .with_surface(NoticeSurface::Banner),
+                    ),
+                ));
+            }
             let _ = resp_tx.send(turn(
                 &session.id().await,
                 TurnEvent::SessionReview { alert },

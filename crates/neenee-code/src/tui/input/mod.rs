@@ -461,24 +461,14 @@ pub fn process_event(
             let x = mouse.column;
             let y = mouse.row;
             match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    // The question modal's selection is driven by ↑/↓; route the
-                    // wheel there too so the scroll doesn't fall through to the
-                    // transcript behind the modal. Other modals translate the
-                    // wheel in the event loop's ScrollUp handler.
-                    if context.active_modal == super::Modal::Question {
-                        InputAction::QuestionUp
-                    } else {
-                        InputAction::ScrollUp
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    if context.active_modal == super::Modal::Question {
-                        InputAction::QuestionDown
-                    } else {
-                        InputAction::ScrollDown
-                    }
-                }
+                // The wheel always scrolls the body of whatever modal owns the
+                // surface (or the transcript when none does). The event loop's
+                // ScrollUp/ScrollDown handlers translate it per-modal — including
+                // the question modal, whose body scroll is decoupled from the ↑/↓
+                // highlight so wheeling browses a long option list without moving
+                // the selection cursor.
+                MouseEventKind::ScrollUp => InputAction::ScrollUp,
+                MouseEventKind::ScrollDown => InputAction::ScrollDown,
                 MouseEventKind::Down(MouseButton::Left) => {
                     // The permission sheet replaces the composer but leaves the
                     // transcript above fully interactive, so a click there can
@@ -492,6 +482,8 @@ pub fn process_event(
                         super::Modal::None | super::Modal::Permission
                     ) {
                         drag.start(SemanticCursor::new(0, 0, 0));
+                        InputAction::SelectionStart { x, y }
+                    } else if context.active_modal == super::Modal::Question {
                         InputAction::SelectionStart { x, y }
                     } else if context.active_modal.dismissable_by_outside_click() {
                         // A dismissable modal owns this click — forward it as
@@ -1282,7 +1274,7 @@ pub fn process_event(
                 KeyCode::PageUp
                     if matches!(
                         context.active_modal,
-                        super::Modal::None | super::Modal::Permission
+                        super::Modal::None | super::Modal::Permission | super::Modal::Question
                     ) =>
                 {
                     InputAction::ScrollPageUp
@@ -1290,7 +1282,7 @@ pub fn process_event(
                 KeyCode::PageDown
                     if matches!(
                         context.active_modal,
-                        super::Modal::None | super::Modal::Permission
+                        super::Modal::None | super::Modal::Permission | super::Modal::Question
                     ) =>
                 {
                     InputAction::ScrollPageDown
@@ -2437,6 +2429,78 @@ mod tests {
                 false
             ),
             InputAction::ScrollBottom
+        );
+    }
+
+    #[test]
+    fn page_keys_scroll_question_modal_body() {
+        let mut input = String::new();
+        let mut cursor = 0;
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::PageUp,
+                KeyModifiers::NONE,
+                crate::tui::Modal::Question,
+                false
+            ),
+            InputAction::ScrollPageUp
+        );
+        assert_eq!(
+            run_key(
+                &mut input,
+                &mut cursor,
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+                crate::tui::Modal::Question,
+                false
+            ),
+            InputAction::ScrollPageDown
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_question_modal_body() {
+        let mk = |kind| {
+            let mut input = String::new();
+            let mut cursor = 0;
+            let mut drag = SelectionDrag::default();
+            process_event(
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind,
+                    column: 5,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &mut input,
+                &mut cursor,
+                InputContext {
+                    active_modal: crate::tui::Modal::Question,
+                    is_responding: false,
+                    completion_kind: crate::tui::CompletionKind::None,
+                    suggestion_count: 0,
+                    has_exact_suggestion: false,
+                    suggestion_index: None,
+                    permission_confirm_always: false,
+                    permission_show_details: false,
+                    in_subagent_view: false,
+                    in_side_view: false,
+                    has_focused_target: false,
+                    has_queued: false,
+                    history_searching: false,
+                },
+                &mut drag,
+            )
+        };
+
+        assert_eq!(
+            mk(crossterm::event::MouseEventKind::ScrollUp),
+            InputAction::ScrollUp
+        );
+        assert_eq!(
+            mk(crossterm::event::MouseEventKind::ScrollDown),
+            InputAction::ScrollDown
         );
     }
 

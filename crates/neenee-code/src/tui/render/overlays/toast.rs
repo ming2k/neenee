@@ -1,4 +1,4 @@
-//! Transient notification bubbles: copy result and armed-action toasts.
+//! Transient notice bubbles: copy result and armed-action toasts.
 
 use neenee_tui::{
     Block as RtBlock, Borders, Color, Frame, Modifier, Paragraph, Rect, Span, {Line, Style},

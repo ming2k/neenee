@@ -7,12 +7,13 @@ use neenee_tui::{
 use neenee_core::{PermissionRequest, UserQuestionRequest};
 
 use crate::tui::Modal;
+use crate::tui::layout::{ModalHitMap, PermissionActionHit, QuestionOptionHit};
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     FooterHint, contrast_fg, modal_area, modal_footer_text, modal_frame, panel_block, render_body,
     render_modal_footer,
 };
-use neenee_tui::{Constraint, Direction, Layout};
+use crate::tui::render::text_layout::wrap_text;
 use unicode_width::UnicodeWidthStr;
 
 // The permission sheet renders inline, replacing the composer (input box)
@@ -35,12 +36,14 @@ const OTHER_OPTION_LABEL: &str = "Other";
 #[allow(clippy::too_many_arguments)] // modal draw fns thread many context args by nature
 pub fn draw_question_modal(
     frame: &mut Frame,
+    hit_map: &mut ModalHitMap,
     request: &UserQuestionRequest,
     current_question: usize,
     selected: &[Vec<usize>],
     other_text: &[String],
     highlighted: usize,
     scroll: &mut usize,
+    follow_highlight: bool,
     theme: &Theme,
 ) -> neenee_tui::Rect {
     let area = modal_area(frame, Modal::Question).expect("question modal has fixed geometry");
@@ -66,22 +69,32 @@ pub fn draw_question_modal(
         );
     }
 
-    let mut header_lines: Vec<Line> = Vec::new();
-    let mut option_lines: Vec<Line> = Vec::new();
+    let mut body_lines: Vec<Line> = Vec::new();
+    let mut option_rows: Vec<(usize, usize, usize)> = Vec::new();
+    let body_width = f.body.width as usize;
+    let mut highlighted_row = None;
     if let Some(q) = question {
         if let Some(header) = &q.header {
-            header_lines.push(Line::from(vec![Span::styled(
-                header.clone(),
+            push_wrapped_styled(
+                &mut body_lines,
+                "",
+                "",
+                header,
                 Style::default()
                     .fg(theme.info())
                     .add_modifier(Modifier::BOLD),
-            )]));
+                body_width,
+            );
         }
-        header_lines.push(Line::from(vec![Span::styled(
-            q.question.clone(),
+        push_wrapped_styled(
+            &mut body_lines,
+            "",
+            "",
+            &q.question,
             Style::default().fg(theme.fg()),
-        )]));
-        header_lines.push(Line::from(""));
+            body_width,
+        );
+        body_lines.push(Line::from(""));
 
         let q_selected = selected.get(current_question);
         let other_index = q.options.len();
@@ -94,62 +107,65 @@ pub fn draw_question_modal(
         for (i, option) in q.options.iter().enumerate() {
             let is_selected = q_selected.is_some_and(|s| s.contains(&i));
             let is_highlighted = i == highlighted;
+            let row = body_lines.len();
+            if is_highlighted {
+                highlighted_row = Some(row);
+            }
+            let start = body_lines.len();
             render_question_option(
-                &mut option_lines,
+                &mut body_lines,
                 i,
                 &option.label,
                 option.description.as_deref(),
                 is_selected,
                 is_highlighted,
                 q.multi_select,
+                body_width,
                 theme,
             );
+            option_rows.push((i, start, body_lines.len()));
         }
 
+        let row = body_lines.len();
+        if other_highlighted {
+            highlighted_row = Some(row);
+        }
+        let other_start = body_lines.len();
         render_question_option(
-            &mut option_lines,
+            &mut body_lines,
             other_index,
             OTHER_OPTION_LABEL,
             None,
             q_selected.is_some_and(|s| s.contains(&other_index)),
             other_highlighted,
             q.multi_select,
+            body_width,
             theme,
         );
         if other_highlighted {
-            option_lines.push(Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(
-                    format!("{}{}", other_text_value, "█"),
-                    Style::default().fg(theme.brand()),
-                ),
-            ]));
+            push_wrapped_styled(
+                &mut body_lines,
+                "     ",
+                "     ",
+                &format!("{}{}", other_text_value, "█"),
+                Style::default().fg(theme.brand()),
+                body_width,
+            );
         }
+        option_rows.push((other_index, other_start, body_lines.len()));
     }
 
-    let header_height = header_lines.len() as u16;
-    let mut constraints = vec![Constraint::Length(header_height)];
-    constraints.push(Constraint::Min(0));
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(f.body);
-
-    let header_rect = chunks[0];
-    let options_rect = chunks[1];
-
-    frame.render_widget(Paragraph::new(header_lines), header_rect);
-
-    let follow = highlighted_option_row_index(question, highlighted);
-    render_body(
-        frame,
-        options_rect,
-        option_lines,
-        scroll,
-        follow,
-        true,
-        theme,
-    );
+    // Auto-follow the highlight only while navigating (the default after open /
+    // ↑↓ / digit-jump); a manual wheel/page scroll clears the flag so the user
+    // can browse a long question or option list without the body snapping back
+    // to the cursor. Mirrors the session / history modals.
+    let follow = if follow_highlight {
+        highlighted_row
+    } else {
+        None
+    };
+    render_body(frame, f.body, body_lines, scroll, follow, false, theme);
+    record_question_hits(hit_map, f.body, &option_rows, *scroll);
 
     if let Some(fo) = f.footer {
         render_modal_footer(
@@ -157,6 +173,7 @@ pub fn draw_question_modal(
             fo,
             &[
                 FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::navigation("wheel/Pg", "scroll"),
                 FooterHint::primary("Enter", "submit"),
                 FooterHint::secondary("Space", "select"),
                 FooterHint::secondary("1-9", "jump"),
@@ -168,29 +185,68 @@ pub fn draw_question_modal(
     area
 }
 
-/// Map the highlighted option index to its row in the options line list, so
-/// [`render_body`] can follow it and keep it visible as the user moves the
-/// cursor. Each option takes one label row plus one description row when it
-/// has one.
-fn highlighted_option_row_index(
-    question: Option<&neenee_core::UserQuestion>,
-    highlighted: usize,
-) -> Option<usize> {
-    let q = question?;
-    let mut row = 0;
-    for (i, opt) in q.options.iter().enumerate() {
-        if i == highlighted {
-            return Some(row);
-        }
-        row += 1;
-        if opt.description.is_some() {
-            row += 1;
-        }
+fn record_question_hits(
+    hit_map: &mut ModalHitMap,
+    body: Rect,
+    option_rows: &[(usize, usize, usize)],
+    scroll: usize,
+) {
+    if body.width == 0 || body.height == 0 {
+        return;
     }
-    if highlighted == q.options.len() {
-        return Some(row);
+    let visible_top = scroll;
+    let visible_bottom = scroll + body.height as usize;
+    for &(option_index, start, end) in option_rows {
+        let top = start.max(visible_top);
+        let bottom = end.max(start + 1).min(visible_bottom);
+        if top >= bottom {
+            continue;
+        }
+        hit_map.push_question_option(QuestionOptionHit {
+            option_index,
+            rect: Rect::new(
+                body.x,
+                body.y + (top - visible_top) as u16,
+                body.width,
+                (bottom - top) as u16,
+            ),
+        });
     }
-    None
+}
+
+fn push_wrapped_styled(
+    lines: &mut Vec<Line>,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    text: &str,
+    style: Style,
+    body_width: usize,
+) {
+    let first_width = first_prefix.width();
+    let continuation_width = continuation_prefix.width();
+    let wrap_width = body_width
+        .saturating_sub(first_width.max(continuation_width))
+        .max(1);
+    let wrapped = wrap_text(text, wrap_width);
+    if wrapped.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            first_prefix.to_string(),
+            Style::default(),
+        )]));
+        return;
+    }
+
+    for (idx, wrapped_line) in wrapped.into_iter().enumerate() {
+        let prefix = if idx == 0 {
+            first_prefix
+        } else {
+            continuation_prefix
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default()),
+            Span::styled(wrapped_line.text, style),
+        ]));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -202,6 +258,7 @@ fn render_question_option(
     is_selected: bool,
     is_highlighted: bool,
     multi_select: bool,
+    body_width: usize,
     theme: &Theme,
 ) {
     // No row-number prefix and no `❯` focus glyph — the hover is signalled
@@ -232,12 +289,17 @@ fn render_question_option(
         Style::default().fg(theme.fg())
     };
 
-    let label_line = Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(format!("{} ", marker), marker_style),
-        Span::styled(label.to_string(), text_style),
-    ]);
-    lines.push(label_line);
+    let first_prefix = format!("  {} ", marker);
+    let continuation_prefix = "     ";
+    push_wrapped_styled_with_prefix_style(
+        lines,
+        &first_prefix,
+        continuation_prefix,
+        label,
+        marker_style,
+        text_style,
+        body_width,
+    );
 
     if let Some(desc) = description {
         let desc_style = if is_highlighted {
@@ -245,10 +307,45 @@ fn render_question_option(
         } else {
             Style::default().fg(theme.dim())
         };
-        lines.push(Line::from(vec![
-            Span::styled("     ", Style::default()),
-            Span::styled(desc.to_string(), desc_style),
-        ]));
+        push_wrapped_styled(lines, "     ", "     ", desc, desc_style, body_width);
+    }
+}
+
+fn push_wrapped_styled_with_prefix_style(
+    lines: &mut Vec<Line>,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    text: &str,
+    first_prefix_style: Style,
+    text_style: Style,
+    body_width: usize,
+) {
+    let first_width = first_prefix.width();
+    let continuation_width = continuation_prefix.width();
+    let wrap_width = body_width
+        .saturating_sub(first_width.max(continuation_width))
+        .max(1);
+    let wrapped = wrap_text(text, wrap_width);
+    if wrapped.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            first_prefix.to_string(),
+            first_prefix_style,
+        )]));
+        return;
+    }
+
+    for (idx, wrapped_line) in wrapped.into_iter().enumerate() {
+        if idx == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(first_prefix.to_string(), first_prefix_style),
+                Span::styled(wrapped_line.text, text_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(continuation_prefix.to_string(), Style::default()),
+                Span::styled(wrapped_line.text, text_style),
+            ]));
+        }
     }
 }
 
@@ -262,6 +359,7 @@ fn render_question_option(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_permission_sheet(
     frame: &mut Frame,
+    hit_map: &mut ModalHitMap,
     request: &PermissionRequest,
     selected: usize,
     confirm_always: bool,
@@ -368,6 +466,7 @@ pub fn draw_permission_sheet(
     let sheet_h = desired_h.max(input_rect.height).min(area_bottom).max(1);
     let sheet_top = area_bottom.saturating_sub(sheet_h);
     let area = Rect::new(input_rect.x, sheet_top, input_rect.width, sheet_h);
+    hit_map.set_permission_sheet(area);
 
     frame.render_widget(Clear, area);
     frame.render_widget(panel_block(theme.warn(), theme.panel()), area);
@@ -409,6 +508,7 @@ pub fn draw_permission_sheet(
     };
 
     let mut footer_spans: Vec<Span> = Vec::new();
+    let mut action_x = content_x;
     for (index, label) in labels.iter().enumerate() {
         let is_cancel = confirm_always && index == 1;
         let is_reject = !confirm_always && index == 2;
@@ -429,11 +529,19 @@ pub fn draw_permission_sheet(
         };
         if index > 0 {
             footer_spans.push(Span::styled("  ", Style::default().bg(theme.raised())));
+            action_x = action_x.saturating_add(2);
         }
+        let text = format!(" {} ", label);
+        let width = text.width().min(u16::MAX as usize) as u16;
+        hit_map.push_permission_action(PermissionActionHit {
+            action_index: index,
+            rect: Rect::new(action_x, footer_y, width, PERMISSION_FOOTER_HEIGHT),
+        });
         footer_spans.push(Span::styled(
-            format!(" {} ", label),
+            text,
             Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
         ));
+        action_x = action_x.saturating_add(width);
     }
     let hints: &[FooterHint] = if confirm_always {
         &[
@@ -480,4 +588,111 @@ pub fn draw_permission_sheet(
         Rect::new(content_x, footer_y, content_w, PERMISSION_FOOTER_HEIGHT),
     );
     max_scroll
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neenee_core::{UserQuestion, UserQuestionOption};
+
+    #[test]
+    fn question_modal_records_option_hit_boxes() {
+        let request = UserQuestionRequest {
+            id: "q".into(),
+            questions: vec![UserQuestion {
+                header: None,
+                question: "Pick one".into(),
+                options: vec![
+                    UserQuestionOption {
+                        label: "A".into(),
+                        description: None,
+                    },
+                    UserQuestionOption {
+                        label: "B".into(),
+                        description: Some("Second option".into()),
+                    },
+                ],
+                multi_select: false,
+            }],
+        };
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
+        let mut hit_map = ModalHitMap::new();
+        terminal.draw(|frame| {
+            let mut scroll = 0;
+            draw_question_modal(
+                frame,
+                &mut hit_map,
+                &request,
+                0,
+                &[vec![0]],
+                &[String::new()],
+                0,
+                &mut scroll,
+                true,
+                &Theme::default(),
+            );
+        });
+
+        assert!(find_question_hit(&hit_map, 80, 24, 0));
+        assert!(find_question_hit(&hit_map, 80, 24, 1));
+        assert!(find_question_hit(&hit_map, 80, 24, 2));
+    }
+
+    #[test]
+    fn permission_sheet_records_footer_action_hit_boxes() {
+        let request = PermissionRequest {
+            id: "p".into(),
+            tool: "bash".into(),
+            label: "bash".into(),
+            description: "Run a command".into(),
+            arguments: r#"{"command":"cargo test"}"#.into(),
+            scope: "*".into(),
+        };
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
+        let mut hit_map = ModalHitMap::new();
+        terminal.draw(|frame| {
+            let rect = Rect::new(0, 16, 80, 8);
+            let _ = draw_permission_sheet(
+                frame,
+                &mut hit_map,
+                &request,
+                0,
+                false,
+                false,
+                0,
+                rect,
+                &Theme::default(),
+            );
+        });
+
+        for action_index in 0..4 {
+            assert!(
+                find_permission_hit(&hit_map, 80, 24, action_index),
+                "missing permission action {action_index}"
+            );
+        }
+    }
+
+    fn find_question_hit(map: &ModalHitMap, width: u16, height: u16, option_index: usize) -> bool {
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                map.question_option_at(x, y)
+                    .is_some_and(|hit| hit.option_index == option_index)
+            })
+        })
+    }
+
+    fn find_permission_hit(
+        map: &ModalHitMap,
+        width: u16,
+        height: u16,
+        action_index: usize,
+    ) -> bool {
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                map.permission_action_at(x, y)
+                    .is_some_and(|hit| hit.action_index == action_index)
+            })
+        })
+    }
 }

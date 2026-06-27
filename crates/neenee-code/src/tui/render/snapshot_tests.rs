@@ -20,7 +20,7 @@ use crate::tui::layout::LayoutMap;
 use crate::tui::selection::SelectionState;
 
 use super::Theme;
-use super::step::draw_tool_step;
+use super::disclosure::draw_tool_step;
 
 /// Build a finished tool-step message with optional output and expand state.
 fn tool_step(
@@ -498,8 +498,8 @@ fn edit_file_diff_renders_from_structured_patch() {
 /// spacing between consecutive steps is captured. Backgrounds are omitted:
 /// these tests are about row counts, not palette.
 fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) -> String {
-    use crate::tui::layout::LayoutMap;
     use super::{Theme, TranscriptView, draw_transcript};
+    use crate::tui::layout::LayoutMap;
 
     let theme = Theme::default();
     let selection = SelectionState::default();
@@ -600,11 +600,7 @@ fn collapsed_tool_steps_stack_flush() {
         .filter(|(_, l)| l.contains("Read ") && (l.contains('+') || l.contains('-')))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(
-        header_idx.len(),
-        3,
-        "expected three Read headers:\n{grid}"
-    );
+    assert_eq!(header_idx.len(), 3, "expected three Read headers:\n{grid}");
     assert_eq!(
         header_idx[1] - header_idx[0],
         1,
@@ -639,10 +635,7 @@ fn expanded_body_pads_itself_neighbours_stay_flush() {
             r#"{"pattern":"foo","path":"src"}"#,
             neenee_core::ToolOutput::Matches {
                 pattern: "foo".into(),
-                lines: vec![
-                    "src/a.rs:10:1:foo".into(),
-                    "src/b.rs:5:1:foo".into(),
-                ],
+                lines: vec!["src/a.rs:10:1:foo".into(), "src/b.rs:5:1:foo".into()],
             },
             true, // expanded — body padded above + below
         ),
