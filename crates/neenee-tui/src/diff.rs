@@ -51,6 +51,8 @@ pub enum Draw {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrawCmd {
     pub draws: Vec<Draw>,
+    pub w: u16,
+    pub h: u16,
 }
 
 /// Diff `back` (desired) against `front` (current terminal state), emitting
@@ -73,7 +75,7 @@ pub fn diff(back: &Grid, front: &Grid) -> DrawCmd {
     let mut draws = Vec::new();
 
     let Some((lo, hi)) = back.dirty_rows() else {
-        return DrawCmd { draws };
+        return DrawCmd { draws, w, h };
     };
 
     for y in lo..=hi {
@@ -83,7 +85,7 @@ pub fn diff(back: &Grid, front: &Grid) -> DrawCmd {
         diff_row(&mut draws, back, front, y, start, w);
     }
 
-    DrawCmd { draws }
+    DrawCmd { draws, w, h }
 }
 
 /// Diff one row from `start_col` to the right edge, appending draw commands.

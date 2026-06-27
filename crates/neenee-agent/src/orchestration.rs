@@ -117,6 +117,18 @@ impl Provider for ProxyProvider {
         p.prepare_tools(tools);
     }
 
+    fn prepare_tools_with(
+        &self,
+        tools: &[Arc<dyn neenee_core::Tool>],
+        overrides: &neenee_core::ToolDescriptionOverrides,
+    ) {
+        let p = self
+            .holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        p.prepare_tools_with(tools, overrides);
+    }
+
     /// Delegate to the currently active inner provider so attribution tracks
     /// the live provider even after a mid-session `/provider` switch.
     fn provider_id(&self) -> String {

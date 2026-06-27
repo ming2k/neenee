@@ -146,13 +146,24 @@ impl<W: Write> Backend<W> {
     /// style delta, and write each run's symbols. Returns the number of draw
     /// commands processed.
     pub fn render(&mut self, cmd: &DrawCmd) -> io::Result<usize> {
+        let terminal_w = cmd.w;
+        let terminal_h = cmd.h;
+
         for draw in &cmd.draws {
             match draw {
                 Draw::Cells { x, y, style, cells } => {
                     self.move_to(*x, *y)?;
                     self.apply_style(*style)?;
+                    let mut current_x = *x;
                     for (sym, w) in cells {
+                        let is_bottom_right = *y == terminal_h.saturating_sub(1) && current_x + (*w as u16) >= terminal_w;
+                        if is_bottom_right {
+                            // Avoid printing to the very last cell of the terminal,
+                            // which would cause the emulator to auto-wrap and scroll.
+                            break;
+                        }
                         self.out.queue(crossterm::style::Print(sym.clone()))?;
+                        current_x += *w as u16;
                         // Advance our tracked cursor by the glyph's width; the
                         // trailing continuation column is implicit.
                         if let Some((cx, _cy)) = self.cur.as_mut() {
@@ -170,11 +181,17 @@ impl<W: Write> Backend<W> {
                         self.out.queue(terminal::Clear(ClearType::UntilNewLine))?;
                     } else {
                         // No BCE or non-default background: paint explicit styled spaces to the edge.
-                        for _ in 0..*width {
+                        let mut safe_width = *width;
+                        let is_bottom_row = *y == terminal_h.saturating_sub(1);
+                        if is_bottom_row {
+                            let max_safe_width = terminal_w.saturating_sub(*x).saturating_sub(1);
+                            safe_width = safe_width.min(max_safe_width);
+                        }
+                        for _ in 0..safe_width {
                             self.out.queue(crossterm::style::Print(" "))?;
                         }
                         if let Some((cx, _cy)) = self.cur.as_mut() {
-                            *cx = cx.saturating_add(*width);
+                            *cx = cx.saturating_add(safe_width);
                         }
                     }
                 }

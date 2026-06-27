@@ -288,6 +288,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reseed_prune_threshold(&agent, &config);
     }
 
+    // Seed per-model tool-description overrides for the startup model. The
+    // function schemas sent to the provider swap in any listed tool's
+    // replacement description; re-seeded on provider/model switch.
+    agent_setup::reseed_tool_overrides(&agent, &config);
+
     // Wire the `[agent]` config table: the opt-in hard-stop budget and the
     // verify hard-nudge toggle. (Session review is on-demand via `/review`,
     // so it has no config to seed.) All default to sensible values when the

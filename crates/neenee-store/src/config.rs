@@ -9,7 +9,8 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::{
-    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, WebSearchConfig,
+    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, ToolDescriptionOverrides,
+    WebSearchConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -277,6 +278,56 @@ pub struct Config {
     /// shell command at one lifecycle point; see [`HookSpec`].
     #[serde(default)]
     pub hooks: Vec<HookSpec>,
+    /// Per-model tool-description overrides (`[tool_overrides."<model-id>"]`
+    /// table). When talking to the named model, each listed tool's built-in
+    /// description is replaced in the function schema. See [`ToolOverridesConfig`].
+    #[serde(default)]
+    pub tool_overrides: ToolOverridesConfig,
+}
+
+/// Per-model tool-description overrides, deserialized from the
+/// `[tool_overrides]` section of `config.toml`. Maps a model id to a set of
+/// `{ tool_name = "replacement description" }` pairs; when the agent is
+/// talking to that model, each listed tool's built-in description is replaced
+/// in the function schema sent to the provider.
+///
+/// ```toml
+/// # Re-word how `read_file` is pitched to kimi-k2.7-code.
+/// [tool_overrides."kimi-k2.7-code"]
+/// read_file = "Read a file. Pass offset/limit for large files. Never omit them."
+/// todo = "Maintain the task list…"
+/// ```
+///
+/// Tools not listed keep their built-in description; models with no entry are
+/// unaffected. Only the `description` field of the function schema changes —
+/// the tool name and parameters are untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolOverridesConfig(pub HashMap<String, ModelToolOverrides>);
+
+/// One model's tool-description overrides. A transparent wrapper around the
+/// `tool_name → description` map so it serializes directly as a TOML table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModelToolOverrides(pub ToolDescriptionOverrides);
+
+impl ToolOverridesConfig {
+    /// Look up the description overrides for `model_id`, if any. Returns an
+    /// empty map (not `None`) for unknown models so callers can always borrow
+    /// `&ToolDescriptionOverrides`.
+    pub fn for_model(&self, model_id: &str) -> &ToolDescriptionOverrides {
+        self.0
+            .get(model_id)
+            .map(|m| &m.0)
+            .unwrap_or_else(|| neenee_core::empty_tool_description_overrides())
+    }
+}
+
+impl ModelToolOverrides {
+    /// Construct from an iterator of `(tool_name, description)` pairs.
+    pub fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
 }
 
 /// One lifecycle event hook entry (ADR-0025). Deserialized from a `[[hooks]]`
@@ -340,6 +391,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             agent: AgentConfig::default(),
             hooks: Vec::new(),
+            tool_overrides: ToolOverridesConfig::default(),
         }
     }
 }
@@ -445,4 +497,57 @@ mod tests {
         let parsed: Config = toml::from_str(&serialised).unwrap();
         assert_eq!(parsed.agent.hard_stop_rounds, 99);
     }
+
+    #[test]
+    fn tool_overrides_table_parses_and_resolves_per_model() {
+        // The table name mirrors the Config field name (`tool_overrides`), as
+        // serde maps struct fields to TOML keys verbatim — same convention as
+        // `[websearch]`, `[skills]`, etc. The model id is quoted because it
+        // contains dots/hyphens.
+        let toml_src = r#"
+            [tool_overrides."kimi-k2.7-code"]
+            read_file = "Always pass offset and limit."
+            todo = "Keep the list honest."
+
+            [tool_overrides."glm-5.2"]
+            bash = "Prefer explicit, idempotent commands."
+        "#;
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+
+        // Known model → its map; unknown tool within a known model → absent.
+        let kimi = cfg.tool_overrides.for_model("kimi-k2.7-code");
+        assert_eq!(kimi.get("read_file").unwrap(), "Always pass offset and limit.");
+        assert_eq!(kimi.get("todo").unwrap(), "Keep the list honest.");
+        assert!(kimi.get("bash").is_none());
+
+        // A different model gets its own independent map.
+        let glm = cfg.tool_overrides.for_model("glm-5.2");
+        assert_eq!(glm.get("bash").unwrap(), "Prefer explicit, idempotent commands.");
+        assert!(glm.get("read_file").is_none());
+
+        // Unknown model → empty (but borrowable without an Option).
+        let unknown = cfg.tool_overrides.for_model("does-not-exist");
+        assert!(unknown.is_empty());
+
+        // Absent table entirely → empty config, every lookup is empty.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.tool_overrides.for_model("kimi-k2.7-code").is_empty());
+    }
+
+    #[test]
+    fn tool_overrides_round_trip_through_serialise() {
+        let mut cfg = Config::default();
+        let map = ModelToolOverrides::from_iter([
+            ("read_file".to_string(), "desc A".to_string()),
+            ("bash".to_string(), "desc B".to_string()),
+        ]);
+        cfg.tool_overrides.0.insert("kimi-k2.7-code".to_string(), map);
+        let serialised = toml::to_string(&cfg).unwrap();
+        let parsed: Config = toml::from_str(&serialised).unwrap();
+        let resolved = parsed.tool_overrides.for_model("kimi-k2.7-code");
+        assert_eq!(resolved.get("read_file").unwrap(), "desc A");
+        assert_eq!(resolved.get("bash").unwrap(), "desc B");
+    }
 }
+
+

@@ -7,8 +7,29 @@ use crate::{Message, SubagentEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Per-model tool-description overrides: maps a tool's name to a replacement
+/// description string. When the agent builds a provider's tool schemas for the
+/// active model, an entry here replaces the tool's built-in [`Tool::description`]
+/// in the function schema — the name and parameters are untouched. This is how
+/// a single toolset can be re-worded to play to a particular model's strengths
+/// (or quirks) without forking the tool implementations.
+///
+/// Configured per model id under `[tool_overrides."<model-id>"]` in
+/// `config.toml`; the agent selects the map matching `Provider::model()`.
+pub type ToolDescriptionOverrides = HashMap<String, String>;
+
+/// A shared empty [`ToolDescriptionOverrides`] map, handy as a default borrow
+/// target so callers can always hand out `&ToolDescriptionOverrides` without
+/// an `Option`.
+pub fn empty_tool_description_overrides() -> &'static ToolDescriptionOverrides {
+    static EMPTY: std::sync::LazyLock<ToolDescriptionOverrides> =
+        std::sync::LazyLock::new(ToolDescriptionOverrides::new);
+    &EMPTY
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderStreamEvent {
@@ -49,6 +70,22 @@ pub trait Provider: Send + Sync {
     /// Called by the agent before each turn so the provider can prepare tool schemas.
     /// Default is a no-op for providers that don't support native function calling.
     fn prepare_tools(&self, _tools: &[Arc<dyn Tool>]) {}
+
+    /// Called by the agent before each turn so the provider can prepare tool
+    /// schemas, with per-model description overrides. When a tool's name is
+    /// present in `overrides`, its built-in description is replaced in the
+    /// generated function schema. The default delegates to
+    /// [`prepare_tools`](Self::prepare_tools), so providers that haven't opted
+    /// in simply ignore overrides. Providers that build function schemas
+    /// (OpenAI-/Anthropic-compatible) override this to thread overrides into
+    /// [`Tool::to_openai_function_with`].
+    fn prepare_tools_with(
+        &self,
+        tools: &[Arc<dyn Tool>],
+        _overrides: &ToolDescriptionOverrides,
+    ) {
+        self.prepare_tools(tools);
+    }
 
     /// Stable provider/solution identifier (e.g. `"kimi-code"`, `"gemini"`).
     /// The harness stamps it onto assistant messages so a session that mixes
@@ -231,6 +268,26 @@ pub trait Tool: Send + Sync {
             }
         })
     }
+
+    /// Like [`to_openai_function`](Self::to_openai_function), but the tool's
+    /// description is replaced when `overrides` contains an entry for this
+    /// tool's name. Used to re-word a tool per model without changing the tool
+    /// implementation. An empty or miss-having `overrides` map yields the same
+    /// schema as the plain method.
+    fn to_openai_function_with(&self, overrides: &ToolDescriptionOverrides) -> serde_json::Value {
+        let description = overrides
+            .get(self.name())
+            .map(String::as_str)
+            .unwrap_or_else(|| self.description());
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": description,
+                "parameters": self.parameters(),
+            }
+        })
+    }
 }
 
 /// What a tool call acts on, so the operation-scope gate can match it against
@@ -390,7 +447,7 @@ fn resolve_for_check(path: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandScope, OperationScope, ScopeTarget};
+    use super::{CommandScope, OperationScope, ScopeTarget, Tool};
     use std::path::PathBuf;
 
     #[test]
@@ -469,5 +526,72 @@ mod tests {
         assert_eq!(super::leading_program("   "), "");
         assert_eq!(super::leading_program("git"), "git");
         assert_eq!(super::leading_program("  git   status "), "git");
+    }
+
+    /// A minimal [`Tool`] stand-in so the schema-with-overrides tests can run
+    /// without pulling in the whole tool crate.
+    struct DummyTool {
+        name: &'static str,
+        desc: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl super::Tool for DummyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.desc
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn call(&self, _arguments: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn desc_of(schema: &serde_json::Value) -> &str {
+        schema["function"]["description"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn schema_uses_built_in_description_when_no_override() {
+        let tool = DummyTool {
+            name: "read_file",
+            desc: "built-in description",
+        };
+        let empty = super::ToolDescriptionOverrides::new();
+        let schema = tool.to_openai_function_with(&empty);
+        assert_eq!(desc_of(&schema), "built-in description");
+        // Plain method agrees (the override path is a strict superset).
+        assert_eq!(desc_of(&tool.to_openai_function()), "built-in description");
+    }
+
+    #[test]
+    fn override_replaces_description_for_named_tool_only() {
+        let tool = DummyTool {
+            name: "read_file",
+            desc: "built-in description",
+        };
+        let mut overrides = super::ToolDescriptionOverrides::new();
+        overrides.insert("read_file".to_string(), "custom model-specific wording".to_string());
+        overrides.insert("other_tool".to_string(), "unused".to_string());
+        let schema = tool.to_openai_function_with(&overrides);
+        assert_eq!(desc_of(&schema), "custom model-specific wording");
+        // Name and parameters are never touched by an override.
+        assert_eq!(schema["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn override_miss_leaves_built_in_description_intact() {
+        let tool = DummyTool {
+            name: "bash",
+            desc: "built-in description",
+        };
+        let mut overrides = super::ToolDescriptionOverrides::new();
+        overrides.insert("read_file".to_string(), "irrelevant".to_string());
+        let schema = tool.to_openai_function_with(&overrides);
+        assert_eq!(desc_of(&schema), "built-in description");
     }
 }

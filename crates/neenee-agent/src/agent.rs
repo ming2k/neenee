@@ -190,6 +190,12 @@ pub struct Agent {
     /// sections in rank order. User-channel sections are added in later
     /// migration stages.
     pub(crate) prompt_registry: crate::PromptRegistry,
+    /// Per-model tool-description overrides for the *current* model. When the
+    /// agent builds tool schemas for a turn, any tool whose name is present
+    /// here has its built-in description replaced. Seeded from
+    /// `[tool_overrides."<model-id>"]` config via [`Agent::set_tool_overrides`]
+    /// and re-seeded on model switch so it always tracks the live model.
+    tool_overrides: std::sync::Mutex<neenee_core::ToolDescriptionOverrides>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -337,6 +343,7 @@ impl Agent {
             identity,
             round_persist: std::sync::Mutex::new(None),
             prompt_registry: crate::prompt::default_prompt_registry(),
+            tool_overrides: std::sync::Mutex::new(neenee_core::ToolDescriptionOverrides::new()),
         }
     }
 
@@ -348,6 +355,18 @@ impl Agent {
             .context_prune_threshold_tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = budget_tokens;
+    }
+
+    /// Replace the tool-description overrides applied to the current model's
+    /// tool schemas. Seeded from `[tool_overrides."<model-id>"]` config and
+    /// re-applied on model switch so the wording always tracks the live model.
+    /// An empty map (the default) leaves every tool's built-in description
+    /// untouched.
+    pub fn set_tool_overrides(&self, overrides: neenee_core::ToolDescriptionOverrides) {
+        *self
+            .tool_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = overrides;
     }
 
     /// Replace the prompt registry wholesale. Used by sub-callers that need a
@@ -1038,7 +1057,12 @@ impl Agent {
         // applied here so a toggled-off tool's schema never reaches the
         // provider, which keeps the model from naming it in the first place.
         let visible = self.visible_tools();
-        self.provider.prepare_tools(&visible);
+        let overrides = self
+            .tool_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.provider.prepare_tools_with(&visible, &overrides);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
             guards: TurnState::guards_default(),
@@ -1160,7 +1184,12 @@ impl Agent {
         // applied here so a toggled-off tool's schema never reaches the
         // provider, which keeps the model from naming it in the first place.
         let visible = self.visible_tools();
-        self.provider.prepare_tools(&visible);
+        let overrides = self
+            .tool_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.provider.prepare_tools_with(&visible, &overrides);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
             guards: TurnState::guards_default(),

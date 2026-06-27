@@ -215,7 +215,7 @@ fn bce_clear_to_end_uses_clr_eol_only_for_default_bg() {
     // emits that sequence when handed an explicit ClearEol command.
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
-    let cmd = DrawCmd {
+    let cmd = DrawCmd { w: 10, h: 10,
         draws: vec![Draw::ClearEol {
             x: 2,
             y: 1,
@@ -236,7 +236,7 @@ fn bce_clear_to_end_uses_clr_eol_only_for_default_bg() {
 fn bce_clear_to_end_falls_back_to_spaces_without_bce() {
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
-    let cmd = DrawCmd {
+    let cmd = DrawCmd { w: 10, h: 10,
         draws: vec![Draw::ClearEol {
             x: 1,
             y: 0,
@@ -300,7 +300,7 @@ fn invalidate_emits_real_sgr_reset() {
 
     // First render a bold run so the terminal genuinely holds the BOLD
     // attribute (this is what a tool-step summary line does).
-    let bold_cmd = DrawCmd {
+    let bold_cmd = DrawCmd { w: 10, h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,
@@ -338,7 +338,7 @@ fn resize_then_repaint_does_not_inherit_stale_bold() {
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
 
-    let bold_cmd = DrawCmd {
+    let bold_cmd = DrawCmd { w: 10, h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,
@@ -346,7 +346,7 @@ fn resize_then_repaint_does_not_inherit_stale_bold() {
             cells: vec![("X".to_string(), 1)],
         }],
     };
-    let plain_cmd = DrawCmd {
+    let plain_cmd = DrawCmd { w: 10, h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,

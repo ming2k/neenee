@@ -24,3 +24,12 @@ pub fn reseed_prune_threshold(agent: &Agent, config: &Config) {
     let window = active_context_window(agent);
     agent.set_context_prune_threshold(config.compaction.resolve(window).prune_threshold_tokens);
 }
+
+/// Re-seed the per-model tool-description overrides so the function schemas
+/// sent to the provider always track the live model. Called at startup and
+/// after every provider/model switch. A model with no `[tool_overrides.<id>]`
+/// entry gets an empty map, leaving every tool's built-in description intact.
+pub fn reseed_tool_overrides(agent: &Agent, config: &Config) {
+    let model = agent.provider.model();
+    agent.set_tool_overrides(config.tool_overrides.for_model(&model).clone());
+}

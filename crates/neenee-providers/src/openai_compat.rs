@@ -500,6 +500,20 @@ impl Provider for OpenAiCompatProvider {
         });
     }
 
+    fn prepare_tools_with(
+        &self,
+        tools: &[Arc<dyn Tool>],
+        overrides: &neenee_core::ToolDescriptionOverrides,
+    ) {
+        let schemas: Vec<Value> = tools
+            .iter()
+            .map(|t| t.to_openai_function_with(overrides))
+            .collect();
+        let _ = self.tools.lock().map(|mut guard| {
+            *guard = Some(schemas);
+        });
+    }
+
     fn provider_id(&self) -> String {
         self.id.clone()
     }

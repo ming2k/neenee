@@ -12,7 +12,7 @@ use neenee_store::{config::Config, provider_usage::ProviderUsage};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
-use crate::agent_setup::reseed_prune_threshold;
+use crate::agent_setup::{reseed_prune_threshold, reseed_tool_overrides};
 use crate::session_view::provider_key_status;
 
 /// `AgentRequest::SwitchProvider` — persist the chosen key/url/model/default,
@@ -92,6 +92,9 @@ pub async fn switch(
     // The new model may have a different context window; re-seed
     // the mid-turn prune threshold so relief tracks it.
     reseed_prune_threshold(agent, config);
+    // Tool-description overrides are keyed by model id, so they must
+    // re-track the live model too.
+    reseed_tool_overrides(agent, config);
 
     let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(config)));
     // Record the switch as an activation so the picker's recency
@@ -154,6 +157,8 @@ pub async fn set_default_model(
     // Re-seed mid-turn relief for the newly activated model's
     // context window.
     reseed_prune_threshold(agent, config);
+    // Tool-description overrides track the live model id.
+    reseed_tool_overrides(agent, config);
     provider_usage.record(&id);
     if let Err(error) = provider_usage.save() {
         tracing::warn!(?error, "could not persist model usage telemetry");
