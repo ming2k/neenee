@@ -28,7 +28,7 @@ pub use help::draw_help_modal;
 pub use history::draw_history_modal;
 pub use permission::{draw_permission_sheet, draw_question_modal};
 pub(crate) use permissions_manager::draw_permissions_manager;
-pub(crate) use provider::{draw_model_editor, draw_model_picker, draw_models_modal};
+pub(crate) use provider::{draw_model_editor, draw_models_modal};
 pub use session::{draw_session_modal, draw_sessions_modal};
 pub use toast::{draw_armed_toast, draw_copy_toast};
 pub use tool_step_detail::draw_tool_step_detail_overlay;

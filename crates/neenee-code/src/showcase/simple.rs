@@ -33,6 +33,8 @@ struct ProviderState {
     index: usize,
     query: String,
     cursor: usize,
+    scroll: usize,
+    search: bool,
     picker: ProviderPickerSnapshot,
     key_status: HashMap<String, bool>,
     solutions: Vec<crate::tui::ProviderPreset>,
@@ -68,6 +70,8 @@ pub fn provider() -> io::Result<()> {
         index: 0,
         query: String::new(),
         cursor: 0,
+        scroll: 0,
+        search: false,
         picker,
         key_status,
         solutions,
@@ -77,22 +81,31 @@ pub fn provider() -> io::Result<()> {
         &mut state,
         |f, s| {
             let title = format!(
-                " provider picker · {} providers · type to filter · q/Ctrl+C=quit",
+                " model picker · {} providers · / to search · q/Ctrl+C=quit",
                 s.solutions.len(),
             );
-            let hint = " ↑↓ navigate · Enter select · type to filter · Esc clear/quit ";
+            let hint = " ↑↓ navigate · Enter select · / search · Esc back/quit ";
             common::draw_with_chrome(f, &title, hint, &theme, |f| {
                 let mut lm = LayoutMap::new();
+                let query = if s.search { s.query.trim() } else { "" };
+                let ranked = crate::tui::models_filtered_from(&s.solutions, &s.picker, query);
+                // The draw closure borrows state immutably; follow-selection
+                // re-anchors the scroll each frame, so a frame-local offset is
+                // sufficient for the showcase.
+                let mut scroll = s.scroll;
                 draw_models_modal(
                     f,
                     &mut lm,
-                    &s.solutions,
+                    &ranked,
                     &s.picker.default_id,
+                    "",
                     s.index,
                     &s.key_status,
-                    &s.picker,
                     &s.query,
                     s.cursor,
+                    &mut scroll,
+                    true,
+                    s.search,
                     &theme,
                 );
             });
@@ -100,25 +113,33 @@ pub fn provider() -> io::Result<()> {
         |s, key| -> ShowAction {
             match key.code {
                 KeyCode::Esc => {
-                    if s.query.is_empty() {
-                        return ShowAction::Exit;
+                    // Two-stage Esc, mirroring the real picker: search → browse,
+                    // then browse → quit.
+                    if s.search {
+                        s.search = false;
+                        s.query.clear();
+                        s.cursor = 0;
+                        s.index = 0;
+                        return ShowAction::Continue;
                     }
-                    s.query.clear();
-                    s.cursor = 0;
-                    s.index = 0;
-                    ShowAction::Continue
+                    ShowAction::Exit
                 }
-                KeyCode::Up if s.query.is_empty() => {
+                KeyCode::Up => {
                     if s.index > 0 {
                         s.index -= 1;
                     }
                     ShowAction::Continue
                 }
-                KeyCode::Down if s.query.is_empty() => {
+                KeyCode::Down => {
                     s.index += 1;
                     ShowAction::Continue
                 }
-                KeyCode::Backspace => {
+                KeyCode::Char('/') if !s.search => {
+                    s.search = true;
+                    s.index = 0;
+                    ShowAction::Continue
+                }
+                KeyCode::Backspace if s.search => {
                     if s.cursor > 0 {
                         s.cursor -= 1;
                         s.query.remove(s.cursor);
@@ -126,7 +147,7 @@ pub fn provider() -> io::Result<()> {
                     s.index = 0;
                     ShowAction::Continue
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if s.search => {
                     s.query.insert(s.cursor, c);
                     s.cursor += 1;
                     s.index = 0;

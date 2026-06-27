@@ -507,10 +507,11 @@ fn history_rows_browses_reverse_then_ranks_search() {
 #[test]
 fn history_modal_is_click_dismissable_and_restores_draft() {
     use crate::tui::app::Modal;
-    // The history modal joins the click-outside-to-dismiss set (its filter is
-    // ephemeral); entry modals that hold precious input stay non-dismissable.
+    // The history modal and the flat model picker join the click-outside-to-
+    // dismiss set (their filter is ephemeral, the draft is parked); entry modals
+    // that hold precious input (the editor) stay non-dismissable.
     assert!(Modal::HistorySearch.dismissable_by_outside_click());
-    assert!(!Modal::Provider.dismissable_by_outside_click());
+    assert!(Modal::Provider.dismissable_by_outside_click());
     assert!(!Modal::ModelEditor.dismissable_by_outside_click());
 
     // restore_history_draft hands the parked composer draft back and clears the
@@ -635,13 +636,15 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         copy_toast_failed: false,
         ctrl_c_armed_ticks: 0,
         esc_armed_ticks: 0,
-        spinner_tick: 0,
+        spinner_epoch: std::time::Instant::now(),
         stashed_input: String::new(),
         editor_target: None,
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
-        model_picker_provider: None,
+        model_search: false,
+        model_scroll: 0,
+        model_modal_follow: true,
         key_status: HashMap::new(),
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),

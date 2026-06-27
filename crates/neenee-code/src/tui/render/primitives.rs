@@ -98,8 +98,7 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
     };
 
     Some(match modal {
-        Modal::Provider => fixed(72, 60),
-        Modal::ModelPicker => fixed(64, 60),
+        Modal::Provider => fixed(72, 72),
         Modal::HistorySearch => fixed(70, 72),
         Modal::Question => fixed(78, 70),
         Modal::ModelEditor => fixed(60, 36),
@@ -661,7 +660,6 @@ mod tests {
     fn modal_specs_cover_runtime_centered_modals() {
         for modal in [
             Modal::Provider,
-            Modal::ModelPicker,
             Modal::HistorySearch,
             Modal::Question,
             Modal::ModelEditor,

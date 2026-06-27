@@ -1,4 +1,4 @@
-//! Provider picker and API-key / model-id editor modals.
+//! Flat model picker and API-key / model-id editor modals.
 
 use std::collections::HashMap;
 
@@ -8,59 +8,64 @@ use neenee_tui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::layout::LayoutMap;
-use neenee_core::ProviderPickerSnapshot;
 
 use super::common::{caret_column, truncate_ellipsis};
-use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     FooterHint, contrast_fg, modal_area, modal_frame, render_body, render_modal_footer,
 };
+use crate::tui::{Modal, PROVIDERS, RankedModel};
 
-/// Draw the provider picker The input line is borrowed as a
-/// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
-/// activates (the default on an empty filter, the highlighted row otherwise);
-/// `*` toggles a favorite.
+/// Draw the flat model picker — a single searchable list of every
+/// `(provider, model)` pair. Mirrors the input-history modal's two-mode design:
 ///
-/// `query` / `cursor_position` are the borrowed filter (the composer input
-/// while the modal is open). `key_status` is the legacy per-provider key map,
-/// retained for the readiness glyph. `provider_picker` carries the favorite /
-/// last-used / default signals.
+/// - **browse** (`search == false`): a plain ranked list (favorites → last-used
+///   → name), no editable field, `/` enters search, `*` favorites the row's
+///   provider and `e` opens its editor;
+/// - **search** (`search == true`): the header becomes a `› <query>` field with
+///   the real caret and each row highlights the matched query characters.
+///
+/// `ranked` is the pre-computed [`RankedModel`] list (from
+/// [`crate::tui::App::models_filtered`]); `modal_index` selects into it.
+/// `key_status` maps provider id → key-ready for the readiness glyph. `scroll`
+/// is read and written back so the offset stays consistent with the clamped
+/// body height; `follow_selection` keeps `modal_index` in view after navigation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_models_modal(
     frame: &mut Frame,
     _layout_map: &mut LayoutMap,
-    solutions: &[crate::tui::ProviderPreset],
+    ranked: &[RankedModel],
     current_provider: &str,
+    current_model: &str,
     modal_index: usize,
     key_status: &HashMap<String, bool>,
-    provider_picker: &ProviderPickerSnapshot,
     query: &str,
     cursor_position: usize,
+    scroll: &mut usize,
+    follow_selection: bool,
+    search: bool,
     theme: &Theme,
 ) -> neenee_tui::Rect {
-    let area = modal_area(frame, Modal::Provider).expect("provider modal has fixed geometry");
+    let area = modal_area(frame, Modal::Provider).expect("model picker modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
-
-    // Filter + sort once for the frame; the input handler shares the same
-    // function so selection and rendering never diverge.
-    let ranked = crate::tui::providers_filtered_from(solutions, provider_picker, query.trim());
 
     let header_rect = f.header;
     if let Some(h) = header_rect {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Models",
-                    Style::default()
-                        .fg(theme.brand())
-                        .add_modifier(Modifier::BOLD),
-                ),
+        let title = Span::styled(
+            "Models",
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        );
+        let header_line = if search {
+            // Search sub-layer: the title doubles as the filter field.
+            Line::from(vec![
+                title,
                 Span::raw("  "),
-                Span::styled("❯ ", Style::default().fg(theme.muted())),
+                Span::styled("› ", Style::default().fg(theme.muted())),
                 Span::styled(
                     if query.is_empty() {
-                        "type to filter · enter selects default"
+                        "type to fuzzy-filter"
                     } else {
                         query
                     },
@@ -72,205 +77,178 @@ pub(crate) fn draw_models_modal(
                         })
                         .add_modifier(Modifier::BOLD),
                 ),
-            ])),
-            h,
-        );
+            ])
+        } else {
+            // Browse mode: plain title plus a hint to reach search.
+            Line::from(vec![
+                title,
+                Span::raw("  "),
+                Span::styled("· / to search", Style::default().fg(theme.muted())),
+            ])
+        };
+        frame.render_widget(Paragraph::new(header_line), h);
     }
 
+    let body = list_body(
+        ranked,
+        current_provider,
+        current_model,
+        key_status,
+        modal_index,
+        theme,
+        f.body.width as usize,
+    );
+    let follow = if follow_selection {
+        Some(modal_index)
+    } else {
+        None
+    };
+    render_body(frame, f.body, body, scroll, follow, false, theme);
+
+    if let Some(fo) = f.footer {
+        let hints: &[FooterHint] = if search {
+            &[
+                FooterHint::secondary("type", "filter"),
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::primary("Enter", "activate"),
+                FooterHint::always("Esc", "back"),
+            ]
+        } else {
+            &[
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::secondary("/", "search"),
+                FooterHint::primary("Enter", "activate"),
+                FooterHint::secondary("*", "favorite"),
+                FooterHint::secondary("e", "edit"),
+                FooterHint::always("Esc", "close"),
+            ]
+        };
+        render_modal_footer(frame, fo, hints, theme);
+    }
+
+    // The real terminal caret only exists in search mode — browse mode has no
+    // editable field. Place it in the header filter field after `Models  › `.
+    if search {
+        if let Some(h) = header_rect {
+            let prefix = "Models  › ".width() as u16;
+            let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+            let cursor_y = h.y;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+    area
+}
+
+/// Build the one-line-per-model list body. Each row is
+/// `★ ● <key> <model display>  <provider>`, with the model name bold and the
+/// provider name dimmed; in search mode the fuzzy-matched characters of the
+/// label are underlined/bolded. The match positions index into each row's
+/// `label`, so they map directly onto the rendered characters.
+fn list_body(
+    ranked: &[RankedModel],
+    current_provider: &str,
+    current_model: &str,
+    key_status: &HashMap<String, bool>,
+    modal_index: usize,
+    theme: &Theme,
+    body_width: usize,
+) -> Vec<Line<'static>> {
     let mut body: Vec<Line> = Vec::new();
-    let body_w = f.body.width as usize;
     if ranked.is_empty() {
         body.push(Line::from(""));
         body.push(Line::from(Span::styled(
             " (no matches — try a shorter or different query)",
             Style::default().fg(theme.muted()),
         )));
-    } else {
-        for (row, (sol_idx, picker_row)) in ranked.iter().enumerate() {
-            let solution = &solutions[*sol_idx];
-            let is_current = solution.id == current_provider;
-            let is_selected = row == modal_index;
-            let row_bg = if is_selected {
-                theme.brand()
-            } else {
-                theme.panel()
-            };
-            let row_fg = if is_selected {
-                contrast_fg(theme.brand())
-            } else {
-                theme.fg()
-            };
-            let base = Style::default().bg(row_bg).fg(row_fg);
-            let dim = if is_selected {
-                Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
-            } else {
-                Style::default().fg(theme.muted())
-            };
-            let star = if picker_row.favorite { "★ " } else { "  " };
-            let dot = if is_current { "● " } else { "  " };
-            let (key_label, key_color) = match key_status.get(solution.id) {
-                Some(true) => ("✓", theme.ok()),
-                Some(false) => ("✗", theme.err()),
-                None => ("", row_fg),
-            };
-            let key_style = if is_selected {
-                Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
-            } else {
-                Style::default().fg(key_color)
-            };
-            let star_style = if picker_row.favorite {
-                Style::default().bg(row_bg).fg(if is_selected {
-                    contrast_fg(theme.brand())
-                } else {
-                    theme.warn()
-                })
-            } else {
-                dim
-            };
-
-            // Fixed overhead: "★ "(3) + dot(2) + name(17) + key(3) = 25.
-            // Model + "· " + description share the rest.
-            let avail = body_w.saturating_sub(25);
-            let model_max = avail.clamp(1, 40);
-            let trunc_model = truncate_ellipsis(solution.model, model_max);
-            let model_w = trunc_model.width();
-            let desc_max = avail.saturating_sub(model_w + 1 + 2).max(1);
-            let trunc_desc = if solution.description.is_empty() {
-                String::new()
-            } else {
-                truncate_ellipsis(solution.description, desc_max)
-            };
-
-            let mut spans = vec![
-                Span::styled(format!(" {}", star), star_style),
-                Span::styled(dot.to_string(), dim),
-                Span::styled(
-                    format!("{:<16} ", solution.name),
-                    base.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{:<2} ", key_label), key_style),
-                Span::styled(format!("{} ", trunc_model), dim),
-            ];
-            if !trunc_desc.is_empty() {
-                spans.push(Span::styled(format!("· {}", trunc_desc), dim));
-            }
-            body.push(Line::from(spans));
-        }
-    }
-    render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);
-
-    if let Some(fo) = f.footer {
-        render_modal_footer(
-            frame,
-            fo,
-            &[
-                FooterHint::secondary("type", "filter"),
-                FooterHint::navigation("↑↓", "navigate"),
-                FooterHint::primary("Enter", "activate"),
-                FooterHint::secondary("*", "favorite"),
-                FooterHint::always("Esc", "close"),
-            ],
-            theme,
-        );
+        return body;
     }
 
-    // Place the real terminal caret in the filter field (the header row, after
-    // the `Models  ❯ ` prefix) so typing visibly tracks the insertion point.
-    if let Some(h) = header_rect {
-        let prefix = "Models  ❯ ".width() as u16;
-        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
-        let cursor_y = h.y;
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
-    area
-}
-
-/// Draw the second-stage model picker for a multi-model provider (opencode-go).
-/// Lists the provider's models with their display names; the highlighted row is
-/// activated on `Enter`. Esc returns to the provider picker.
-pub(crate) fn draw_model_picker(
-    frame: &mut Frame,
-    _layout_map: &mut LayoutMap,
-    solution: &crate::tui::ProviderPreset,
-    current_model: &str,
-    modal_index: usize,
-    theme: &Theme,
-) -> neenee_tui::Rect {
-    let area =
-        modal_area(frame, Modal::ModelPicker).expect("model picker modal has fixed geometry");
-    let f = modal_frame(frame, area, theme.panel(), true, true);
-
-    let header_rect = f.header;
-    if let Some(h) = header_rect {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Models",
-                    Style::default()
-                        .fg(theme.brand())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled("❯ ", Style::default().fg(theme.muted())),
-                Span::styled(
-                    format!("{} — pick a model", solution.name),
-                    Style::default().fg(theme.muted()),
-                ),
-            ])),
-            h,
-        );
-    }
-
-    let mut body: Vec<Line> = Vec::new();
-    let body_w = f.body.width as usize;
-    for (row, &mid) in solution.models.iter().enumerate() {
-        let is_current = mid == current_model;
+    for (row, rm) in ranked.iter().enumerate() {
+        let solution = PROVIDERS[rm.provider_idx];
+        let is_current = solution.id == current_provider && rm.model == current_model;
         let is_selected = row == modal_index;
-        let row_bg = if is_selected {
+        let bg = if is_selected {
             theme.brand()
         } else {
             theme.panel()
         };
-        let row_fg = if is_selected {
-            contrast_fg(theme.brand())
-        } else {
-            theme.fg()
+        let sel_fg = contrast_fg(theme.brand());
+
+        let star = if rm.favorite { "★ " } else { "  " };
+        let dot = if is_current { "● " } else { "  " };
+        let (key_label, key_color) = match key_status.get(solution.id) {
+            Some(true) => ("✓ ", theme.ok()),
+            Some(false) => ("✗ ", theme.err()),
+            None => ("  ", theme.muted()),
         };
-        let base = Style::default().bg(row_bg).fg(row_fg);
-        let dim = if is_selected {
-            Style::default().bg(row_bg).fg(contrast_fg(theme.brand()))
+
+        let star_style = if is_selected {
+            Style::default().bg(bg).fg(sel_fg)
+        } else if rm.favorite {
+            Style::default().fg(theme.warn())
         } else {
             Style::default().fg(theme.muted())
         };
-        let dot = if is_current { "● " } else { "  " };
-        let display = crate::tui::providers::model_display_name(mid);
-        // Fixed overhead: dot(2) + display(19) = 21.
-        let mid_max = body_w.saturating_sub(21).max(1);
-        let trunc_mid = truncate_ellipsis(mid, mid_max);
-        body.push(Line::from(vec![
-            Span::styled(dot.to_string(), dim),
-            Span::styled(
-                format!("{:<18} ", display),
-                base.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(trunc_mid, dim),
-        ]));
-    }
-    render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);
+        let dim_style = if is_selected {
+            Style::default().bg(bg).fg(sel_fg)
+        } else {
+            Style::default().fg(theme.muted())
+        };
+        let key_style = if is_selected {
+            Style::default().bg(bg).fg(sel_fg)
+        } else {
+            Style::default().fg(key_color)
+        };
+        // Model-name characters: bold; provider-name characters: dim.
+        let model_style = if is_selected {
+            Style::default()
+                .bg(bg)
+                .fg(sel_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+        };
+        let provider_style = dim_style;
+        let matched_style = if is_selected {
+            Style::default()
+                .bg(bg)
+                .fg(sel_fg)
+                .add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default()
+                .bg(bg)
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD)
+        };
 
-    if let Some(fo) = f.footer {
-        render_modal_footer(
-            frame,
-            fo,
-            &[
-                FooterHint::navigation("↑↓", "navigate"),
-                FooterHint::primary("Enter", "activate"),
-                FooterHint::always("Esc", "back"),
-            ],
-            theme,
-        );
+        // Fixed prefix: star(2) + dot(2) + key(2) = 6 columns.
+        const PREFIX_COLS: usize = 6;
+        let label_max = body_width.saturating_sub(PREFIX_COLS).max(1);
+        let label = truncate_ellipsis(&rm.label, label_max);
+
+        let matched: std::collections::HashSet<usize> = rm
+            .m
+            .as_ref()
+            .map(|m| m.positions.iter().copied().collect())
+            .unwrap_or_default();
+
+        let mut spans: Vec<Span> = Vec::with_capacity(label.chars().count() + 3);
+        spans.push(Span::styled(format!(" {star}"), star_style));
+        spans.push(Span::styled(dot.to_string(), dim_style));
+        spans.push(Span::styled(key_label.to_string(), key_style));
+        for (char_idx, c) in label.chars().enumerate() {
+            let style = if matched.contains(&char_idx) {
+                matched_style
+            } else if char_idx < rm.model_w {
+                model_style
+            } else {
+                provider_style
+            };
+            spans.push(Span::styled(c.to_string(), style));
+        }
+        body.push(Line::from(spans));
     }
-    area
+    body
 }
 
 /// Draw the unified provider editor Two fields — API key

@@ -43,17 +43,25 @@ pub struct InputContext {
     /// is browse mode (typing is inert, `/` enters search), `true` borrows the
     /// composer line as the live fuzzy query. Mirrors `App::history_search`.
     pub history_searching: bool,
+    /// Whether the model picker's search sub-layer is active. Only meaningful
+    /// while [`Self::active_modal`] is [`super::Modal::Provider`]: `false` is
+    /// browse mode (typing is inert, `/` enters search, `*`/`e` act on the row),
+    /// `true` borrows the composer line as the live fuzzy query. Mirrors
+    /// `App::model_search`.
+    pub model_searching: bool,
 }
 
 /// Whether `modal` currently treats the composer line as an editable free-text
 /// field — the surfaces where printable keys, Backspace, and the readline
 /// editing family (Ctrl+A/E/W/U/K, Alt+B/F/D, …) act on the input buffer. The
-/// history modal only qualifies while its search sub-layer is active
-/// (`history_searching`); in browse mode those keys are inert so `/` can open
-/// search and stray letters never mutate a buffer the user isn't editing.
-fn edits_input_field(modal: super::Modal, history_searching: bool) -> bool {
+/// history and model-picker modals only qualify while their search sub-layer is
+/// active (`history_searching` / `model_searching`); in browse mode those keys
+/// are inert so `/` can open search and stray letters never mutate a buffer the
+/// user isn't editing.
+fn edits_input_field(modal: super::Modal, history_searching: bool, model_searching: bool) -> bool {
     match modal {
-        super::Modal::None | super::Modal::Provider | super::Modal::ModelEditor => true,
+        super::Modal::None | super::Modal::ModelEditor => true,
+        super::Modal::Provider => model_searching,
         super::Modal::HistorySearch => history_searching,
         _ => false,
     }
@@ -213,6 +221,13 @@ pub enum InputAction {
     /// clear the query and return to the full reverse-chronological browse
     /// list. A second Esc then closes the modal.
     HistoryExitSearch,
+    /// Enter the model picker's search sub-layer (`/` in browse mode): start
+    /// borrowing the composer line as a live fuzzy query and re-rank the list.
+    ModelEnterSearch,
+    /// Leave the model picker's search sub-layer (first Esc while searching):
+    /// clear the query and return to the full browse list. A second Esc then
+    /// closes the modal.
+    ModelExitSearch,
     /// Select modal item up.
     ModalUp,
     /// Select modal item down.
@@ -603,6 +618,13 @@ pub fn process_event(
                         // Two-stage Esc: leave the search sub-layer back to the
                         // browse list first; the next Esc (browse mode) closes.
                         InputAction::HistoryExitSearch
+                    } else if context.active_modal == super::Modal::Provider
+                        && context.model_searching
+                    {
+                        // Same two-stage Esc as the history modal: the first Esc
+                        // drops the model picker's search sub-layer back to the
+                        // browse list; the next Esc (browse mode) closes.
+                        InputAction::ModelExitSearch
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
                     } else if context.in_side_view {
@@ -689,9 +711,6 @@ pub fn process_event(
                 }
                 KeyCode::Enter => match context.active_modal {
                     super::Modal::Provider => InputAction::ProviderPickerActivate,
-                    // Enter in the second-stage model picker activates the
-                    // highlighted model (same action as the provider picker).
-                    super::Modal::ModelPicker => InputAction::ProviderPickerActivate,
                     super::Modal::ModelEditor => InputAction::SubmitModelEditor,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
@@ -811,7 +830,7 @@ pub fn process_event(
                 // inserts the text at the cursor (main prompt), or splices it
                 // inline into the modal field (modals).
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         InputAction::Paste
                     } else {
                         InputAction::None
@@ -823,7 +842,7 @@ pub fn process_event(
                 // is edited; a no-op elsewhere so it never inserts a literal
                 // 'b' or scrolls.
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching)
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
                         && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -836,14 +855,14 @@ pub fn process_event(
                 // modals. Outside those (Browse zone, read-only modals) it is
                 // a no-op so it never inserts a literal 'a' or scrolls.
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         cursor_line_start(input, cursor_position);
                     }
                     InputAction::None
                 }
                 // Ctrl+E: move the caret to the end of the current line.
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         cursor_line_end(input, cursor_position);
                     }
                     InputAction::None
@@ -856,7 +875,7 @@ pub fn process_event(
                 // newlines. No-op outside free-text surfaces so it never
                 // closes a modal or inserts a literal 'w'.
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let start = prev_word_start(input, *cursor_position);
                         if start < *cursor_position {
                             let start_byte = input
@@ -881,7 +900,7 @@ pub fn process_event(
                 // drafts only lose the current line; Ctrl+C still clears the
                 // whole buffer when the user wants a full wipe.
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let mut start = *cursor_position;
                         cursor_line_start(input, &mut start);
                         if start < *cursor_position {
@@ -906,7 +925,7 @@ pub fn process_event(
                 // logical line (readline `kill-line`). Stops at the next
                 // newline so multi-line drafts keep their other lines.
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let mut end = *cursor_position;
                         cursor_line_end(input, &mut end);
                         if end > *cursor_position {
@@ -928,14 +947,14 @@ pub fn process_event(
                 }
                 // Alt+B: jump back one word (readline `backward-word`).
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         *cursor_position = prev_word_start(input, *cursor_position);
                     }
                     InputAction::None
                 }
                 // Alt+F: jump forward one word (readline `forward-word`).
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         *cursor_position = next_word_end(input, *cursor_position);
                     }
                     InputAction::None
@@ -943,7 +962,7 @@ pub fn process_event(
                 // Alt+D: delete the next whitespace-delimited word (readline
                 // `kill-word`). Symmetric counterpart to Ctrl+W.
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching) {
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let end = next_word_end(input, *cursor_position);
                         if end > *cursor_position {
                             let start_byte = input
@@ -1001,21 +1020,27 @@ pub fn process_event(
                     // through to the input box below (the focus highlight stays
                     // until Esc / Enter). `Enter` activates the focused step;
                     // `Space` just inserts a space.
-                    if context.active_modal == super::Modal::Provider && c == '*' {
-                        // Star a model as a favorite. `*` is chosen over `f`
-                        // because every letter collides with the fuzzy filter
-                        // (you could never start a query for "flash" or
-                        // "deepseek"). `*` evokes the favorite star and never
-                        // begins a model-name query.
+                    if context.active_modal == super::Modal::Provider
+                        && !context.model_searching
+                        && c == '/'
+                    {
+                        // Browse mode: `/` opens the search sub-layer rather than
+                        // inserting a literal slash — mirrors the history modal.
+                        InputAction::ModelEnterSearch
+                    } else if context.active_modal == super::Modal::Provider
+                        && !context.model_searching
+                        && c == '*'
+                    {
+                        // Browse mode only: star the highlighted provider as a
+                        // favorite. In the search sub-layer `*` is a query char.
                         InputAction::ProviderPickerToggleFavorite
                     } else if context.active_modal == super::Modal::Provider
+                        && !context.model_searching
                         && c == 'e'
-                        && input.is_empty()
                     {
-                        // `e` opens the editor for the highlighted row. Gated
-                        // on an empty filter so it never fights typing: no
-                        // built-in model name starts with `e`, so clearing the
-                        // filter then pressing `e` always reaches the editor.
+                        // Browse mode only: `e` opens the editor for the
+                        // highlighted row (key + model id). In search mode `e`
+                        // is a query char.
                         InputAction::OpenModelEditor
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
@@ -1032,7 +1057,7 @@ pub fn process_event(
                         // inert here (`edits_input_field` is false), so the list
                         // stays a pure browse surface until search is entered.
                         InputAction::HistoryEnterSearch
-                    } else if edits_input_field(context.active_modal, context.history_searching) {
+                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         let byte_pos = input
                             .char_indices()
                             .map(|(i, _)| i)
@@ -1053,7 +1078,7 @@ pub fn process_event(
                 KeyCode::Backspace => {
                     if context.active_modal == super::Modal::Question {
                         InputAction::QuestionBackspace
-                    } else if edits_input_field(context.active_modal, context.history_searching)
+                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
                         && *cursor_position > 0
                     {
                         // Alt+Backspace / Ctrl+Backspace delete the previous
@@ -1127,7 +1152,7 @@ pub fn process_event(
                         return InputAction::ModalUp;
                     }
 
-                    if edits_input_field(context.active_modal, context.history_searching)
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
                         && *cursor_position > 0
                     {
                         // Ctrl+Left (and Alt+Left on terminals that translate
@@ -1149,7 +1174,7 @@ pub fn process_event(
                         return InputAction::ModalDown;
                     }
 
-                    if edits_input_field(context.active_modal, context.history_searching)
+                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
                         && *cursor_position < input.chars().count()
                     {
                         // Ctrl+Right (and Alt+Right) jump forward one word.
@@ -1185,7 +1210,6 @@ pub fn process_event(
                 }
                 KeyCode::Up => match context.active_modal {
                     super::Modal::Provider => InputAction::ModalUp,
-                    super::Modal::ModelPicker => InputAction::ModalUp,
                     super::Modal::HistorySearch => InputAction::ModalUp,
                     super::Modal::Sessions => InputAction::ModalUp,
                     super::Modal::Question => InputAction::QuestionUp,
@@ -1234,7 +1258,6 @@ pub fn process_event(
                 },
                 KeyCode::Down => match context.active_modal {
                     super::Modal::Provider => InputAction::ModalDown,
-                    super::Modal::ModelPicker => InputAction::ModalDown,
                     super::Modal::HistorySearch => InputAction::ModalDown,
                     super::Modal::Sessions => InputAction::ModalDown,
                     super::Modal::Question => InputAction::QuestionDown,
@@ -1298,7 +1321,7 @@ pub fn process_event(
                             && context.has_focused_target)
                     {
                         InputAction::ScrollTop
-                    } else if edits_input_field(context.active_modal, context.history_searching) {
+                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
                     } else {
@@ -1311,7 +1334,7 @@ pub fn process_event(
                             && context.has_focused_target)
                     {
                         InputAction::ScrollBottom
-                    } else if edits_input_field(context.active_modal, context.history_searching) {
+                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
                     } else {
@@ -1327,7 +1350,7 @@ pub fn process_event(
             // splice it inline into the focused field in the free-text
             // modals (provider editor, provider picker filter, history
             // search).
-            if edits_input_field(context.active_modal, context.history_searching) {
+            if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
                 InputAction::BracketedPaste(text)
             } else {
                 InputAction::None
@@ -1375,6 +1398,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -1417,6 +1441,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -1536,6 +1561,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1573,6 +1599,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1609,6 +1636,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1642,6 +1670,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1675,6 +1704,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1712,6 +1742,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1749,6 +1780,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1781,6 +1813,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1854,6 +1887,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -1887,6 +1921,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1916,6 +1951,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1945,6 +1981,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -1953,8 +1990,9 @@ mod tests {
 
     #[test]
     fn letter_in_models_modal_feeds_the_fuzzy_filter() {
-        // `k` used to open the key configurator; now every letter feeds the
-        // fuzzy filter so users can search for "kimi" or "deepseek".
+        // In the model picker's search sub-layer every letter feeds the fuzzy
+        // filter so users can search for "kimi" or "deepseek". (In browse mode
+        // the same letter is inert — see `letter_in_models_browse_mode_is_inert`.)
         let mut input = String::new();
         let mut cursor = 0;
         let mut drag = SelectionDrag::default();
@@ -1976,11 +2014,55 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: true,
             },
             &mut drag,
         );
         assert_eq!(action, InputAction::InsertChar('k'));
         assert_eq!(input, "k");
+    }
+
+    #[test]
+    fn letter_in_models_browse_mode_is_inert_and_slash_enters_search() {
+        // Browse mode (no `/` yet): printable letters do not mutate the borrowed
+        // composer line; `/` is what enters the search sub-layer.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let ctx = || InputContext {
+            active_modal: crate::tui::Modal::Provider,
+            is_responding: false,
+            completion_kind: crate::tui::CompletionKind::None,
+            suggestion_count: 0,
+            has_exact_suggestion: false,
+            suggestion_index: None,
+            permission_confirm_always: false,
+            permission_show_details: false,
+            in_subagent_view: false,
+            in_side_view: false,
+            has_focused_target: false,
+            has_queued: false,
+            history_searching: false,
+            model_searching: false,
+        };
+        let letter = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            ctx(),
+            &mut drag,
+        );
+        assert_eq!(letter, InputAction::None);
+        assert_eq!(input, "");
+        let slash = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            ctx(),
+            &mut drag,
+        );
+        assert_eq!(slash, InputAction::ModelEnterSearch);
+        assert_eq!(input, "");
     }
 
     #[test]
@@ -2009,6 +2091,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -2034,6 +2117,7 @@ mod tests {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+            model_searching: false,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -2070,6 +2154,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -2097,6 +2182,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -2124,6 +2210,7 @@ mod tests {
                 has_focused_target: true,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -2331,10 +2418,11 @@ mod tests {
                 in_side_view: false,
                 has_focused_target: has_focus,
                 has_queued: false,
-                // Editing text in the history modal only happens inside its
-                // search sub-layer, so treat any HistorySearch case here as
-                // search mode (browse mode never reaches the editing keys).
+                // Editing text in the history and model-picker modals only
+                // happens inside their search sub-layer, so treat those cases
+                // here as search mode (browse mode never reaches editing keys).
                 history_searching: modal == crate::tui::Modal::HistorySearch,
+                model_searching: modal == crate::tui::Modal::Provider,
             },
             &mut drag,
         )
@@ -2489,6 +2577,7 @@ mod tests {
                     has_focused_target: false,
                     has_queued: false,
                     history_searching: false,
+                    model_searching: false,
                 },
                 &mut drag,
             )
@@ -3028,6 +3117,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: true,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -3108,6 +3198,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -3224,6 +3315,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -3252,6 +3344,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -3284,6 +3377,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         )
@@ -3335,6 +3429,7 @@ mod tests {
                 has_focused_target: true,
                 has_queued: true,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );
@@ -3368,9 +3463,10 @@ mod tests {
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
-                // The history modal only takes text in its search sub-layer;
-                // treat the HistorySearch case as search mode here.
+                // The history and model-picker modals only take text in their
+                // search sub-layer; treat those cases as search mode here.
                 history_searching: modal == crate::tui::Modal::HistorySearch,
+                model_searching: modal == crate::tui::Modal::Provider,
             },
             &mut drag,
         )
@@ -3494,6 +3590,7 @@ mod tests {
                 has_focused_target: false,
                 has_queued: false,
                 history_searching: false,
+                model_searching: false,
             },
             &mut drag,
         );

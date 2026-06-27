@@ -27,7 +27,8 @@ mod transcript;
 pub(crate) use app::{ActivityTab, App, Modal, Recess};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
-    PROVIDERS, ProviderPreset, model_display_name, provider_context_window, providers_filtered_from,
+    PROVIDERS, ProviderPreset, RankedModel, model_display_name, models_filtered_from,
+    provider_context_window,
 };
 
 use crossterm::{
@@ -861,13 +862,15 @@ pub async fn run_tui(
         copy_toast_failed: false,
         ctrl_c_armed_ticks: 0,
         esc_armed_ticks: 0,
-        spinner_tick: 0,
+        spinner_epoch: std::time::Instant::now(),
         stashed_input: String::new(),
         editor_target: None,
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
-        model_picker_provider: None,
+        model_search: false,
+        model_scroll: 0,
+        model_modal_follow: true,
         key_status: HashMap::new(),
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),

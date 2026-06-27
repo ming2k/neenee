@@ -46,7 +46,7 @@ use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
-    draw_history_modal, draw_model_editor, draw_model_picker, draw_models_modal,
+    draw_history_modal, draw_model_editor, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
     draw_sessions_modal, draw_tool_step_detail_overlay,
 };
@@ -68,7 +68,7 @@ use crate::tui::document::TranscriptMessage;
 use crate::tui::layout::{InteractiveTarget, LayoutMap};
 use crate::tui::selection::{CellDragInfo, SelectionState};
 #[cfg(test)]
-use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest};
+use neenee_core::{PermissionRequest, UserQuestionRequest};
 #[cfg(test)]
 use std::collections::HashMap;
 
@@ -767,11 +767,14 @@ mod tests {
                 &mut LayoutMap::new(),
                 &[],
                 "mock",
+                "mock-model",
                 0,
                 &HashMap::new(),
-                &ProviderPickerSnapshot::default(),
                 "",
                 0,
+                &mut 0,
+                true,
+                false,
                 &theme,
             );
             let history_roster: Vec<String> = vec!["a".to_string()];

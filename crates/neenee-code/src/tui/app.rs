@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use neenee_core::{
-    AgentRequest, AgentResponse, ImagePart, ParentStatus, PermissionRequest, ProviderPickerRow,
+    AgentRequest, AgentResponse, ImagePart, ParentStatus, PermissionRequest,
     ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, mcp::McpConnectionStatus,
 };
 
@@ -25,7 +25,7 @@ use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
 use crate::tui::layout::{InteractiveTarget, LayoutMap, ModalHitMap};
-use crate::tui::providers::{PROVIDERS, providers_filtered_from};
+use crate::tui::providers::{PROVIDERS, RankedModel, models_filtered_from};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 
@@ -62,6 +62,15 @@ pub struct QueuedDispatch {
 #[derive(PartialEq, Clone, Copy)]
 pub enum Modal {
     None,
+    /// Flat model picker (`Ctrl+P` / `/model`). A single searchable list of
+    /// every `(provider, model)` pair — multi-model providers fan out into one
+    /// row per model — that mirrors the input-history modal's two-mode design:
+    /// it opens in **browse** mode (a plain ranked list, composer line not
+    /// borrowed, typing inert) and `/` drops into a **search** sub-layer that
+    /// borrows the line as a live fuzzy query (`App::model_search` distinguishes
+    /// the two). Rows come from [`App::models_filtered`]; Enter activates the
+    /// highlighted model. The first Esc in search returns to browse, the second
+    /// (or an outside click) closes and restores the draft.
     Provider,
     /// Input-history recall (Ctrl+R). A two-mode surface: it opens in **browse**
     /// mode — a plain reverse-chronological list (newest first, top-focused)
@@ -80,12 +89,6 @@ pub enum Modal {
     /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
     /// ModelName modal chain.
     ModelEditor,
-    /// Second-stage model picker for a multi-model provider (opencode-go).
-    /// Reached by activating a provider whose preset carries more than one
-    /// model. Lists the provider's models; selecting one switches to it with
-    /// the per-model transport. [`App::model_picker_provider`] holds the
-    /// `PROVIDERS` index whose models are shown.
-    ModelPicker,
     Help,
     Sessions,
     /// Full-output detail overlay for a focused tool step. The step is
@@ -152,11 +155,11 @@ impl Modal {
     /// Whether this modal closes when the user clicks outside its rect
     /// (click-outside-to-dismiss). True for the read-only / info overlays
     /// (Help, ToolStepDetail, Session, Sessions, Activity) and for the history
-    /// modal: its filter query is ephemeral and the real composer draft is
-    /// safely parked in `stashed_input`, so an outside click closes it and
-    /// restores the draft (via [`App::restore_history_draft`]) — exactly like
-    /// Esc. Entry modals that hold precious in-progress input (Provider,
-    /// ModelEditor, Question) and the permission sheet stay open so an
+    /// modal and the model picker: their filter query is ephemeral and the real
+    /// composer draft is safely parked in `stashed_input`, so an outside click
+    /// closes them and restores the draft (via [`App::restore_history_draft`]) —
+    /// exactly like Esc. Entry modals that hold precious in-progress input
+    /// (ModelEditor, Question) and the permission sheet stay open so an
     /// accidental click never discards an API key or a pending decision.
     ///
     /// This is the single source of truth for *which* modals are
@@ -173,6 +176,7 @@ impl Modal {
                 | Modal::Permissions
                 | Modal::Activity
                 | Modal::HistorySearch
+                | Modal::Provider
         )
     }
 }
@@ -482,9 +486,12 @@ pub struct App {
     pub ctrl_c_armed_ticks: u8,
     /// Ticks remaining in which a second Esc interrupts the running task.
     pub esc_armed_ticks: u8,
-    /// Monotonic per-frame counter that drives the status bar spinner so the
-    /// harness never looks frozen while a turn is in flight.
-    pub spinner_tick: usize,
+    /// Epoch the breathing indicator is timed against. The spinner phase is
+    /// derived from wall-clock elapsed time since this instant rather than a
+    /// per-frame counter, so the breathing cadence stays constant regardless of
+    /// how often the loop redraws (mouse movement, streaming, paste, etc. all
+    /// wake the loop at irregular intervals and would otherwise jitter it).
+    pub spinner_epoch: std::time::Instant,
     /// Input stashed while the API-key modal borrows the input line.
     pub stashed_input: String,
     /// Target `PROVIDERS` index for the unified provider editor.
@@ -496,9 +503,20 @@ pub struct App {
     pub editor_key: String,
     /// Model-id buffer for the editor.
     pub editor_model: String,
-    /// `PROVIDERS` index whose models the second-stage [`Modal::ModelPicker`]
-    /// is listing. `None` when the model picker is not open.
-    pub model_picker_provider: Option<usize>,
+    /// Whether the model picker's **search sub-layer** is active. The picker
+    /// ([`Modal::Provider`]) opens in browse mode (`false`): a plain ranked list
+    /// with no query field. Pressing `/` enters search (`true`), which borrows
+    /// the composer line as a live fuzzy query; the first Esc returns to browse
+    /// and the second closes the modal. Mirrors [`Self::history_search`]. See
+    /// [`Self::models_filtered`].
+    pub model_search: bool,
+    /// Body scroll offset of the model picker. Reset to 0 each time the modal
+    /// opens (and when toggling browse/search); clamped and auto-followed to the
+    /// selection by the renderer each frame. Mirrors [`Self::history_scroll`].
+    pub model_scroll: usize,
+    /// When true, the model picker's body scroll follows the ↑/↓ selection
+    /// cursor. Cleared on manual scroll (free browse), re-set on navigation.
+    pub model_modal_follow: bool,
     /// Lowercase provider name → whether a usable API key is configured.
     pub key_status: HashMap<String, bool>,
     /// Live model-picker snapshot (default id + per-model favorite / key-ready
@@ -949,11 +967,34 @@ impl App {
         self.history_preview = false;
     }
 
-    /// Compute the filtered, sorted model rows for the `/provider` picker.
-    /// Delegates to [`providers_filtered_from`] so the input handler and the
-    /// renderer share one filter+sort implementation.
-    pub fn providers_filtered(&self) -> Vec<(usize, &ProviderPickerRow)> {
-        providers_filtered_from(PROVIDERS, &self.provider_picker, self.input.trim())
+    /// Tear down the model picker's borrowed state: hand the parked composer
+    /// draft back, drop any filter query, and clear the search/scroll sub-flags.
+    /// Shared by the Esc (`CloseModal`), click-outside dismiss, and activation
+    /// paths so they can never drift. Mirrors [`Self::restore_history_draft`];
+    /// does **not** touch `active_modal` — the caller owns that transition.
+    pub fn restore_model_draft(&mut self) {
+        self.input = std::mem::take(&mut self.stashed_input);
+        self.cursor_position = self.input.chars().count();
+        self.input_scroll = 0;
+        self.suggestion_index = None;
+        self.modal_index = 0;
+        self.model_search = false;
+        self.model_scroll = 0;
+        self.model_modal_follow = true;
+    }
+
+    /// Compute the flat, ranked model rows for the picker. Delegates to
+    /// [`models_filtered_from`] so the input handler and the renderer share one
+    /// filter+sort implementation. The query is the borrowed composer line only
+    /// while the search sub-layer is active; in browse mode it is empty so every
+    /// row is shown unhighlighted.
+    pub fn models_filtered(&self) -> Vec<RankedModel> {
+        let query = if self.model_search {
+            self.input.trim()
+        } else {
+            ""
+        };
+        models_filtered_from(PROVIDERS, &self.provider_picker, query)
     }
 
     /// Number of selectable rows in the session dashboard — the tool list, the

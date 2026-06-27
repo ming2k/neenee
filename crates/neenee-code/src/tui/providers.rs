@@ -4,12 +4,12 @@
 //! to drive: it carries the display name, the default model id, and a one-line
 //! description. Context-window size is resolved from the [`neenee_core::model`]
 //! registry, not duplicated here. The live per-user state (favorite, key-ready,
-//! last-used) arrives via [`ProviderPickerSnapshot`]; [`providers_filtered_from`]
-//! joins the two to render and navigate the picker.
+//! last-used) arrives via [`ProviderPickerSnapshot`]; [`models_filtered_from`]
+//! joins the two into the flat, ranked model list the picker browses.
 //!
 //! [`ProviderPickerSnapshot`]: neenee_core::ProviderPickerSnapshot
 
-use neenee_core::{ProviderPickerRow, resolve_model};
+use neenee_core::resolve_model;
 
 use crate::tui::fuzzy;
 
@@ -137,43 +137,94 @@ pub(crate) const PROVIDERS: &[ProviderPreset] = &[
     },
 ];
 
-/// Filter and sort the provider picker rows Joins the TUI's
-/// static `PROVIDERS` (display metadata) with the live picker snapshot
-/// (favorite / key-ready / last-used), fuzzy-filters by `query`, and sorts by
-/// **favorite first → last-used descending → name ascending**.
+/// One selectable row in the flat model picker: a single (provider, model)
+/// pair. Multi-model providers (opencode-go) contribute one `RankedModel` per
+/// model they serve; single-model presets contribute exactly one (their
+/// default `model`). This is the unit the picker browses, searches, and
+/// activates — there is no separate provider→model two-step.
+pub(crate) struct RankedModel {
+    /// Index into [`PROVIDERS`] of the provider serving this model.
+    pub provider_idx: usize,
+    /// Wire model id to activate.
+    pub model: &'static str,
+    /// Whether the provider is favorited (mirrors the snapshot row).
+    pub favorite: bool,
+    /// The rendered label, `"<model display>  <provider name>"`. The fuzzy
+    /// match is computed against this exact string so `m.positions` index
+    /// directly onto the characters the renderer draws.
+    pub label: String,
+    /// Char count of the model-display prefix of `label`; the renderer styles
+    /// `[0, model_w)` as the model name and the remainder as the provider name.
+    pub model_w: usize,
+    /// The fuzzy match against `label`, or `None` in browse mode (empty query),
+    /// where every row is shown unhighlighted.
+    pub m: Option<fuzzy::FuzzyMatch>,
+}
+
+/// Build the flat, ranked model list for the picker. Expands every provider
+/// into its model rows (multi-model providers fan out; single-model presets
+/// yield one), joins the live favorite / last-used signals from `picker`,
+/// fuzzy-filters by `query` against each row's `"<model>  <provider>"` label,
+/// and sorts **favorite first → last-used desc → provider name → model name**.
 ///
-/// The fuzzy query is a *filter*, not a sort key: once a row passes the filter,
-/// its position is set by the user's preference and usage signals, not by match
-/// quality, so a favorite always wins over a slightly-better-matching
-/// non-favorite. Returns `(PROVIDERS index, picker row)` pairs.
-pub(crate) fn providers_filtered_from<'a>(
-    solutions: &'a [ProviderPreset],
-    picker: &'a neenee_core::ProviderPickerSnapshot,
+/// As in the provider picker, the fuzzy query is a *filter*, not a sort key:
+/// a favorite always outranks a slightly-better-matching non-favorite. An empty
+/// `query` (browse mode) keeps every row with no match positions.
+pub(crate) fn models_filtered_from(
+    solutions: &[ProviderPreset],
+    picker: &neenee_core::ProviderPickerSnapshot,
     query: &str,
-) -> Vec<(usize, &'a ProviderPickerRow)> {
-    let mut rows: Vec<(usize, &ProviderPickerRow)> = solutions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, solution)| {
-            let row = picker.rows.iter().find(|r| r.id == solution.id)?;
-            Some((i, row))
-        })
-        .filter(|(i, _)| {
-            if query.is_empty() {
-                return true;
-            }
-            let solution = &solutions[*i];
-            fuzzy::fuzzy_match(solution.name, query).is_some()
-                || fuzzy::fuzzy_match(solution.id, query).is_some()
-        })
-        .collect();
-    rows.sort_by(|(ia, ra), (ib, rb)| {
-        let name_a = &solutions[*ia].name;
-        let name_b = &solutions[*ib].name;
+) -> Vec<RankedModel> {
+    let mut rows: Vec<RankedModel> = Vec::new();
+    for (provider_idx, solution) in solutions.iter().enumerate() {
+        let Some(prow) = picker.rows.iter().find(|r| r.id == solution.id) else {
+            continue;
+        };
+        // Single-model presets list their one default; multi-model providers
+        // fan out into one row per served model.
+        let models: &[&str] = if solution.models.is_empty() {
+            std::slice::from_ref(&solution.model)
+        } else {
+            solution.models
+        };
+        for &model in models {
+            let display = model_display_name(model);
+            let model_w = display.chars().count();
+            let label = format!("{display}  {}", solution.name);
+            let m = if query.is_empty() {
+                None
+            } else {
+                match fuzzy::fuzzy_match(&label, query) {
+                    Some(m) => Some(m),
+                    None => continue,
+                }
+            };
+            rows.push(RankedModel {
+                provider_idx,
+                model,
+                favorite: prow.favorite,
+                label,
+                model_w,
+                m,
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        let ra = &picker.rows[picker
+            .rows
+            .iter()
+            .position(|r| r.id == solutions[a.provider_idx].id)
+            .expect("row built from an existing snapshot entry")];
+        let rb = &picker.rows[picker
+            .rows
+            .iter()
+            .position(|r| r.id == solutions[b.provider_idx].id)
+            .expect("row built from an existing snapshot entry")];
         rb.favorite
             .cmp(&ra.favorite)
             .then_with(|| rb.last_used_ms.cmp(&ra.last_used_ms))
-            .then_with(|| name_a.cmp(name_b))
+            .then_with(|| solutions[a.provider_idx].name.cmp(solutions[b.provider_idx].name))
+            .then_with(|| a.label.cmp(&b.label))
     });
     rows
 }

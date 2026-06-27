@@ -170,7 +170,10 @@ pub fn draw_activity_bar(
         // Activity modal.
         if let Some(p) = pursuit.filter(|p| !p.is_complete) {
             spans.push(Span::styled(" · ", dim));
-            spans.push(Span::styled("⟴ ", dim));
+            // `»` (Latin-1) rather than a rarer arrow glyph (the old `⟴`
+            // U+27F4 is absent from many terminal fonts and rendered as a
+            // tofu box); width is unambiguously 1 cell everywhere.
+            spans.push(Span::styled("» ", dim));
             spans.push(Span::styled(truncate_for_bar(&p.objective, 32), dim));
         }
 
@@ -192,7 +195,11 @@ pub fn draw_activity_bar(
             let warn = breathing_color(spinner_phase, theme.warning, theme.surface());
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
-                format!("⚠ {review_alert}"),
+                // U+FE0E (text presentation selector) forces the warning sign
+                // to render as a 1-cell text glyph; without it some terminals
+                // pick emoji presentation (2 cells) while `unicode-width`
+                // counts 1, leaving a stray cell / misaligned right-pin.
+                format!("⚠\u{FE0E} {review_alert}"),
                 Style::default().fg(warn).add_modifier(Modifier::BOLD),
             ));
         }
