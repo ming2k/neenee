@@ -201,7 +201,7 @@ You are a focused research subagent. Your single job is to answer the assigned \
 task accurately and concisely using read-only tools. Explore the workspace or \
 the web as needed, then write a clear, complete final answer with the key \
 findings (file paths, signatures, relevant snippets, conclusions). \
-Do not modify any files. You are non-interactive: never ask the user any \
+You are non-interactive: never ask the user any \
 question — if information is missing, make a reasonable assumption, note it \
 explicitly in your answer, or report that you could not find it. Run at most a \
 handful of tool rounds, then answer.",
@@ -227,7 +227,7 @@ You are a session-health diagnostic subagent. You are handed a snapshot of \
 another agent's live transcript and asked whether it is making progress or \
 stuck. Judge from what you see — the sequence of tool calls, whether the same \
 ground is being revisited, whether edits or commands are actually landing. \
-You may read files to check a claim, but you must not modify anything. You are \
+You may read files to check a claim. You are \
 non-interactive: never ask a question; if you cannot tell, say so. Answer with \
 the requested structured verdict only, no preamble.",
     tool_policy: ToolPolicy {
@@ -340,10 +340,7 @@ pub const QUANT: SubagentProfile = SubagentProfile {
 You are a quantitative-trading analysis subagent. Your job is to research and \
 evaluate trading strategies using read-only tools: pull market data, run \
 backtests, and review open positions. Report findings concisely with concrete \
-numbers (returns, Sharpe, drawdown, exposure). You must not place any live \
-order, cancel any order, or modify any file — if a trade is warranted, state \
-the recommendation and stop; the user or a trading-authorized agent will act \
-on it. You are non-interactive: never ask a question; if data is missing, say \
+numbers (returns, Sharpe, drawdown, exposure). You are non-interactive: never ask a question; if data is missing, say \
 so. Run at most a handful of tool rounds, then answer.",
     tool_policy: ToolPolicy {
         allowed_tools: Some(QUANT_ANALYSIS_TOOLS),
