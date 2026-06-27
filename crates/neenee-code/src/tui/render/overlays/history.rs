@@ -5,19 +5,17 @@ use neenee_tui::{
 };
 
 use super::common::caret_column;
+use crate::tui::Modal;
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{
-    centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
-};
+use crate::tui::render::primitives::{contrast_fg, modal_area, modal_frame, render_body};
 use unicode_width::UnicodeWidthStr;
 
 /// Draw the history search modal.
 ///
-/// `query` is the fuzzy query (mirrored from `app.input` while the modal is
-/// open); `ranked` is the pre-computed `(original_history_index, FuzzyMatch)`
-/// list produced by [`crate::tui::App::history_filtered`] — passing it in avoids a
-/// second fuzzy pass per frame. `modal_index` selects into `ranked`.
+/// `ranked` is the pre-computed `(original_history_index, FuzzyMatch)` list
+/// produced by [`crate::tui::App::history_rows`] — passing it in avoids a second
+/// fuzzy pass per frame. `modal_index` selects into `ranked`.
 /// `scroll` is read AND written back so the caller's offset stays consistent
 /// with the clamped body height; `follow_selection` gates whether the body
 /// auto-scrolls to keep `modal_index` in view (true after navigation, false
@@ -25,9 +23,11 @@ use unicode_width::UnicodeWidthStr;
 /// one-line fuzzy list to a full-text view of the selected entry (toggled by
 /// Tab); `scroll` is reused as that entry's per-line scroll.
 ///
-/// Each result line highlights the matched characters of the query so the
-/// user can see why an entry surfaced. Empty query → show everything with no
-/// highlights; query with no matches → "no matches" placeholder.
+/// `search` selects the modal's mode. In **browse** mode (`false`) the header
+/// is a plain title with a `/ to search` hint, the rows are the caller's
+/// reverse-chronological list (no highlights), and there is no editable field /
+/// caret. In **search** mode (`true`) the header becomes a `› <query>` filter
+/// field with the real caret, and each row highlights the matched query chars.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_history_modal(
     frame: &mut Frame,
@@ -40,21 +40,24 @@ pub fn draw_history_modal(
     scroll: &mut usize,
     follow_selection: bool,
     preview: bool,
+    search: bool,
     theme: &Theme,
-) {
-    let area = centered_rect(70, 55, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::HistorySearch).expect("history modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     let header_rect = f.header;
     if let Some(h) = header_rect {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Input History",
-                    Style::default()
-                        .fg(theme.brand())
-                        .add_modifier(Modifier::BOLD),
-                ),
+        let title = Span::styled(
+            "Input History",
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
+        );
+        let header_line = if search {
+            // Search sub-layer: the title doubles as the filter field.
+            Line::from(vec![
+                title,
                 Span::raw("  "),
                 Span::styled("› ", Style::default().fg(theme.muted())),
                 Span::styled(
@@ -71,9 +74,16 @@ pub fn draw_history_modal(
                         })
                         .add_modifier(Modifier::BOLD),
                 ),
-            ])),
-            h,
-        );
+            ])
+        } else {
+            // Browse mode: plain title plus a hint to reach search.
+            Line::from(vec![
+                title,
+                Span::raw("  "),
+                Span::styled("· / to search", Style::default().fg(theme.muted())),
+            ])
+        };
+        frame.render_widget(Paragraph::new(header_line), h);
     }
 
     if preview {
@@ -92,8 +102,10 @@ pub fn draw_history_modal(
     if let Some(fo) = f.footer {
         let hint = if preview {
             "↑↓ next entry · Tab back to list · Enter insert · Esc close"
+        } else if search {
+            "type to filter · ↑↓ navigate · Tab preview · Enter insert · Esc back"
         } else {
-            "type to filter · ↑↓ navigate · Tab preview · Enter insert · Esc close"
+            "↑↓ navigate · / search · Tab preview · Enter insert · Esc close"
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -105,14 +117,18 @@ pub fn draw_history_modal(
     }
 
     // Place the real terminal caret in the filter field (the header row, after
-    // the `Input History  › ` prefix). The composer underneath is skipped for
-    // this modal, so without this the caret would be absent.
-    if let Some(h) = header_rect {
-        let prefix = "Input History  › ".width() as u16;
-        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
-        let cursor_y = h.y;
-        frame.set_cursor_position((cursor_x, cursor_y));
+    // the `Input History  › ` prefix). Only in search mode — browse mode has no
+    // editable field, so it shows no caret. The composer underneath is skipped
+    // for this modal, so without this the caret would be absent.
+    if search {
+        if let Some(h) = header_rect {
+            let prefix = "Input History  › ".width() as u16;
+            let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+            let cursor_y = h.y;
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     }
+    area
 }
 
 /// Build the one-line-per-entry fuzzy list body. Multi-line entries are

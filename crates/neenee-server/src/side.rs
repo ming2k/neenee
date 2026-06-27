@@ -74,11 +74,11 @@ impl SideSession {
         ));
         agent.set_thread_id(&side_id);
         agent.set_project_root(Some(project_root.to_path_buf()));
-        // A side conversation is a quick aside; auto-approve its write tools so
+        // A side conversation is a quick aside; unattended its write tools so
         // it never raises a permission modal whose reply could not be routed
         // back to the side `Agent` through the shared permission channel. This
-        // mirrors the subagent policy (`subagent_tool.rs` sets `auto_approve`).
-        agent.set_auto_approve(true);
+        // mirrors the subagent policy (`subagent_tool.rs` sets `unattended`).
+        agent.set_unattended(true);
 
         Ok(Self {
             id: side_id,

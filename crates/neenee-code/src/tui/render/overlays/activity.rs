@@ -8,9 +8,10 @@ use neenee_tui::{
 };
 
 use super::common::todo_status_glyph_color;
+use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::design::{MODAL_BODY_LEADING_INDENT, MODAL_TITLE_META_GAP};
-use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
 use crate::tui::render::text_layout::{indented_wrapped_lines, wrap_text};
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
@@ -52,7 +53,7 @@ pub fn draw_activity_modal(
     view: ActivityModalView<'_>,
     scroll: &mut usize,
     theme: &Theme,
-) {
+) -> neenee_tui::Rect {
     let ActivityModalView {
         active_tab,
         pursuit,
@@ -66,7 +67,7 @@ pub fn draw_activity_modal(
         activity,
     } = view;
 
-    let area = centered_rect(72, 70, viewport_rect(frame));
+    let area = modal_area(frame, Modal::Activity).expect("activity modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     let muted = theme.muted();
@@ -293,4 +294,5 @@ pub fn draw_activity_modal(
             footer,
         );
     }
+    area
 }

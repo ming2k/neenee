@@ -45,7 +45,7 @@ pub(super) const HINT_BAR_ROWS: u16 = 1;
 /// Internal left indent of hint-bar content, matching the composer's prompt
 /// prefix feel.
 pub(super) const HINT_BAR_INNER_PADDING: usize = 1;
-/// Minimum gap between the left cluster (focus / auto-approve pills) and the
+/// Minimum gap between the left cluster (shell pill) and the
 /// right-aligned cluster (model/context).
 pub(super) const HINT_BAR_GAP_MIN: usize = 2;
 /// Gap between adjacent right-aligned hint segments.

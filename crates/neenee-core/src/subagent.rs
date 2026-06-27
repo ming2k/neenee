@@ -107,8 +107,8 @@ pub struct SubagentProfile {
     pub name: &'static str,
     pub system_prompt: &'static str,
     pub tool_policy: ToolPolicy,
-    /// Whether the spawned subagent auto-approves its admitted write/execute
-    /// tools, bypassing the permission broker. Full-duplex (ADR-0029): the
+    /// Whether the spawned subagent runs its admitted write/execute tools
+    /// unattended, bypassing the permission broker. Full-duplex (ADR-0029): the
     /// built-in profiles keep this `true` to preserve the legacy autonomous
     /// contract (the broker's `PermissionRequest` would otherwise surface up
     /// to the parent, which historically had no path to answer it). Now that
@@ -116,7 +116,7 @@ pub struct SubagentProfile {
     /// `reply_permission`) are wired, a future interactive profile can set
     /// this `false` so a subagent's tool calls prompt the user through the
     /// same modal a top-level call uses, and the reply routes back down.
-    pub auto_approve: bool,
+    pub unattended: bool,
 }
 
 impl SubagentProfile {
@@ -211,7 +211,7 @@ handful of tool rounds, then answer.",
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: true,
+    unattended: true,
 };
 
 /// The diagnostic role used by session review (ADR-0016). Read-only,
@@ -236,7 +236,7 @@ the requested structured verdict only, no preamble.",
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: true,
+    unattended: true,
 };
 
 /// The session-titling role (ADR-0022). Read-only and non-interactive like
@@ -260,15 +260,15 @@ the title in the same language as the conversation.",
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: true,
+    unattended: true,
 };
 
 /// The interactive subagent role (ADR-0029). The built-in roles
-/// ([`EXPLORE`]) are autonomous: `auto_approve: true` and
+/// ([`EXPLORE`]) are autonomous: `unattended: true` and
 /// no `requires_user` tools, so they never block on a human. This role is the
 /// opposite shape — it is meant to run **under user supervision**: a `Write`
 /// ceiling admits the full tool ladder (read + execute + write),
-/// `allow_user_interaction` admits `ask_user`, and `auto_approve: false` leaves
+/// `allow_user_interaction` admits `ask_user`, and `unattended: false` leaves
 /// the permission broker on, so every execute/write surfaces as a
 /// `SubagentEvent::PermissionRequest` that round-trips through the parent
 /// harness ↔ TUI ↔ registry handle.
@@ -296,7 +296,7 @@ turns short and report concrete findings, then stop.",
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: false,
+    unattended: false,
 };
 
 /// Tools a quant-analysis subagent may use: the read-only quant domain tools
@@ -351,7 +351,7 @@ so. Run at most a handful of tool rounds, then answer.",
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: true,
+    unattended: true,
 };
 
 #[cfg(test)]
@@ -515,7 +515,7 @@ mod tests {
 
     /// INTERACTIVE (ADR-0029): `allowed_tools: None` admits every named tool,
     /// `allow_user_interaction` admits ask_user, but recursion and control-flow
-    /// are still absolute. Its `auto_approve: false` (asserted at runtime by the
+    /// are still absolute. Its `unattended: false` (asserted at runtime by the
     /// duplex test) is what surfaces its calls as PermissionRequests.
     #[test]
     fn interactive_admits_all_named_tools_but_not_recursion_or_control() {

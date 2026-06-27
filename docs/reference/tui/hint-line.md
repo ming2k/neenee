@@ -1,8 +1,8 @@
 # Hint line
 
-Single-row status strip below the input box. Left side carries the focus-zone
-pill and optional auto-approve badge; right side carries the model name and
-context-usage indicator.
+Single-row status strip below the input box. Left side carries an optional
+shell-mode pill; right side carries the model name and context-usage
+indicator.
 
 ## Appearance
 
@@ -11,7 +11,9 @@ context-usage indicator.
 ```
 
 In Browse zone the pill switches to `[ BROWSE ]` in the warning tone. When
-auto-approve is active, an additional `[ AUTO-APPROVE ]` badge appears.
+unattended mode is active, the input box's `›` prompt glyph turns red
+(warning tone) instead of its usual brand color — no separate hint-line
+badge is shown.
 
 | Attribute | Value |
 |-----------|-------|

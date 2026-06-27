@@ -6,9 +6,10 @@ use neenee_tui::{
 
 use neenee_core::{PermissionRequest, UserQuestionRequest};
 
+use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
-    centered_rect, contrast_fg, modal_frame, panel_block, render_body, viewport_rect,
+    contrast_fg, modal_area, modal_frame, panel_block, render_body,
 };
 use neenee_tui::{Constraint, Direction, Layout};
 use unicode_width::UnicodeWidthStr;
@@ -40,8 +41,8 @@ pub fn draw_question_modal(
     highlighted: usize,
     scroll: &mut usize,
     theme: &Theme,
-) {
-    let area = centered_rect(78, 70, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::Question).expect("question modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     let question = request.questions.get(current_question);
@@ -158,6 +159,7 @@ pub fn draw_question_modal(
             fo,
         );
     }
+    area
 }
 
 /// Map the highlighted option index to its row in the options line list, so

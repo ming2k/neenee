@@ -9,18 +9,20 @@ use neenee_tui::{
     Clear, Frame, Modifier, Paragraph, Span, {Line, Style},
 };
 
+use crate::tui::Modal;
 use crate::tui::document::TranscriptMessage;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{centered_rect, panel_block, panel_inner, viewport_rect};
+use crate::tui::render::primitives::{modal_area, panel_block, panel_inner};
 
 pub fn draw_tool_step_detail_overlay(
     frame: &mut Frame,
     msg: &TranscriptMessage,
     scroll: u16,
     theme: &Theme,
-) {
+) -> neenee_tui::Rect {
     use crate::tui::document::MessageKind;
-    let area = centered_rect(92, 84, viewport_rect(frame));
+    let area =
+        modal_area(frame, Modal::ToolStepDetail).expect("tool detail modal has fixed geometry");
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -114,4 +116,5 @@ pub fn draw_tool_step_detail_overlay(
             .wrap(neenee_tui::Wrap { trim: false }),
         panel_inner(area),
     );
+    area
 }

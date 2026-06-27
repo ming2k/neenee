@@ -54,7 +54,7 @@ define_builtin_commands! {
     Compact     = "/compact"      : "Compact older complete turns now",
     Clear       = "/clear"        : "Clear the conversation history",
     Permissions = "/permissions"  : "Show or clear always-allowed tool rules",
-    AutoApprove = "/auto-approve" : "Toggle bypassing write-tool permission prompts (on/off)",
+    Unattended  = "/unattended"   : "Toggle bypassing write-tool permission prompts (on/off)",
     Review      = "/review"       : "Run an on-demand session-review diagnostic of the current turn",
     Search      = "/search"       : "Semantic search over the project's session history",
     Session     = "/session"      : "Manage durable sessions (status|list|resume|fork|open|new)",
@@ -98,7 +98,7 @@ pub enum StartupMode {
 pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, bool) {
     let mut iter = args.into_iter().peekable();
     let mut project: Option<PathBuf> = None;
-    let mut auto_approve = false;
+    let mut unattended = false;
     let mut single_instance = false;
     let mut rest = Vec::new();
     while let Some(arg) = iter.next() {
@@ -106,8 +106,8 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, boo
             project = iter.next().map(PathBuf::from);
         } else if let Some(value) = arg.strip_prefix("--project=") {
             project = Some(PathBuf::from(value));
-        } else if arg == "--auto-approve" {
-            auto_approve = true;
+        } else if arg == "--unattended" {
+            unattended = true;
         } else if arg == "--single-instance" {
             single_instance = true;
         } else {
@@ -131,13 +131,13 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, boo
             #[cfg(not(debug_assertions))]
             let showcase_line = "";
             eprintln!(
-                "Unknown command '{}'. Usage:\n  neenee                  start a fresh session\n  neenee resume [id]      resume a session (picker when no id)\n  neenee doctor           verify stored session integrity\n{showcase_line}\nOptions:\n  --project <path>        operate on the project at <path>\n  --auto-approve          bypass write-tool permission prompts for this session\n  --single-instance       require exclusive per-project lock (pre-ADR-0018 default)",
+                "Unknown command '{}'. Usage:\n  neenee                  start a fresh session\n  neenee resume [id]      resume a session (picker when no id)\n  neenee doctor           verify stored session integrity\n{showcase_line}\nOptions:\n  --project <path>        operate on the project at <path>\n  --unattended            bypass write-tool permission prompts for this session\n  --single-instance       require exclusive per-project lock (pre-ADR-0018 default)",
                 cmd
             );
             std::process::exit(2);
         }
     };
-    (mode, project, auto_approve, single_instance)
+    (mode, project, unattended, single_instance)
 }
 
 /// Initialise file-based tracing when `NEENEE_LOG` names a log file.

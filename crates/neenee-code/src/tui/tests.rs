@@ -450,10 +450,11 @@ fn path_query_match_mid_path_substring() {
 }
 
 #[test]
-fn history_filtered_ranks_and_filters_input_history() {
-    // The App-level view of the Ctrl+R modal: an empty query surfaces
-    // every entry unhighlighted, a fuzzy query surfaces only the
-    // subsequence matches ordered by score with input order on ties.
+fn history_rows_browses_reverse_then_ranks_search() {
+    // The App-level view of the Ctrl+R modal. Browse mode (and any empty
+    // query) lists history newest-first, unhighlighted; the search sub-layer
+    // surfaces only the subsequence matches ordered by score with input order
+    // on ties.
     let (mut app, _tmp) = app_in_tempdir(&[], &[]);
     app.input_history = vec![
         "scatter".to_string(),     // idx 0 — 'cat' mid-word, lowest score
@@ -462,36 +463,74 @@ fn history_filtered_ranks_and_filters_input_history() {
         "the cat sat".to_string(), // idx 3 — 'cat' at boundary, high score
     ];
 
-    // Empty query → all four entries, score 0, no highlight positions.
+    // Browse mode → reverse-chronological (newest first), score 0, no
+    // highlights. The newest entry (idx 3) is on top so an immediate Enter
+    // re-inserts the last-typed prompt.
+    app.history_search = false;
     app.input.clear();
-    let ranked = app.history_filtered();
-    assert_eq!(ranked.len(), 4);
-    for (_, m) in &ranked {
+    let rows = app.history_rows();
+    let indices: Vec<usize> = rows.iter().map(|(i, _)| *i).collect();
+    assert_eq!(indices, vec![3, 2, 1, 0], "newest first");
+    for (_, m) in &rows {
         assert_eq!(m.score, 0);
         assert!(m.positions.is_empty());
     }
 
-    // Query "cat" → matches catalog, "the cat sat", and scatter; not
+    // Search mode with an empty query still shows the reverse browse list.
+    app.history_search = true;
+    let indices: Vec<usize> = app.history_rows().iter().map(|(i, _)| *i).collect();
+    assert_eq!(indices, vec![3, 2, 1, 0]);
+
+    // Search "cat" → matches catalog, "the cat sat", and scatter; not
     // "cargo build" (no 't' after the 'ca'). Boundary matches outrank
     // scatter, and stable-sort keeps catalog before "the cat sat".
     app.input = "cat".to_string();
-    let ranked = app.history_filtered();
-    let indices: Vec<usize> = ranked.iter().map(|(i, _)| *i).collect();
+    let rows = app.history_rows();
+    let indices: Vec<usize> = rows.iter().map(|(i, _)| *i).collect();
     assert_eq!(
         indices,
         vec![1, 3, 0],
         "boundary matches first, then scatter"
     );
-    assert!(ranked[0].1.score > ranked[2].1.score);
+    assert!(rows[0].1.score > rows[2].1.score);
     // Every matched entry exposes highlight positions, one per query char.
-    for (_, m) in &ranked {
+    for (_, m) in &rows {
         assert_eq!(m.positions.len(), 3);
     }
 
-    // Query with no subsequence match → empty filtered list (the renderer
-    // turns this into the "no matches" placeholder).
+    // Query with no subsequence match → empty list (the renderer turns this
+    // into the "no matches" placeholder).
     app.input = "xyz".to_string();
-    assert!(app.history_filtered().is_empty());
+    assert!(app.history_rows().is_empty());
+}
+
+#[test]
+fn history_modal_is_click_dismissable_and_restores_draft() {
+    use crate::tui::app::Modal;
+    // The history modal joins the click-outside-to-dismiss set (its filter is
+    // ephemeral); entry modals that hold precious input stay non-dismissable.
+    assert!(Modal::HistorySearch.dismissable_by_outside_click());
+    assert!(!Modal::Provider.dismissable_by_outside_click());
+    assert!(!Modal::ModelEditor.dismissable_by_outside_click());
+
+    // restore_history_draft hands the parked composer draft back and clears the
+    // search/preview sub-state — the shared teardown for Esc and outside-click.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.stashed_input = "my draft".to_string();
+    app.input = "git".to_string(); // the live fuzzy query
+    app.cursor_position = 3;
+    app.history_search = true;
+    app.history_preview = true;
+    app.modal_index = 4;
+
+    app.restore_history_draft();
+
+    assert_eq!(app.input, "my draft", "draft restored from the stash");
+    assert_eq!(app.cursor_position, "my draft".chars().count());
+    assert!(app.stashed_input.is_empty());
+    assert!(!app.history_search);
+    assert!(!app.history_preview);
+    assert_eq!(app.modal_index, 0);
 }
 
 /// Build a minimal `App` scoped to a tempdir project so we can exercise
@@ -548,6 +587,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
+        history_search: false,
         current_provider: "mock".to_string(),
         current_model: "mock".to_string(),
         cwd: cwd.clone(),
@@ -556,7 +596,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         session_context: None,
         loop_status: "idle".to_string(),
         activity_status: String::new(),
-        auto_approve: false,
+        unattended: false,
         todos: None,
         turn_count: 0,
         current_round: 0,

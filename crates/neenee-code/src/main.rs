@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
     // `neenee doctor` -> verify stored session integrity.
-    let (startup, project_override, auto_approve_at_start, single_instance) =
+    let (startup, project_override, unattended_at_start, single_instance) =
         parse_args(std::env::args().skip(1).collect());
     let project_root = project_override.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -260,12 +260,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent.mcp_tools_holder(),
         ));
     }
-    if auto_approve_at_start {
-        agent.set_auto_approve(true);
+    if unattended_at_start {
+        agent.set_unattended(true);
         let _ = resp_tx.send(turn(
             &session.id().await,
             TurnEvent::Text(
-                "Auto-approve ON: write tools will execute without permission prompts.".to_string(),
+                "Unattended ON: write tools will execute without permission prompts.".to_string(),
             ),
         ));
     }

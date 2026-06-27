@@ -2,7 +2,7 @@
 //! chrome, and color arithmetic. Kept in one place so the per-component
 //! modules do not need to depend on each other for these primitives.
 
-use crate::tui::app::Recess;
+use crate::tui::app::{Modal, Recess};
 use neenee_tui::{
     Constraint, Direction, Frame, Layout, Line, Margin, Rect, {Block as RtBlock, Clear, Paragraph},
     {Color, Style},
@@ -69,6 +69,98 @@ pub(super) fn centered_rect_h(percent_x: u16, height: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(band)[1]
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ModalHeight {
+    Percent(u16),
+    Content {
+        min_rows: u16,
+        max_viewport_percent: u16,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ModalSpec {
+    pub width_percent: u16,
+    pub height: ModalHeight,
+    pub header: bool,
+    pub footer: bool,
+}
+
+pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
+    let fixed = |width_percent, height_percent| ModalSpec {
+        width_percent,
+        height: ModalHeight::Percent(height_percent),
+        header: true,
+        footer: true,
+    };
+
+    Some(match modal {
+        Modal::Provider => fixed(72, 60),
+        Modal::ModelPicker => fixed(64, 60),
+        Modal::HistorySearch => fixed(70, 55),
+        Modal::Question => fixed(78, 70),
+        Modal::ModelEditor => fixed(60, 36),
+        Modal::Help => fixed(58, 70),
+        Modal::ToolStepDetail => fixed(92, 84),
+        Modal::Sessions => fixed(80, 64),
+        Modal::Permissions => fixed(64, 60),
+        Modal::Activity => fixed(72, 70),
+        Modal::Session => ModalSpec {
+            width_percent: 76,
+            height: ModalHeight::Content {
+                min_rows: 9,
+                max_viewport_percent: 82,
+            },
+            header: true,
+            footer: true,
+        },
+        Modal::None | Modal::Permission => return None,
+    })
+}
+
+pub(super) fn modal_chrome_rows(spec: ModalSpec) -> u16 {
+    let mut rows = 2 * MODAL_INNER_V_PADDING;
+    if spec.header {
+        rows += 2; // header + gap after header
+    }
+    if spec.footer {
+        rows += 2; // gap before footer + footer
+    }
+    rows
+}
+
+pub(super) fn modal_area(frame: &Frame, modal: Modal) -> Option<Rect> {
+    let spec = modal_spec(modal)?;
+    let ModalHeight::Percent(height_percent) = spec.height else {
+        return None;
+    };
+    Some(centered_rect(
+        spec.width_percent,
+        height_percent,
+        viewport_rect(frame),
+    ))
+}
+
+pub(super) fn content_modal_probe(frame: &Frame, modal: Modal) -> Option<Rect> {
+    let spec = modal_spec(modal)?;
+    Some(centered_rect(spec.width_percent, 100, viewport_rect(frame)))
+}
+
+pub(super) fn content_modal_area(frame: &Frame, modal: Modal, desired_rows: u16) -> Option<Rect> {
+    let spec = modal_spec(modal)?;
+    let ModalHeight::Content {
+        min_rows,
+        max_viewport_percent,
+    } = spec.height
+    else {
+        return None;
+    };
+    let viewport = viewport_rect(frame);
+    let max_h = ((viewport.height as u32 * max_viewport_percent as u32) / 100) as u16;
+    let height = desired_rows.clamp(min_rows, max_h.max(min_rows));
+    Some(centered_rect_h(spec.width_percent, height, viewport))
 }
 
 /// Recess the live surface behind a modal, per its [`Recess`] policy.
@@ -367,6 +459,8 @@ mod tests {
     //! `panel_inner` is the symmetric-inset contract for the left-bar-panel
     //! family. Lock its geometry directly so a long overlay line can never
     //! kiss the panel's right edge regardless of terminal width.
+    use crate::tui::Modal;
+
     use super::*;
     use neenee_tui::Rect;
 
@@ -391,5 +485,44 @@ mod tests {
         // at the panel's origin rather than underflowing the width.
         let inner = panel_inner(Rect::new(0, 0, 1, 1));
         assert_eq!(inner, Rect::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn modal_specs_cover_runtime_centered_modals() {
+        for modal in [
+            Modal::Provider,
+            Modal::ModelPicker,
+            Modal::HistorySearch,
+            Modal::Question,
+            Modal::ModelEditor,
+            Modal::Help,
+            Modal::ToolStepDetail,
+            Modal::Sessions,
+            Modal::Session,
+            Modal::Permissions,
+            Modal::Activity,
+        ] {
+            assert!(modal_spec(modal).is_some());
+        }
+
+        assert!(modal_spec(Modal::None).is_none());
+        assert!(modal_spec(Modal::Permission).is_none());
+    }
+
+    #[test]
+    fn session_modal_spec_is_content_sized() {
+        let spec = modal_spec(Modal::Session).expect("session modal has a spec");
+        assert_eq!(spec.width_percent, 76);
+        assert_eq!(modal_chrome_rows(spec), 6);
+        match spec.height {
+            ModalHeight::Content {
+                min_rows,
+                max_viewport_percent,
+            } => {
+                assert_eq!(min_rows, 9);
+                assert_eq!(max_viewport_percent, 82);
+            }
+            ModalHeight::Percent(_) => panic!("session modal should size to content"),
+        }
     }
 }

@@ -437,7 +437,8 @@ fn tool_step_detail_overlay_keeps_right_gutter_clear_on_long_lines() {
     let mut panel = Rect::default();
     let mut terminal = neenee_tui::TestTerminal::new(60, 14);
     terminal.draw(|f| {
-        panel = super::primitives::centered_rect(92, 84, super::primitives::viewport_rect(f));
+        panel = super::primitives::modal_area(f, crate::tui::Modal::ToolStepDetail)
+            .expect("tool detail modal has fixed geometry");
         super::draw_tool_step_detail_overlay(f, &m, 0, &Theme::default());
     });
     let buf = terminal.buffer();

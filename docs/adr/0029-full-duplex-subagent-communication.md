@@ -12,7 +12,7 @@ parent had no way to reach into a running child, and a child that surfaced a
 request was forwarded as a `SubagentEvent` but, with no reply channel, the
 child's oneshot waited forever. ADR-0011 codified this as a hard rule:
 subagents are non-interactive (`requires_user` tools excluded from every
-profile), and `set_auto_approve(true)` suppresses the broker, precisely so an
+profile), and `set_unattended(true)` suppresses the broker, precisely so an
 unanswered prompt can never hang the child.
 
 That made the whole subagent surface read-only and silent. It blocked two
@@ -23,7 +23,7 @@ things this codebase now wants:
    clarification through the parent as a coarse round-trip (child returns "I
    need X", parent asks, re-spawns) because there was no live channel.
 2. **Truthful permissioning of child side effects.** A subagent that writes or
-   executes gets auto-approved today, which is a workaround for the missing
+   executes runs unattended today, which is a workaround for the missing
    reply path, not a real decision.
 
 ## Decision
@@ -73,22 +73,22 @@ binary that constructs the tool exposes the same `Arc<SubagentRegistry>` to the
 harness, so a user reply arriving on a nested `SubagentEvent::PermissionRequest`
 can be routed back down: `registry.get(parent_call_id).reply_permission(...)`.
 
-### What `set_auto_approve` becomes
+### What `set_unattended` becomes
 
-With the reply path in place, the child's `set_auto_approve(true)` is no longer
+With the reply path in place, the child's `set_unattended(true)` is no longer
 a load-bearing deadlock fix — it is a **transitional gate**. The built-in
 profiles (`EXPLORE`/`VERIFY`) still exclude `requires_user` tools, so in
-practice no nested request is surfaced today; `auto_approve` only suppresses the
+practice no nested request is surfaced today; `unattended` only suppresses the
 broker for the `Execute`-tier tools `VERIFY` admits (`bash`). A future
 interactive profile (e.g. `PLAN` with `allow_user_interaction: true`) can drop
-`auto_approve` and the round-trip just works through the handle.
+`unattended` and the round-trip just works through the handle.
 
 ## Alternatives considered
 
 - **Keep subagents fire-and-forget; route clarification via parent round-trip
   (original ADR-0027 §5).** Rejected: a plan that needs several Q&A exchanges
   pays a full subagent spawn per exchange, and it leaves child side effects
-  auto-approved forever. A live channel removes both costs.
+  unattended forever. A live channel removes both costs.
 
 - **Single bidirectional channel for everything (steering + replies).**
   Rejected: steering must be boundary-safe (never interrupt a tool side
@@ -112,7 +112,7 @@ interactive profile (e.g. `PLAN` with `allow_user_interaction: true`) can drop
 
 - **Positive:** `PLAN` can clarify inline (superseding ADR-0027 §5); a future
   interactive profile gets user interaction for free; child permissions can
-  become truthful (the auto-approve gate can be dropped per-profile). The
+  become truthful (the unattended gate can be dropped per-profile). The
   up/down split is general — any `SubagentEvent` the parent can render, the
   parent can now also answer.
 

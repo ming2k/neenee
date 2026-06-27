@@ -325,10 +325,21 @@ impl<'a> Paragraph<'a> {
                     Alignment::Center => inner.x + (inner.width.saturating_sub(lw as u16)) / 2,
                     Alignment::Right => inner.x + inner.width.saturating_sub(lw as u16),
                 };
+                // Clip each span to the rect's right edge. `grid.put` only
+                // clips at the *terminal* edge, so without this a non-wrapped
+                // line longer than `inner.width` (e.g. a modal footer hint)
+                // would spill past the panel into the backdrop. Wrapped lines
+                // already fit within `max_width`, so this is a no-op for them.
+                let right = inner.x + inner.width;
                 let mut cx = x;
                 for span in &wl.spans {
+                    if cx >= right {
+                        break;
+                    }
                     let s = merge_style(base, span.style);
-                    let end = grid.put(cx, y, crate::grid::Fit::Clip, s, &span.content);
+                    let avail = (right - cx) as usize;
+                    let content = clip_to_cols(&span.content, avail);
+                    let end = grid.put(cx, y, crate::grid::Fit::Clip, s, content);
                     cx = end.x;
                 }
                 y += 1;
@@ -386,6 +397,66 @@ fn line_display_width(l: &Line<'_>) -> usize {
         .iter()
         .map(|s| crate::text::str_len(&s.content))
         .sum()
+}
+
+/// The longest whole-grapheme prefix of `s` that fits within `max_cols`
+/// display columns. Returns a borrowed slice (the full string when it already
+/// fits), so the common in-bounds case allocates nothing. A wide glyph that
+/// would straddle the boundary is dropped rather than half-drawn.
+fn clip_to_cols(s: &str, max_cols: usize) -> &str {
+    let mut used = 0usize;
+    let mut bytes = 0usize;
+    for piece in crate::text::graphemes(s) {
+        let w = piece.width as usize;
+        if used + w > max_cols {
+            break;
+        }
+        used += w;
+        bytes += piece.text.len();
+    }
+    &s[..bytes]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Grid;
+
+    #[test]
+    fn clip_to_cols_keeps_whole_graphemes() {
+        assert_eq!(clip_to_cols("hello", 3), "hel");
+        assert_eq!(clip_to_cols("hello", 99), "hello");
+        assert_eq!(clip_to_cols("hello", 0), "");
+        // A wide (CJK) glyph that would straddle the boundary is dropped, not
+        // split in half.
+        assert_eq!(clip_to_cols("世界", 1), "");
+        assert_eq!(clip_to_cols("世界", 2), "世");
+    }
+
+    #[test]
+    fn unwrapped_paragraph_clips_to_rect_not_terminal() {
+        // A single-line (non-wrapped) Paragraph longer than its rect must stop
+        // at the rect's right edge — never spill into the cells beyond it. This
+        // is the guard against modal header/footer hints overflowing the panel.
+        let mut grid = Grid::new(40, 1);
+        // Sentinel content past the rect so we can detect a spill.
+        grid.fill_rect(0, 0, 40, 1, Style::default());
+        for x in 10..40 {
+            grid.put(x, 0, crate::grid::Fit::Clip, Style::default(), "#");
+        }
+        let para = Paragraph::new("xxxxxxxxxxxxxxxxxxxxxxxxxxxx"); // 28 x's
+        // Render into a 10-wide rect starting at column 0.
+        para.render(Rect::new(0, 0, 10, 1), &mut grid);
+        // Columns 0..10 are the x's; column 10 onward must keep the sentinel.
+        for x in 0..10 {
+            assert_eq!(grid.get(x, 0).unwrap().symbol(), "x", "col {x} in-rect");
+        }
+        assert_eq!(
+            grid.get(10, 0).unwrap().symbol(),
+            "#",
+            "the cell just past the rect must not be overwritten"
+        );
+    }
 }
 
 fn wrap_line<'a>(line: &Line<'a>, max_width: usize) -> Vec<Line<'a>> {

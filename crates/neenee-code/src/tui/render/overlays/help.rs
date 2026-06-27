@@ -4,11 +4,12 @@ use neenee_tui::{
     Frame, Modifier, Paragraph, Span, {Line, Style},
 };
 
+use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
 
-pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) {
-    let area = centered_rect(58, 70, viewport_rect(frame));
+pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::Help).expect("help modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     if let Some(h) = f.header {
@@ -95,4 +96,5 @@ pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) {
             fo,
         );
     }
+    area
 }

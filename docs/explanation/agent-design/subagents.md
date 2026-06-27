@@ -175,7 +175,7 @@ immediately, since the child is already waiting on it.
 
 The built-in profiles other than `INTERACTIVE` stay non-interactive, so in
 practice no nested request is surfaced today and the child's
-`set_auto_approve(true)` is a transitional gate rather than a load-bearing
+`set_unattended(true)` is a transitional gate rather than a load-bearing
 deadlock fix. The `INTERACTIVE` profile opts into `allow_user_interaction`, so
 its `ask_user` round-trip works through the handle directly.
 

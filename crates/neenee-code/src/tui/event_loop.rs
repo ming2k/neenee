@@ -162,7 +162,7 @@ pub(super) async fn run_app_loop(
             let harness = runtime.harness.lock().await.clone();
             app.current_pursuit = harness.pursuit;
             app.loop_status = harness.loop_status;
-            app.auto_approve = harness.auto_approve;
+            app.unattended = harness.unattended;
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
             app.todos = runtime.todos.lock().await.clone();
@@ -454,7 +454,6 @@ pub(super) async fn run_app_loop(
                         shell_active: app.focused_target.is_none()
                             && app.active_modal == Modal::None
                             && app.input.starts_with('!'),
-                        auto_approve: app.auto_approve,
                     },
                     &app.theme,
                 );
@@ -523,6 +522,7 @@ pub(super) async fn run_app_loop(
                         app.byte_cursor(),
                         !step_focused,
                         show_caret,
+                        app.unattended,
                         &app.theme,
                         &mut layout_map,
                         true,
@@ -580,41 +580,43 @@ pub(super) async fn run_app_loop(
             render::recess_backdrop(f, recess, &app.theme);
 
             // Modals
-            match app.active_modal {
-                Modal::Provider => {
-                    render::draw_models_modal(
-                        f,
-                        &mut layout_map,
-                        PROVIDERS,
-                        &app.current_provider,
-                        app.modal_index,
-                        &app.key_status,
-                        &app.provider_picker,
-                        &app.input,
-                        app.cursor_position,
-                        &app.theme,
-                    );
-                }
+            let drawn_modal_rect = match app.active_modal {
+                Modal::Provider => Some(render::draw_models_modal(
+                    f,
+                    &mut layout_map,
+                    PROVIDERS,
+                    &app.current_provider,
+                    app.modal_index,
+                    &app.key_status,
+                    &app.provider_picker,
+                    &app.input,
+                    app.cursor_position,
+                    &app.theme,
+                )),
                 Modal::ModelPicker => {
                     // Second-stage model picker: list the staged multi-model
                     // provider's models. The provider index lives in
                     // `model_picker_provider`.
                     if let Some(sol_idx) = app.model_picker_provider {
                         if let Some(solution) = PROVIDERS.get(sol_idx) {
-                            render::draw_model_picker(
+                            Some(render::draw_model_picker(
                                 f,
                                 &mut layout_map,
                                 solution,
                                 &app.current_model,
                                 app.modal_index,
                                 &app.theme,
-                            );
+                            ))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
                 }
                 Modal::HistorySearch => {
-                    let ranked = app.history_filtered();
-                    render::draw_history_modal(
+                    let ranked = app.history_rows();
+                    Some(render::draw_history_modal(
                         f,
                         &mut layout_map,
                         &app.input_history,
@@ -625,13 +627,14 @@ pub(super) async fn run_app_loop(
                         &mut app.history_scroll,
                         app.history_modal_follow,
                         app.history_preview,
+                        app.history_search,
                         &app.theme,
-                    );
+                    ))
                 }
-                Modal::Permission => {}
+                Modal::Permission => None,
                 Modal::Question => {
                     if let Some(ref qmodel) = app.question {
-                        render::draw_question_modal(
+                        Some(render::draw_question_modal(
                             f,
                             qmodel.request(),
                             qmodel.current(),
@@ -640,7 +643,9 @@ pub(super) async fn run_app_loop(
                             qmodel.highlight(),
                             &mut app.question_scroll,
                             &app.theme,
-                        );
+                        ))
+                    } else {
+                        None
                     }
                 }
                 Modal::ModelEditor => {
@@ -649,7 +654,7 @@ pub(super) async fn run_app_loop(
                         .and_then(|idx| PROVIDERS.get(idx))
                         .map(|s| s.name)
                         .unwrap_or("model");
-                    render::draw_model_editor(
+                    Some(render::draw_model_editor(
                         f,
                         title,
                         app.editor_field,
@@ -658,30 +663,32 @@ pub(super) async fn run_app_loop(
                         &app.input,
                         app.cursor_position,
                         &app.theme,
-                    );
+                    ))
                 }
-                Modal::Help => render::draw_help_modal(f, &mut app.help_scroll, &app.theme),
+                Modal::Help => Some(render::draw_help_modal(f, &mut app.help_scroll, &app.theme)),
                 Modal::ToolStepDetail => {
                     if let Some(msg) = app
                         .tool_detail_message_idx
                         .and_then(|idx| app.messages.get(idx))
                     {
-                        render::draw_tool_step_detail_overlay(
+                        Some(render::draw_tool_step_detail_overlay(
                             f,
                             msg,
                             app.tool_detail_scroll,
                             &app.theme,
-                        );
+                        ))
+                    } else {
+                        None
                     }
                 }
-                Modal::Sessions => render::draw_sessions_modal(
+                Modal::Sessions => Some(render::draw_sessions_modal(
                     f,
                     &app.sessions_overview,
                     app.modal_index
                         .min(app.sessions_overview.len().saturating_sub(1)),
                     &app.theme,
-                ),
-                Modal::Session => render::draw_session_modal(
+                )),
+                Modal::Session => Some(render::draw_session_modal(
                     f,
                     &app.current_provider,
                     &app.current_model,
@@ -692,14 +699,14 @@ pub(super) async fn run_app_loop(
                     &mut app.session_scroll,
                     app.session_modal_follow,
                     &app.theme,
-                ),
-                Modal::Permissions => render::draw_permissions_manager(
+                )),
+                Modal::Permissions => Some(render::draw_permissions_manager(
                     f,
                     app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.permissions_scroll,
                     &app.theme,
-                ),
+                )),
                 Modal::Activity => {
                     let user_prompt: Option<String> = app
                         .focused_messages()
@@ -716,7 +723,7 @@ pub(super) async fn run_app_loop(
                                 && m.origin == crate::tui::document::UserMessageOrigin::Chat
                         })
                         .map(|m| m.raw.clone());
-                    render::draw_activity_modal(
+                    Some(render::draw_activity_modal(
                         f,
                         render::ActivityModalView {
                             active_tab: app.activity_tab,
@@ -732,10 +739,10 @@ pub(super) async fn run_app_loop(
                         },
                         &mut app.activity_scroll,
                         &app.theme,
-                    )
+                    ))
                 }
-                Modal::None => {}
-            }
+                Modal::None => None,
+            };
 
             // Copy toast
             if app.copy_toast_until.is_some() {
@@ -760,11 +767,15 @@ pub(super) async fn run_app_loop(
 
             app.layout_map = layout_map;
 
-            // Record the open modal's panel rect (when one is dismissable) so a
-            // click on the backdrop outside it can close it. Computed from the
-            // frame here, the same geometry the modal just drew with.
-            let modal_rect = render::modal_outer_rect(&app.active_modal, f);
-            app.modal_rect = modal_rect;
+            // Record the open modal's actual panel rect (when one is
+            // dismissable) so a click on the backdrop outside it can close it.
+            // The rect comes from the renderer that just painted the panel, so
+            // dynamic-height modals and click hit-tests cannot drift apart.
+            app.modal_rect = if app.active_modal.dismissable_by_outside_click() {
+                drawn_modal_rect
+            } else {
+                None
+            };
         })?;
 
         // Cursor visibility follows the focus zone so the caret only shows up
@@ -828,12 +839,13 @@ pub(super) async fn run_app_loop(
             }
             events_drained = true;
             let event = event::read()?;
-            // The Ctrl+R history-search modal borrows the input line as its
-            // fuzzy query, so a literal `/foo` query must NOT trigger the slash
-            // completion popup (or `@path` mentions). Suppress completions
-            // entirely while that modal is open. The same suppression applies
-            // right after an Enter-driven commit: the user just finished a
-            // completion, so the popup should stay hidden until the next edit.
+            // The Ctrl+R history modal's search sub-layer borrows the input line
+            // as its fuzzy query, so a literal `/foo` query must NOT trigger the
+            // slash completion popup (or `@path` mentions); browse mode keeps the
+            // line empty. Either way, suppress completions while the modal is
+            // open. The same suppression applies right after an Enter-driven
+            // commit: the user just finished a completion, so the popup should
+            // stay hidden until the next edit.
             let suppress_completions =
                 app.active_modal == Modal::HistorySearch || app.completion_dismissed;
             // Pre-compute completion data to avoid borrow conflicts with process_event.
@@ -874,6 +886,7 @@ pub(super) async fn run_app_loop(
                     in_side_view: app.in_side_view,
                     has_focused_target: app.focused_target.is_some(),
                     has_queued: !app.pending_dispatch.is_empty(),
+                    history_searching: app.history_search,
                 },
                 &mut app.drag,
             );
@@ -1332,26 +1345,53 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::OpenHistory => {
                     // Stash whatever the user was composing so Esc restores it
-                    // unchanged; the input box is reused as the fuzzy query
-                    // while the modal is open (mirrors the ApiKey / Endpoint /
-                    // ModelName modals that also borrow the input line).
+                    // unchanged. The modal opens in browse mode, so the input
+                    // line stays empty until `/` enters search and borrows it as
+                    // the fuzzy query.
                     app.stashed_input = std::mem::take(&mut app.input);
                     app.cursor_position = 0;
                     app.input_scroll = 0;
                     app.suggestion_index = None;
                     app.active_modal = Modal::HistorySearch;
-                    // Default to the most-recent entry so an immediate Enter
-                    // re-inserts the last-typed item. Empty history → 0.
-                    app.modal_index = app.input_history.len().saturating_sub(1);
+                    app.history_search = false;
+                    // Browse rows are newest-first, so index 0 is the most-recent
+                    // entry — focus the top so an immediate Enter re-inserts it.
+                    app.modal_index = 0;
                     app.history_scroll = 0;
                     app.history_modal_follow = true;
+                    app.history_preview = false;
+                }
+                input::InputAction::HistoryEnterSearch => {
+                    // `/` in browse mode: enter the search sub-layer. The input
+                    // line is already empty (held in `stashed_input`); typing now
+                    // builds the fuzzy query and re-ranks `history_rows`.
+                    app.history_search = true;
+                    app.modal_index = 0;
+                    app.history_scroll = 0;
+                    app.history_modal_follow = true;
+                    app.history_preview = false;
+                }
+                input::InputAction::HistoryExitSearch => {
+                    // First Esc while searching: drop the query and return to the
+                    // full browse list. The original draft stays parked in
+                    // `stashed_input` until the modal closes for real.
+                    app.history_search = false;
+                    app.input.clear();
+                    app.cursor_position = 0;
+                    app.input_scroll = 0;
+                    app.suggestion_index = None;
+                    app.modal_index = 0;
+                    app.history_scroll = 0;
+                    app.history_modal_follow = true;
+                    app.history_preview = false;
                 }
                 input::InputAction::HistoryInsert => {
-                    // Enter inside the Ctrl+R modal: pull the highlighted fuzzy
-                    // match out of the filtered list and drop it into the input
-                    // box for further editing / sending. The message is not
-                    // shipped here — the user hits Enter again to send.
-                    let ranked = app.history_filtered();
+                    // Enter inside the Ctrl+R modal: pull the focused entry out
+                    // of `history_rows` (the browse list or the search matches)
+                    // and drop it into the input box for further editing /
+                    // sending. The message is not shipped here — the user hits
+                    // Enter again to send.
+                    let ranked = app.history_rows();
                     let pick = ranked.get(app.modal_index).or_else(|| ranked.first());
                     if let Some((orig_idx, _)) = pick {
                         let original = *orig_idx;
@@ -1495,13 +1535,10 @@ pub(super) async fn run_app_loop(
                     // provider picker, so a nested pick is recoverable with Esc.
                     let mut return_to_picker = false;
                     if app.active_modal == Modal::HistorySearch {
-                        // The input box was borrowed as the fuzzy query; hand
-                        // the in-progress draft back so Esc is a true cancel.
-                        app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
-                        app.input_scroll = 0;
-                        app.suggestion_index = None;
-                        app.modal_index = 0;
+                        // Closing from either browse or search: hand the parked
+                        // draft back so Esc is a true cancel, and clear the
+                        // search sub-layer / preview flags for the next open.
+                        app.restore_history_draft();
                     } else if app.active_modal == Modal::Provider {
                         // The input box was borrowed as the fuzzy filter; hand
                         // the in-progress draft back so Esc cancels cleanly.
@@ -1709,13 +1746,10 @@ pub(super) async fn run_app_loop(
                     ) {
                         clipboard_ops::spawn_clipboard_copy(&copy_tx, copy_pending.clone(), text);
                     } else if app.active_modal == Modal::HistorySearch {
-                        // Cancel the fuzzy query: restore the in-progress draft
-                        // the user was composing before Ctrl+R.
-                        app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
-                        app.input_scroll = 0;
-                        app.suggestion_index = None;
-                        app.modal_index = 0;
+                        // Cancel the history modal: restore the in-progress draft
+                        // the user was composing before Ctrl+R (clears the search
+                        // query and sub-flags too).
+                        app.restore_history_draft();
                         app.active_modal = Modal::None;
                     } else if app.active_modal != Modal::None
                         && app.active_modal != Modal::Permission
@@ -2055,7 +2089,7 @@ pub(super) async fn run_app_loop(
                         // Up/Down walk the fuzzy-filtered list, not the raw
                         // history, so the cursor never lands on an entry the
                         // user cannot actually see or select.
-                        let count = app.history_filtered().len();
+                        let count = app.history_rows().len();
                         app.modal_index = if count == 0 {
                             0
                         } else if app.modal_index == 0 {
@@ -2122,7 +2156,7 @@ pub(super) async fn run_app_loop(
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::HistorySearch => {
-                        let count = app.history_filtered().len().max(1);
+                        let count = app.history_rows().len().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                         app.history_modal_follow = true;
                         if app.history_preview {
@@ -2350,14 +2384,19 @@ pub(super) async fn run_app_loop(
                     // press inside is a no-op (these info modals have no click
                     // targets yet). Either way the click is consumed so it does
                     // not also fall through to the transcript behind the
-                    // backdrop. Modals that need their own restore path
-                    // (Provider / ModelEditor / HistorySearch) report no rect
+                    // backdrop. Modals that hold precious input and need their
+                    // own restore path (Provider / ModelEditor) report no rect
                     // and are skipped here, so a stray click never discards an
-                    // in-progress filter or API key.
+                    // API key. HistorySearch *is* dismissable: its filter is
+                    // ephemeral and the draft is parked, so an outside click
+                    // restores the draft (mirroring Esc / CloseModal).
                     if let Some(r) = app.modal_rect {
                         let inside =
                             r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height;
                         if !inside {
+                            if app.active_modal == Modal::HistorySearch {
+                                app.restore_history_draft();
+                            }
                             app.active_modal = Modal::None;
                         }
                         app.selection = SelectionState::None;

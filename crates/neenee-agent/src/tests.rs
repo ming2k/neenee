@@ -1003,7 +1003,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("tool-cancelled {name}")
             }
             AgentEvent::PursuitUpdated(_) => "pursuit-updated".to_string(),
-            AgentEvent::AutoApproveChanged(enabled) => format!("auto-approve {enabled}"),
+            AgentEvent::UnattendedChanged(enabled) => format!("unattended {enabled}"),
             AgentEvent::SessionReview { alert } => {
                 format!("session-review alert={alert:?}")
             }

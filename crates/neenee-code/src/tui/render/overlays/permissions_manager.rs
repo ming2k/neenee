@@ -10,8 +10,9 @@ use neenee_tui::{
 };
 
 use super::common::{placeholder, selectable_row};
+use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
 
 /// Draw the permissions manager modal: a centered, dismissable list of cached
 /// "always allow" rules. Each row shows `<tool> <scope>`; `Space` revokes the
@@ -23,8 +24,8 @@ pub fn draw_permissions_manager(
     modal_index: usize,
     scroll: &mut usize,
     theme: &Theme,
-) {
-    let area = centered_rect(64, 60, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::Permissions).expect("permissions modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     // ── Header ──
@@ -91,4 +92,5 @@ pub fn draw_permissions_manager(
             fo,
         );
     }
+    area
 }

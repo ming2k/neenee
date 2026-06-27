@@ -3,7 +3,7 @@
 //!
 //! This is the largest handler — it fans the parsed command out across every
 //! `BuiltinCmd` variant (`/provider`, `/mcp`, `/compact`, `/clear`,
-//! `/permissions`, `/auto-approve`, `/review`, `/search`, `/resume`,
+//! `/permissions`, `/unattended`, `/review`, `/search`, `/resume`,
 //! `/session`, `/sessions`, `/btw`, `/pursue`, `/repeat`, `/init`,
 //! `/skills`, `/skill`, `/export`, `/debug`, `/help`, `/exit`) plus the
 //! `None` arm that runs a user-defined project command.
@@ -117,38 +117,38 @@ pub async fn dispatch(
                 let _ = resp_tx.send(turn(&session.id().await, TurnEvent::Text(message)));
             }
         }
-        Some(BuiltinCmd::AutoApprove) => {
+        Some(BuiltinCmd::Unattended) => {
             let next = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
                 Some("on") | Some("true") | Some("1") => Some(true),
                 Some("off") | Some("false") | Some("0") => Some(false),
                 Some(other) => {
                     let _ = resp_tx.send(AgentResponse::Error(format!(
-                        "Unknown value '{}'. Use `/auto-approve on|off`.",
+                        "Unknown value '{}'. Use `/unattended on|off`.",
                         other
                     )));
                     return;
                 }
                 None => None,
             };
-            let enabled = next.unwrap_or_else(|| !agent.get_auto_approve());
-            agent.set_auto_approve(enabled);
+            let enabled = next.unwrap_or_else(|| !agent.get_unattended());
+            agent.set_unattended(enabled);
             let _ = resp_tx.send(turn(
                 &session.id().await,
                 TurnEvent::Text(format!(
-                    "Auto-approve {}: write tools {} run without permission prompts.",
+                    "Unattended {}: write tools {} run without permission prompts.",
                     if enabled { "ON" } else { "OFF" },
                     if enabled { "will" } else { "won't" },
                 )),
             ));
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::AutoApproveChanged(enabled),
+                TurnEvent::UnattendedChanged(enabled),
             ));
-            // No `send_harness_state` here: toggling auto-approve is not a
+            // No `send_harness_state` here: toggling unattended is not a
             // turn lifecycle transition, so emitting a `HarnessState("idle")`
             // would make the HarnessState handler clear the live activity
             // cell (`activity_status`) and momentarily hide the activity bar
-            // mid-turn. The `AutoApproveChanged` event above already mirrors
+            // mid-turn. The `UnattendedChanged` event above already mirrors
             // the new value into the TUI snapshot without that side effect.
         }
         Some(BuiltinCmd::Review) => {

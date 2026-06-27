@@ -139,7 +139,7 @@ live channel — the child surfaces `ask_user`/permission *up* as a
 `SubagentEvent`, and the user's reply travels *down* via the registry →
 `SubagentHandle` → the child's parked oneshot. So `PLAN` can clarify inline
 like the main agent does, with no re-spawn. (While ADR-0029's
-`set_auto_approve` transitional gate is still in place, the default `PLAN`
+`set_unattended` transitional gate is still in place, the default `PLAN`
 profile remains non-interactive in practice; an interactive `PLAN` is one
 profile flag away once the gate is dropped.)
 

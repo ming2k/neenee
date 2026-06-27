@@ -63,6 +63,15 @@ pub struct QueuedDispatch {
 pub enum Modal {
     None,
     Provider,
+    /// Input-history recall (Ctrl+R). A two-mode surface: it opens in **browse**
+    /// mode — a plain reverse-chronological list (newest first, top-focused)
+    /// where the composer line is not borrowed and typing is inert — and `/`
+    /// drops into a **search** sub-layer that borrows the line as a live fuzzy
+    /// query (`App::history_search` distinguishes the two). The name is kept for
+    /// continuity even though browsing, not searching, is now the default.
+    /// Rows come from [`App::history_rows`]; Enter inserts the focused entry into
+    /// the composer for editing (never sends). The first Esc in search returns to
+    /// browse, the second (or an outside click) closes and restores the draft.
     HistorySearch,
     Permission,
     Question,
@@ -141,16 +150,19 @@ impl Modal {
     }
 
     /// Whether this modal closes when the user clicks outside its rect
-    /// (click-outside-to-dismiss). True only for read-only / info overlays
-    /// (Help, ToolStepDetail, Session, Sessions, Activity).
-    /// Entry modals (Provider, ModelEditor, Question) and the permission
-    /// sheet stay open so an accidental click never discards in-progress
-    /// input or a pending decision; HistorySearch borrows the input line and
-    /// restores through its own path.
+    /// (click-outside-to-dismiss). True for the read-only / info overlays
+    /// (Help, ToolStepDetail, Session, Sessions, Activity) and for the history
+    /// modal: its filter query is ephemeral and the real composer draft is
+    /// safely parked in `stashed_input`, so an outside click closes it and
+    /// restores the draft (via [`App::restore_history_draft`]) — exactly like
+    /// Esc. Entry modals that hold precious in-progress input (Provider,
+    /// ModelEditor, Question) and the permission sheet stay open so an
+    /// accidental click never discards an API key or a pending decision.
     ///
     /// This is the single source of truth for *which* modals are
-    /// click-dismissable; `render::modal_outer_rect` defers to it and only
-    /// adds geometry, so the two can never disagree.
+    /// click-dismissable; the event loop records the renderer's actual panel
+    /// rect for these modals and leaves every other modal without an
+    /// outside-click target.
     pub fn dismissable_by_outside_click(self) -> bool {
         matches!(
             self,
@@ -160,6 +172,7 @@ impl Modal {
                 | Modal::Sessions
                 | Modal::Permissions
                 | Modal::Activity
+                | Modal::HistorySearch
         )
     }
 }
@@ -241,11 +254,11 @@ pub struct App {
     pub todos_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the currently-open dismissable overlay modal (the
     /// centered panel, not the full-screen backdrop), so a click that lands
-    /// outside it closes the modal — mirroring Esc. Written each render via
-    /// [`crate::tui::render::modal_outer_rect`]. `None` when no modal is open,
+    /// outside it closes the modal — mirroring Esc. Written each render from
+    /// the rect returned by the modal renderer. `None` when no modal is open,
     /// when the modal paints no full backdrop (Permission), or when it borrows
     /// the composer input and therefore must close through its own restore
-    /// path (Provider / ModelEditor / HistorySearch).
+    /// path (Provider / ModelEditor).
     pub modal_rect: Option<neenee_tui::Rect>,
     /// Content-line index of the sticky step's real summary. Used to re-anchor
     /// the scroll offset when the user collapses the pinned step so the summary
@@ -300,9 +313,9 @@ pub struct App {
     /// time the modal opens; clamped and auto-followed to the selection by the
     /// renderer each frame.
     pub permissions_scroll: usize,
-    /// Body scroll offset of the history search modal (Ctrl+R). Reset to 0
-    /// each time the modal opens; clamped and auto-followed to the selection
-    /// by the renderer each frame.
+    /// Body scroll offset of the history modal (Ctrl+R). Reset to 0 each time
+    /// the modal opens (and when toggling browse/search/preview); clamped and
+    /// auto-followed to the selection by the renderer each frame.
     pub history_scroll: usize,
     /// When true, the history modal's body scroll follows the ↑/↓ selection
     /// cursor. Cleared on manual scroll (free browse), re-set on navigation.
@@ -312,6 +325,12 @@ pub struct App {
     /// Tab; ↑/↓ re-shows the focused entry's complete prompt. `history_scroll`
     /// is reused as the per-entry scroll inside preview mode.
     pub history_preview: bool,
+    /// Whether the history modal's **search sub-layer** is active. The modal
+    /// opens in browse mode (`false`): a plain reverse-chronological list with
+    /// no query field. Pressing `/` enters search (`true`), which borrows the
+    /// composer line as a live fuzzy query; the first Esc returns to browse and
+    /// the second closes the modal. See [`App::history_rows`].
+    pub history_search: bool,
     pub current_provider: String,
     pub current_model: String,
     /// Raw current working directory captured at startup. Used to resolve
@@ -331,10 +350,10 @@ pub struct App {
     pub loop_status: String,
     pub activity_status: String,
     /// Whether write-tool permission prompts are bypassed this session
-    /// (`--auto-approve` / `/auto-approve on`). Mirrored from the harness
+    /// (`--unattended` / `/unattended on`). Mirrored from the harness
     /// snapshot; shown as a badge in the hint bar so the elevated state is
     /// always visible.
-    pub auto_approve: bool,
+    pub unattended: bool,
     /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. Shown
     /// inside the Activity modal (and no longer pinned above the input box) so
     /// the footer reclaims the vertical space. `None` (or an empty list)
@@ -874,18 +893,51 @@ impl App {
         self.reset_view_state();
     }
 
-    /// Fuzzy-filtered view of [`App::input_history`] for the Ctrl+R
-    /// (`Modal::HistorySearch`) modal. Returns `(original_index, FuzzyMatch)`
-    /// pairs sorted by descending match score, with input order as the stable
-    /// tiebreaker so equally-good matches keep their top-to-bottom history
-    /// order. Computed from scratch on every call: history is small and this
-    /// is invoked at most a few times per frame (modal navigation, Enter
-    /// accept, and rendering), so a cached field would just add stale-state
-    /// risk for no measurable win.
-    pub fn history_filtered(&self) -> Vec<(usize, fuzzy::FuzzyMatch)> {
+    /// Rows shown in the Ctrl+R history modal, as `(original_index, FuzzyMatch)`
+    /// pairs. The single source of truth for navigation (Up/Down clamp), Enter
+    /// accept, and rendering — they all index into this same vector so the
+    /// cursor never lands on a row the user cannot see.
+    ///
+    /// In **browse** mode (or in search mode before the user types anything) the
+    /// list is **reverse-chronological** — newest first — with empty matches (no
+    /// highlight). Once a query is present in **search** mode the rows are the
+    /// fuzzy-ranked matches, best score first, with input order as the stable
+    /// tiebreaker. Recomputed from scratch each call: history is small and this
+    /// runs at most a few times per frame, so caching would only add stale-state
+    /// risk.
+    pub fn history_rows(&self) -> Vec<(usize, fuzzy::FuzzyMatch)> {
+        if !self.history_search || self.input.is_empty() {
+            return (0..self.input_history.len())
+                .rev()
+                .map(|i| {
+                    (
+                        i,
+                        fuzzy::FuzzyMatch {
+                            score: 0,
+                            positions: Vec::new(),
+                        },
+                    )
+                })
+                .collect();
+        }
         let mut ranked = fuzzy::rank(&self.input_history, &self.input);
         fuzzy::sort_by_score(&mut ranked);
         ranked
+    }
+
+    /// Tear down the history modal's borrowed state: hand the parked composer
+    /// draft back, drop any filter query, and clear the search/preview
+    /// sub-flags. Shared by the Esc (`CloseModal`) and click-outside dismiss
+    /// paths so the two can never drift. Does **not** touch `active_modal` —
+    /// the caller owns that transition.
+    pub fn restore_history_draft(&mut self) {
+        self.input = std::mem::take(&mut self.stashed_input);
+        self.cursor_position = self.input.chars().count();
+        self.input_scroll = 0;
+        self.suggestion_index = None;
+        self.modal_index = 0;
+        self.history_search = false;
+        self.history_preview = false;
     }
 
     /// Compute the filtered, sorted model rows for the `/provider` picker.

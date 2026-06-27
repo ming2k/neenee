@@ -72,40 +72,6 @@ use neenee_core::{PermissionRequest, ProviderPickerSnapshot, UserQuestionRequest
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// Outer centered rect of the currently-open dismissable overlay modal, so the
-/// event loop can close it when the user clicks on the backdrop (i.e. outside
-/// the panel) — mirroring Esc.
-///
-/// Only the read-only / info overlays are covered: modals that paint no
-/// full-screen backdrop (Permission) or that borrow the composer input and
-/// therefore need their own Esc/restore path (Provider / ModelEditor /
-/// HistorySearch) return `None`, so a stray click never discards an in-progress
-/// filter or API key. The percentages mirror the `centered_rect(...)` call each
-/// of these modals paints in `overlays.rs`; if a modal's geometry changes
-/// there, update it here too so the click-outside hit-test stays exact.
-pub fn modal_outer_rect(modal: &crate::tui::app::Modal, frame: &Frame) -> Option<Rect> {
-    use crate::tui::app::Modal;
-    // Single source of truth for *which* modals are click-dismissable lives
-    // on the `Modal` type itself; this fn only adds the geometry.
-    if !modal.dismissable_by_outside_click() {
-        return None;
-    }
-    let (percent_x, percent_y) = match modal {
-        Modal::Help => (58, 70),
-        Modal::ToolStepDetail => (92, 84),
-        Modal::Activity => (72, 70),
-        Modal::Session => (76, 70),
-        Modal::Sessions => (80, 64),
-        Modal::Permissions => (64, 60),
-        _ => return None,
-    };
-    Some(primitives::centered_rect(
-        percent_x,
-        percent_y,
-        viewport_rect(frame),
-    ))
-}
-
 /// Inner rect of a transcript-area region after reserving the uniform
 /// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. This is the **single
 /// point** where the horizontal inset is applied — called exactly three times
@@ -736,6 +702,7 @@ mod tests {
                     5,
                     true,
                     true,
+                    false,
                     &theme,
                     &mut LayoutMap::new(),
                     true,
@@ -795,6 +762,7 @@ mod tests {
                 &mut 0,
                 true,
                 false,
+                true,
                 &theme,
             );
             draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
@@ -1193,6 +1161,7 @@ mod tests {
                 0,
                 true,
                 true,
+                false,
                 &theme,
                 &mut layout_map,
                 true,
@@ -1229,6 +1198,7 @@ mod tests {
                 input.len(),
                 true,
                 true,
+                false,
                 &theme,
                 &mut LayoutMap::new(),
                 true,
@@ -1262,6 +1232,7 @@ mod tests {
                     input.len(),
                     true,
                     true,
+                    false,
                     &theme,
                     &mut LayoutMap::new(),
                     false,
@@ -1311,6 +1282,7 @@ mod tests {
                 input,
                 input.len(),
                 true,
+                false,
                 false,
                 &theme,
                 &mut LayoutMap::new(),
@@ -1370,6 +1342,7 @@ mod tests {
                 input,
                 input.len(),
                 true,
+                false,
                 false,
                 &theme,
                 &mut LayoutMap::new(),
@@ -1441,6 +1414,7 @@ mod tests {
                 input.len(),
                 true,
                 false,
+                false,
                 &theme,
                 &mut layout_map,
                 true,
@@ -1466,6 +1440,7 @@ mod tests {
                     input,
                     input.len(),
                     true,
+                    false,
                     false,
                     theme,
                     &mut LayoutMap::new(),
@@ -1576,6 +1551,7 @@ mod tests {
                 0,
                 true,
                 true,
+                false,
                 &theme,
                 &mut layout_map,
                 false,
@@ -2055,6 +2031,7 @@ mod tests {
                     &mut 0,
                     true,
                     false,
+                    true,
                     &theme,
                 );
             });
@@ -2078,9 +2055,55 @@ mod tests {
                 &mut 0,
                 true,
                 false,
+                true,
                 &theme,
             );
         });
+    }
+
+    /// Browse mode (`search = false`) renders the plain list with the
+    /// `/ to search` hint and no query field — the default state when the
+    /// Ctrl+R modal first opens.
+    #[test]
+    fn history_modal_browse_mode_shows_search_hint() {
+        let theme = Theme::default();
+        let history = vec!["git status".to_string(), "cargo test".to_string()];
+        // Browse rows are newest-first with empty (unhighlighted) matches.
+        let ranked: Vec<(usize, crate::tui::fuzzy::FuzzyMatch)> = (0..history.len())
+            .rev()
+            .map(|i| {
+                (
+                    i,
+                    crate::tui::fuzzy::FuzzyMatch {
+                        score: 0,
+                        positions: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
+        terminal.draw(|f| {
+            draw_history_modal(
+                f,
+                &mut LayoutMap::new(),
+                &history,
+                "",
+                0,
+                &ranked,
+                0,
+                &mut 0,
+                true,
+                false,
+                false, // browse mode
+                &theme,
+            );
+        });
+        let buf = terminal.buffer();
+        let screen: String = buf.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            screen.contains("/ to search"),
+            "browse header should advertise the search shortcut"
+        );
     }
 
     /// A multi-line history entry collapses to its first line in the fuzzy
@@ -2111,6 +2134,7 @@ mod tests {
                 &mut 0,
                 true,
                 false,
+                true,
                 &theme,
             );
         });
@@ -2131,6 +2155,7 @@ mod tests {
                 &ranked,
                 0,
                 &mut 0,
+                true,
                 true,
                 true,
                 &theme,

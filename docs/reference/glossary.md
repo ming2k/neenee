@@ -66,7 +66,7 @@ symbol, the symbol is backticked and never abbreviated.
 | **`WriteScope`** | A runtime, per-agent filesystem-write boundary (`None` / `Scoped` / `Unrestricted`); a hard boundary, not a prompt. [ADR-0028](../adr/0028-capability-allocation-scoped-writes.md) |
 | **write-scope gate** | The gating-stack step (after lookup, before the broker) that blocks write tools whose target is outside the agent's `WriteScope`. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
 | **permission broker** | The interactive authorization surface: Write/Execute tools pass through it before execution; offers once/always/reject. [Harness architecture](../explanation/agent-design/harness.md) |
-| **auto-approve** | When on, the harness stops prompting for confirmation before write tools. Affects the live process only. [Slash commands](commands.md) |
+| **unattended** | When on, the harness stops prompting for confirmation before write tools. Affects the live process only. [Slash commands](commands.md) |
 | **`tool_call_id` pairing** | The wire requirement that every result message references a preceding call id; preserved across pruning and fallback. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
 
 ## Skills

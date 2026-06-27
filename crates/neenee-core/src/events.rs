@@ -220,9 +220,9 @@ pub enum TurnEvent {
     /// `todo_update`). Mirrors [`AgentEvent::TodosUpdated`]. An empty list
     /// means "no active task list" and hides the sticky panel.
     TodosUpdated(crate::todos::TodoList),
-    /// The auto-approve toggle changed. Emitted by `/auto-approve` so the TUI
+    /// The unattended toggle changed. Emitted by `/unattended` so the TUI
     /// can refresh its badge without waiting for the next harness snapshot.
-    AutoApproveChanged(bool),
+    UnattendedChanged(bool),
     /// Mirrors [`AgentEvent::SessionReview`]. The TUI renders a non-modal
     /// alert with `alert` (or clears it when `alert` is empty).
     SessionReview {
@@ -276,9 +276,9 @@ pub struct HarnessSnapshot {
     pub pursuit: Option<Pursuit>,
     pub loop_status: String,
     /// Whether write-tool permission prompts are bypassed this session
-    /// (`--auto-approve` / `/auto-approve on`). The TUI mirrors this into a
+    /// (`--unattended` / `/unattended on`). The TUI mirrors this into a
     /// visible badge so the elevated state is never silent.
-    pub auto_approve: bool,
+    pub unattended: bool,
 }
 
 /// A row in the sessions picker: enough to identify, describe and order a past
@@ -360,7 +360,7 @@ pub enum SubagentEvent {
     /// `reply_permission` (resolving the parked oneshot directly), unblocking
     /// the subagent's pending tool. Only fires when
     /// the subagent's profile does not suppress the broker (e.g. via
-    /// `auto_approve`) — a read-only profile never produces one.
+    /// `unattended`) — a read-only profile never produces one.
     PermissionRequest(PermissionRequest),
     /// The subagent called `ask_user` and is blocked awaiting answers.
     /// Full-duplex (ADR-0029): carries the questions *up*; the reply travels
@@ -447,8 +447,8 @@ pub enum AgentEvent {
     /// The task list changed (`todo` / `todo_update`). The TUI uses this to refresh the
     /// unified sticky panel above the input box.
     TodosUpdated(crate::todos::TodoList),
-    /// The auto-approve toggle changed (via `/auto-approve`).
-    AutoApproveChanged(bool),
+    /// The unattended toggle changed (via `/unattended`).
+    UnattendedChanged(bool),
     /// An on-demand session-review diagnostic ran (ADR-0018, superseding the
     /// periodic ADR-0016 design). `alert` is a pre-rendered, human-facing
     /// summary of the worst verdict across all review dimensions (empty string

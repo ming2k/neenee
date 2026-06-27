@@ -115,7 +115,7 @@ pub async fn run_tui(
     let harness = Arc::new(Mutex::new(HarnessSnapshot {
         pursuit: None,
         loop_status: "idle".to_string(),
-        auto_approve: false,
+        unattended: false,
     }));
     let harness_clone = harness.clone();
     // Unified task list, mirrored from `AgentResponse::TodosUpdated`. Empty
@@ -548,7 +548,7 @@ pub async fn run_tui(
                             // its reply. Queue them FIFO so none is lost; the UI shows
                             // one sheet at a time and hands off as each is resolved.
                             // Stays global regardless of session so the modal always
-                            // surfaces (ADR-0017: the side auto-approves, so in
+                            // surfaces (ADR-0017: the side runs unattended, so in
                             // practice only the primary ever reaches here).
                             pending_permission_clone.lock().await.push_back(request);
                             if !routes_to_side {
@@ -673,9 +673,9 @@ pub async fn run_tui(
                                 }
                             }
                         }
-                        TurnEvent::AutoApproveChanged(enabled) => {
+                        TurnEvent::UnattendedChanged(enabled) => {
                             if !routes_to_side {
-                                harness_clone.lock().await.auto_approve = enabled;
+                                harness_clone.lock().await.unattended = enabled;
                             }
                         }
                         TurnEvent::RetryScheduled {
@@ -820,6 +820,7 @@ pub async fn run_tui(
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
+        history_search: false,
         current_provider: initial_provider,
         current_model: initial_model,
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -828,7 +829,7 @@ pub async fn run_tui(
         session_context: None,
         loop_status: "idle".to_string(),
         activity_status: String::new(),
-        auto_approve: false,
+        unattended: false,
         todos: None,
         turn_count: 0,
         current_round: 0,

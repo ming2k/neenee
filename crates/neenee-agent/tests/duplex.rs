@@ -260,7 +260,7 @@ impl Provider for StreamWriteCallProvider {
 }
 
 /// A test-only profile that admits write tools *and* leaves the permission
-/// broker on (`auto_approve: false`), so the child's write call surfaces a
+/// broker on (`unattended: false`), so the child's write call surfaces a
 /// `PermissionRequest` — the shape needed to exercise the full up→down
 /// round-trip through `SubagentTool` + the registry. Declared `const` because
 /// `SubagentTool::new` borrows the profile for `'static`.
@@ -273,13 +273,13 @@ const INTERACTIVE: SubagentProfile = SubagentProfile {
         write_paths: &[],
         command_allowlist: &[],
     },
-    auto_approve: false,
+    unattended: false,
 };
 
 #[tokio::test]
 async fn streaming_loop_fires_permission_broker_direct() {
     // Isolation: does run_streaming_with_events itself surface a permission
-    // request for a write tool when auto_approve is false? Decouples the
+    // request for a write tool when unattended is false? Decouples the
     // streaming driver from the SubagentTool wrapping.
     let ran = Arc::new(AtomicUsize::new(0));
     let agent = Arc::new(Agent::new(
@@ -288,7 +288,7 @@ async fn streaming_loop_fires_permission_broker_direct() {
         SkillRegistry::empty(),
         neenee_agent::AgentIdentity::default(),
     ));
-    agent.set_auto_approve(false);
+    agent.set_unattended(false);
 
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let a = Arc::clone(&agent);
@@ -320,7 +320,7 @@ async fn streaming_loop_fires_permission_broker_direct() {
 #[tokio::test]
 async fn subagent_tool_registry_routes_reply_into_live_subagent() {
     // End-to-end through SubagentTool with an interactive profile
-    // (`auto_approve: false`): the child's execute-tier tool surfaces a
+    // (`unattended: false`): the child's execute-tier tool surfaces a
     // permission request UP as `SubagentEvent::PermissionRequest`, the tool
     // registers the child's handle by the parent `call_id`, and a reply pulled
     // from the registry resolves the parked oneshot so the tool runs. This is

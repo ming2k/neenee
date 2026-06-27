@@ -16,7 +16,7 @@ Project and user-defined commands are covered under
 | `/compact` | Compact older complete turns now |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
-| `/auto-approve [on\|off]` | Toggle bypassing write-tool permission prompts |
+| `/unattended [on\|off]` | Toggle bypassing write-tool permission prompts |
 | `/review` | Run an on-demand session-review diagnostic of the current turn |
 | `/search <query>` | Semantic search over the project's session history |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
@@ -90,13 +90,13 @@ clock-driven scheduler, independent of `/pursue`. See
 | `/permissions` | List always-allowed tool rules for this process |
 | `/permissions clear` | Clear process-local always-allow rules |
 
-### `/auto-approve`
+### `/unattended`
 
 | Form | Effect |
 |------|--------|
-| `/auto-approve` | Toggle auto-approve on/off |
-| `/auto-approve on` | Enable bypassing write-tool permission prompts |
-| `/auto-approve off` | Disable bypassing write-tool permission prompts |
+| `/unattended` | Toggle unattended on/off |
+| `/unattended on` | Enable bypassing write-tool permission prompts |
+| `/unattended off` | Disable bypassing write-tool permission prompts |
 
 When on, the harness stops prompting for confirmation before write tools
 (`bash`, `write_file`, `edit_file`, …) run. Affects the live process only.

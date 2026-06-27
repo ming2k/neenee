@@ -8,10 +8,12 @@ use neenee_tui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::common::{McpRow, relative_time_compact, truncate_ellipsis};
+use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::design::{MODAL_BODY_LEADING_INDENT, MODAL_INNER_H_PADDING};
 use crate::tui::render::primitives::{
-    centered_rect, centered_rect_h, contrast_fg, modal_frame, render_body, viewport_rect,
+    content_modal_area, content_modal_probe, contrast_fg, modal_area, modal_chrome_rows,
+    modal_frame, modal_spec, render_body,
 };
 
 /// Draw the sessions picker: each row shows the session overview plus its
@@ -21,8 +23,8 @@ pub fn draw_sessions_modal(
     sessions: &[neenee_core::SessionOverview],
     selected: usize,
     theme: &Theme,
-) {
-    let area = centered_rect(80, 64, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::Sessions).expect("sessions modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     if let Some(h) = f.header {
@@ -105,6 +107,7 @@ pub fn draw_sessions_modal(
             fo,
         );
     }
+    area
 }
 
 /// Greedy word-wrap of `text` into lines no wider than `width` display columns.
@@ -170,15 +173,11 @@ pub fn draw_session_modal(
     scroll: &mut usize,
     follow_selection: bool,
     theme: &Theme,
-) {
-    const MODAL_W: u16 = 76;
-    const MIN_H: u16 = 9;
-    let viewport = viewport_rect(frame);
-
+) -> neenee_tui::Rect {
     // Width is independent of height, so probe a full-height rect first to learn
     // the body's content width, then build the dashboard, then size the panel to
     // the content (clamped) so there is no slab of dead space below it.
-    let probe = centered_rect(MODAL_W, 100, viewport);
+    let probe = content_modal_probe(frame, Modal::Session).expect("session modal has geometry");
     let body_width = (probe.width as usize)
         .saturating_sub(2 * MODAL_INNER_H_PADDING as usize)
         .max(1);
@@ -464,12 +463,10 @@ pub fn draw_session_modal(
     }
 
     // ── Size the panel to the content and paint it ──
-    // chrome = v-padding(2) + header(1) + gap(1) + gap(1) + footer(1) = 6 rows.
-    const CHROME: u16 = 6;
-    let desired = body.len() as u16 + CHROME;
-    let max_h = (viewport.height as f32 * 0.82) as u16;
-    let height = desired.clamp(MIN_H, max_h.max(MIN_H));
-    let area = centered_rect_h(MODAL_W, height, viewport);
+    let spec = modal_spec(Modal::Session).expect("session modal has geometry");
+    let desired = body.len() as u16 + modal_chrome_rows(spec);
+    let area =
+        content_modal_area(frame, Modal::Session, desired).expect("session modal has geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     if let Some(h) = f.header {
@@ -513,4 +510,5 @@ pub fn draw_session_modal(
             fo,
         );
     }
+    area
 }

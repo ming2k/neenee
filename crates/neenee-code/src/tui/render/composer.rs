@@ -68,6 +68,10 @@ pub(super) fn input_row_count(input: &str, text_width: usize, byte_cursor: usize
 /// no transcript step carries keyboard focus, and `false` when the user has
 /// navigated into the transcript with Ctrl+↑/↓ — the dimmer "read-only"
 /// palette signals that the next keypress targets the step, not the input box.
+///
+/// `unattended` recolors the `›` prompt glyph in the warning tone so the
+/// elevated, no-prompt state is unmissable every time the eye returns to the
+/// input line — replacing the hint-bar badge the state used to carry.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_composer(
     frame: &mut Frame,
@@ -76,6 +80,7 @@ pub fn draw_composer(
     byte_cursor: usize,
     focused: bool,
     show_caret: bool,
+    unattended: bool,
     theme: &Theme,
     layout_map: &mut LayoutMap,
     record: bool,
@@ -99,7 +104,9 @@ pub fn draw_composer(
     } else {
         theme.user_surface()
     };
-    let prompt_fg = if focused {
+    let prompt_fg = if unattended {
+        theme.warn()
+    } else if focused {
         theme.brand()
     } else {
         theme.muted()

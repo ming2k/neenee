@@ -264,6 +264,7 @@ pub fn history() -> io::Result<()> {
                     &mut scroll,
                     true,
                     false,
+                    true,
                     &theme,
                 );
             });

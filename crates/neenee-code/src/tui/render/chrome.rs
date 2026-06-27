@@ -367,16 +367,13 @@ pub struct HintBarView<'a> {
     /// When false the left of the bar is empty: there is no compose/browse
     /// mode to advertise, the focused-step highlight indicates navigation.
     pub shell_active: bool,
-    /// Whether auto-approve mode is active. Renders an extra warning-toned
-    /// pill so the elevated, no-prompt state is unmissable.
-    pub auto_approve: bool,
 }
 
 /// Draw the single-line hint bar pinned below the input box. Carries the model
 /// name and context-usage info that the old top header showed, now collapsed
 /// onto one row so the transcript reclaims the vertical space.
 ///
-/// Layout: focus-zone pill (and optional auto-approve pill) on the left,
+/// Layout: focus-zone pill (shell mode) on the left,
 /// right-aligned cluster of `model · context-usage` on the right.
 pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme: &Theme) {
     let HintBarView {
@@ -384,7 +381,6 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
         current_model,
         messages,
         shell_active,
-        auto_approve,
     } = view;
 
     let bg = theme.surface();
@@ -417,49 +413,15 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     };
     let zone_pill_width = if shell_active { shell_pill_width } else { 0 };
 
-    // --- Auto-approve pill (only when active). Mirrors the focus-zone pill
-    // styling but in the warning tone so the elevated, no-prompt state is
-    // unmissable. Rendered against the same raised background so it reads as
-    // a sibling badge rather than body text.
-    let warn_fg = theme.warn();
-    let auto_pill_text = " AUTO-APPROVE ";
-    let auto_pill_width = auto_pill_text.chars().count() + 2; // +2 for brackets
-    let auto_spans: Vec<Span<'static>> = if auto_approve {
-        vec![
-            Span::styled("[", Style::default().fg(warn_fg).bg(accent_bg)),
-            Span::styled(
-                auto_pill_text,
-                Style::default()
-                    .fg(warn_fg)
-                    .bg(accent_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("]", Style::default().fg(warn_fg).bg(accent_bg)),
-        ]
-    } else {
-        Vec::new()
-    };
-    let auto_segment_width = if auto_approve {
-        // The separating gap only exists when a shell pill precedes the
-        // auto-approve pill (see the span assembly below).
-        (if shell_active {
-            HINT_BAR_SEGMENT_GAP
-        } else {
-            0
-        }) + auto_pill_width
-    } else {
-        0
-    };
-
     // --- Right cluster: model name and context bar.
     // Build each segment separately so we can drop optional ones when the
     // terminal is too narrow.
     let context_max = crate::tui::provider_context_window(current_provider);
 
-    // Left side: optional shell pill and optional auto-approve pill. Computed
-    // now so the gap to the right cluster can hug the right edge.
+    // Left side: optional shell pill. Computed now so the gap to the right
+    // cluster can hug the right edge.
     let inner = HINT_BAR_INNER_PADDING;
-    let left_used = inner + zone_pill_width + auto_segment_width;
+    let left_used = inner + zone_pill_width;
 
     // Reserve the right-side segments from the inside out: model is always
     // shown; then context bar. Each preceding segment is separated by
@@ -507,18 +469,6 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8 + right_spans.len());
     spans.push(Span::styled(" ".repeat(inner), Style::default().bg(bg)));
     spans.extend(zone_spans);
-    if auto_approve {
-        // Separate the auto-approve pill from the shell pill with a gap, but
-        // only when the shell pill is actually present; otherwise the pill
-        // sits flush against the inner padding.
-        if shell_active {
-            spans.push(Span::styled(
-                " ".repeat(HINT_BAR_SEGMENT_GAP),
-                Style::default().bg(bg),
-            ));
-        }
-        spans.extend(auto_spans);
-    }
     spans.push(Span::styled(" ".repeat(gap), Style::default().bg(bg)));
     spans.extend(right_spans);
     // Trailing fill so the row owns every cell on this line.
@@ -637,7 +587,6 @@ mod tests {
                     current_model: "mock-model",
                     messages: &messages,
                     shell_active: false,
-                    auto_approve: false,
                 },
                 &theme,
             );
@@ -658,7 +607,6 @@ mod tests {
                     current_model: "",
                     messages: &Vec::<TranscriptMessage>::new(),
                     shell_active,
-                    auto_approve: false,
                 };
                 draw_hint_bar(f, Rect::new(0, 0, 80, 1), view, &Theme::default());
             });

@@ -599,12 +599,12 @@ impl Agent {
         }
     }
 
-    pub fn get_auto_approve(&self) -> bool {
-        self.permissions.auto_approve()
+    pub fn get_unattended(&self) -> bool {
+        self.permissions.unattended()
     }
 
-    pub fn set_auto_approve(&self, enabled: bool) {
-        self.permissions.set_auto_approve(enabled);
+    pub fn set_unattended(&self, enabled: bool) {
+        self.permissions.set_unattended(enabled);
     }
 
     /// Set this agent's operation boundary (ADR-0028). The main agent leaves it
@@ -1983,8 +1983,8 @@ impl Agent {
                 tool: tool.name().to_string(),
                 scope: scope.clone(),
             };
-            let auto_approved = self.get_auto_approve();
-            let always_allowed = auto_approved || self.permissions.is_always_allowed(&rule);
+            let unattended = self.get_unattended();
+            let always_allowed = unattended || self.permissions.is_always_allowed(&rule);
             if !always_allowed {
                 let request = PermissionRequest {
                     id: format!("permission_{}", uuid::Uuid::new_v4()),
@@ -2013,8 +2013,8 @@ impl Agent {
                         };
                     }
                 }
-            } else if auto_approved {
-                tracing::info!(tool = %tool.name(), scope = %scope, "auto-approved");
+            } else if unattended {
+                tracing::info!(tool = %tool.name(), scope = %scope, "ran unattended");
             }
         }
 

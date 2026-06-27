@@ -406,7 +406,7 @@ impl neenee_core::ContextReliefGate for MidTurnPruneGate {
     }
 }
 
-/// Emit the current harness snapshot (mode, pursuit, loop status, auto-approve)
+/// Emit the current harness snapshot (mode, pursuit, loop status, unattended)
 /// to the UI.
 pub fn send_harness_state(
     tx: &mpsc::UnboundedSender<AgentResponse>,
@@ -419,7 +419,7 @@ pub fn send_harness_state(
         TurnEvent::HarnessState(HarnessSnapshot {
             pursuit: agent.get_pursuit(),
             loop_status: loop_status.into(),
-            auto_approve: agent.get_auto_approve(),
+            unattended: agent.get_unattended(),
         }),
     ));
 }
@@ -945,8 +945,8 @@ pub fn relay_agent_event(
         }
         AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
         AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
-        AgentEvent::AutoApproveChanged(enabled) => {
-            turn(session_id, TurnEvent::AutoApproveChanged(enabled))
+        AgentEvent::UnattendedChanged(enabled) => {
+            turn(session_id, TurnEvent::UnattendedChanged(enabled))
         }
         AgentEvent::SessionReview { alert } => turn(session_id, TurnEvent::SessionReview { alert }),
         AgentEvent::PermissionRequest(request) => {

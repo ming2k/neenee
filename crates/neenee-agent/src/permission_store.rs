@@ -50,7 +50,7 @@ pub struct PermissionStore {
     project_root: Mutex<Option<std::path::PathBuf>>,
     /// When true, write tools execute without a permission prompt. Bypasses
     /// the allowlist entirely (the prompt block is skipped wholesale).
-    auto_approve: Mutex<bool>,
+    unattended: Mutex<bool>,
 }
 
 impl PermissionStore {
@@ -58,18 +58,18 @@ impl PermissionStore {
         Self {
             state: Mutex::new(PermissionState::default()),
             project_root: Mutex::new(None),
-            auto_approve: Mutex::new(false),
+            unattended: Mutex::new(false),
         }
     }
 
-    // ── auto-approve ────────────────────────────────────────────────────
+    // ── unattended ────────────────────────────────────────────────────
 
-    pub fn auto_approve(&self) -> bool {
-        *lock(&self.auto_approve)
+    pub fn unattended(&self) -> bool {
+        *lock(&self.unattended)
     }
 
-    pub fn set_auto_approve(&self, value: bool) {
-        *lock(&self.auto_approve) = value;
+    pub fn set_unattended(&self, value: bool) {
+        *lock(&self.unattended) = value;
     }
 
     // ── pending requests ────────────────────────────────────────────────

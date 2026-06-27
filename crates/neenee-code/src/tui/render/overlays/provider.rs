@@ -11,10 +11,9 @@ use crate::tui::layout::LayoutMap;
 use neenee_core::ProviderPickerSnapshot;
 
 use super::common::{caret_column, truncate_ellipsis};
+use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{
-    centered_rect, contrast_fg, modal_frame, render_body, viewport_rect,
-};
+use crate::tui::render::primitives::{contrast_fg, modal_area, modal_frame, render_body};
 
 /// Draw the provider picker The input line is borrowed as a
 /// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
@@ -37,8 +36,8 @@ pub(crate) fn draw_models_modal(
     query: &str,
     cursor_position: usize,
     theme: &Theme,
-) {
-    let area = centered_rect(72, 60, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::Provider).expect("provider modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     // Filter + sort once for the frame; the input handler shares the same
@@ -176,6 +175,7 @@ pub(crate) fn draw_models_modal(
         let cursor_y = h.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+    area
 }
 
 /// Draw the second-stage model picker for a multi-model provider (opencode-go).
@@ -188,8 +188,9 @@ pub(crate) fn draw_model_picker(
     current_model: &str,
     modal_index: usize,
     theme: &Theme,
-) {
-    let area = centered_rect(64, 60, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area =
+        modal_area(frame, Modal::ModelPicker).expect("model picker modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     let header_rect = f.header;
@@ -259,6 +260,7 @@ pub(crate) fn draw_model_picker(
             fo,
         );
     }
+    area
 }
 
 /// Draw the unified provider editor Two fields — API key
@@ -275,8 +277,9 @@ pub fn draw_model_editor(
     input: &str,
     cursor_position: usize,
     theme: &Theme,
-) {
-    let area = centered_rect(60, 36, viewport_rect(frame));
+) -> neenee_tui::Rect {
+    let area =
+        modal_area(frame, Modal::ModelEditor).expect("model editor modal has fixed geometry");
     let f = modal_frame(frame, area, theme.panel(), true, true);
 
     // The focused field's value lives in `input`; the unfocused one in its buf.
@@ -364,4 +367,5 @@ pub fn draw_model_editor(
     let cursor_x = body_rect.x + prefix.width() as u16 + caret_column(input, cursor_position);
     let cursor_y = body_rect.y + if field == 0 { 0 } else { 1 };
     frame.set_cursor_position((cursor_x, cursor_y));
+    area
 }

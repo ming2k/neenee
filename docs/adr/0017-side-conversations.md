@@ -72,7 +72,7 @@ agent and its own self-contained session file.
    `Text`, `Stream*`, `ToolCall`, `ToolResult`, `ToolStream`,
    `ToolCancelled`, `RoundStarted`, `Activity`, `PermissionRequest`,
    `UserQuestionRequest`, `Compacted`, `RetryScheduled`, `SessionReview`,
-   `PursuitUpdated`, `ModeChanged`, `PlanProgressUpdated`, `AutoApproveChanged`,
+   `PursuitUpdated`, `ModeChanged`, `PlanProgressUpdated`, `UnattendedChanged`,
    `HarnessState`, `SubTask`. `relay_agent_event`
    (`orchestration.rs:547`) emits `Turn { session_id, event }` for the turn it
    is relaying; global events stay top-level. The TUI keys transcript buffers
@@ -233,7 +233,7 @@ map to the code as follows:
 
 Four scoping choices, all deferring polish without contradicting the decision:
 
-- **Side `Agent` runs with `auto_approve(true)`** (mirroring `TaskTool`'s
+- **Side `Agent` runs with `unattended(true)`** (mirroring `TaskTool`'s
   sub-agent). A side chat is a quick aside; suppressing its permission prompts
   sidesteps the fact that the shared permission-reply channel routes to the
   primary `Agent`. The primary's prompts are unaffected and still modal. A
