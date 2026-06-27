@@ -54,6 +54,7 @@ define_builtin_commands! {
     Compact     = "/compact"      : "Compact older complete turns now",
     Clear       = "/clear"        : "Clear the conversation history",
     Permissions = "/permissions"  : "Show or clear always-allowed tool rules",
+    Config      = "/config"       : "Open user configuration",
     Unattended  = "/unattended"   : "Toggle bypassing write-tool permission prompts (on/off)",
     Review      = "/review"       : "Run an on-demand session-review diagnostic of the current turn",
     Search      = "/search"       : "Semantic search over the project's session history",

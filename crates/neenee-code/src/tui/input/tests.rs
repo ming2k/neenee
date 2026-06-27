@@ -788,7 +788,7 @@ fn key_with_focus(code: KeyCode) -> InputAction {
 #[test]
 fn tab_in_compose_without_suggestions_is_noop() {
     // Tab is completion-only: with no suggestion menu open, it does
-    // nothing. Zone switching is Ctrl+B, not Tab.
+    // nothing. (Transcript focus uses Ctrl+Up/Ctrl-Down, not Tab.)
     let mut input = String::new();
     assert_eq!(
         key_in_view(KeyCode::Tab, false, &mut input),

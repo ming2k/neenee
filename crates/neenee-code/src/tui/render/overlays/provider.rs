@@ -13,7 +13,9 @@ use neenee_core::ProviderPickerSnapshot;
 use super::common::{caret_column, truncate_ellipsis};
 use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{contrast_fg, modal_area, modal_frame, render_body};
+use crate::tui::render::primitives::{
+    FooterHint, contrast_fg, modal_area, modal_frame, render_body, render_modal_footer,
+};
 
 /// Draw the provider picker The input line is borrowed as a
 /// fuzzy filter; rows are sorted favorites-first → last-used → name. `Enter`
@@ -158,12 +160,17 @@ pub(crate) fn draw_models_modal(
     render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "type to filter · ↑↓ navigate · enter activate · * favorite · esc",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::secondary("type", "filter"),
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::primary("Enter", "activate"),
+                FooterHint::secondary("*", "favorite"),
+                FooterHint::always("Esc", "close"),
+            ],
+            theme,
         );
     }
 
@@ -252,12 +259,15 @@ pub(crate) fn draw_model_picker(
     render_body(frame, f.body, body, &mut 0, Some(modal_index), false, theme);
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑↓ navigate · enter activate · esc back",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::primary("Enter", "activate"),
+                FooterHint::always("Esc", "back"),
+            ],
+            theme,
         );
     }
     area
@@ -350,12 +360,15 @@ pub fn draw_model_editor(
     render_body(frame, body_rect, body, &mut 0, None, false, theme);
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "tab switch field · enter save & switch · esc cancel",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::secondary("Tab", "switch field"),
+                FooterHint::primary("Enter", "save"),
+                FooterHint::always("Esc", "cancel"),
+            ],
+            theme,
         );
     }
 

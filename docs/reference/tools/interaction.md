@@ -2,7 +2,8 @@
 
 Tools for the agent to manage its own state and to query the user mid-task.
 All are `Read` and bypass the permission broker. `ask_user` lives in
-`neenee-tools`; `todo` and `todo_update` live in `crates/neenee-core/src/todos.rs`.
+`neenee-tools`; `progress_update`, `todo`, and `todo_update` live in
+`neenee-agent`.
 
 ### `ask_user`
 
@@ -17,6 +18,17 @@ and [User questions](../../explanation/agent-design/user-questions.md).
 
 Each question: `{ "header"?: string, "question": string, "options": Option[], "multi_select"?: boolean }`.
 Each option: `{ "label": string, "description"?: string }`. The model should put the recommended option first and suffix its label with `(Recommended)`. The TUI always appends an "Other" free-text option so the user is not forced into the model's choices.
+
+### `progress_update`
+
+Report a very short current work status for the TUI activity bar and Activity
+modal. The status is model-authored, persists through transport phases inside
+the active turn, and clears when the turn ends. The tool is controlled by
+`agent.progress_updates.enabled`.
+
+| Parameter | Type | Required | Notes |
+|-----------|------|----------|-------|
+| `summary` | string | yes | Collapsed to one line and truncated to `agent.progress_updates.max_chars` |
 
 ### `todo`
 

@@ -39,9 +39,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neenee_core::{
-    AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
-    ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
-    TodoStatus, TurnEvent, UserQuestionRequest, mcp::McpConnectionStatus,
+    AgentRequest, AgentResponse, ConfigSnapshot, HarnessSnapshot, Message, ParentStatus,
+    PermissionRequest, ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot,
+    SessionOverview, TodoList, TodoStatus, TurnEvent, UserQuestionRequest,
+    mcp::McpConnectionStatus,
 };
 use neenee_tui::{Backend, Terminal};
 use std::{
@@ -142,6 +143,8 @@ pub async fn run_tui(
     let turn_started_at_clone = turn_started_at.clone();
     let activity_status = Arc::new(Mutex::new(String::new()));
     let activity_clone = activity_status.clone();
+    let progress_status = Arc::new(Mutex::new(String::new()));
+    let progress_clone = progress_status.clone();
     let pending_permission = Arc::new(Mutex::new(VecDeque::<PermissionRequest>::new()));
     let pending_permission_clone = pending_permission.clone();
     let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
@@ -167,6 +170,8 @@ pub async fn run_tui(
     // harness applies (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
+    let config_snapshot = Arc::new(Mutex::new(ConfigSnapshot::default()));
+    let config_snapshot_clone = config_snapshot.clone();
     // Global tool-step density (true = Comfortable: new tool steps spawn
     // expanded). Shared with the response listener so steps created mid-turn
     // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
@@ -244,11 +249,18 @@ pub async fn run_tui(
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
                                 activity_clone.lock().await.clear();
+                                progress_clone.lock().await.clear();
                             }
                         }
                         TurnEvent::Activity(status) => {
                             if !routes_to_side {
                                 *activity_clone.lock().await = status;
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        TurnEvent::ProgressUpdate(summary) => {
+                            if !routes_to_side {
+                                *progress_clone.lock().await = summary;
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
@@ -601,6 +613,7 @@ pub async fn run_tui(
                                 ir_clone.store(running, Ordering::SeqCst);
                                 if !running {
                                     activity_clone.lock().await.clear();
+                                    progress_clone.lock().await.clear();
                                     *current_round_clone.lock().await = 0;
                                     *review_alert_clone.lock().await = String::new();
                                     *turn_started_at_clone.lock().await = None;
@@ -702,6 +715,7 @@ pub async fn run_tui(
                             if !routes_to_side {
                                 ir_clone.store(false, Ordering::SeqCst);
                                 activity_clone.lock().await.clear();
+                                progress_clone.lock().await.clear();
                             }
                         }
                         TurnEvent::SessionReview { alert } => {
@@ -740,6 +754,7 @@ pub async fn run_tui(
                 AgentResponse::PermissionsCleared => {
                     pending_permission_clone.lock().await.clear();
                     activity_clone.lock().await.clear();
+                    progress_clone.lock().await.clear();
                 }
                 AgentResponse::ProviderKeys(status) => {
                     *key_status_clone.lock().await = status.into_iter().collect();
@@ -760,6 +775,9 @@ pub async fn run_tui(
                 }
                 AgentResponse::SessionContext(snapshot) => {
                     *session_context_clone.lock().await = Some(snapshot);
+                }
+                AgentResponse::ConfigSnapshot(snapshot) => {
+                    *config_snapshot_clone.lock().await = snapshot;
                 }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
@@ -817,6 +835,7 @@ pub async fn run_tui(
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
+        config_scroll: 0,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -827,8 +846,10 @@ pub async fn run_tui(
         path_scan_cache: None,
         current_pursuit: None,
         session_context: None,
+        config_snapshot: ConfigSnapshot::default(),
         loop_status: "idle".to_string(),
         activity_status: String::new(),
+        progress_status: String::new(),
         unattended: false,
         todos: None,
         turn_count: 0,
@@ -889,6 +910,7 @@ pub async fn run_tui(
             current_model,
             harness,
             activity_status,
+            progress_status,
             pending_permission,
             pending_question,
             is_responding,
@@ -903,6 +925,7 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
+            config_snapshot,
             todos,
             turn_count,
             current_round,

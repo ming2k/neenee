@@ -945,6 +945,7 @@ pub fn relay_agent_event(
         }
         AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
         AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
+        AgentEvent::ProgressUpdate(summary) => turn(session_id, TurnEvent::ProgressUpdate(summary)),
         AgentEvent::UnattendedChanged(enabled) => {
             turn(session_id, TurnEvent::UnattendedChanged(enabled))
         }

@@ -8,7 +8,9 @@ use super::common::caret_column;
 use crate::tui::Modal;
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{contrast_fg, modal_area, modal_frame, render_body};
+use crate::tui::render::primitives::{
+    FooterHint, contrast_fg, modal_area, modal_frame, render_body, render_modal_footer,
+};
 use unicode_width::UnicodeWidthStr;
 
 /// Draw the history search modal.
@@ -100,20 +102,31 @@ pub fn draw_history_modal(
     }
 
     if let Some(fo) = f.footer {
-        let hint = if preview {
-            "↑↓ next entry · Tab back to list · Enter insert · Esc close"
+        let hints: &[FooterHint] = if preview {
+            &[
+                FooterHint::navigation("↑↓", "next entry"),
+                FooterHint::secondary("Tab", "list"),
+                FooterHint::primary("Enter", "insert"),
+                FooterHint::always("Esc", "close"),
+            ]
         } else if search {
-            "type to filter · ↑↓ navigate · Tab preview · Enter insert · Esc back"
+            &[
+                FooterHint::secondary("type", "filter"),
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::secondary("Tab", "preview"),
+                FooterHint::primary("Enter", "insert"),
+                FooterHint::always("Esc", "back"),
+            ]
         } else {
-            "↑↓ navigate · / search · Tab preview · Enter insert · Esc close"
+            &[
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::secondary("/", "search"),
+                FooterHint::secondary("Tab", "preview"),
+                FooterHint::primary("Enter", "insert"),
+                FooterHint::always("Esc", "close"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(theme.muted()),
-            ))),
-            fo,
-        );
+        render_modal_footer(frame, fo, hints, theme);
     }
 
     // Place the real terminal caret in the filter field (the header row, after

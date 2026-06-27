@@ -12,7 +12,9 @@ use neenee_tui::{
 use crate::tui::Modal;
 use crate::tui::document::TranscriptMessage;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{modal_area, panel_block, panel_inner};
+use crate::tui::render::primitives::{
+    FooterHint, modal_area, modal_footer_text, panel_block, panel_inner,
+};
 
 pub fn draw_tool_step_detail_overlay(
     frame: &mut Frame,
@@ -100,8 +102,16 @@ pub fn draw_tool_step_detail_overlay(
     }
 
     lines.push(Line::from(""));
+    let inner = panel_inner(area);
+    let footer = modal_footer_text(
+        &[
+            FooterHint::navigation("↑↓/wheel", "scroll"),
+            FooterHint::always("Esc", "close"),
+        ],
+        inner.width as usize,
+    );
     lines.push(Line::from(Span::styled(
-        " ↑/↓ or wheel scroll · esc close ",
+        footer,
         Style::default().fg(theme.muted()),
     )));
 
@@ -114,7 +124,7 @@ pub fn draw_tool_step_detail_overlay(
         Paragraph::new(lines)
             .scroll(scroll, 0)
             .wrap(neenee_tui::Wrap { trim: false }),
-        panel_inner(area),
+        inner,
     );
     area
 }

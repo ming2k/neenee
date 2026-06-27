@@ -12,7 +12,9 @@ use neenee_tui::{
 use super::common::{placeholder, selectable_row};
 use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
+use crate::tui::render::primitives::{
+    FooterHint, modal_area, modal_frame, render_body, render_modal_footer,
+};
 
 /// Draw the permissions manager modal: a centered, dismissable list of cached
 /// "always allow" rules. Each row shows `<tool> <scope>`; `Space` revokes the
@@ -79,18 +81,17 @@ pub fn draw_permissions_manager(
 
     // ── Footer ──
     if let Some(fo) = f.footer {
-        let hint = if rules.is_empty() {
-            "Esc close".to_string()
+        let hints: &[FooterHint] = if rules.is_empty() {
+            &[FooterHint::always("Esc", "close")]
         } else {
-            "↑↓ select · Space revoke · c clear all · Esc close".to_string()
+            &[
+                FooterHint::navigation("↑↓", "select"),
+                FooterHint::primary("Space", "revoke"),
+                FooterHint::secondary("c", "clear all"),
+                FooterHint::always("Esc", "close"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(theme.muted()),
-            ))),
-            fo,
-        );
+        render_modal_footer(frame, fo, hints, theme);
     }
     area
 }

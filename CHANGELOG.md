@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Glanceable model-authored progress updates.** A new `progress_update` tool
+  lets the model publish terse current-work status such as "Refactor config
+  modal" to the activity bar without mixing that status into assistant prose.
+  `/config` opens a modal that toggles the feature at runtime and persists
+  `[agent.progress_updates] enabled`; `max_chars` defaults to 60.
+
 ## [0.8.0] - 2026-07-14
 
 ### Fixed

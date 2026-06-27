@@ -56,6 +56,10 @@ pub struct AgentConfig {
     /// call) and the nudge is non-terminating — distinct from the removed
     /// ADR-0030 semantic review, and unrelated to on-demand `/review`.
     pub loop_review_enabled: bool,
+    /// Model-authored, glanceable progress updates surfaced in the TUI while a
+    /// turn is running. Kept under its own sub-table so related knobs stay
+    /// together as the feature grows.
+    pub progress_updates: ProgressUpdateConfig,
 }
 
 impl Default for AgentConfig {
@@ -63,6 +67,33 @@ impl Default for AgentConfig {
         Self {
             hard_stop_rounds: 0,
             loop_review_enabled: true,
+            progress_updates: ProgressUpdateConfig::default(),
+        }
+    }
+}
+
+/// Configuration for the model-facing `progress_update` tool.
+///
+/// ```toml
+/// [agent.progress_updates]
+/// enabled = true
+/// max_chars = 60
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgressUpdateConfig {
+    /// Whether the `progress_update` tool is visible to the model.
+    pub enabled: bool,
+    /// Maximum number of characters accepted from a status update. Longer
+    /// updates are trimmed at a character boundary before they reach the UI.
+    pub max_chars: usize,
+}
+
+impl Default for ProgressUpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_chars: 60,
         }
     }
 }
@@ -444,5 +475,23 @@ mod tests {
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
         assert_eq!(parsed.agent.hard_stop_rounds, 99);
+    }
+
+    #[test]
+    fn progress_updates_config_defaults_and_overrides() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.agent.progress_updates.enabled);
+        assert_eq!(cfg.agent.progress_updates.max_chars, 60);
+
+        let cfg: Config = toml::from_str(
+            r#"
+            [agent.progress_updates]
+            enabled = false
+            max_chars = 24
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.agent.progress_updates.enabled);
+        assert_eq!(cfg.agent.progress_updates.max_chars, 24);
     }
 }

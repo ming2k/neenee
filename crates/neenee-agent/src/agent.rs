@@ -126,6 +126,9 @@ pub struct Agent {
     context_prune_threshold_tokens: Arc<std::sync::Mutex<usize>>,
     /// Optional mid-turn context-relief gate (see [`ContextReliefGate`]).
     context_relief_gate: Arc<std::sync::Mutex<Option<Arc<dyn ContextReliefGate>>>>,
+    /// Character cap used by the `progress_update` tool. Shared with the tool
+    /// instance so runtime config changes do not require rebuilding the agent.
+    progress_update_max_chars: Arc<std::sync::atomic::AtomicUsize>,
     /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
     /// tool rounds. Seeded from `Config::agent.hard_stop_rounds` (default `0`
     /// = uncapped, matching ADR-0009) and mutated at runtime via
@@ -304,8 +307,12 @@ impl Agent {
         // same shared list.
         let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
+        let progress_update_max_chars = Arc::new(std::sync::atomic::AtomicUsize::new(60));
         let todo_context =
             neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
+        tools.push(Arc::new(crate::progress_tool::ProgressUpdateTool::new(
+            Arc::clone(&progress_update_max_chars),
+        )));
         tools.push(Arc::new(crate::todo_tools::TodoWriteTool::new(
             todo_context.clone(),
         )));
@@ -327,6 +334,7 @@ impl Agent {
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
+            progress_update_max_chars,
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reviews: crate::default_reviews(),
@@ -930,10 +938,24 @@ impl Agent {
         !guard.contains(name)
     }
 
+    /// Apply the durable progress-update config to the live agent. The tool is
+    /// always installed so it can be hot-enabled; this controls whether it is
+    /// visible to the model and updates its runtime character cap.
+    pub fn configure_progress_updates(&self, enabled: bool, max_chars: usize) {
+        self.progress_update_max_chars
+            .store(max_chars.max(1), std::sync::atomic::Ordering::Relaxed);
+        let _ = self.set_tool_enabled("progress_update", enabled);
+    }
+
+    pub fn progress_update_max_chars(&self) -> usize {
+        self.progress_update_max_chars
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// All installed tools that the model may see this turn: every tool whose
     /// name is not in the disabled mask. Used at the schema-build choke points
     /// so a disabled tool's definition never reaches the provider.
-    fn visible_tools(&self) -> Vec<Arc<dyn Tool>> {
+    pub(crate) fn visible_tools(&self) -> Vec<Arc<dyn Tool>> {
         let disabled = self
             .disabled_tools
             .lock()
@@ -1560,6 +1582,9 @@ impl Agent {
         }
         tracing::info!(tool = %call.name, duration_ms, bytes = text.len(), "tool result");
         self.emit_todos_change(call, on_event);
+        if call.name == "progress_update" && !text.trim().is_empty() {
+            on_event(AgentEvent::ProgressUpdate(text.trim().to_string()));
+        }
         if emit_event {
             on_event(AgentEvent::ToolResult {
                 id: call_id.to_string(),

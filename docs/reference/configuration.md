@@ -64,10 +64,16 @@ The optional `[agent]` table.
 |-----|---------|---------|
 | `agent.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
 | `agent.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on sub-agents and the `/review` diagnostic |
+| `agent.progress_updates.enabled` | `true` | Enables the model-facing `progress_update` tool and the TUI progress status surface |
+| `agent.progress_updates.max_chars` | `60` | Maximum characters accepted from one progress update |
 
 ```toml
 [agent]
 hard_stop_rounds = 0
+
+[agent.progress_updates]
+enabled = true
+max_chars = 60
 ```
 
 ## Provider selection and retry

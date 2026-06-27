@@ -16,6 +16,7 @@ Project and user-defined commands are covered under
 | `/compact` | Compact older complete turns now |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
+| `/config` | Open user configuration |
 | `/unattended [on\|off]` | Toggle bypassing write-tool permission prompts |
 | `/review` | Run an on-demand session-review diagnostic of the current turn |
 | `/search <query>` | Semantic search over the project's session history |
@@ -33,8 +34,8 @@ Project and user-defined commands are covered under
 | `/help` | Show available commands and keybindings |
 | `/exit` | Exit the program |
 
-`/provider` and `/exit` are handled entirely in the TUI; the rest are dispatched
-by the agent backend.
+`/provider`, `/config`, and `/exit` are handled entirely in the TUI; the rest
+are dispatched by the agent backend.
 
 ## Subcommands
 
@@ -89,6 +90,15 @@ clock-driven scheduler, independent of `/pursue`. See
 |------|--------|
 | `/permissions` | List always-allowed tool rules for this process |
 | `/permissions clear` | Clear process-local always-allow rules |
+
+### `/config`
+
+| Form | Effect |
+|------|--------|
+| `/config` | Open the configuration modal |
+
+The modal currently toggles model-authored progress updates. The toggle is
+persisted to `config.toml` and takes effect for the running session.
 
 ### `/unattended`
 

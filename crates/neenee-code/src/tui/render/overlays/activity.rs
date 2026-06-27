@@ -11,7 +11,9 @@ use super::common::todo_status_glyph_color;
 use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::design::{MODAL_BODY_LEADING_INDENT, MODAL_TITLE_META_GAP};
-use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
+use crate::tui::render::primitives::{
+    FooterHint, modal_area, modal_frame, render_body, render_modal_footer,
+};
 use crate::tui::render::text_layout::{indented_wrapped_lines, wrap_text};
 
 /// Inputs for [`draw_activity_modal`]. Carries everything the old always-pinned
@@ -286,12 +288,14 @@ pub fn draw_activity_modal(
     render_body(frame, f.body, lines, scroll, None, false, theme);
 
     if let Some(footer) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑/↓ scroll · Esc to close",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             footer,
+            &[
+                FooterHint::navigation("↑↓", "scroll"),
+                FooterHint::always("Esc", "close"),
+            ],
+            theme,
         );
     }
     area

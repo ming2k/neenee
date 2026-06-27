@@ -9,7 +9,8 @@ use neenee_core::{PermissionRequest, UserQuestionRequest};
 use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
-    contrast_fg, modal_area, modal_frame, panel_block, render_body,
+    FooterHint, contrast_fg, modal_area, modal_footer_text, modal_frame, panel_block, render_body,
+    render_modal_footer,
 };
 use neenee_tui::{Constraint, Direction, Layout};
 use unicode_width::UnicodeWidthStr;
@@ -151,12 +152,17 @@ pub fn draw_question_modal(
     );
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑↓ navigate · Space select · Enter submit · 1-9 jump · Esc cancel",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::primary("Enter", "submit"),
+                FooterHint::secondary("Space", "select"),
+                FooterHint::secondary("1-9", "jump"),
+                FooterHint::always("Esc", "cancel"),
+            ],
+            theme,
         );
     }
     area
@@ -429,16 +435,30 @@ pub fn draw_permission_sheet(
             Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD),
         ));
     }
-    let hint = if confirm_always {
-        " ←→ select · Enter confirm · Esc back "
+    let hints: &[FooterHint] = if confirm_always {
+        &[
+            FooterHint::navigation("←→", "select"),
+            FooterHint::primary("Enter", "confirm"),
+            FooterHint::always("Esc", "back"),
+        ]
     } else if max_scroll > 0 {
-        " ↑↓ scroll details · ←→ select · Enter · Esc reject "
+        &[
+            FooterHint::navigation("↑↓", "scroll"),
+            FooterHint::navigation("←→", "select"),
+            FooterHint::primary("Enter", "confirm"),
+            FooterHint::always("Esc", "reject"),
+        ]
     } else {
-        " ←→ select · Enter · Esc reject "
+        &[
+            FooterHint::navigation("←→", "select"),
+            FooterHint::primary("Enter", "confirm"),
+            FooterHint::always("Esc", "reject"),
+        ]
     };
-    let hint_width = hint.width();
     let footer_width = content_w as usize;
     let used: usize = footer_spans.iter().map(|s| s.content.width()).sum();
+    let hint = modal_footer_text(hints, footer_width.saturating_sub(used));
+    let hint_width = hint.width();
     if used + hint_width <= footer_width {
         footer_spans.push(Span::styled(
             " ".repeat(footer_width - used - hint_width),

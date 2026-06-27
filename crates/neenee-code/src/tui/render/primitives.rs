@@ -5,8 +5,9 @@
 use crate::tui::app::{Modal, Recess};
 use neenee_tui::{
     Constraint, Direction, Frame, Layout, Line, Margin, Rect, {Block as RtBlock, Clear, Paragraph},
-    {Color, Style},
+    {Color, Span, Style},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::Theme;
 use super::design::{MODAL_INNER_H_PADDING, MODAL_INNER_V_PADDING, PANEL_BAR_INSET, SCROLLBAR_GAP};
@@ -106,6 +107,7 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
         Modal::ToolStepDetail => fixed(92, 84),
         Modal::Sessions => fixed(80, 64),
         Modal::Permissions => fixed(64, 60),
+        Modal::Config => fixed(58, 36),
         Modal::Activity => fixed(72, 70),
         Modal::Session => ModalSpec {
             width_percent: 76,
@@ -257,6 +259,175 @@ pub(super) struct ModalFrame {
     pub header: Option<Rect>,
     pub body: Rect,
     pub footer: Option<Rect>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FooterPriority {
+    Always,
+    Primary,
+    Navigation,
+    Secondary,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FooterHint {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub priority: FooterPriority,
+}
+
+impl FooterHint {
+    pub(super) const fn always(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            priority: FooterPriority::Always,
+        }
+    }
+
+    pub(super) const fn primary(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            priority: FooterPriority::Primary,
+        }
+    }
+
+    pub(super) const fn navigation(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            priority: FooterPriority::Navigation,
+        }
+    }
+
+    pub(super) const fn secondary(key: &'static str, label: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            priority: FooterPriority::Secondary,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FooterLabelMode {
+    Full,
+    Compact,
+}
+
+/// Render the one-line modal command strip with width-aware degradation.
+///
+/// Callers provide structured hints rather than pre-joined prose. The renderer
+/// first tries full labels, then compact key-only labels, then drops low
+/// priority hints. If the terminal is still too narrow it truncates the
+/// highest-priority compact set, with `Always` hints such as `Esc` kept last.
+pub(super) fn render_modal_footer(
+    frame: &mut Frame,
+    rect: Rect,
+    hints: &[FooterHint],
+    theme: &Theme,
+) {
+    frame.render_widget(modal_footer_line(hints, rect.width as usize, theme), rect);
+}
+
+pub(super) fn modal_footer_line(
+    hints: &[FooterHint],
+    width: usize,
+    theme: &Theme,
+) -> Paragraph<'static> {
+    let text = modal_footer_text(hints, width);
+    Paragraph::new(Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.muted()),
+    )))
+}
+
+pub(super) fn modal_footer_text(hints: &[FooterHint], width: usize) -> String {
+    if width == 0 || hints.is_empty() {
+        return String::new();
+    }
+
+    let candidates = [
+        (FooterLabelMode::Full, None),
+        (FooterLabelMode::Compact, None),
+        (FooterLabelMode::Compact, Some(FooterPriority::Navigation)),
+        (FooterLabelMode::Full, Some(FooterPriority::Primary)),
+        (FooterLabelMode::Compact, Some(FooterPriority::Primary)),
+        (FooterLabelMode::Full, Some(FooterPriority::Always)),
+        (FooterLabelMode::Compact, Some(FooterPriority::Always)),
+    ];
+
+    for (mode, max_priority) in candidates {
+        let text = join_footer_hints(hints, mode, max_priority);
+        if !text.is_empty() && text.width() <= width {
+            return text;
+        }
+    }
+
+    truncate_to_width(
+        &join_footer_hints(
+            hints,
+            FooterLabelMode::Compact,
+            Some(FooterPriority::Always),
+        ),
+        width,
+    )
+}
+
+fn join_footer_hints(
+    hints: &[FooterHint],
+    mode: FooterLabelMode,
+    max_priority: Option<FooterPriority>,
+) -> String {
+    hints
+        .iter()
+        .filter(|hint| {
+            max_priority
+                .map(|max| footer_priority_rank(hint.priority) <= footer_priority_rank(max))
+                .unwrap_or(true)
+        })
+        .map(|hint| match mode {
+            FooterLabelMode::Full if !hint.label.is_empty() => {
+                format!("{} {}", hint.key, hint.label)
+            }
+            _ => hint.key.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn footer_priority_rank(priority: FooterPriority) -> u8 {
+    match priority {
+        FooterPriority::Always => 0,
+        FooterPriority::Primary => 1,
+        FooterPriority::Navigation => 2,
+        FooterPriority::Secondary => 3,
+    }
+}
+
+fn truncate_to_width(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0).max(1);
+        if width + cw > max - 1 {
+            break;
+        }
+        out.push(c);
+        width += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// Paint the unified modal chrome and split the content area into sections.
@@ -500,6 +671,7 @@ mod tests {
             Modal::Sessions,
             Modal::Session,
             Modal::Permissions,
+            Modal::Config,
             Modal::Activity,
         ] {
             assert!(modal_spec(modal).is_some());
@@ -524,5 +696,25 @@ mod tests {
             }
             ModalHeight::Percent(_) => panic!("session modal should size to content"),
         }
+    }
+
+    #[test]
+    fn modal_footer_degrades_by_width_and_priority() {
+        let hints = [
+            FooterHint::secondary("type", "filter"),
+            FooterHint::navigation("↑↓", "navigate"),
+            FooterHint::primary("Enter", "activate"),
+            FooterHint::secondary("*", "favorite"),
+            FooterHint::always("Esc", "close"),
+        ];
+
+        assert_eq!(
+            modal_footer_text(&hints, 80),
+            "type filter · ↑↓ navigate · Enter activate · * favorite · Esc close"
+        );
+        assert_eq!(modal_footer_text(&hints, 27), "type · ↑↓ · Enter · * · Esc");
+        assert_eq!(modal_footer_text(&hints, 14), "Enter · Esc");
+        assert_eq!(modal_footer_text(&hints, 3), "Esc");
+        assert_eq!(modal_footer_text(&hints, 2), "E…");
     }
 }

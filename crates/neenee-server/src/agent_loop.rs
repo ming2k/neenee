@@ -167,6 +167,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
         &config,
         &provider_usage,
     )));
+    crate::handlers_session::query_config(&config, &resp_tx);
     if open_picker_on_start {
         let _ = resp_tx.send(AgentResponse::SessionsOverview(
             build_sessions_overview(&session).await,
@@ -268,6 +269,9 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     &resp_tx,
                 );
             }
+            AgentRequest::QueryConfig => {
+                crate::handlers_session::query_config(&config, &resp_tx);
+            }
             AgentRequest::RevokePermission { tool, scope } => {
                 crate::handlers_session::revoke_permission(
                     &agent,
@@ -296,6 +300,14 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     &config,
                     &resp_tx,
                     name,
+                    enabled,
+                );
+            }
+            AgentRequest::SetProgressUpdates { enabled } => {
+                crate::handlers_session::set_progress_updates(
+                    &agent,
+                    &mut config,
+                    &resp_tx,
                     enabled,
                 );
             }

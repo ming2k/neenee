@@ -49,6 +49,10 @@ pub(super) struct UiRuntime {
     pub current_model: Arc<Mutex<String>>,
     pub harness: Arc<Mutex<HarnessSnapshot>>,
     pub activity_status: Arc<Mutex<String>>,
+    /// Model-authored short work status from `progress_update`. This is kept
+    /// separate from harness activity so transport phases like "waiting for
+    /// model" do not erase the user's glanceable work context.
+    pub progress_status: Arc<Mutex<String>>,
     pub pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
     pub pending_question: Arc<Mutex<VecDeque<UserQuestionRequest>>>,
     pub is_responding: Arc<AtomicBool>,
@@ -87,6 +91,8 @@ pub(super) struct UiRuntime {
     /// the first `QuerySessionContext` round-trip completes. The modal renders
     /// a lightweight placeholder while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
+    /// Latest config snapshot for the config modal.
+    pub config_snapshot: Arc<Mutex<neenee_core::ConfigSnapshot>>,
     /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. The
     /// render loop copies it into `App::todos` each frame so the Activity
     /// modal stays in sync with the agent's state.
@@ -164,7 +170,9 @@ pub(super) async fn run_app_loop(
             app.loop_status = harness.loop_status;
             app.unattended = harness.unattended;
             app.activity_status = runtime.activity_status.lock().await.clone();
+            app.progress_status = runtime.progress_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
+            app.config_snapshot = runtime.config_snapshot.lock().await.clone();
             app.todos = runtime.todos.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
@@ -340,9 +348,14 @@ pub(super) async fn run_app_loop(
         // Draw frame
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
+            let activity_for_display = if app.progress_status.is_empty() {
+                app.activity_status.as_str()
+            } else {
+                app.progress_status.as_str()
+            };
             let status = display_status(
                 &app.loop_status,
-                &app.activity_status,
+                activity_for_display,
                 app.pending_permission.is_some(),
             );
 
@@ -705,6 +718,13 @@ pub(super) async fn run_app_loop(
                     app.session_context.as_ref(),
                     app.modal_index,
                     &mut app.permissions_scroll,
+                    &app.theme,
+                )),
+                Modal::Config => Some(render::draw_config_modal(
+                    f,
+                    &app.config_snapshot,
+                    app.modal_index,
+                    &mut app.config_scroll,
                     &app.theme,
                 )),
                 Modal::Activity => {
@@ -1458,6 +1478,12 @@ pub(super) async fn run_app_loop(
                     app.permissions_scroll = 0;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
+                input::InputAction::OpenConfig => {
+                    app.active_modal = Modal::Config;
+                    app.modal_index = 0;
+                    app.config_scroll = 0;
+                    let _ = app.tx.send(AgentRequest::QueryConfig);
+                }
                 input::InputAction::PermissionsActivate => {
                     // Revoke the selected "always allow" rule. The harness
                     // replies with a fresh snapshot so the list re-renders.
@@ -1475,6 +1501,13 @@ pub(super) async fn run_app_loop(
                     // (empty) snapshot.
                     let _ = app.tx.send(AgentRequest::ClearAllPermissions);
                     app.modal_index = 0;
+                }
+                input::InputAction::ConfigActivate => {
+                    let next = !app.config_snapshot.progress_updates_enabled;
+                    let _ = app
+                        .tx
+                        .send(AgentRequest::SetProgressUpdates { enabled: next });
+                    app.config_snapshot.progress_updates_enabled = next;
                 }
                 input::InputAction::SessionSelect { forward } => {
                     // Move the tool-selection cursor (the body scroll follows
@@ -1595,6 +1628,8 @@ pub(super) async fn run_app_loop(
                         app.session_scroll = app.session_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = app.permissions_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = app.config_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_sub(1);
@@ -1621,6 +1656,8 @@ pub(super) async fn run_app_loop(
                         app.session_scroll = app.session_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = app.permissions_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = app.config_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_add(1);
@@ -1640,6 +1677,8 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll =
                             app.permissions_scroll.saturating_sub(step as usize);
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = app.config_scroll.saturating_sub(step as usize);
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_sub(step as usize);
@@ -1661,6 +1700,8 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll =
                             app.permissions_scroll.saturating_add(step as usize);
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = app.config_scroll.saturating_add(step as usize);
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = app.history_scroll.saturating_add(step as usize);
@@ -1682,6 +1723,8 @@ pub(super) async fn run_app_loop(
                         app.session_scroll = 0;
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = 0;
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = 0;
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = 0;
@@ -1703,6 +1746,8 @@ pub(super) async fn run_app_loop(
                         app.session_scroll = usize::MAX;
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = usize::MAX;
+                    } else if app.active_modal == Modal::Config {
+                        app.config_scroll = usize::MAX;
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
                         app.history_scroll = usize::MAX;
@@ -2142,6 +2187,7 @@ pub(super) async fn run_app_loop(
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
+                    | Modal::Config
                     | Modal::Activity
                     | Modal::None => {}
                 },
@@ -2185,6 +2231,7 @@ pub(super) async fn run_app_loop(
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
+                    | Modal::Config
                     | Modal::Activity
                     | Modal::None => {}
                 },

@@ -106,6 +106,10 @@ pub enum InputAction {
     /// `/permissions` slash command (intercepted locally, never sent to the
     /// backend). `/permissions clear` still goes to the backend.
     OpenPermissions,
+    /// Open the user configuration modal.
+    OpenConfig,
+    /// Toggle the selected configuration row.
+    ConfigActivate,
     /// Revoke the selected "always allow" rule in the permissions manager
     /// modal. Bound to `Space`.
     PermissionsActivate,
@@ -693,6 +697,7 @@ pub fn process_event(
                     super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
                     super::Modal::Permissions => InputAction::CloseModal,
+                    super::Modal::Config => InputAction::ConfigActivate,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.has_focused_target {
@@ -733,6 +738,7 @@ pub fn process_event(
                             // exact-match arm instead of silently no-op'ing.
                             match text.trim() {
                                 "/provider" => InputAction::OpenProvider,
+                                "/config" => InputAction::OpenConfig,
                                 "/session" => InputAction::OpenSession,
                                 "/permissions" => InputAction::OpenPermissions,
                                 "/exit" => InputAction::Quit,
@@ -779,13 +785,15 @@ pub fn process_event(
                         InputAction::HistoryTogglePreview
                     } else {
                         // No completion open and no modal field to cycle: Tab
-                        // is a no-op. Zone switching is Ctrl+B / `p`, not Tab.
+                        // is a no-op. (There is no zone switching: focus is
+                        // toggled with Ctrl+Up/Ctrl-Down, never Tab.)
                         InputAction::None
                     }
                 }
                 KeyCode::BackTab => {
                     // Shift+Tab mirrors Tab in modals (no-op outside model
-                    // editor). Zone switching uses Ctrl+B / `p`, not Tab.
+                    // editor). Transcript focus uses Ctrl+Up/Ctrl-Down, not
+                    // Tab.
                     InputAction::None
                 }
                 // Ctrl+J: alias for Alt+Enter — insert a literal newline.
@@ -978,6 +986,9 @@ pub fn process_event(
                     // selected rule.
                     if context.active_modal == super::Modal::Permissions && c == ' ' {
                         return InputAction::PermissionsActivate;
+                    }
+                    if context.active_modal == super::Modal::Config && c == ' ' {
+                        return InputAction::ConfigActivate;
                     }
                     if context.active_modal == super::Modal::Question {
                         if let Some(d) = c.to_digit(10) {
@@ -1196,6 +1207,7 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollUp,
                     super::Modal::Session => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
+                    super::Modal::Config => InputAction::None,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::None => {
@@ -1241,6 +1253,7 @@ pub fn process_event(
                     super::Modal::Activity => InputAction::ScrollDown,
                     super::Modal::Session => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
+                    super::Modal::Config => InputAction::None,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::None => {
@@ -1419,6 +1432,12 @@ mod tests {
             enter(&mut input, true),
             InputAction::SendSlash("/pursue".to_string())
         );
+    }
+
+    #[test]
+    fn enter_opens_config_modal_locally() {
+        let mut input = "/config".to_string();
+        assert_eq!(enter(&mut input, true), InputAction::OpenConfig);
     }
 
     #[test]
@@ -2122,7 +2141,7 @@ mod tests {
     #[test]
     fn tab_in_compose_without_suggestions_is_noop() {
         // Tab is completion-only: with no suggestion menu open, it does
-        // nothing. Zone switching is Ctrl+B, not Tab.
+        // nothing. (Transcript focus uses Ctrl+Up/Ctrl-Down, not Tab.)
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::Tab, false, &mut input),

@@ -13,7 +13,9 @@ use neenee_tui::{
 
 use super::common::{placeholder, selectable_row};
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{centered_rect, modal_frame, render_body, viewport_rect};
+use crate::tui::render::primitives::{
+    FooterHint, centered_rect, modal_frame, render_body, render_modal_footer, viewport_rect,
+};
 
 /// Draw the skills modal.
 ///
@@ -114,17 +116,19 @@ pub fn draw_skills_modal(
 
     // ── Footer ──
     if let Some(fo) = f.footer {
-        let hint = if skills.is_empty() {
-            "r reload · Esc close".to_string()
+        let hints: &[FooterHint] = if skills.is_empty() {
+            &[
+                FooterHint::secondary("r", "reload"),
+                FooterHint::always("Esc", "close"),
+            ]
         } else {
-            "↑↓ select · Enter detail · r reload · Esc close".to_string()
+            &[
+                FooterHint::navigation("↑↓", "select"),
+                FooterHint::primary("Enter", "detail"),
+                FooterHint::secondary("r", "reload"),
+                FooterHint::always("Esc", "close"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(theme.muted()),
-            ))),
-            fo,
-        );
+        render_modal_footer(frame, fo, hints, theme);
     }
 }

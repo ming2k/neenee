@@ -12,8 +12,8 @@ use crate::tui::Modal;
 use crate::tui::render::Theme;
 use crate::tui::render::design::{MODAL_BODY_LEADING_INDENT, MODAL_INNER_H_PADDING};
 use crate::tui::render::primitives::{
-    content_modal_area, content_modal_probe, contrast_fg, modal_area, modal_chrome_rows,
-    modal_frame, modal_spec, render_body,
+    FooterHint, content_modal_area, content_modal_probe, contrast_fg, modal_area,
+    modal_chrome_rows, modal_frame, modal_spec, render_body, render_modal_footer,
 };
 
 /// Draw the sessions picker: each row shows the session overview plus its
@@ -99,12 +99,16 @@ pub fn draw_sessions_modal(
     render_body(frame, f.body, body, &mut 0, Some(selected), false, theme);
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑↓ navigate · Enter open · d delete · Esc close",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::navigation("↑↓", "navigate"),
+                FooterHint::primary("Enter", "open"),
+                FooterHint::secondary("d", "delete"),
+                FooterHint::always("Esc", "close"),
+            ],
+            theme,
         );
     }
     area
@@ -495,20 +499,15 @@ pub fn draw_session_modal(
     render_body(frame, body_rect, body, scroll, follow, false, theme);
 
     if let Some(fo) = f.footer {
-        let mut hint = String::new();
+        let mut hints = Vec::new();
         if has_tools {
-            hint.push_str("↑↓ select · Space toggle · ");
+            hints.push(FooterHint::navigation("↑↓", "select"));
+            hints.push(FooterHint::primary("Space", "toggle"));
         } else if content_lines > visible {
-            hint.push_str("↑↓ scroll · ");
+            hints.push(FooterHint::navigation("↑↓", "scroll"));
         }
-        hint.push_str("Esc close");
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(theme.muted()),
-            ))),
-            fo,
-        );
+        hints.push(FooterHint::always("Esc", "close"));
+        render_modal_footer(frame, fo, &hints, theme);
     }
     area
 }

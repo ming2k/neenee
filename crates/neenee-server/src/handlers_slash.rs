@@ -85,6 +85,9 @@ pub async fn dispatch(
         Some(BuiltinCmd::Provider) => {
             // Handled in TUI
         }
+        Some(BuiltinCmd::Config) => {
+            // Handled in TUI
+        }
         Some(BuiltinCmd::Mcp) => {
             let message = if mcp_statuses.is_empty() {
                 "No MCP servers configured.".to_string()
@@ -454,6 +457,7 @@ pub async fn dispatch(
                 base_tools_for_side,
                 provider_for_task,
                 (*skills_registry).clone(),
+                config,
                 project_root_for_side,
                 AgentIdentity::new(crate::NEENEE_NAME, crate::NEENEE_MISSION),
             )

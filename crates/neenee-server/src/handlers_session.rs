@@ -7,7 +7,7 @@
 
 use neenee_agent::Agent;
 use neenee_agent::skills::SkillRegistry;
-use neenee_core::{AgentResponse, McpConnectionStatus};
+use neenee_core::{AgentResponse, ConfigSnapshot, McpConnectionStatus};
 use neenee_store::{config::Config, session::SessionStore};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +46,40 @@ pub fn query_context(
 ) {
     let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+}
+
+pub fn config_snapshot(config: &Config) -> ConfigSnapshot {
+    ConfigSnapshot {
+        progress_updates_enabled: config.agent.progress_updates.enabled,
+        progress_update_max_chars: config.agent.progress_updates.max_chars,
+    }
+}
+
+/// `AgentRequest::QueryConfig` — build and push the live config snapshot for
+/// the TUI configuration modal.
+pub fn query_config(config: &Config, resp_tx: &mpsc::UnboundedSender<AgentResponse>) {
+    let _ = resp_tx.send(AgentResponse::ConfigSnapshot(config_snapshot(config)));
+}
+
+/// `AgentRequest::SetProgressUpdates` — toggle the model-facing progress
+/// update tool, persist config, and push the updated snapshot.
+pub fn set_progress_updates(
+    agent: &Agent,
+    config: &mut Config,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    enabled: bool,
+) {
+    config.agent.progress_updates.enabled = enabled;
+    agent.configure_progress_updates(
+        config.agent.progress_updates.enabled,
+        config.agent.progress_updates.max_chars,
+    );
+    if let Err(error) = config.save() {
+        let _ = resp_tx.send(AgentResponse::Error(format!(
+            "Failed to save config: {error}"
+        )));
+    }
+    let _ = resp_tx.send(AgentResponse::ConfigSnapshot(config_snapshot(config)));
 }
 
 /// `AgentRequest::RevokePermission` — drop one cached always-allow rule and

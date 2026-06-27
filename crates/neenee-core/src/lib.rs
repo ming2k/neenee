@@ -63,10 +63,11 @@ pub use capability::{
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use dynamic::DynamicCatalog;
 pub use events::{
-    AgentEvent, AgentOp, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo, ModelInfo,
-    ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
-    ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, SubagentEvent,
-    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    AgentEvent, AgentOp, AgentRequest, AgentResponse, ConfigSnapshot, HarnessSnapshot,
+    McpServerInfo, ModelInfo, ParentStatus, PermissionDecision, PermissionRequest,
+    PermissionRuleInfo, ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot,
+    SessionOverview, SkillInfo, SubagentEvent, ToolInfo, TurnEvent, UserQuestion,
+    UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};

@@ -6,7 +6,9 @@ use neenee_tui::{
 
 use crate::tui::Modal;
 use crate::tui::render::Theme;
-use crate::tui::render::primitives::{modal_area, modal_frame, render_body};
+use crate::tui::render::primitives::{
+    FooterHint, modal_area, modal_frame, render_body, render_modal_footer,
+};
 
 pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) -> neenee_tui::Rect {
     let area = modal_area(frame, Modal::Help).expect("help modal has fixed geometry");
@@ -74,6 +76,7 @@ pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) -> 
         Line::from(""),
         Line::from(section("Views & tools")),
         row("ctrl+h", "this help"),
+        row("/config", "configuration"),
         row("/session", "session context"),
         row("ctrl+m", "switch model"),
         row("ctrl+r", "search history"),
@@ -88,12 +91,14 @@ pub fn draw_help_modal(frame: &mut Frame, scroll: &mut usize, theme: &Theme) -> 
     render_body(frame, f.body, body, scroll, None, true, theme);
 
     if let Some(fo) = f.footer {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑/↓ scroll · esc close",
-                Style::default().fg(theme.muted()),
-            ))),
+        render_modal_footer(
+            frame,
             fo,
+            &[
+                FooterHint::navigation("↑↓", "scroll"),
+                FooterHint::always("Esc", "close"),
+            ],
+            theme,
         );
     }
     area
