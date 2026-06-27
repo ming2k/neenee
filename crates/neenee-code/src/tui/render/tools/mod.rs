@@ -73,14 +73,18 @@ impl ToolStatus {
     /// previously each duplicated.
     pub fn color(self, theme: &Theme) -> Color {
         match self {
-            ToolStatus::Running => theme.info(),
+            // Running reads as a neutral, in-flight gray — not a hue. A
+            // pending call carries no success/failure semantics yet, so it
+            // borrows the muted text tone rather than the blue `info` accent,
+            // keeping the accent palette reserved for resolved outcomes.
+            ToolStatus::Running => theme.muted(),
             ToolStatus::Ok => theme.ok(),
             ToolStatus::Failed => theme.err(),
             // Warn color distinguishes a user denial from a runtime failure.
             ToolStatus::Denied => theme.warn(),
-            // No dedicated cancelled accent: reuse the muted tone so a
-            // cancelled step reads as inert rather than as a fresh failure.
-            ToolStatus::Cancelled => theme.muted(),
+            // Cancelled steps one rung dimmer than Running: the call was
+            // aborted, so it reads as fully inert rather than merely idle.
+            ToolStatus::Cancelled => theme.dim(),
         }
     }
 }

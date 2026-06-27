@@ -36,18 +36,23 @@
 //!   lifecycle only affects its marker) yield no accent, handing control to
 //!   the weight channel.
 //! - **weight** (luminance) — from Disclosure × Interaction, via
-//!   [`state::summary_weight`]. Decides how bright the summary reads: expanded
-//!   or focused steps read as the primary foreground, a collapsed step under
-//!   the pointer (but not focused) reads as the intermediate hover tone, and
-//!   an idle collapsed step reads as muted — never which color.
+//!   [`state::summary_weight`]. A **three-tone, hover-priority model** decides
+//!   how bright the summary reads:
+//!   1. Hover (highest priority) → the intermediate hover tone, regardless of
+//!      open/closed. Keyboard focus shares this tone.
+//!   2. Expanded (idle) → the primary foreground (an open body is active).
+//!   3. Collapsed (idle) → muted (a closed step recedes).
+//!   Expanded and collapsed are mutually exclusive peers, decided only when
+//!   idle; hover overrides both. This keeps the three states visually distinct
+//!   and means closing a step immediately darkens it instead of staying bright.
 //!
 //! When an accent is present it supplies the hue and the weight channel
 //! modulates its brightness (see [`state::summary_text_color`]), so an accent
-//! step — e.g. a long-running subagent task — still brightens on hover / focus
-//! instead of sitting at one flat color. Keeping the channels composable is
-//! what makes the behavior consistent across step kinds: a step brightens when
-//! it is open, focused, or hovered, and each cause flows through the single
-//! [`state::summary_weight`] entry point.
+//! step — e.g. a long-running subagent task — still shifts tone on hover / when
+//! open instead of sitting at one flat color. Keeping the channels composable is
+//! what makes the behavior consistent across step kinds: a step shifts toward
+//! the hover tone when hovered or focused, toward the foreground when open, and
+//! each cause flows through the single [`state::summary_weight`] entry point.
 
 use super::Theme;
 

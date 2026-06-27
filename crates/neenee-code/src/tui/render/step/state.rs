@@ -39,12 +39,13 @@ pub enum Interaction {
     Idle,
     /// Pointer rests on the summary line — a soft hover affordance.
     Hovered,
-    /// Keyboard focus ring is on this step. Reads as the **primary foreground**
-    /// via [`summary_weight`] (same luminance as an expanded step), so a focused
-    /// step clearly stands out from its idle/muted siblings. Focus takes
-    /// priority over hover in [`from_hover_focused`](Interaction::from_hover_focused)
-    /// so the deliberate keyboard cue never yields to the incidental pointer
-    /// affordance.
+    /// Keyboard focus ring is on this step. Reads as the **hover tone**
+    /// via [`summary_weight`] (same color as a pointer hover), because focus
+    /// is a transient "look here" cue — it shares hover's color rather than
+    /// pinning the step to full brightness. Focus takes priority over hover
+    /// only in [`from_hover_focused`](Interaction::from_hover_focused)'s
+    /// enum resolution; both land on the same color in [`summary_weight`],
+    /// so a focused step never silently darkens when the pointer leaves.
     Focused,
 }
 
@@ -52,8 +53,9 @@ impl Interaction {
     /// Build from the raw interaction flags produced by the call site.
     ///
     /// Priority: **focus** beats **hover** beats **idle**. Focus wins over
-    /// hover so a keyboard-navigating user never sees the pointer's soft
-    /// affordance compete with the deliberate focus cue.
+    /// hover purely to keep the enum deterministic (both resolve to the same
+    /// color in [`summary_weight`], so a focused step stays highlighted even
+    /// after the pointer moves away).
     pub fn from_hover_focused(hovered: bool, focused: bool) -> Self {
         if focused {
             Interaction::Focused
@@ -70,20 +72,30 @@ impl Interaction {
 /// channel only; it never depends on lifecycle, so it cannot leak run-state
 /// into the brightness.
 ///
-/// Priority:
-/// - An **expanded** step reads as the primary foreground (the active state)
-///   regardless of interaction — its body being open is the strongest signal.
-/// - A **collapsed** step carrying keyboard focus also reads as the primary
-///   foreground, so the user can tell at a glance which step the cursor is on.
-/// - A **collapsed** step under the pointer (but not focused) lights up to the
-///   intermediate hover tone as a soft click affordance.
-/// - Otherwise (collapsed + idle) it stays muted.
+/// **Three-tone, hover-priority model.** Each cause maps to its own distinct
+/// color so the three states never collapse into one and stay easy to tell
+/// apart at a glance:
+///
+/// 1. **Hover (highest priority)** → `theme.hover()`. Whether the step is open
+///    or closed, the pointer resting on it is the strongest transient signal,
+///    so it always reads as the intermediate hover tone. Keyboard focus is
+///    folded into this same tone (focus is a transient "look here" cue, so it
+///    shares hover's color rather than pinning the step to full brightness).
+/// 2. **Expanded (idle)** → `theme.fg()`. An open body is the active state, so
+///    it reads as the primary foreground.
+/// 3. **Collapsed (idle)** → `theme.muted()`. A closed, idle step recedes.
+///
+/// Expanded and collapsed are **mutually exclusive peers** (same priority,
+/// decided only when idle); hover overrides whichever one is active. This
+/// means closing a step *immediately* darkens it to muted instead of staying
+/// bright, because the close click no longer collides with a focus override.
 pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &Theme) -> Color {
-    match (disclosure, interaction) {
-        (Disclosure::Expanded, _) => theme.fg(),
-        (Disclosure::Collapsed, Interaction::Focused) => theme.fg(),
-        (Disclosure::Collapsed, Interaction::Hovered) => theme.hover(),
-        (Disclosure::Collapsed, Interaction::Idle) => theme.muted(),
+    match interaction {
+        Interaction::Hovered | Interaction::Focused => theme.hover(),
+        Interaction::Idle => match disclosure {
+            Disclosure::Expanded => theme.fg(),
+            Disclosure::Collapsed => theme.muted(),
+        },
     }
 }
 
@@ -105,11 +117,12 @@ pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &
 /// color for its whole lifetime and the hover/focus affordance would never
 /// show, which is exactly the bug where hovering an `explore` step did
 /// nothing. The accent is nudged toward the weight-ladder color by a per-rung
-/// factor (`accent_idle_blend`, `accent_hover_blend`, `accent_focus_blend`):
-/// idle leaves the accent essentially intact (the running step stays vivid),
-/// hover leans a little toward `theme.hover()`, and focus / an open body lean
-/// toward the primary foreground so the deliberate cue reads clearly on top of
-/// the hue.
+/// factor (`accent_idle_blend`, `accent_hover_blend`, `accent_focus_blend`)
+/// that mirrors [`summary_weight`]'s three-tone model: an idle collapsed step
+/// leaves the accent essentially intact (the running step stays vivid), hover
+/// / focus lean a little toward `theme.hover()`, and an open (expanded) body
+/// leans toward the primary foreground so the active state reads clearly on
+/// top of the hue.
 ///
 /// This is the single entry point renderers use for the summary text color,
 /// keeping the accent/weight separation in one auditable place.
@@ -124,7 +137,10 @@ pub fn summary_text_color(
     };
     // The weight-ladder color for this disclosure × interaction gives the
     // brightness target. Blend the accent toward it by a rung-specific factor
-    // so the hue dominates but hover / focus still produce a visible shift.
+    // so the hue dominates but hover / open-body / idle still produce a visible
+    // luminance shift. The factor mirrors the three-tone weight ladder: hover
+    // (and focus) lean toward the hover tone, an expanded body leans toward the
+    // primary foreground, and an idle collapsed step leaves the accent intact.
     let weight = summary_weight(disclosure, interaction, theme);
     let t = accent_blend_factor(disclosure, interaction);
     accent.blend(weight, t)
@@ -132,24 +148,30 @@ pub fn summary_text_color(
 
 /// How strongly a lifecycle accent yields to the disclosure × interaction
 /// weight color. Kept small so the hue (running / failed / denied) stays the
-/// dominant signal: idle leaves the accent untouched, hover adds a gentle
-/// nudge, and focus / an open body push it harder toward the primary
-/// foreground. `Expanded` reads as the active (focused) state since an open
-/// body is the strongest signal regardless of interaction, mirroring
-/// [`summary_weight`].
+/// dominant signal, but non-zero on the transient / active states so the
+/// accent still visibly shifts toward the matching weight-ladder color. The
+/// rungs mirror [`summary_weight`]'s three-tone, hover-priority model:
+///
+/// - Hover / focus → lean toward `theme.hover()` (the strongest transient
+///   cue, regardless of disclosure).
+/// - Expanded + idle → lean toward `theme.fg()` (an open body is active).
+/// - Collapsed + idle → leave the accent intact (the running step stays vivid
+///   while it recedes).
 fn accent_blend_factor(disclosure: Disclosure, interaction: Interaction) -> f32 {
-    match (disclosure, interaction) {
-        (Disclosure::Expanded, _) | (Disclosure::Collapsed, Interaction::Focused) => {
-            ACCENT_FOCUS_BLEND
-        }
-        (Disclosure::Collapsed, Interaction::Hovered) => ACCENT_HOVER_BLEND,
-        (Disclosure::Collapsed, Interaction::Idle) => ACCENT_IDLE_BLEND,
+    match interaction {
+        Interaction::Hovered | Interaction::Focused => ACCENT_HOVER_BLEND,
+        Interaction::Idle => match disclosure {
+            Disclosure::Expanded => ACCENT_FOCUS_BLEND,
+            Disclosure::Collapsed => ACCENT_IDLE_BLEND,
+        },
     }
 }
 
 /// Blend factors used to compose a lifecycle accent with the weight ladder.
 /// Exposed as module consts so the unit tests assert the exact composed color
-/// rather than only "it changed".
+/// rather than only "it changed". Hover/focus share one rung (both are
+/// transient "look here" cues), expanded is its own rung (the active state),
+/// and idle-collapsed leaves the accent essentially untouched.
 const ACCENT_IDLE_BLEND: f32 = 0.0;
 const ACCENT_HOVER_BLEND: f32 = 0.35;
 const ACCENT_FOCUS_BLEND: f32 = 0.6;
@@ -158,84 +180,125 @@ const ACCENT_FOCUS_BLEND: f32 = 0.6;
 mod tests {
     use super::*;
 
-    /// Expanded dominates every interaction state — an open step is always the
-    /// active tone, never muted by being idle.
+    /// The three tones are always distinct, so a step can never ambiguously
+    /// share a color between two causes. This is the core invariant of the
+    /// hover-priority model: hover ≠ fg ≠ muted.
     #[test]
-    fn expanded_dominates_interaction() {
+    fn three_tones_are_distinct() {
+        let theme = Theme::default();
+        assert_ne!(theme.hover(), theme.fg());
+        assert_ne!(theme.hover(), theme.muted());
+        assert_ne!(theme.fg(), theme.muted());
+    }
+
+    /// Hover is the highest priority: regardless of disclosure, a hovered step
+    /// reads as the intermediate hover tone — never the expanded fg or the idle
+    /// muted. This is what lets hover stay a distinct third color.
+    #[test]
+    fn hover_dominates_disclosure() {
+        let theme = Theme::default();
+        assert_eq!(
+            summary_weight(Disclosure::Collapsed, Interaction::Hovered, &theme),
+            theme.hover()
+        );
+        assert_eq!(
+            summary_weight(Disclosure::Expanded, Interaction::Hovered, &theme),
+            theme.hover()
+        );
+    }
+
+    /// Keyboard focus shares the hover tone (a transient "look here" cue). This
+    /// keeps the three-tone model intact — focus does not introduce a fourth
+    /// color — while still standing out from muted idle siblings.
+    #[test]
+    fn focused_reads_as_hover_tone() {
+        let theme = Theme::default();
+        assert_eq!(
+            summary_weight(Disclosure::Collapsed, Interaction::Focused, &theme),
+            theme.hover()
+        );
+        assert_eq!(
+            summary_weight(Disclosure::Expanded, Interaction::Focused, &theme),
+            theme.hover()
+        );
+        // Distinct from both the idle states.
+        assert_ne!(
+            summary_weight(Disclosure::Collapsed, Interaction::Focused, &theme),
+            theme.muted()
+        );
+    }
+
+    /// Expanded and collapsed are mutually exclusive peers, decided only when
+    /// idle: an open idle step is the primary foreground, a closed idle step is
+    /// muted. This is the regression for the original bug — closing a step must
+    /// *immediately* darken it instead of staying bright.
+    #[test]
+    fn idle_disclosure_decides_fg_vs_muted() {
         let theme = Theme::default();
         assert_eq!(
             summary_weight(Disclosure::Expanded, Interaction::Idle, &theme),
             theme.fg()
         );
         assert_eq!(
-            summary_weight(Disclosure::Expanded, Interaction::Hovered, &theme),
-            theme.fg()
-        );
-        assert_eq!(
-            summary_weight(Disclosure::Expanded, Interaction::Focused, &theme),
-            theme.fg()
+            summary_weight(Disclosure::Collapsed, Interaction::Idle, &theme),
+            theme.muted()
         );
     }
 
-    /// Collapsed + hovered is the intermediate hover tone — distinct from both
-    /// the expanded (fg) and idle (muted) states.
+    /// Regression for the reported bug: after clicking a summary to collapse
+    /// it, the step must darken to muted. The close click also sets keyboard
+    /// focus, but under the new model focused collapses to the hover tone —
+    /// still distinct from the expanded fg — and once the pointer/focus leaves
+    /// it reads as muted. An expanded step is therefore brighter than a closed
+    /// one in every non-hover state.
     #[test]
-    fn collapsed_hovered_is_intermediate() {
+    fn closing_a_step_darkens_it() {
         let theme = Theme::default();
-        let hovered = summary_weight(Disclosure::Collapsed, Interaction::Hovered, &theme);
-        assert_eq!(hovered, theme.hover());
-        assert_ne!(hovered, theme.fg());
-        assert_ne!(hovered, theme.muted());
-    }
-
-    /// Collapsed + focused reads as the primary foreground — the core focus
-    /// affordance. A keyboard-focused step must stand out from its muted idle
-    /// siblings so the user can see exactly which step the cursor is on.
-    #[test]
-    fn collapsed_focused_is_primary() {
-        let theme = Theme::default();
-        let focused = summary_weight(Disclosure::Collapsed, Interaction::Focused, &theme);
-        assert_eq!(focused, theme.fg());
-        assert_ne!(focused, theme.muted(), "focused must not read as idle");
+        let open = summary_weight(Disclosure::Expanded, Interaction::Idle, &theme);
+        let closed = summary_weight(Disclosure::Collapsed, Interaction::Idle, &theme);
+        assert_ne!(
+            open, closed,
+            "an open step must not read the same color as a closed idle one"
+        );
+        // fg is brighter than muted in the default theme, so "darkens" holds.
+        assert_ne!(open, theme.muted());
+        assert_eq!(closed, theme.muted());
     }
 
     /// A lifecycle accent is *not* discarded: idle + accent returns the accent
     /// untouched (the running / failed step stays vivid), while the weight
-    /// channel still nudges the brightness on hover / focus. This is the
+    /// channel still nudges the brightness on hover / focus / open. This is the
     /// composition contract — the hue dominates, the luminance shifts.
     #[test]
     fn accent_idle_is_intact_hover_focus_blend() {
         let theme = Theme::default();
-        let accent = Color::Rgb(128, 153, 156); // matches theme.info (a running step)
-        // Idle: the accent is returned unchanged.
+        let accent = Color::Rgb(128, 153, 156); // an arbitrary accent (e.g. info hue)
+        // Idle collapsed: the accent is returned unchanged.
         assert_eq!(
             summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Idle, &theme),
             accent
         );
-        // Hover: the accent leans toward theme.hover() but keeps its hue, so it
-        // is distinct from both the idle accent and the plain hover tone.
+        // Hover (collapsed): the accent leans toward theme.hover() but keeps its
+        // hue, so it is distinct from both the idle accent and the plain hover.
         let hovered =
             summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Hovered, &theme);
         assert_ne!(hovered, accent, "hover must visibly shift an accent step");
         assert_ne!(hovered, theme.hover());
-        assert_eq!(
-            hovered,
-            accent.blend(theme.hover(), ACCENT_HOVER_BLEND)
-        );
-        // Focus / expanded: leans harder toward the primary foreground.
+        assert_eq!(hovered, accent.blend(theme.hover(), ACCENT_HOVER_BLEND));
+        // Focus shares the hover rung.
         let focused =
             summary_text_color(Some(accent), Disclosure::Collapsed, Interaction::Focused, &theme);
-        assert_ne!(focused, accent);
-        assert_eq!(focused, accent.blend(theme.fg(), ACCENT_FOCUS_BLEND));
+        assert_eq!(focused, accent.blend(theme.hover(), ACCENT_HOVER_BLEND));
+        // Expanded + idle leans toward the primary foreground (its own rung).
         let expanded =
             summary_text_color(Some(accent), Disclosure::Expanded, Interaction::Idle, &theme);
+        assert_ne!(expanded, accent);
         assert_eq!(expanded, accent.blend(theme.fg(), ACCENT_FOCUS_BLEND));
     }
 
-    /// Regression: an accent step must brighten on hover. Before the fix a
-    /// running subagent (`explore`) pinned the summary to a flat accent for its
-    /// whole lifetime and hovering did nothing, because the accent won outright
-    /// and the weight channel was bypassed. The composed result must differ
+    /// Regression: an accent step must shift on hover. Before the fix a running
+    /// subagent (`explore`) pinned the summary to a flat accent for its whole
+    /// lifetime and hovering did nothing. The composed result must differ
     /// between idle and hover.
     #[test]
     fn accent_step_hover_is_visible() {
@@ -255,36 +318,43 @@ mod tests {
         );
         assert_ne!(
             idle, hover,
-            "hovering an accent (running) step must change its color"
+            "hovering an accented step must change its color"
         );
     }
 
-    /// No accent falls through to the weight ladder.
+    /// No accent falls through to the weight ladder (the three-tone model).
     #[test]
     fn no_accent_uses_weight() {
         let theme = Theme::default();
+        // Idle peers: expanded → fg, collapsed → muted.
         assert_eq!(
             summary_text_color(None, Disclosure::Expanded, Interaction::Idle, &theme),
             theme.fg()
         );
         assert_eq!(
+            summary_text_color(None, Disclosure::Collapsed, Interaction::Idle, &theme),
+            theme.muted()
+        );
+        // Hover dominates disclosure.
+        assert_eq!(
             summary_text_color(None, Disclosure::Collapsed, Interaction::Hovered, &theme),
             theme.hover()
         );
         assert_eq!(
-            summary_text_color(None, Disclosure::Collapsed, Interaction::Idle, &theme),
-            theme.muted()
+            summary_text_color(None, Disclosure::Expanded, Interaction::Hovered, &theme),
+            theme.hover()
         );
-        // Collapsed + focused (no accent) → primary foreground.
+        // Focus shares the hover tone.
         assert_eq!(
             summary_text_color(None, Disclosure::Collapsed, Interaction::Focused, &theme),
-            theme.fg()
+            theme.hover()
         );
     }
 
-    /// `from_hover_focused` priority: focus > hover > idle. A focused step is
-    /// always `Focused` even when also under the pointer, so the deliberate
-    /// keyboard cue never yields to the incidental hover affordance.
+    /// `from_hover_focused` priority: focus > hover > idle. The enum keeps
+    /// focus distinct from hover for determinism, even though both resolve to
+    /// the same color in `summary_weight` — so a focused step stays highlighted
+    /// after the pointer leaves.
     #[test]
     fn focus_beats_hover_beats_idle() {
         assert_eq!(

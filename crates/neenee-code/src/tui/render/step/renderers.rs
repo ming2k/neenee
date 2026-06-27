@@ -184,9 +184,9 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
 /// Build the summary line for a tool/subagent step: an optional expand marker
 /// followed by the summary text, padded to `full_width`.
 ///
-/// The focus affordance is carried entirely by `fg` (resolved upstream through
+/// The focus affordance is carried entirely by color (resolved upstream through
 /// `summary_text_color` / `summary_weight`, which maps a focused step to the
-/// primary foreground), so this builder needs no focus flag of its own.
+/// hover tone), so this builder needs no focus flag of its own.
 ///
 /// The summary text is display-width-clamped to the remaining columns after
 /// the expand marker, so a long header can never overflow the band (and thus
@@ -1211,12 +1211,12 @@ pub fn draw_subagent_inline_step(
     // still modulates its brightness; the completed case yields no accent and
     // falls fully through to the weight ladder (a task never expands inline, so
     // it is bright when focused or under the pointer and calm otherwise).
+    // (Under the three-tone weight model "bright when focused/hovered" reads as
+    // the hover tone, not the primary foreground.)
+    let status_color = status.color(theme);
     let accent = match status {
-        ToolStatus::Failed => Some(theme.error_fg),
-        ToolStatus::Denied => Some(theme.warn()),
-        ToolStatus::Cancelled => Some(theme.text_muted),
         ToolStatus::Ok => None,
-        ToolStatus::Running => Some(theme.info),
+        _ => Some(status_color),
     };
     let summary_color = summary_text_color(
         accent,
@@ -1409,8 +1409,9 @@ pub fn draw_tool_step(
     // lifecycle supplies an accent that supplies the hue while the disclosure ×
     // interaction weight channel modulates its brightness; the completed case
     // yields no accent and falls fully through to the weight ladder so a
-    // finished call reads as calm when idle — bright while its body is open,
-    // focused, or the pointer rests on it.
+    // finished call reads as calm when idle — bright (primary foreground) while
+    // its body is open, the hover tone while focused or under the pointer, and
+    // muted when collapsed and idle.
     //
     // The activity bar is the single breathing anchor (ADR 0008); per-step
     // liveness rides on hue alone so a transcript full of running steps does
@@ -1715,8 +1716,8 @@ fn reasoning_summary_line(
 ) -> Line<'static> {
     // The focus affordance is carried entirely by `summary_color` (resolved
     // upstream through `summary_text_color` / `summary_weight`, which maps a
-    // focused step to the primary foreground), so this builder needs no focus
-    // flag of its own.
+    // focused step to the hover tone), so this builder needs no focus flag of
+    // its own.
     //
     // No marker prefix: the horizontal gutter is applied once at the stream
     // entry point, so the marker starts at the area's left edge.
@@ -1756,9 +1757,9 @@ fn draw_reasoning_summary(
     // omitted while streaming) and the steady `info` hue — never by the
     // marker, which is always the disclosure `+`/`-`. So no accent is
     // supplied and the summary color is the pure disclosure × interaction
-    // weight from the shared state machine: open → primary foreground,
-    // collapsed + focused → primary foreground, collapsed + hovered →
-    // intermediate hover tone, otherwise muted.
+    // weight from the shared state machine (three-tone, hover-priority):
+    // hovered/focused → intermediate hover tone (regardless of disclosure),
+    // expanded + idle → primary foreground, collapsed + idle → muted.
     //
     // The marker shares that same color so the disclosure affordance reads as
     // one visual unit with the summary text — matching how tool steps render

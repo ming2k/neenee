@@ -461,8 +461,24 @@ pub fn process_event(
             let x = mouse.column;
             let y = mouse.row;
             match mouse.kind {
-                MouseEventKind::ScrollUp => InputAction::ScrollUp,
-                MouseEventKind::ScrollDown => InputAction::ScrollDown,
+                MouseEventKind::ScrollUp => {
+                    // The question modal's selection is driven by ↑/↓; route the
+                    // wheel there too so the scroll doesn't fall through to the
+                    // transcript behind the modal. Other modals translate the
+                    // wheel in the event loop's ScrollUp handler.
+                    if context.active_modal == super::Modal::Question {
+                        InputAction::QuestionUp
+                    } else {
+                        InputAction::ScrollUp
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if context.active_modal == super::Modal::Question {
+                        InputAction::QuestionDown
+                    } else {
+                        InputAction::ScrollDown
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     // The permission sheet replaces the composer but leaves the
                     // transcript above fully interactive, so a click there can

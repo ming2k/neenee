@@ -1085,6 +1085,81 @@ fn home_and_end_scroll_in_permission_modal() {
     );
 }
 
+fn mouse_ctx_for(modal: crate::tui::Modal) -> InputContext {
+    InputContext {
+        active_modal: modal,
+        is_responding: false,
+        completion_kind: crate::tui::CompletionKind::None,
+        suggestion_count: 0,
+        has_exact_suggestion: false,
+        suggestion_index: None,
+        permission_confirm_always: false,
+        permission_show_details: false,
+        in_subagent_view: false,
+        in_side_view: false,
+        has_focused_target: false,
+        has_queued: false,
+        history_searching: false,
+    }
+}
+
+#[test]
+fn mouse_wheel_moves_selection_in_question_modal() {
+    // The question modal's option selection is driven by ↑/↓. The mouse wheel
+    // must route there too (QuestionUp/QuestionDown) instead of leaking through
+    // to a transcript ScrollUp/ScrollDown behind the modal — the bug this guards.
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mk = |kind| {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            mouse_ctx_for(crate::tui::Modal::Question),
+            &mut drag,
+        )
+    };
+
+    assert_eq!(mk(MouseEventKind::ScrollUp), InputAction::QuestionUp);
+    assert_eq!(mk(MouseEventKind::ScrollDown), InputAction::QuestionDown);
+}
+
+#[test]
+fn mouse_wheel_still_scrolls_when_no_modal_open() {
+    // Regression guard: outside the question modal the wheel keeps its original
+    // transcript-scroll behavior.
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mk = |kind| {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        process_event(
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            mouse_ctx_for(crate::tui::Modal::None),
+            &mut drag,
+        )
+    };
+
+    assert_eq!(mk(MouseEventKind::ScrollUp), InputAction::ScrollUp);
+    assert_eq!(mk(MouseEventKind::ScrollDown), InputAction::ScrollDown);
+}
+
 #[test]
 fn home_and_end_move_caret_in_free_text_modals() {
     // The unified provider editor borrows the input line for one field at a
