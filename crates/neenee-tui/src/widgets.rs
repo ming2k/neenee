@@ -2,7 +2,7 @@
 //!
 //! These mirror ratatui's text/widget API so migrated widget code only needs
 //! an import-path swap. The key difference: rendering writes into the
-//! engine's [`Grid`] (via [`Frame::render_widget`]) instead of ratatui's
+//! engine's [`Grid`][crate::Grid] (via [`Frame::render_widget`][crate::frame::Frame::render_widget]) instead of ratatui's
 //! `Buffer`, so every paint goes through the write-marks-dirty path and the
 //! wide-glyph trailing column is owned by the writer (ADR-0038).
 

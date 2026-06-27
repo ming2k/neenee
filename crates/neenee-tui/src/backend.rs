@@ -188,7 +188,6 @@ impl<W: Write> Backend<W> {
                 }
             }
         }
-        self.out.flush()?;
         Ok(cmd.draws.len())
     }
 

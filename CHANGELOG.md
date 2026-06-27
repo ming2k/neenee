@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Shell output interleaves stdout/stderr by arrival order.** `bash` no longer
+  renders all of stdout followed by all of stderr — both pipes now merge into a
+  single arrival-ordered line stream, so the expanded view and detail overlay show
+  warnings and progress (which hit stderr) interleaved with results (stdout) exactly
+  as the process wrote them. This fixes the reorder symptom for tools like
+  `cargo`/`git`/`npm`, whose diagnostics were pushed below their results. Each line
+  keeps its source tag so stderr still colours distinctly in `error_fg`. (Legacy /
+  restored sessions and the pre-final streaming seed fall back to the old
+  all-stdout-then-all-stderr bands.) `stderr` is now streamed live alongside stdout
+  rather than accumulated silently.
+
+### Fixed
+
+- **ANSI escape sequences in shell output.** Colour codes (`\x1b[...]m`, cursor
+  moves, OSC sequences) emitted even under a non-tty (`--color=always`,
+  `CLICOLOR_FORCE`) are stripped at capture time, so they no longer corrupt the TUI's
+  width math or render as literal `[0;32m` glyphs.
+
+- **Carriage returns (`\r`) in shell lines.** Progress bars and spinners that refresh
+  a line with `\r` now show the surviving text (after the last `\r`) instead of
+  drawing the raw return and overlapping the two halves.
+
 ## [0.9.1] - 2026-06-29
 
 ### Added

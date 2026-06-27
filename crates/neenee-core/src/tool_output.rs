@@ -45,10 +45,19 @@ pub enum ToolOutput {
     /// UI never has to string-sniff for `Exit N` / `STDOUT:` / `STDERR:`
     /// markers. `truncated` records whether the composed output exceeded the
     /// tool's size cap and was cut.
+    ///
+    /// `lines` is the **TUI-authoritative** view: stdout and stderr lines in
+    /// their true interleaved arrival order, each tagged with its source
+    /// stream so the renderer can colour stderr distinctly without reordering
+    /// them. The flat `stdout` / `stderr` strings stay for the model-facing
+    /// `to_text` path and as a fallback when `lines` is empty (legacy /
+    /// restored sessions, or the live-streaming seed before the final result
+    /// lands).
     Shell {
         command: String,
         stdout: String,
         stderr: String,
+        lines: Vec<ShellLine>,
         exit: Option<i32>,
         truncated: bool,
     },
@@ -134,6 +143,140 @@ pub enum PatchOp {
     Delete,
 }
 
+/// Which pipe a captured shell line came from. Lets the renderer colour
+/// stderr distinctly while still emitting lines in their true arrival order
+/// (interleaved), instead of the all-stdout-then-all-stderr split that lost
+/// timing for tools like `cargo`/`git`/`npm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellStream {
+    /// Standard output.
+    Out,
+    /// Standard error.
+    Err,
+}
+
+/// One captured line of shell output with its source stream tagged. The TUI
+/// renders [`ToolOutput::Shell`]'s `lines` verbatim in order (the source tag
+/// only picks the colour), which preserves stdout/stderr interleaving. The
+/// model-facing text path (`to_text`) keeps using the flat `stdout`/`stderr`
+/// fields, so the two audiences stay decoupled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellLine {
+    pub stream: ShellStream,
+    pub text: String,
+}
+
+/// Strip CSI / OSC / 8-bit ESC ANSI sequences from `s`. Applied at shell
+/// capture time so neither the model-facing text nor the TUI renderer ever
+/// see escape bytes (which would otherwise corrupt width math and show as
+/// literal `[0;32m` glyphs in the expanded body). Hand-rolled to avoid a new
+/// dependency; covers the sequences shells actually emit (SGR `ESC [ … m`,
+/// cursor moves, `OSC … BEL/ST`, and the 8-bit CSI `0x9b` form).
+pub fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // 8-bit CSI.
+        if b == 0x9b {
+            i += 1;
+            i += skip_csi_params(bytes, i);
+            continue;
+        }
+        // ESC-sequence family.
+        if b == 0x1b && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'[' => {
+                    // CSI: ESC [ params intermediates final.
+                    i += 2;
+                    i += skip_csi_params(bytes, i);
+                    continue;
+                }
+                b']' => {
+                    // OSC: ESC ] … terminated by BEL (0x07) or ST (ESC \).
+                    i += 2;
+                    let mut done = false;
+                    while i < bytes.len() && !done {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            done = true;
+                        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\'
+                        {
+                            i += 2; // consume ST
+                            done = true;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+                // DCS/PM/APC/SOS (`ESC P`/`ESC X`/`ESC ^`/`ESC _`): terminate on ST (ESC \).
+                b'P' | b'X' | b'^' | b'_' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == 0x1b && bytes[i + 1] == b'\\') {
+                        i += 1;
+                    }
+                    i += 2; // consume the ST
+                    continue;
+                }
+                // Two-char escapes (`ESC c`, `ESC =`, …).
+                _ => {
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        // Safe to emit: advance one UTF-8 character.
+        let ch_start = i;
+        i += utf8_len(b);
+        if i <= bytes.len() {
+            if let Some(slice) = s.get(ch_start..i) {
+                out.push_str(slice);
+            } else {
+                // Defensive: malformed tail; emit nothing and realign.
+                i = ch_start + 1;
+            }
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Length in bytes of the UTF-8 codepoint whose leading byte is `b`.
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
+}
+
+/// Advance past a CSI parameter/intermediate run and its single final byte,
+/// returning the count consumed.
+fn skip_csi_params(bytes: &[u8], mut i: usize) -> usize {
+    let start = i;
+    // Parameter bytes 0x30..=0x3f, then intermediates 0x20..=0x2f, then a
+    // single final byte 0x40..=0x7e.
+    while i < bytes.len() && (0x30..=0x3f).contains(&bytes[i]) {
+        i += 1;
+    }
+    while i < bytes.len() && (0x20..=0x2f).contains(&bytes[i]) {
+        i += 1;
+    }
+    if i < bytes.len() && (0x40..=0x7e).contains(&bytes[i]) {
+        i += 1;
+    }
+    i - start
+}
+
 /// Prefix each line of `text` with its 1-based file line number, derived from
 /// `start_line`. This is what the model sees in tool results — the line
 /// numbers let it reference exact lines when targeting `offset` in a
@@ -179,6 +322,7 @@ impl ToolOutput {
                 stderr,
                 exit,
                 truncated,
+                ..
             } => shell_to_text(stdout, stderr, *exit, *truncated),
             ToolOutput::Code {
                 text,
@@ -329,6 +473,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strip_ansi_removes_sgr_cursor_osc() {
+        use super::strip_ansi;
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi("a\x1b[2Kbc"), "abc");
+        assert_eq!(strip_ansi("\x1b]0;title\x07clean"), "clean");
+        assert_eq!(strip_ansi("\x1b[1;31mhi\r"), "hi\r");
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+    }
+
+    #[test]
     fn text_round_trips() {
         assert_eq!(ToolOutput::text("hi").to_text(), "hi");
         let v = ToolOutput::from("x".to_string());
@@ -362,6 +516,7 @@ mod tests {
             command: "echo hi".into(),
             stdout: "hi\n".into(),
             stderr: "".into(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: false,
         };
@@ -375,6 +530,7 @@ mod tests {
             command: "x".into(),
             stdout: "".into(),
             stderr: "warn".into(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: false,
         };
@@ -387,6 +543,7 @@ mod tests {
             command: "false".into(),
             stdout: "out".into(),
             stderr: "err".into(),
+            lines: Vec::new(),
             exit: Some(1),
             truncated: false,
         };
@@ -400,6 +557,7 @@ mod tests {
             command: "x".into(),
             stdout: "".into(),
             stderr: "killed".into(),
+            lines: Vec::new(),
             exit: None,
             truncated: false,
         };
@@ -414,6 +572,7 @@ mod tests {
             command: "x".into(),
             stdout: big,
             stderr: "".into(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: true,
         };

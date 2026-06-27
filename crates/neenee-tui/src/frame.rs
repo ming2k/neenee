@@ -138,6 +138,10 @@ impl<W: io::Write> Terminal<W> {
         // full repaint is the fallback and worst case is a transient style
         // glitch, not a hang.
         let _ = self.backend.invalidate();
+        use crossterm::QueueableCommand;
+        let _ = self.backend.writer().queue(crossterm::terminal::Clear(
+            crossterm::terminal::ClearType::All,
+        ));
     }
 
     /// Run the app's draw closure against a fresh frame, then diff → render
@@ -157,6 +161,10 @@ impl<W: io::Write> Terminal<W> {
                 // risks a transient style glitch on the next frame, so we
                 // swallow it rather than aborting the draw.
                 let _ = self.backend.invalidate();
+                use crossterm::QueueableCommand;
+                let _ = self.backend.writer().queue(crossterm::terminal::Clear(
+                    crossterm::terminal::ClearType::All,
+                ));
             }
         }
         {

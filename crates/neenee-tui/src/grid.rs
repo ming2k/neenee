@@ -16,8 +16,8 @@
 //!
 //! - the **back** grid (`Grid::default`): what the app wants.
 //! - the **front** grid: what the terminal currently shows. After the backend
-//!   applies a diff's [`Draw`] commands, the back grid's dirty cells are
-//!   promoted into the front grid (see [`Grid::promote`]).
+//!   applies a diff's [`Draw`][crate::diff::Draw] commands, the back grid's dirty cells are
+//!   promoted into the front grid (see [`promote`][crate::diff::promote]).
 //!
 //! The application never touches the front grid directly; it only writes the
 //! back grid and lets the frame loop diff + promote.
@@ -27,7 +27,7 @@
 //! Writing a width-2 glyph at `(x, y)` also writes a wide-continuation cell at
 //! `(x+1, y)` carrying the glyph's background, so the trailing column can
 //! never ghost (ADR-0038). Writing past the right edge wraps or clips per the
-//! [`put`] options; a glyph that would straddle the edge is never split — it
+//! [`Grid::put`] options; a glyph that would straddle the edge is never split — it
 //! moves to the next row (wrap) or is dropped (clip).
 
 use crate::cell::Cell;
@@ -61,7 +61,7 @@ pub enum Fit {
 ///
 /// Stored as a flat `Vec<Cell>` in row-major order. The dirty bookkeeping
 /// (`dirty_col`, `dirty_row_lo`, `dirty_row_hi`) is updated on every mutating
-/// call so [`Grid::diff`] only walks the region that actually changed.
+/// call so the diff only walks the region that actually changed.
 pub struct Grid {
     pub width: u16,
     pub height: u16,
@@ -71,7 +71,7 @@ pub struct Grid {
     /// mutate in place must call [`Grid::mark`] for the touched content, or
     /// [`Grid::mark_all_dirty`] for a wholesale edit.
     pub content: Vec<Cell>,
-    /// Alias for [`Grid::cells`] matching ratatui's `Buffer::content` naming,
+    /// Alias for `content` matching ratatui's `Buffer::content` naming,
     /// so migrated code that reads `buf.content[idx]` works without changes.
     /// This is a method returning a slice because a field alias would require
     /// duplicating the storage; callers should use `.cells` directly in new
@@ -326,7 +326,7 @@ impl Grid {
 
     /// Record that column `x` on row `y` changed, expanding the row's dirty
     /// window leftward and extending the dirty row range. Public so callers
-    /// that mutate [`Grid::cells`] in place (scrollbar, dim) can keep the
+    /// that mutate [`Grid::content`] in place (scrollbar, dim) can keep the
     /// dirty tracking honest.
     #[inline]
     pub fn mark(&mut self, x: u16, y: u16) {

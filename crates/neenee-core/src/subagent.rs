@@ -19,13 +19,13 @@
 //!    dispatch tool rather than declaring intent.
 //!
 //! The fix is a profile primitive that expresses the tool policy in terms of
-//! [`Tool`] capability axes — [`Tool::access`], [`Tool::requires_user`],
+//! [`Tool`] capability axes — [`Tool::scope_target`], [`Tool::requires_user`],
 //! [`Tool::spawns_subagent`] — so admission is data-driven and generalizes to
 //! future tools without touching the dispatch path.
 //!
 //! ## The capability axes
 //!
-//! - [`Tool::access`] — filesystem mutation (`Read` vs `Write`). Existing.
+//! - [`Tool::scope_target`] — what the call touches (`Read` vs `Write` path). Existing.
 //! - [`Tool::requires_user`] — may block on a live human (e.g. `ask_user`).
 //! - [`Tool::spawns_subagent`] — dispatches a nested agent (e.g. `task`).
 //!

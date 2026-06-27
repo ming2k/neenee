@@ -49,7 +49,7 @@ session.
 
 | Tool | Renderer | Notes |
 |------|----------|-------|
-| `bash` | `draw_bash_content` | A `$ command` prompt line, then stdout, then stderr in `error_fg`, then an `exit N` / `[output truncated]` footer — all one `code_bg` block. Command comes from the structured `Shell` payload (available while streaming), falling back to the parsed arguments. |
+| `bash` | `draw_bash_content` | A `$ command` prompt line, then the captured lines in **arrival order** — stdout and stderr interleaved exactly as the process wrote them, each coloured by source stream (stderr in `error_fg`) — then an `exit N` / `[output truncated]` footer, all one `code_bg` block. Carriage returns are collapsed (only the text after the last `\r` on a line survives). The ordered view comes from the structured `Shell::lines` field (available while streaming); legacy/restored payloads with only flat `stdout`/`stderr` fall back to the all-stdout-then-all-stderr bands. Command comes from the structured `Shell` payload, falling back to the parsed arguments. |
 | `list_dir`, `glob` | `draw_listing_content` | One entry per row, no gutter, on `code_bg`. Directories (entries ending in `/`) in `info`, files in `code_fg`. |
 | `grep` | `draw_grep_content` | Matches grouped under a bold `heading_fg` file-path header; each match shown as `{lineno}  {content}` with the line-number column aligned and dimmed. |
 | `edit_file`, `write_file` | `draw_diff_content` | A real `similar`-based unified diff: line-number gutter, `+`/`-` sign column, and intra-line word highlight on the changed spans, on `code_bg`. |
@@ -84,8 +84,9 @@ running — no luminance sweep.)
 
 `Enter` on a focused tool step opens a centered, scrollable panel showing the
 step's complete output — the full structured payload, not the
-transcript-truncated view. For `Shell` it renders `$ command`, stdout, stderr
-(in `error_fg`), and the exit/truncation footer directly from the
+transcript-truncated view. For `Shell` it renders `$ command`, the captured
+lines in **arrival order** (stdout and stderr interleaved as written, stderr in
+`error_fg`), and the exit/truncation footer directly from the
 `ToolOutput::Shell` fields. `↑`/`↓`/wheel scrolls; `Esc`/`Enter` closes.
 Sub-agent `subagent` steps still navigate into the child session on `Enter`
 instead of opening the overlay. The bulk `Ctrl+T` toggle still inline-expands

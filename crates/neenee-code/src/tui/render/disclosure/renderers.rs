@@ -677,42 +677,73 @@ fn draw_bash_content(
     if let Some(neenee_core::ToolOutput::Shell {
         stdout,
         stderr,
+        lines,
         exit,
         truncated,
         ..
     }) = structured
     {
-        // Render from structured fields: stdout then stderr (distinguished by
-        // color) then an exit/truncation footer — replacing the old sniffing
-        // of `Exit N` / `STDERR:` markers embedded in the composed text.
+        // Declared once so both the interleaved-`lines` branch and the
+        // legacy/seed fallback share the running offset, which then feeds the
+        // truncated / exit footer below.
         let mut byte_offset = 0usize;
-        if !stdout.is_empty() {
-            byte_offset = emit_bash_lines(
-                ctx,
-                mi,
-                block_idx,
-                indent,
-                wrap_w,
-                pad,
-                sel_range,
-                stdout,
-                base,
-                byte_offset,
-            );
-        }
-        if !stderr.is_empty() {
-            byte_offset = emit_bash_lines(
-                ctx,
-                mi,
-                block_idx,
-                indent,
-                wrap_w,
-                pad,
-                sel_range,
-                stderr,
-                stderr_style,
-                byte_offset,
-            );
+        if !lines.is_empty() {
+            // Arrival-ordered view: stdout and stderr interleaved exactly as the
+            // process wrote them, each line coloured by its source stream. This
+            // is the fix for the "all-stdout-then-all-stderr" reorder symptom.
+            for line in lines {
+                let style = if line.stream == neenee_core::tool_output::ShellStream::Err {
+                    stderr_style
+                } else {
+                    base
+                };
+                byte_offset = emit_bash_lines(
+                    ctx,
+                    mi,
+                    block_idx,
+                    indent,
+                    wrap_w,
+                    pad,
+                    sel_range,
+                    &line.text,
+                    style,
+                    byte_offset,
+                );
+            }
+        } else {
+            // Legacy / live-seed fallback: no ordered lines, so fall back to
+            // the all-stdout-then-all-stderr bands. This is the path live
+            // streaming takes before the final result lands (the streaming seed
+            // accumulates into the flat strings) and the path restored sessions
+            // with only the flat strings take.
+            if !stdout.is_empty() {
+                byte_offset = emit_bash_lines(
+                    ctx,
+                    mi,
+                    block_idx,
+                    indent,
+                    wrap_w,
+                    pad,
+                    sel_range,
+                    stdout,
+                    base,
+                    byte_offset,
+                );
+            }
+            if !stderr.is_empty() {
+                byte_offset = emit_bash_lines(
+                    ctx,
+                    mi,
+                    block_idx,
+                    indent,
+                    wrap_w,
+                    pad,
+                    sel_range,
+                    stderr,
+                    stderr_style,
+                    byte_offset,
+                );
+            }
         }
         if *truncated {
             byte_offset = emit_bash_lines(
@@ -808,6 +839,11 @@ fn emit_bash_lines(
     // whose strings never carry a trailing newline.
     let text = text.trim_end_matches(&['\r', '\n'][..]);
     for logical_line in text.split('\n') {
+        // Honour carriage returns: a `\r` moves the terminal cursor to column 0,
+        // so the text after the *last* `\r` on a line is what survives on
+        // screen (progress bars / spinners refresh this way). Without this, a
+        // `\r` would be drawn raw and the two halves would visually overlap.
+        let logical_line = logical_line.rsplit('\r').next().unwrap_or(logical_line);
         let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_w));
         for wl in &wrapped {
             let block_wl = WrappedLine {

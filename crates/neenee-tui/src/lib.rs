@@ -20,7 +20,7 @@
 //!   application wants on screen. Writes mark the touched line dirty
 //!   ([per-line `dirty_col`], vim's `ScreenGrid` model) at write time — no
 //!   full-frame rescan.
-//! - Each frame, [`Grid::diff`] compares the back grid (desired) against the
+//! - Each frame, [`diff`][crate::diff::diff] compares the back grid (desired) against the
 //!   front grid (what the terminal currently shows) and emits a stream of
 //!   [`Draw`] commands: run-length packed cell runs with SGR-merged styles
 //!   and cursor jumps over unchanged cells. Unchanged lines emit nothing.

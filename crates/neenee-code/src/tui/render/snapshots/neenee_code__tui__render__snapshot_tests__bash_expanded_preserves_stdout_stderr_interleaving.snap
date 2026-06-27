@@ -1,0 +1,20 @@
+---
+source: crates/neenee-code/src/tui/render/snapshot_tests.rs
+assertion_line: 314
+expression: "render_grid(&m, 80, 40)"
+---
+- Run cargo build · 0ms
+
+  $ cargo build
+  Compiling a
+  warning: b
+  Compiling c
+
+backgrounds:
+A=#070808  B=#111312  .=reset
+0: A80
+1: A80
+2: B80
+3: B80
+4: B80
+5: B80

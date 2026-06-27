@@ -57,6 +57,7 @@ pub fn draw_tool_step_detail_overlay(
                 command,
                 stdout,
                 stderr,
+                lines: shell_lines,
                 exit,
                 truncated,
             } = structured.as_deref().expect("guarded by match guard")
@@ -69,12 +70,25 @@ pub fn draw_tool_step_detail_overlay(
                     Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
                 )));
             }
-            for line in stdout.trim_end_matches(&['\r', '\n'][..]).split('\n') {
-                lines.push(Line::from(Span::styled(line.to_string(), body_style)));
-            }
-            if !stderr.is_empty() {
-                for line in stderr.trim_end_matches(&['\r', '\n'][..]).split('\n') {
-                    lines.push(Line::from(Span::styled(line.to_string(), stderr_style)));
+            if !shell_lines.is_empty() {
+                // Arrival-ordered: stdout/stderr interleaved exactly as written,
+                // each coloured by source stream.
+                for l in shell_lines {
+                    let st = if l.stream == neenee_core::tool_output::ShellStream::Err {
+                        stderr_style
+                    } else {
+                        body_style
+                    };
+                    lines.push(Line::from(Span::styled(l.text.clone(), st)));
+                }
+            } else {
+                for line in stdout.trim_end_matches(&['\r', '\n'][..]).split('\n') {
+                    lines.push(Line::from(Span::styled(line.to_string(), body_style)));
+                }
+                if !stderr.is_empty() {
+                    for line in stderr.trim_end_matches(&['\r', '\n'][..]).split('\n') {
+                        lines.push(Line::from(Span::styled(line.to_string(), stderr_style)));
+                    }
                 }
             }
             if *truncated {

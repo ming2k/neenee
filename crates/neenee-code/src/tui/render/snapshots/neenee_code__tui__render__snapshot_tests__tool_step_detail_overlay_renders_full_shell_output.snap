@@ -12,5 +12,5 @@ expression: "rows.join(\"\\n\")"
   ┃test result: ok. 3 passed
   ┃warning: unused import
   ┃
-  ┃ ↑/↓ or wheel scroll · esc close
+  ┃↑↓/wheel scroll · Esc close
   ┃

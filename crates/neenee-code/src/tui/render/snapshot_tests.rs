@@ -268,7 +268,45 @@ fn bash_expanded_renders_structured_shell() {
             command: "cargo test".into(),
             stdout: "running 3 tests\n...\ntest result: ok. 3 passed".into(),
             stderr: "warning: unused import".into(),
+            lines: Vec::new(),
             exit: Some(1),
+            truncated: false,
+        },
+        true,
+    );
+    insta::assert_snapshot!(render_grid(&m, 80, 40));
+}
+
+#[test]
+fn bash_expanded_preserves_stdout_stderr_interleaving() {
+    // Regression for the "all-stdout-then-all-stderr" reorder symptom: when
+    // `lines` is populated, the renderer must emit them in arrival order, not
+    // bucketed by stream. Here a stderr line sits *between* two stdout lines,
+    // so a correct render shows `warning: b` between `Compiling a` and
+    // `Compiling c` — not pinned to the bottom.
+    use neenee_core::tool_output::{ShellLine, ShellStream};
+    let m = tool_step_structured(
+        "bash",
+        r#"{"command":"cargo build"}"#,
+        neenee_core::ToolOutput::Shell {
+            command: "cargo build".into(),
+            stdout: "Compiling a\nCompiling c".into(),
+            stderr: "warning: b".into(),
+            lines: vec![
+                ShellLine {
+                    stream: ShellStream::Out,
+                    text: "Compiling a".into(),
+                },
+                ShellLine {
+                    stream: ShellStream::Err,
+                    text: "warning: b".into(),
+                },
+                ShellLine {
+                    stream: ShellStream::Out,
+                    text: "Compiling c".into(),
+                },
+            ],
+            exit: Some(0),
             truncated: false,
         },
         true,
@@ -371,6 +409,7 @@ fn bash_running_streams_live_preview() {
             command: "cargo build".into(),
             stdout: "Compiling neenee-core v0.1.0\nCompiling neenee-tui v0.1.0".into(),
             stderr: String::new(),
+            lines: Vec::new(),
             exit: None,
             truncated: false,
         },
@@ -388,6 +427,7 @@ fn tool_step_detail_overlay_renders_full_shell_output() {
             command: "cargo test".into(),
             stdout: "running 3 tests\n...\ntest result: ok. 3 passed".into(),
             stderr: "warning: unused import".into(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: false,
         },
@@ -427,6 +467,7 @@ fn tool_step_detail_overlay_keeps_right_gutter_clear_on_long_lines() {
             command: "cargo test".into(),
             stdout: long,
             stderr: String::new(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: false,
         },

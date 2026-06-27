@@ -274,6 +274,7 @@ fn bash_failed(id: &str) -> TranscriptMessage {
         command: "cargo test".into(),
         stdout: "running 3 tests\n...\ntest result: FAILED. 1 passed; 2 failed".into(),
         stderr: "error[E0599]: no method named `missing`".into(),
+        lines: Vec::new(),
         exit: Some(1),
         truncated: false,
     };

@@ -484,6 +484,7 @@ impl TranscriptMessage {
                 command: String::new(),
                 stdout: String::new(),
                 stderr: String::new(),
+                lines: Vec::new(),
                 exit: None,
                 truncated: false,
             }));
@@ -2249,6 +2250,7 @@ mod tests {
             command: "false".into(),
             stdout: String::new(),
             stderr: "boom".into(),
+            lines: Vec::new(),
             exit: Some(1),
             truncated: false,
         };
@@ -2268,6 +2270,7 @@ mod tests {
             command: "true".into(),
             stdout: "ok\n".into(),
             stderr: String::new(),
+            lines: Vec::new(),
             exit: Some(0),
             truncated: false,
         };
