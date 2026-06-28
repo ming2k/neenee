@@ -41,6 +41,12 @@ impl Tool for ReadImageTool {
             "required": ["path"]
         })
     }
+    /// Vision-only: this tool feeds the model an image part, which a text-only
+    /// model strips before the request hits the wire. The pool resolver drops
+    /// it from a non-vision model's toolset (hard model-capability limit).
+    fn requires_vision(&self) -> bool {
+        true
+    }
     async fn call(&self, arguments: &str) -> Result<String, String> {
         self.call_structured(arguments).await.map(|o| o.to_text())
     }

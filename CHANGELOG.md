@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tools are a pool; the agent and the model each select from it.** The toolset
+  is now resolved through a single entry point, `ToolSet::resolve_for(model,
+  agent_selection, model_selection)`, that composes two independent selectors
+  over two orthogonal axes: **scope** (which capabilities) by *intersection* —
+  a capability survives only if both the agent's identity (Principal scope or
+  Envoy role) and the model admit it — and **override** (which variant) by
+  *precedence*, where an agent-side override beats a model-side override. A
+  model's hard capability limits live on the scope/pool axis, not the override
+  axis: a variant a model cannot execute (e.g. a `requires_vision` tool like
+  `read_image` on a text-only model) is simply absent from the resolved pool, so
+  no agent override can reinstate it. New `Tool::requires_vision()` capability
+  axis (mirrors `requires_user`); new `ToolScope` / `ToolSelection` core types;
+  the Principal now carries a first-class `agent_selection`, re-composed with the
+  live model on every model switch.
+
 ### Changed
 
 - **BREAKING — agent vocabulary is now Principal / Envoy.** "Agent" is kept only

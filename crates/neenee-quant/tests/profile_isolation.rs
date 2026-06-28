@@ -16,17 +16,17 @@
 
 use std::sync::Arc;
 
-use neenee_core::{QUANT, Tool};
+use neenee_core::{QUANT, Tool, ToolSelection, ToolSet, resolve_model};
 use neenee_quant::{BacktestTool, ListPositionsTool, MarketDataTool, PlaceOrderTool};
 
 #[test]
 fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
-    // A mixed parent toolset: quant tools (read + trade) + coding tools (read
-    // + write). A real assembled quant agent would carry quant tools; here we
+    // A mixed parent pool: quant tools (read + trade) + coding tools (read +
+    // write). A real assembled quant agent would carry quant tools; here we
     // also throw in coding tools to prove the profile filters them out.
-    let mixed: Vec<Arc<dyn Tool>> = vec![
+    let mixed = ToolSet::from_tools(vec![
         // Quant domain.
-        Arc::new(MarketDataTool::new()),
+        Arc::new(MarketDataTool::new()) as Arc<dyn Tool>,
         Arc::new(BacktestTool::new()),
         Arc::new(ListPositionsTool::new()),
         Arc::new(PlaceOrderTool::new()),
@@ -35,9 +35,12 @@ fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
         Arc::new(neenee_tools::WriteFileTool),
         Arc::new(neenee_tools::EditFileTool),
         Arc::new(neenee_tools::BashTool),
-    ];
+    ]);
 
-    let selected = QUANT.select_tools(&mixed);
+    // Resolve the pool for the QUANT role on a vision-capable model with no
+    // model-side overrides — isolates the role-scope contract.
+    let model = resolve_model("claude-opus-4-8");
+    let selected = QUANT.resolve_tools(&mixed, &model, &ToolSelection::unrestricted());
     let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
 
     // Admitted: read-only quant + read-only inspection.

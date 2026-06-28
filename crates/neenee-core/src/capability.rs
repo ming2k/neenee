@@ -161,6 +161,25 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this tool only functions on a model that can see images
+    /// (vision). A vision-only tool (e.g. `read_image`, which feeds the model
+    /// an image part) is useless — or actively misleading — on a text-only
+    /// model, which strips image parts before the request hits the wire. This
+    /// is a **model-capability requirement**, the symmetric counterpart of
+    /// [`requires_user`](Self::requires_user): where that gates on whether a
+    /// human is reachable, this gates on whether the model can perceive the
+    /// tool's output.
+    ///
+    /// The pool resolver ([`crate::ToolSet::resolve_for`]) treats it as a
+    /// **hard** filter: a variant whose `requires_vision()` a model cannot
+    /// satisfy is never selectable for that model — it is simply absent from
+    /// the resolved set, so no agent-side override can reinstate it. This is
+    /// why model capability limits live on the scope/pool axis, not the soft
+    /// override axis.
+    fn requires_vision(&self) -> bool {
+        false
+    }
+
     /// Whether this tool exercises control over the harness itself (e.g. the
     /// abort/exit escape hatch), as opposed to the workspace/filesystem. This
     /// is orthogonal to [`Tool::scope_target`]: `scope_target` classifies *what

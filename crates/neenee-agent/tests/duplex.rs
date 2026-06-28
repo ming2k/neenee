@@ -273,6 +273,7 @@ const INTERACTIVE: EnvoyProfile = EnvoyProfile {
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: false,
 };
 

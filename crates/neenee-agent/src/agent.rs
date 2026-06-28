@@ -209,9 +209,19 @@ pub struct Agent {
     /// resolved toolset always tracks the live model. Held behind an `Arc` so a
     /// spawned envoy — which is an agent on the *same* model — can inherit
     /// the same overrides by sharing this handle (see
-    /// [`Agent::variant_selection_handle`]); the profile decides scope, the
+    /// [`Agent::variant_selection_handle`]); the agent decides scope, the
     /// model decides variant.
     variant_selection: Arc<std::sync::Mutex<neenee_core::VariantSelection>>,
+    /// This agent's **identity-side selection** of the pool (the agent half of
+    /// the two-selector model): the capability scope it admits plus any variant
+    /// pins it forces. The principal agent is
+    /// [`ToolSelection::unrestricted`](neenee_core::ToolSelection::unrestricted)
+    /// — every capability, model-chosen variants. A scoped agent (or a future
+    /// role-bound principal) narrows this. Composed with the live model's
+    /// selection by [`neenee_core::ToolSet::resolve_for`] every time the toolset
+    /// is re-resolved: scope by intersection, variants by agent-over-model
+    /// precedence, model capability limits applied hard.
+    agent_selection: std::sync::Mutex<neenee_core::ToolSelection>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -358,10 +368,18 @@ impl Agent {
             todo_context,
         )));
 
-        // Seed the model-visible view with the default variant of every
-        // capability; re-seeded by `set_variant_selection` once the model's
-        // `[tool_variants]` selection is known.
-        let resolved_tools = std::sync::RwLock::new(toolset.default_view());
+        // Seed the model-visible view by resolving the pool for the live model
+        // with no role restriction and no model variant overrides yet: the
+        // principal's identity selection (unrestricted) composed with the
+        // model's capability limits. `set_variant_selection` re-resolves once
+        // the model's `[tool_variants]` selection is known and on every switch.
+        let agent_selection = neenee_core::ToolSelection::unrestricted();
+        let seed_model = neenee_core::resolve_model(&provider.model());
+        let resolved_tools = std::sync::RwLock::new(toolset.resolve_for(
+            &seed_model,
+            &agent_selection,
+            &neenee_core::ToolSelection::unrestricted(),
+        ));
 
         Self {
             provider,
@@ -391,6 +409,7 @@ impl Agent {
             variant_selection: Arc::new(
                 std::sync::Mutex::new(neenee_core::VariantSelection::new()),
             ),
+            agent_selection: std::sync::Mutex::new(agent_selection),
         }
     }
 
@@ -404,21 +423,59 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) = budget_tokens;
     }
 
-    /// Replace the tool-description overrides applied to the current model's
     /// Replace the per-model tool-variant selection and re-resolve the
     /// model-visible toolset to match. Seeded from `[tool_variants."<model-id>"]`
-    /// config and re-applied on model switch so the resolved variants always
-    /// track the live model. An empty map (the default) realizes every
-    /// capability with its default variant.
+    /// config and re-applied on model switch so the resolved variants — and the
+    /// live model's hard capability limits (e.g. vision) — always track the
+    /// live model. An empty map (the default) realizes every capability with its
+    /// model-chosen / default variant.
     pub fn set_variant_selection(&self, selection: neenee_core::VariantSelection) {
-        *self
-            .resolved_tools
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = self.toolset.resolve(&selection);
+        self.reresolve_tools(&selection);
         *self
             .variant_selection
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = selection;
+    }
+
+    /// Replace this agent's identity-side selection (capability scope + variant
+    /// pins) and re-resolve the model-visible toolset. The principal is
+    /// unrestricted by default; this narrows it (e.g. confining a role-bound
+    /// principal to a capability subset). The current per-model variant
+    /// selection is preserved and re-composed.
+    pub fn set_agent_selection(&self, selection: neenee_core::ToolSelection) {
+        *self
+            .agent_selection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = selection;
+        let model_variants = self
+            .variant_selection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.reresolve_tools(&model_variants);
+    }
+
+    /// Re-resolve [`resolved_tools`](Self::resolved_tools) from the pool for the
+    /// live model, composing this agent's identity selection with the model's
+    /// selection (`model_variants` overrides + the model's hard capability
+    /// limits). The single choke point through which both the principal seed and
+    /// every model/selection switch flow, so the schema sent to the provider and
+    /// the dispatch table always reflect `agent_scope ∩ model_caps`.
+    fn reresolve_tools(&self, model_variants: &neenee_core::VariantSelection) {
+        let model = neenee_core::resolve_model(&self.provider.model());
+        let agent_selection = self
+            .agent_selection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let model_selection =
+            neenee_core::ToolSelection::unrestricted().with_variants(model_variants.clone());
+        *self
+            .resolved_tools
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) =
+            self.toolset
+                .resolve_for(&model, &agent_selection, &model_selection);
     }
 
     /// The current model-visible toolset: exactly one variant per capability for

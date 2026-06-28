@@ -283,13 +283,19 @@ impl EnvoyTool {
             profile: self.profile.name.to_string(),
         });
 
-        // Scope (profile) ∘ override (model). First resolve every capability to
-        // the model's chosen variant (inherited from the parent — an envoy is
-        // an agent on the same model), then narrow to what the profile admits.
-        // The profile owns *which* tools (scope, ADR-0011); the model owns
-        // *which variant* of each (override).
-        let resolved = self.toolset.resolve(&self.variant_snapshot());
-        let sub_tools = self.profile.select_tools(&resolved);
+        // Resolve the pool for this envoy: profile selection ⊓ model selection.
+        // The envoy is an agent on the *same* model as the parent, so it carries
+        // the parent's model (capability limits + variant overrides). The profile
+        // contributes the role scope and any variant pins; the model contributes
+        // its variant overrides (snapshotted from the parent) and its hard
+        // capability limits. `resolve_tools` composes both and applies the envoy
+        // runtime hard rules (no recursion / control-flow / blocking-on-user).
+        let model = neenee_core::resolve_model(&self.provider.model());
+        let model_sel = neenee_core::ToolSelection::unrestricted()
+            .with_variants(self.variant_snapshot());
+        let sub_tools = self
+            .profile
+            .resolve_tools(&self.toolset, &model, &model_sel);
 
         // The envoy's identity *is* its profile's system prompt — that is the
         // persona/mission framing for this role (e.g. EXPLORE's research
@@ -569,11 +575,16 @@ mod tests {
         ]);
         let tool = EnvoyTool::new(std::sync::Arc::new(CannedProvider), toolset, &EXPLORE);
 
+        let resolve = |tool: &EnvoyTool| {
+            let model = neenee_core::resolve_model(&CannedProvider.model());
+            let model_sel = neenee_core::ToolSelection::unrestricted()
+                .with_variants(tool.variant_snapshot());
+            tool.profile.resolve_tools(&tool.toolset, &model, &model_sel)
+        };
+
         // Unbound (no model override) → read_text resolves to its default
         // variant; the out-of-scope write tool is excluded regardless.
-        let scoped = tool
-            .profile
-            .select_tools(&tool.toolset.resolve(&tool.variant_snapshot()));
+        let scoped = resolve(&tool);
         let read = scoped.iter().find(|t| t.name() == "read_text");
         assert_eq!(read.map(|t| t.variant()), Some("default"));
         assert!(scoped.iter().all(|t| t.name() != "stub_write"));
@@ -583,9 +594,7 @@ mod tests {
         let mut sel = neenee_core::VariantSelection::new();
         sel.insert("read_text".to_string(), "terse".to_string());
         tool.bind_variant_selection(std::sync::Arc::new(std::sync::Mutex::new(sel)));
-        let scoped = tool
-            .profile
-            .select_tools(&tool.toolset.resolve(&tool.variant_snapshot()));
+        let scoped = resolve(&tool);
         let read = scoped.iter().find(|t| t.name() == "read_text");
         assert_eq!(read.map(|t| t.variant()), Some("terse"));
         assert!(scoped.iter().all(|t| t.name() != "stub_write"));
@@ -699,14 +708,16 @@ mod tests {
         let envoy_tool =
             EnvoyTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
-        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
-            std::sync::Arc::new(EchoReadTool),
+        let toolset = neenee_core::ToolSet::from_tools(vec![
+            std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>,
             std::sync::Arc::new(neenee_tools::AskUserTool),
             std::sync::Arc::new(StubWriteTool),
             std::sync::Arc::new(envoy_tool),
-        ];
+        ]);
 
-        let admitted = EXPLORE.select_tools(&tools);
+        let model = neenee_core::resolve_model(&CannedProvider.model());
+        let model_sel = neenee_core::ToolSelection::unrestricted();
+        let admitted = EXPLORE.resolve_tools(&toolset, &model, &model_sel);
         let admitted_names: Vec<&str> = admitted.iter().map(|t| t.name()).collect();
 
         assert_eq!(admitted_names, vec!["read_text"]);
@@ -722,17 +733,19 @@ mod tests {
         let envoy_tool =
             EnvoyTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
-        let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
-            std::sync::Arc::new(EchoReadTool),
+        let toolset = neenee_core::ToolSet::from_tools(vec![
+            std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>,
             std::sync::Arc::new(neenee_tools::BashTool),
             std::sync::Arc::new(neenee_tools::AskUserTool),
             std::sync::Arc::new(StubWriteTool),
             std::sync::Arc::new(envoy_tool),
-        ];
+        ]);
 
         // EXPLORE: only the whitelisted read tool survives (bash, ask_user,
         // the write stub, and recursion are all excluded).
-        let explore_selected = EXPLORE.select_tools(&tools);
+        let model = neenee_core::resolve_model(&CannedProvider.model());
+        let model_sel = neenee_core::ToolSelection::unrestricted();
+        let explore_selected = EXPLORE.resolve_tools(&toolset, &model, &model_sel);
         let explore_names: Vec<&str> = explore_selected.iter().map(|t| t.name()).collect();
         assert_eq!(explore_names, vec!["read_text"]);
     }

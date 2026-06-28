@@ -87,11 +87,18 @@ impl Agent {
 
         // Read-only, non-interactive, non-recursive toolset — the reviewer may
         // open a file to check a looping claim but cannot mutate anything or
-        // spawn further agents.
-        // Scope (profile) ∘ override (model): start from the parent's
-        // variant-resolved view so the reviewer inherits the model's tool
-        // overrides, then narrow to the REVIEW profile's read-only scope.
-        let sub_tools = REVIEW.select_tools(&self.installed_tools());
+        // spawn further agents. The reviewer runs on the same model as the
+        // parent, so it carries the parent's model selection (variant overrides
+        // + hard capability limits); the REVIEW profile narrows scope to the
+        // read-only tools. `resolve_tools` composes both off the full pool.
+        let model = neenee_core::resolve_model(&self.provider.model());
+        let model_sel = neenee_core::ToolSelection::unrestricted().with_variants(
+            self.variant_selection_handle()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        );
+        let sub_tools = REVIEW.resolve_tools(&self.toolset, &model, &model_sel);
         let mut reviewer = Agent::new(
             self.provider.clone(),
             sub_tools,

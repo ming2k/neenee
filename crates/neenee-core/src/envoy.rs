@@ -38,7 +38,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::{CommandScope, OperationScope, Tool};
+use crate::model::Model;
+use crate::{CommandScope, OperationScope, Tool, ToolScope, ToolSelection, ToolSet};
 
 /// Ceiling on what an envoy may do. There is no capability ladder — a tool is
 /// admitted purely by name. [`Tool::spawns_envoy`] and
@@ -72,7 +73,22 @@ pub struct ToolPolicy {
 
 impl ToolPolicy {
     /// Returns `true` if a tool may be handed to an envoy under this policy.
+    /// Combines the **name scope** ([`allowed_tools`](Self::allowed_tools)) with
+    /// the **runtime hard rules** ([`admits_runtime`](Self::admits_runtime)).
     pub fn admits(&self, tool: &dyn Tool) -> bool {
+        self.admits_runtime(tool) && self.scope().admits(tool.name())
+    }
+
+    /// The envoy hard rules that are independent of the name whitelist:
+    /// recursion ([`Tool::spawns_envoy`]) and program teardown
+    /// ([`Tool::affects_control_flow`]) are absolute, and human-blocking tools
+    /// ([`Tool::requires_user`]) are gated by
+    /// [`allow_user_interaction`](Self::allow_user_interaction). These are not
+    /// expressible as a capability *name* scope, so the pool resolver (which
+    /// handles name scope + the model-capability filter) cannot apply them — the
+    /// envoy resolution applies this as a post-filter. See
+    /// [`EnvoyProfile::resolve_tools`].
+    pub fn admits_runtime(&self, tool: &dyn Tool) -> bool {
         // Recursion is unconditionally forbidden in envoys.
         if tool.spawns_envoy() {
             return false;
@@ -87,11 +103,17 @@ impl ToolPolicy {
         if tool.requires_user() && !self.allow_user_interaction {
             return false;
         }
-        // Name whitelist: `None` admits everything; `Some(set)` admits only
-        // listed names. This is the sole admission axis.
+        true
+    }
+
+    /// This policy's capability **name scope** for the pool resolver: `None`
+    /// [`allowed_tools`](Self::allowed_tools) → [`ToolScope::All`]; `Some(set)`
+    /// → [`ToolScope::Only`] the listed names. The runtime hard rules
+    /// ([`admits_runtime`](Self::admits_runtime)) are layered on separately.
+    pub fn scope(&self) -> ToolScope {
         match self.allowed_tools {
-            None => true,
-            Some(set) => set.iter().any(|name| *name == tool.name()),
+            None => ToolScope::All,
+            Some(names) => ToolScope::only(names.iter().copied()),
         }
     }
 }
@@ -107,6 +129,14 @@ pub struct EnvoyProfile {
     pub name: &'static str,
     pub system_prompt: &'static str,
     pub tool_policy: ToolPolicy,
+    /// The profile's variant pins (the agent-side **override** axis): a list of
+    /// `(capability, variant_id)` this role forces, regardless of the model's
+    /// own preference. Empty for every built-in role — they accept whatever
+    /// variant the model resolves. A non-empty pin wins over the model's choice
+    /// for that capability (agent-over-model), but can still be overridden
+    /// *down* by the model's hard capability limit if the pinned variant is
+    /// unusable. See [`ToolSet::resolve_for`].
+    pub variant_pins: &'static [(&'static str, &'static str)],
     /// Whether the spawned envoy runs its admitted write/execute tools
     /// unattended, bypassing the permission broker. Full-duplex (ADR-0029): the
     /// built-in profiles keep this `true` to preserve the legacy autonomous
@@ -120,20 +150,46 @@ pub struct EnvoyProfile {
 }
 
 impl EnvoyProfile {
-    /// Filter a parent toolset down to what this profile admits, by
-    /// [`ToolPolicy`]. This is the **scope** axis and the profile's whole job:
-    /// *which* capabilities the envoy may use. It is deliberately blind to
-    /// *which variant* of each capability is used — that is the **override**
-    /// axis, owned by the model ([`crate::VariantSelection`]), not the profile.
+    /// This profile's [`ToolSelection`] — the agent-identity selector it hands
+    /// the pool: the capability **name scope** from its [`ToolPolicy`], plus its
+    /// own variant pins (the **override** axis, agent side). Built-in profiles
+    /// pin nothing, so they accept the model's variant for every capability;
+    /// a profile that pins a variant takes precedence over the model's choice
+    /// (agent-over-model) — see [`ToolSet::resolve_for`].
+    pub fn selection(&self) -> ToolSelection {
+        ToolSelection {
+            scope: self.tool_policy.scope(),
+            variants: self
+                .variant_pins
+                .iter()
+                .map(|(cap, var)| (cap.to_string(), var.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Resolve the pool down to the toolset a spawned envoy on `model` actually
+    /// gets. This is the envoy's whole admission story in one call:
     ///
-    /// Callers pass an already variant-resolved list (one tool per capability,
-    /// at the model's chosen variant), so the envoy inherits the model's
-    /// overrides while the profile only narrows the scope.
-    pub fn select_tools(&self, tools: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
-        tools
-            .iter()
-            .filter(|tool| self.tool_policy.admits(tool.as_ref()))
-            .cloned()
+    /// 1. [`ToolSet::resolve_for`] composes this profile's [`selection`](Self::selection)
+    ///    with the model's selection (`model_sel`) — scope by intersection,
+    ///    variants by agent-over-model precedence, the model's capability limits
+    ///    applied hard.
+    /// 2. The envoy **runtime hard rules** ([`ToolPolicy::admits_runtime`]) are
+    ///    applied as a post-filter: recursion, control-flow, and (unless the
+    ///    profile opts in) human-blocking tools are stripped regardless of name.
+    ///
+    /// The result is the variant-resolved, model-legal, role-scoped tool list to
+    /// hand the child agent.
+    pub fn resolve_tools(
+        &self,
+        toolset: &ToolSet,
+        model: &Model,
+        model_sel: &ToolSelection,
+    ) -> Vec<Arc<dyn Tool>> {
+        toolset
+            .resolve_for(model, &self.selection(), model_sel)
+            .into_iter()
+            .filter(|tool| self.tool_policy.admits_runtime(tool.as_ref()))
             .collect()
     }
 
@@ -219,6 +275,7 @@ handful of tool rounds, then answer.",
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: true,
 };
 
@@ -244,6 +301,7 @@ the requested structured verdict only, no preamble.",
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: true,
 };
 
@@ -268,6 +326,7 @@ the title in the same language as the conversation.",
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: true,
 };
 
@@ -304,6 +363,7 @@ turns short and report concrete findings, then stop.",
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: false,
 };
 
@@ -356,6 +416,7 @@ so. Run at most a handful of tool rounds, then answer.",
         write_paths: &[],
         command_allowlist: &[],
     },
+    variant_pins: &[],
     unattended: true,
 };
 
@@ -489,20 +550,37 @@ mod tests {
         assert!(!permissive.admits(&make_control()));
     }
 
+    /// A test model (vision-capable; the Stub tools require no vision, so the
+    /// model-capability filter is a no-op here — this test isolates the scope +
+    /// runtime-rule composition).
+    fn test_model() -> Model {
+        Model {
+            id: "test",
+            name: "Test",
+            family: "test",
+            context_window: 100_000,
+            reasoning: false,
+            tool_call: true,
+            vision: true,
+            format: crate::WireFormat::OpenAiCompat,
+            model_guidance: "",
+        }
+    }
+
     #[test]
-    fn select_tools_filters_by_name() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(make("read_text")),             // admit (whitelisted)
-            Arc::new(make("bash")),                  // reject (not whitelisted)
-            Arc::new(make("write_file")),            // reject (not whitelisted)
-            Arc::new(make("grep")),                  // admit (whitelisted)
-            Arc::new(with_spawn(make("read_text"))), // reject (recursion)
-        ];
-        let selected = EXPLORE.select_tools(&tools);
-        assert_eq!(selected.len(), 2);
+    fn resolve_tools_applies_scope_and_runtime_rules() {
+        // `grep` is whitelisted → admitted. `bash` is not whitelisted → dropped
+        // by scope. `read_text` is whitelisted *but spawns an envoy* → dropped
+        // by the runtime recursion rule despite passing the name scope.
+        let toolset = ToolSet::from_tools(vec![
+            Arc::new(make("grep")) as Arc<dyn Tool>,
+            Arc::new(make("bash")) as Arc<dyn Tool>,
+            Arc::new(with_spawn(make("read_text"))) as Arc<dyn Tool>,
+        ]);
+        let selected =
+            EXPLORE.resolve_tools(&toolset, &test_model(), &ToolSelection::unrestricted());
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"read_text"));
-        assert!(names.contains(&"grep"));
+        assert_eq!(names, vec!["grep"]);
     }
 
     #[test]

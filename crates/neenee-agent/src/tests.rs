@@ -192,7 +192,7 @@ fn reviewer_system_message_carries_persona_dimensions_and_contract() {
 
     let reviewer = Agent::new(
         Arc::new(TestProvider),
-        REVIEW.select_tools(&[]),
+        Vec::new(),
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );

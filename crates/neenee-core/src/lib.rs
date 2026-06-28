@@ -83,6 +83,7 @@ pub use session_title::{TITLE_MAX_LEN, clean_title};
 pub use skillsconfig::SkillsConfig;
 pub use tool_output::truncate_utf8;
 pub use tool_registry::{
-    Capability, ToolContext, ToolContextBuilder, ToolFactory, ToolSet, collect_toolset,
+    Capability, ToolContext, ToolContextBuilder, ToolFactory, ToolScope, ToolSelection, ToolSet,
+    collect_toolset,
 };
 pub use webconfig::WebSearchConfig;

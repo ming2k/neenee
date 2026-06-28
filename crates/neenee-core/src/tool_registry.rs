@@ -18,9 +18,10 @@
 //! dependency is created; the registry collects everything that is
 //! self-contained.
 
+use crate::model::Model;
 use crate::{Tool, VariantSelection, empty_variant_selection};
 use std::any::{Any, TypeId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// An opaque, type-keyed bag of services handed to each [`ToolFactory`] at
@@ -139,6 +140,40 @@ impl Capability {
             .unwrap_or_else(|| &self.variants[&self.default_variant])
     }
 
+    /// Pick the variant this capability resolves to for `model`, honouring the
+    /// `preferred` variant id (the composed override) but **never** selecting a
+    /// variant the model cannot execute. Returns `None` when no variant is
+    /// usable on `model` — i.e. the whole capability is unavailable on this
+    /// model and must be dropped from the resolved set.
+    ///
+    /// Preference order among model-usable variants: the explicitly `preferred`
+    /// id, else the capability's default, else the lexicographically-smallest
+    /// usable id (deterministic). The model filter is **hard**: an unusable
+    /// preferred/default variant is skipped, not surfaced — which is how a
+    /// model's capability limit overrides any agent-side override.
+    pub fn usable_variant_for(
+        &self,
+        model: &Model,
+        preferred: Option<&str>,
+    ) -> Option<&Arc<dyn Tool>> {
+        let usable = |id: &str| {
+            self.variants
+                .get(id)
+                .filter(|tool| model_can_use(tool.as_ref(), model))
+        };
+        if let Some(tool) = preferred.and_then(usable) {
+            return Some(tool);
+        }
+        if let Some(tool) = usable(&self.default_variant) {
+            return Some(tool);
+        }
+        // BTreeMap iterates in sorted key order, so the first usable is the
+        // smallest usable id.
+        self.variants
+            .values()
+            .find(|tool| model_can_use(tool.as_ref(), model))
+    }
+
     /// All variant ids of this capability, in sorted order.
     pub fn variant_ids(&self) -> impl Iterator<Item = &str> {
         self.variants.keys().map(String::as_str)
@@ -221,6 +256,47 @@ impl ToolSet {
         self.resolve(empty_variant_selection())
     }
 
+    /// Resolve the pool to exactly one tool per **surviving** capability for an
+    /// agent of selection `agent` running on `model`, whose own capability
+    /// limits and variant preferences are `model_sel`. This is the single,
+    /// authoritative entry point that composes the two selectors into a live
+    /// toolset.
+    ///
+    /// Composition follows the two-axis algebra:
+    ///
+    /// - **Scope (which capabilities)** is the *meet* of the two scopes:
+    ///   `agent.scope ∩ model_sel.scope`. Both are ceilings; a capability
+    ///   survives only if **both** parties admit it. Neither can widen the
+    ///   other.
+    /// - **Override (which variant)** is by *precedence*: the agent's variant
+    ///   preference wins, the model's fills any capability the agent left
+    ///   unspecified ([`VariantSelection`] overlay, agent over model).
+    /// - **Model capability limits are hard.** A variant `model` cannot execute
+    ///   (e.g. [`Tool::requires_vision`] on a text-only model) is never
+    ///   selectable; a capability with *no* model-usable variant is dropped
+    ///   entirely. Because the unusable variant is simply absent, no agent-side
+    ///   override can reinstate it — the model's limit always wins, by
+    ///   construction rather than by a priority rule.
+    ///
+    /// Result order is by capability name (the pool's `BTreeMap` order),
+    /// deterministic regardless of `inventory` link order.
+    pub fn resolve_for(
+        &self,
+        model: &Model,
+        agent: &ToolSelection,
+        model_sel: &ToolSelection,
+    ) -> Vec<Arc<dyn Tool>> {
+        let preferred = overlay_variants(&agent.variants, &model_sel.variants);
+        self.capabilities
+            .values()
+            .filter(|cap| agent.scope.admits(cap.name()) && model_sel.scope.admits(cap.name()))
+            .filter_map(|cap| {
+                cap.usable_variant_for(model, preferred.get(cap.name()).map(String::as_str))
+                    .cloned()
+            })
+            .collect()
+    }
+
     /// Look up a capability by name.
     pub fn variants_of(&self, name: &str) -> Option<&Capability> {
         self.capabilities.get(name)
@@ -239,6 +315,118 @@ impl ToolSet {
     /// Number of capabilities (not variants).
     pub fn len(&self) -> usize {
         self.capabilities.len()
+    }
+}
+
+/// Whether `model` can actually execute `tool` — the hard model-capability
+/// filter applied during [`ToolSet::resolve_for`]. Today the only axis is
+/// vision ([`Tool::requires_vision`]); add a conjunct here when a new
+/// model-capability requirement is introduced (the resolver and every selector
+/// then inherit it for free).
+fn model_can_use(tool: &dyn Tool, model: &Model) -> bool {
+    !tool.requires_vision() || model.vision
+}
+
+/// Overlay two variant selections by precedence: every entry of `high` wins,
+/// `low` fills only the capabilities `high` leaves unspecified. This is the
+/// **override-axis** composition — the agent's selection is `high`, the model's
+/// is `low`, so an agent override beats a model override while the model still
+/// supplies a variant for capabilities the agent did not pin.
+fn overlay_variants(high: &VariantSelection, low: &VariantSelection) -> VariantSelection {
+    let mut merged = low.clone();
+    merged.extend(high.iter().map(|(k, v)| (k.clone(), v.clone())));
+    merged
+}
+
+/// The **scope axis** of a [`ToolSelection`]: which capabilities (by
+/// [`Tool::name`]) a party admits. A ceiling, not a request — composing two
+/// scopes can only narrow, never widen. Capabilities are named, not realised;
+/// the scope is deliberately blind to *which variant* is used (that is the
+/// override axis).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolScope {
+    /// Admit every capability in the pool. The principal agent's default, and a
+    /// model's default (a model restricts by *capability requirement*, e.g.
+    /// vision, not by capability *name*).
+    #[default]
+    All,
+    /// Admit only the named capabilities. An empty set admits nothing. Used by
+    /// envoy roles to confine a spawned agent to e.g. the read-only inspection
+    /// tools.
+    Only(BTreeSet<String>),
+}
+
+impl ToolScope {
+    /// Build an `Only` scope from a list of capability names.
+    pub fn only<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        ToolScope::Only(names.into_iter().map(Into::into).collect())
+    }
+
+    /// Whether this scope admits the capability `name`.
+    pub fn admits(&self, name: &str) -> bool {
+        match self {
+            ToolScope::All => true,
+            ToolScope::Only(set) => set.contains(name),
+        }
+    }
+
+    /// The *meet* of two scopes — the set of capabilities **both** admit.
+    /// `All` is the identity (`All ∩ x == x`); two `Only` sets intersect.
+    /// Commutative and associative, so composition order is irrelevant.
+    pub fn intersect(&self, other: &ToolScope) -> ToolScope {
+        match (self, other) {
+            (ToolScope::All, other) => other.clone(),
+            (this, ToolScope::All) => this.clone(),
+            (ToolScope::Only(a), ToolScope::Only(b)) => {
+                ToolScope::Only(a.intersection(b).cloned().collect())
+            }
+        }
+    }
+}
+
+/// One party's ask of the [`ToolSet`] pool: a [`ToolScope`] (which capabilities)
+/// plus a [`VariantSelection`] (which implementation of each). Both the agent
+/// identity (principal or envoy role) and the active model express themselves
+/// as a `ToolSelection`; [`ToolSet::resolve_for`] composes the two — scope by
+/// intersection, variants by agent-over-model precedence — into the live
+/// toolset.
+#[derive(Debug, Clone, Default)]
+pub struct ToolSelection {
+    /// Which capabilities this party admits.
+    pub scope: ToolScope,
+    /// This party's variant preference per capability. Empty means "default
+    /// variant"; entries are honoured only when the chosen variant is usable on
+    /// the active model.
+    pub variants: VariantSelection,
+}
+
+impl ToolSelection {
+    /// An unrestricted selection: every capability, default variants. The
+    /// principal agent's baseline before per-model variants are applied.
+    pub fn unrestricted() -> Self {
+        Self::default()
+    }
+
+    /// A selection that admits only the named capabilities (default variants).
+    pub fn only<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            scope: ToolScope::only(names),
+            variants: VariantSelection::new(),
+        }
+    }
+
+    /// Attach a variant preference (override axis) to this selection.
+    pub fn with_variants(mut self, variants: VariantSelection) -> Self {
+        self.variants = variants;
+        self
     }
 }
 
@@ -440,6 +628,192 @@ mod tests {
         ]);
         let cap = toolset.variants_of("cap").unwrap();
         assert_eq!(cap.default_variant(), "alpha");
+    }
+
+    /// A tool with a configurable name, variant, and vision requirement, for
+    /// exercising `resolve_for`'s scope/override/model-capability composition.
+    struct CapTool {
+        name: &'static str,
+        variant: &'static str,
+        requires_vision: bool,
+    }
+    #[async_trait]
+    impl Tool for CapTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn variant(&self) -> &str {
+            self.variant
+        }
+        fn description(&self) -> &str {
+            self.variant
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn requires_vision(&self) -> bool {
+            self.requires_vision
+        }
+        async fn call(&self, _arguments: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn cap(name: &'static str, variant: &'static str, requires_vision: bool) -> Arc<dyn Tool> {
+        Arc::new(CapTool {
+            name,
+            variant,
+            requires_vision,
+        })
+    }
+
+    /// A test model with vision on/off (other fields are irrelevant to the
+    /// resolver).
+    fn model(vision: bool) -> Model {
+        Model {
+            id: "test",
+            name: "Test",
+            family: "test",
+            context_window: 100_000,
+            reasoning: false,
+            tool_call: true,
+            vision,
+            format: crate::WireFormat::OpenAiCompat,
+            model_guidance: "",
+        }
+    }
+
+    #[test]
+    fn tool_scope_intersect_is_a_meet() {
+        // All is the identity.
+        let only = ToolScope::only(["a", "b"]);
+        assert_eq!(ToolScope::All.intersect(&only), only);
+        assert_eq!(only.intersect(&ToolScope::All), only);
+        // Two Only sets intersect.
+        let other = ToolScope::only(["b", "c"]);
+        assert_eq!(only.intersect(&other), ToolScope::only(["b"]));
+        // Commutative.
+        assert_eq!(only.intersect(&other), other.intersect(&only));
+    }
+
+    #[test]
+    fn resolve_for_intersects_agent_and_model_scope() {
+        let pool = ToolSet::from_tools(vec![
+            cap("read_text", "default", false),
+            cap("grep", "default", false),
+            cap("write_file", "default", false),
+        ]);
+        // Agent admits read_text + write_file; model admits everything (All).
+        let agent = ToolSelection::only(["read_text", "write_file"]);
+        let model_sel = ToolSelection::unrestricted();
+        let resolved = pool.resolve_for(&model(true), &agent, &model_sel);
+        let names: Vec<&str> = resolved.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["read_text", "write_file"]);
+    }
+
+    #[test]
+    fn resolve_for_drops_vision_tool_on_text_only_model() {
+        // read_image is a single-variant, vision-only capability.
+        let pool = ToolSet::from_tools(vec![
+            cap("read_text", "default", false),
+            cap("read_image", "default", true),
+        ]);
+        let agent = ToolSelection::unrestricted();
+        let model_sel = ToolSelection::unrestricted();
+
+        // Vision model: both survive.
+        let resolved = pool.resolve_for(&model(true), &agent, &model_sel);
+        let names: Vec<&str> = resolved.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["read_image", "read_text"]);
+
+        // Text-only model: read_image is dropped entirely — the capability has
+        // no model-usable variant.
+        let resolved = pool.resolve_for(&model(false), &agent, &model_sel);
+        let names: Vec<&str> = resolved.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["read_text"]);
+    }
+
+    #[test]
+    fn resolve_for_model_falls_back_to_usable_variant_over_unusable_default() {
+        // One capability with a vision default + a text-only variant: a
+        // text-only model must get the usable variant, not lose the capability.
+        let pool = ToolSet::from_tools(vec![
+            cap("describe", "default", true), // vision default
+            cap("describe", "text", false),   // text-only fallback
+        ]);
+        let agent = ToolSelection::unrestricted();
+        let model_sel = ToolSelection::unrestricted();
+
+        // Text-only model: default is unusable, so the resolver picks `text`.
+        let resolved = pool.resolve_for(&model(false), &agent, &model_sel);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].variant(), "text");
+
+        // Vision model: keeps the default.
+        let resolved = pool.resolve_for(&model(true), &agent, &model_sel);
+        assert_eq!(resolved[0].variant(), "default");
+    }
+
+    #[test]
+    fn resolve_for_agent_override_beats_model_override() {
+        // Capability with two model-usable variants. Agent pins `terse`, model
+        // pins `verbose`; agent precedence must win.
+        let pool = ToolSet::from_tools(vec![
+            cap("read_text", "default", false),
+            cap("read_text", "terse", false),
+            cap("read_text", "verbose", false),
+        ]);
+        let mut agent = ToolSelection::unrestricted();
+        agent
+            .variants
+            .insert("read_text".to_string(), "terse".to_string());
+        let mut model_sel = ToolSelection::unrestricted();
+        model_sel
+            .variants
+            .insert("read_text".to_string(), "verbose".to_string());
+
+        let resolved = pool.resolve_for(&model(true), &agent, &model_sel);
+        assert_eq!(resolved[0].variant(), "terse");
+    }
+
+    #[test]
+    fn resolve_for_model_override_fills_unpinned_capability() {
+        // Agent pins nothing; the model's override supplies the variant.
+        let pool = ToolSet::from_tools(vec![
+            cap("read_text", "default", false),
+            cap("read_text", "verbose", false),
+        ]);
+        let agent = ToolSelection::unrestricted();
+        let mut model_sel = ToolSelection::unrestricted();
+        model_sel
+            .variants
+            .insert("read_text".to_string(), "verbose".to_string());
+
+        let resolved = pool.resolve_for(&model(true), &agent, &model_sel);
+        assert_eq!(resolved[0].variant(), "verbose");
+    }
+
+    #[test]
+    fn resolve_for_model_cannot_be_overridden_into_an_unusable_variant() {
+        // The hard-limit invariant: even if the agent explicitly pins the
+        // vision variant, a text-only model never receives it.
+        let pool = ToolSet::from_tools(vec![
+            cap("describe", "text", false),
+            cap("describe", "vision", true),
+        ]);
+        let mut agent = ToolSelection::unrestricted();
+        agent
+            .variants
+            .insert("describe".to_string(), "vision".to_string());
+        let model_sel = ToolSelection::unrestricted();
+
+        let resolved = pool.resolve_for(&model(false), &agent, &model_sel);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].variant(),
+            "text",
+            "agent override must not reinstate a model-unusable variant"
+        );
     }
 
     #[test]
