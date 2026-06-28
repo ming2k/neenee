@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `Space` toggle); the footer's `Space select` hint is now shown only for
   multi-select, since it is a harmless no-op for single-select.
 
+## [0.10.1] - 2026-06-29
+
+### Changed
+
+- **All crates:** applied `cargo clippy --fix` across the workspace — 74 files
+  cleaned up with no functional changes.
+
 ## [0.10.0] - 2026-06-29
 
 ### Changed
