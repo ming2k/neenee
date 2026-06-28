@@ -24,6 +24,8 @@ before the individual docs.
 | [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
 | [Harness architecture](agent-design/harness.md) | Control plane around provider calls, pursuit state, autonomous loop, safety bounds |
 | [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model (turn vs round) and the lifecycle inside one round: declaration, gating, execution, and how outcomes re-enter the conversation |
+| [Session persistence](agent-design/session-persistence.md) | The durable local session scene: model window, archived transcript, projection metadata, and resume recovery contract |
+| [Model context](agent-design/model-context.md) | The request-scoped context sent to a provider: rebuilt system prompt, model-visible messages, tool schemas, tool-call arguments, and tool results |
 | [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-turn condition-driven pursuit) and the `/repeat` cron scheduler |
 | [Sub-agents](agent-design/subagents.md) | The `subagent` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and access-tier gating |

@@ -7,8 +7,9 @@ page is the integrating view of those channels. The individual mechanisms each
 has its own deep-dive; this page ties them together and covers the discipline
 that makes the whole assembly auditable.
 
-For the turn that consumes the assembled prompt, see [Harness
-architecture](harness.md) and [Turns and rounds](turns-and-rounds.md).
+For the request-scoped context that consumes the assembled prompt, see
+[Model context](model-context.md). For the turn that sends that context, see
+[Harness architecture](harness.md) and [Turns and rounds](turns-and-rounds.md).
 
 ## The three channels
 

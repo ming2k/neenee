@@ -8,7 +8,9 @@ the file's *nature*, not looked up in a table every time.
 
 This page is the conceptual model. For the per-file lookup, see
 [Paths reference](../reference/paths.md). For the durable decision record,
-see [ADR-0014](../adr/0014-xdg-persistence-architecture.md).
+see [ADR-0014](../adr/0014-xdg-persistence-architecture.md). For the shape of a
+recoverable coding-agent session inside the data category, see
+[Session persistence](agent-design/session-persistence.md).
 
 ## Why XDG
 

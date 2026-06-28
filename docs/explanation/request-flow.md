@@ -4,9 +4,11 @@ A user turn is a sequence of HTTP transactions driven by the ReAct loop.
 This page documents the byte-level shape of each transaction and how the
 message array evolves across the loop.
 
-For the tool protocol that decides *when* a tool call appears in a
-response, see [Tool rounds](agent-design/turns-and-rounds.md). For the high-level turn
-steps, see [Harness architecture](agent-design/harness.md). For which providers speak
+For the request-scoped context that feeds each transaction, see
+[Model context](agent-design/model-context.md). For the tool protocol that
+decides *when* a tool call appears in a response, see
+[Tool rounds](agent-design/turns-and-rounds.md). For the high-level turn steps,
+see [Harness architecture](agent-design/harness.md). For which providers speak
 this contract, see [Providers](../reference/providers.md).
 
 ## One HTTP transaction

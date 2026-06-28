@@ -85,9 +85,10 @@ symbol, the symbol is backticked and never abbreviated.
 
 | Term | Definition |
 |------|------------|
-| **model-context projection** | The durable archive-and-replace operation that records original context in the session store and produces the model-visible window sent on later provider requests. [ADR-0040](../adr/0040-session-state-and-context-projection.md) |
-| **model window** | The current model-visible message window restored on resume and sent to the provider after prompt assembly and provider-specific filtering. [ADR-0040](../adr/0040-session-state-and-context-projection.md) |
-| **archived transcript** | Original messages moved out of the model window by pruning or compaction but retained in the durable session for full recovery. [ADR-0040](../adr/0040-session-state-and-context-projection.md) |
+| **model context** | The provider-facing request view for one round: rebuilt system prompt, current model window, and current tool catalog serialized for the selected provider. [Model context](../explanation/agent-design/model-context.md) |
+| **model-context projection** | The durable archive-and-replace operation that records original context in the session store and produces the model-visible window sent on later provider requests. [Session persistence](../explanation/agent-design/session-persistence.md) |
+| **model window** | The current model-visible message window restored on resume and sent to the provider after prompt assembly and provider-specific filtering. [Model context](../explanation/agent-design/model-context.md) |
+| **archived transcript** | Original messages moved out of the model window by pruning or compaction but retained in the durable session for full recovery. [Session persistence](../explanation/agent-design/session-persistence.md) |
 | **context pruning** | The cheap first projection layer: clears stale tool-result bodies while preserving the `tool_call_id` chain. [Context pruning](../explanation/agent-design/context-pruning.md) |
 | **context compaction** | The heavier second projection layer: summarizes older complete turns into a durable checkpoint with a visible `Compacted` notice. [Context compaction](../explanation/agent-design/context-compaction.md) |
 | **overflow recovery** | The reactive backstop: if a provider reports context overflow before any tool event, the runner may compact and retry once. [Harness architecture](../explanation/agent-design/harness.md) |
@@ -108,7 +109,7 @@ symbol, the symbol is backticked and never abbreviated.
 
 | Term | Definition |
 |------|------------|
-| **durable session** | The local recoverable scene for one coding session: durable transcript, model window, archived transcript, title, task list, pursuit state, and projection metadata. [ADR-0040](../adr/0040-session-state-and-context-projection.md) |
+| **durable session** | The local recoverable scene for one coding session: durable transcript, model window, archived transcript, title, task list, pursuit state, and projection metadata. [Session persistence](../explanation/agent-design/session-persistence.md) |
 | **admission** | Writes the visible or hidden user message before provider work; each turn records its admission session id. [Harness architecture](../explanation/agent-design/harness.md) |
 | **XDG layout** | Files classified by nature and routed to Config, Data, State, Cache, or Runtime categories with different operational lifetimes. [Persistence](../explanation/persistence.md) |
 | **override precedence** | Who decides a path, highest→lowest: CLI flag → app env (`NEENEE_*_DIR`) → standard XDG env → native per-OS default → `$HOME` fallback → current directory. [Persistence](../explanation/persistence.md) |
