@@ -21,7 +21,7 @@
 //!
 //! Instead, each tool is exposed as a plain struct with a constructor
 //! ([`MarketDataTool::new`], …). The quant application instantiates exactly
-//! the set it wants and hands them to [`Agent::new`]. Tool/role isolation is
+//! the set it wants and hands them to `Agent::new`. Tool/role isolation is
 //! therefore enforced at assembly time, not by runtime filtering. See the
 //! [`QUANT`](neenee_core::QUANT) profile for the matching admission policy for
 //! quant sub-agents.

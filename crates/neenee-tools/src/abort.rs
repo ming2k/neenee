@@ -5,7 +5,7 @@
 //! has been pushed into, or a dead end. Calling it sends an
 //! [`AgentRequest::Abort`], which the harness turns into a turn cancellation
 //! (identical path to the user hitting `Esc`) followed by an
-//! [`AgentResponse::Exit`], so the normal graceful-exit sequence runs — the
+//! `AgentResponse::Exit`, so the normal graceful-exit sequence runs — the
 //! session is saved and `SessionEnd` hooks fire — before the process and its
 //! background tasks end.
 //!
@@ -23,7 +23,7 @@
 //!
 //! This is a *control-flow* tool, not a filesystem tool. It declares
 //! [`Tool::affects_control_flow`] = `true`, which is an orthogonal axis to
-//! [`Tool::access`] (the filesystem-damage ladder). That flag, not `access()`,
+//! `Tool::access` (the filesystem-damage ladder). That flag, not `access()`,
 //! is what gates it: the permission broker is bypassed (an escape hatch that
 //! waits for approval is useless), and subagent profiles exclude it
 //! unconditionally — a spawned agent must never be able to tear down the whole

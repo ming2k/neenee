@@ -213,9 +213,9 @@ fn background_map(buf: &neenee_tui::Grid) -> (String, String) {
 }
 
 #[test]
-fn read_file_expanded_renders_code_block() {
+fn read_text_expanded_renders_code_block() {
     let m = tool_step(
-        "read_file",
+        "read_text",
         r#"{"path":"src/lib.rs"}"#,
         Some("fn main() {\n    let x = 1;\n}\n"),
         true,
@@ -224,13 +224,13 @@ fn read_file_expanded_renders_code_block() {
 }
 
 #[test]
-fn read_file_with_offset_numbers_from_start_line() {
-    // A structured `Code` carrying `start_line: 100` (as `read_file` emits
+fn read_text_with_offset_numbers_from_start_line() {
+    // A structured `Code` carrying `start_line: 100` (as `read_text` emits
     // when called with `offset: 100`) must number the gutter 100, 101, … —
     // not restart at 1. Also locks that the gutter column widens to fit
     // three-digit line numbers instead of overflowing.
     let m = tool_step_structured(
-        "read_file",
+        "read_text",
         r#"{"path":"src/lib.rs","offset":100}"#,
         neenee_core::ToolOutput::Code {
             lang: Some("rs".into()),
@@ -596,7 +596,7 @@ fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) 
 fn collapsed_tool_steps_stack_flush() {
     let steps = vec![
         tool_step_structured(
-            "read_file",
+            "read_text",
             r#"{"path":"a.rs"}"#,
             neenee_core::ToolOutput::Code {
                 lang: None,
@@ -608,7 +608,7 @@ fn collapsed_tool_steps_stack_flush() {
             false,
         ),
         tool_step_structured(
-            "read_file",
+            "read_text",
             r#"{"path":"b.rs"}"#,
             neenee_core::ToolOutput::Code {
                 lang: None,
@@ -620,7 +620,7 @@ fn collapsed_tool_steps_stack_flush() {
             false,
         ),
         tool_step_structured(
-            "read_file",
+            "read_text",
             r#"{"path":"c.rs"}"#,
             neenee_core::ToolOutput::Code {
                 lang: None,
@@ -661,7 +661,7 @@ fn collapsed_tool_steps_stack_flush() {
 fn expanded_body_pads_itself_neighbours_stay_flush() {
     let steps = vec![
         tool_step_structured(
-            "read_file",
+            "read_text",
             r#"{"path":"a.rs"}"#,
             neenee_core::ToolOutput::Code {
                 lang: None,
@@ -682,7 +682,7 @@ fn expanded_body_pads_itself_neighbours_stay_flush() {
             true, // expanded — body padded above + below
         ),
         tool_step_structured(
-            "read_file",
+            "read_text",
             r#"{"path":"c.rs"}"#,
             neenee_core::ToolOutput::Code {
                 lang: None,

@@ -1,7 +1,7 @@
 //! Foundational capability traits: how the harness talks to a model
 //! ([`Provider`]) and to tools ([`Tool`]), the stream events a provider emits
-//! ([`ProviderStreamEvent`]), and the mid-turn context-relief hook
-//! ([`ContextReliefGate`]).
+//! ([`ProviderStreamEvent`]), and the mid-turn model-context projection hook
+//! ([`ContextProjectionGate`]).
 
 use crate::{Message, SubagentEvent, ToolOutput, ToolStream};
 use async_trait::async_trait;
@@ -48,8 +48,7 @@ pub type ToolOverrides = HashMap<String, ToolOverride>;
 /// A shared empty [`ToolOverrides`] map, handy as a default borrow target so
 /// callers can always hand out `&ToolOverrides` without an `Option`.
 pub fn empty_tool_overrides() -> &'static ToolOverrides {
-    static EMPTY: std::sync::LazyLock<ToolOverrides> =
-        std::sync::LazyLock::new(ToolOverrides::new);
+    static EMPTY: std::sync::LazyLock<ToolOverrides> = std::sync::LazyLock::new(ToolOverrides::new);
     &EMPTY
 }
 
@@ -127,11 +126,7 @@ pub trait Provider: Send + Sync {
     /// in simply ignore overrides. Providers that build function schemas
     /// (OpenAI-/Anthropic-compatible) override this to thread overrides into
     /// [`Tool::to_openai_function_with`].
-    fn prepare_tools_with(
-        &self,
-        tools: &[Arc<dyn Tool>],
-        _overrides: &ToolOverrides,
-    ) {
+    fn prepare_tools_with(&self, tools: &[Arc<dyn Tool>], _overrides: &ToolOverrides) {
         self.prepare_tools(tools);
     }
 
@@ -156,7 +151,7 @@ pub trait Provider: Send + Sync {
     /// the streamed/returned response, provider id, model, and a timestamp — to
     /// one JSON file under `dir` (one file per round-trip). When `enabled` is
     /// false, capture stops and `dir` is ignored. Default is a no-op; the
-    /// runtime proxy ([`ProxyProvider`]) overrides it so capture survives
+    /// runtime proxy (`ProxyProvider`) overrides it so capture survives
     /// mid-session `/provider` swaps. See the `/debug network` command.
     ///
     /// This lives at the semantic layer (`Vec<Message>` in / events out), not
@@ -173,15 +168,15 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Mid-turn context-relief hook. After each tool round, when context pressure
-/// crosses the agent's configured budget, the harness hands the live message
-/// list to the gate and asks it to relieve pressure (e.g. by pruning old tool
-/// results durably). Returning `Some(replacement)` swaps the live message list;
-/// returning `None` leaves it untouched. The gate owns durability policy
-/// (archiving originals before the replacement takes effect).
+/// Mid-turn model-context projection hook. After each tool round, when context
+/// pressure crosses the configured budget, the harness hands the live message
+/// list to the gate and asks it to produce the next model-visible window. A
+/// `Some(replacement)` swaps the live message list; `None` leaves it untouched.
+/// The gate owns durability policy: original content is archived before the
+/// replacement takes effect.
 #[async_trait]
-pub trait ContextReliefGate: Send + Sync {
-    async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>>;
+pub trait ContextProjectionGate: Send + Sync {
+    async fn project_context(&self, messages: Vec<Message>) -> Option<Vec<Message>>;
 }
 
 #[async_trait]
@@ -459,7 +454,7 @@ fn leading_program(command: &str) -> String {
 /// prompt**: calls whose [`ScopeTarget`] falls outside the granted scope are
 /// blocked outright. `OperationScope` scopes *where* (paths) and *what*
 /// (commands) a tool may touch. A tool with [`ScopeTarget::Unspecified`] (no
-/// locatable target, e.g. `read_file`, `grep`) skips the scope gate and the
+/// locatable target, e.g. `read_text`, `grep`) skips the scope gate and the
 /// permission broker entirely; a tool with a `Path`/`Command` target is checked
 /// against this scope first, then surfaces to the broker for approval. See
 /// ADR-0028.
@@ -655,7 +650,7 @@ mod tests {
     #[test]
     fn schema_uses_built_in_description_when_no_override() {
         let tool = DummyTool {
-            name: "read_file",
+            name: "read_text",
             desc: "built-in description",
         };
         let empty = super::ToolOverrides::new();
@@ -668,12 +663,12 @@ mod tests {
     #[test]
     fn override_replaces_description_for_named_tool_only() {
         let tool = DummyTool {
-            name: "read_file",
+            name: "read_text",
             desc: "built-in description",
         };
         let mut overrides = super::ToolOverrides::new();
         overrides.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             super::ToolOverride {
                 description: Some("custom model-specific wording".to_string()),
                 params: HashMap::new(),
@@ -689,7 +684,7 @@ mod tests {
         let schema = tool.to_openai_function_with(&overrides);
         assert_eq!(desc_of(&schema), "custom model-specific wording");
         // Name is never touched by an override.
-        assert_eq!(schema["function"]["name"], "read_file");
+        assert_eq!(schema["function"]["name"], "read_text");
     }
 
     #[test]
@@ -700,7 +695,7 @@ mod tests {
         };
         let mut overrides = super::ToolOverrides::new();
         overrides.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             super::ToolOverride {
                 description: Some("irrelevant".to_string()),
                 params: HashMap::new(),
@@ -717,7 +712,7 @@ mod tests {
     #[async_trait::async_trait]
     impl super::Tool for ParamTool {
         fn name(&self) -> &str {
-            "read_file"
+            "read_text"
         }
         fn description(&self) -> &str {
             "built-in"
@@ -746,7 +741,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("limit".to_string(), limit_patch);
         overrides.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             super::ToolOverride {
                 description: None,
                 params,
@@ -779,7 +774,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("verbose".to_string(), patch);
         overrides.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             super::ToolOverride {
                 description: None,
                 params,

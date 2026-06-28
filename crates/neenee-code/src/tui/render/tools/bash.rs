@@ -9,7 +9,7 @@ impl ToolPresenter for BashPresenter {
         view.str("command")
             .map(|cmd| {
                 let first = cmd.lines().next().unwrap_or(cmd);
-                format!("Run {}", truncate(&strip_cd_prefix(first), 64))
+                format!("Run {}", truncate(strip_cd_prefix(first), 64))
             })
             .unwrap_or_else(|| "Run command".to_string())
     }

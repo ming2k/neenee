@@ -10,7 +10,7 @@
 //! a monotonic sequence number, a wall-clock timestamp, and the event payload.
 
 use crate::fsutil;
-use crate::session::{ContextReliefCheckpoint, PursuitCheckpoint};
+use crate::session::{ContextProjectionCheckpoint, PursuitCheckpoint};
 use neenee_core::{Message, Pursuit};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -42,15 +42,16 @@ pub enum SessionEvent {
     CheckpointSet {
         checkpoint: Option<PursuitCheckpoint>,
     },
-    /// A context-relief op (tool-result pruning or a summarizing compaction)
-    /// archived originals and replaced the active window. `alias` keeps event
-    /// logs written before the rename replayable. The enum tag is `rename_all =
-    /// "snake_case"`, so the pre-rename on-disk tag was `compaction_committed`.
-    #[serde(alias = "compaction_committed")]
-    ContextReliefCommitted {
-        archived: Vec<Message>,
-        active: Vec<Message>,
-        checkpoint: ContextReliefCheckpoint,
+    /// A model-context projection (tool-result pruning or summarizing compaction)
+    /// archived originals and replaced the model-visible window. Aliases keep
+    /// event logs written before the projection rename replayable.
+    #[serde(alias = "context_relief_committed", alias = "compaction_committed")]
+    ContextProjectionCommitted {
+        #[serde(alias = "archived")]
+        archived_originals: Vec<Message>,
+        #[serde(alias = "active")]
+        model_window: Vec<Message>,
+        checkpoint: ContextProjectionCheckpoint,
     },
     /// Messages were moved into the archived list without a compaction.
     Archived { messages: Vec<Message> },
@@ -172,6 +173,7 @@ impl EventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::ContextProjectionKind;
 
     #[test]
     fn event_log_round_trips() {
@@ -197,7 +199,7 @@ mod tests {
     #[test]
     fn legacy_compaction_committed_tag_still_replays() {
         // Event logs written before the prune/compact rename used the tag
-        // `compaction_committed`. The serde alias on `ContextReliefCommitted`
+        // `compaction_committed`. The serde alias on `ContextProjectionCommitted`
         // must keep those lines replayable, or resuming an old session would
         // drop its archived turns. Regression guard for the rename.
         let dir =
@@ -215,11 +217,53 @@ mod tests {
         let loaded = EventLog::new(path).load().unwrap();
         assert_eq!(loaded.len(), 1);
         match &loaded[0].event {
-            SessionEvent::ContextReliefCommitted { checkpoint, .. } => {
+            SessionEvent::ContextProjectionCommitted { checkpoint, .. } => {
+                assert_eq!(checkpoint.operation, ContextProjectionKind::Unknown);
                 assert_eq!(checkpoint.before_chars, 100);
                 assert_eq!(checkpoint.after_chars, 40);
             }
-            other => panic!("legacy tag did not map to ContextReliefCommitted: {other:?}"),
+            other => panic!("legacy tag did not map to ContextProjectionCommitted: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn context_projection_committed_writes_new_projection_shape() {
+        let dir =
+            std::env::temp_dir().join(format!("neenee-events-projection-{}", uuid::Uuid::new_v4()));
+        let log = EventLog::new(dir.join("events.jsonl"));
+
+        log.append(SessionEvent::ContextProjectionCommitted {
+            archived_originals: vec![neenee_core::Message::new(neenee_core::Role::Tool, "old")],
+            model_window: vec![neenee_core::Message::new(neenee_core::Role::User, "live")],
+            checkpoint: crate::session::ContextProjectionCheckpoint {
+                operation: ContextProjectionKind::Prune,
+                archived_messages: 1,
+                active_messages: 1,
+                before_chars: 100,
+                after_chars: 20,
+            },
+        })
+        .unwrap();
+
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        assert!(raw.contains("\"type\":\"context_projection_committed\""));
+        assert!(raw.contains("\"archived_originals\""));
+        assert!(raw.contains("\"model_window\""));
+        assert!(raw.contains("\"operation\":\"prune\""));
+
+        let loaded = log.load().unwrap();
+        match &loaded[0].event {
+            SessionEvent::ContextProjectionCommitted {
+                archived_originals,
+                model_window,
+                checkpoint,
+            } => {
+                assert_eq!(archived_originals[0].content, "old");
+                assert_eq!(model_window[0].content, "live");
+                assert_eq!(checkpoint.operation, ContextProjectionKind::Prune);
+            }
+            other => panic!("projection event did not round-trip: {other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
     }

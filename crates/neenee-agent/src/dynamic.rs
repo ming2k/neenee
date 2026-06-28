@@ -1,5 +1,5 @@
 //! Wiring for the dynamic-catalog pattern — the background refresh loop that
-//! drives every [`DynamicCatalog`](neenee_core::DynamicCatalog) implementation.
+//! drives every [`DynamicCatalog`] implementation.
 //!
 //! Each catalog (models.dev, remote skills, MCP tools, …) implements
 //! [`DynamicCatalog`]; this module provides the single [`spawn_refresh`] that

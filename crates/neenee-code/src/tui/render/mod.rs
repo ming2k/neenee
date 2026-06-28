@@ -987,12 +987,12 @@ mod tests {
                     connected: true,
                     disabled: false,
                     failure: None,
-                    tool_names: vec!["read_file".to_string(), "write_file".to_string()],
+                    tool_names: vec!["read_text".to_string(), "write_file".to_string()],
                 }],
             };
             let mut key_status = HashMap::new();
             key_status.insert("gemini".to_string(), true);
-            for idx in [0usize, 2] {
+            for _ in [0usize, 2] {
                 draw_session_modal(
                     f,
                     "custom-unknown",
@@ -2016,7 +2016,7 @@ mod tests {
                 "execute shell command, supports timeout, truncates output".to_string(),
             ],
             vec![
-                "read_file".to_string(),
+                "read_text".to_string(),
                 "Read".to_string(),
                 "std::fs::read_to_string".to_string(),
                 "supports offset/limit".to_string(),

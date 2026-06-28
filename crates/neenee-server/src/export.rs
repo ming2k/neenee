@@ -8,7 +8,7 @@
 //! tells the receiving agent how to use the document, then a chronological
 //! transcript of user prompts, assistant replies, tool calls, and tool
 //! results. Hidden and system messages are skipped (mirroring
-//! [`crate::tui::transcript`] rendering), and subagent transcripts nested
+//! `crate::tui::transcript` rendering), and subagent transcripts nested
 //! under `task` tool results are summarised inline rather than dumped in full
 //! so the export stays scannable.
 
@@ -134,7 +134,7 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
 
 /// Choose the text we render for a message: `display_content` (the harness's
 /// curated view) when present, otherwise the raw `content`. Mirrors
-/// [`crate::tui::transcript::transcript_message_from_core`].
+/// `crate::tui::transcript::transcript_message_from_core`.
 fn pick_content(message: &Message) -> &str {
     if let Some(display) = message.display_content.as_deref() {
         display
@@ -157,7 +157,7 @@ fn attribution_suffix(message: &Message) -> Option<String> {
 /// when one can be found later in the transcript. The durable transcript
 /// stores results as `[name result]:output`, keyed only by tool name, so we
 /// pair calls with same-named results in encounter order (mirroring
-/// [`crate::tui::transcript::transcript_messages_from_core`]).
+/// `crate::tui::transcript::transcript_messages_from_core`).
 fn render_tool_call<'a>(
     call: &'a ToolCall,
     messages: &[Message],
@@ -228,7 +228,7 @@ fn render_subagent_summary(children: &[Message], out: &mut String) {
 }
 
 /// Parse the `[<name> result]:<output>` envelope that wraps Tool-role
-/// messages. Mirrors [`crate::tui::transcript::parse_tool_result`] but
+/// messages. Mirrors `crate::tui::transcript::parse_tool_result` but
 /// operates on an owned `&str` so it composes with the iterator pipeline in
 /// [`render_tool_call`].
 fn parse_tool_result(content: &str) -> Option<(&str, &str)> {

@@ -201,8 +201,7 @@ pub fn strip_ansi(s: &str) -> String {
                         if bytes[i] == 0x07 {
                             i += 1;
                             done = true;
-                        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\'
-                        {
+                        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                             i += 2; // consume ST
                             done = true;
                         } else {
@@ -443,7 +442,7 @@ fn shell_to_text(stdout: &str, stderr: &str, exit: Option<i32>, truncated: bool)
     let inner = shell_inner_text(stdout, stderr, exit);
     if truncated || inner.len() > MAX_OUTPUT_CHARS {
         format!(
-            "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_file if you need specific parts]",
+            "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_text if you need specific parts]",
             inner.len(),
             truncate_utf8(&inner, TRUNCATED_CHARS)
         )
@@ -579,7 +578,7 @@ mod tests {
         let text = o.to_text();
         assert!(text.starts_with("[Output truncated: 9000 chars total]\n"));
         assert!(
-            text.ends_with("[Output was large — use grep or read_file if you need specific parts]")
+            text.ends_with("[Output was large — use grep or read_text if you need specific parts]")
         );
     }
 

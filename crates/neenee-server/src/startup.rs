@@ -24,7 +24,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 macro_rules! define_builtin_commands {
     ( $( $variant:ident = $name:literal : $desc:literal ),+ $(,)? ) => {
         /// The set of built-in slash commands. Generated from a single
-        /// declarative list — see [`define_builtin_commands`].
+        /// declarative list — see `define_builtin_commands`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum BuiltinCmd {
             $( $variant ),+

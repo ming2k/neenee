@@ -22,8 +22,9 @@
 use neenee_agent::Agent;
 use neenee_agent::AgentIdentity;
 use neenee_agent::orchestration::{
-    CompactionSettings, PursuitContext, TurnInput, compact_turn_history, emit_pursuit_updated,
-    refresh_agent_pursuit, send_compaction, send_harness_state, start_pursuit, turn,
+    ContextProjectionSettings, PursuitContext, TurnInput, compact_turn_history,
+    emit_pursuit_updated, refresh_agent_pursuit, send_compaction, send_harness_state,
+    start_pursuit, turn,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
@@ -174,7 +175,7 @@ pub async fn dispatch(
                 ));
                 return;
             }
-            let transcript = session.transcript().await;
+            let transcript = session.full_transcript().await;
             let rounds = Agent::estimate_tool_rounds(&transcript);
             if rounds == 0 {
                 let _ = resp_tx.send(turn(
@@ -227,7 +228,7 @@ pub async fn dispatch(
                     TurnEvent::Text("Usage: /search <query>".to_string()),
                 ));
             } else {
-                let messages = session.transcript().await;
+                let messages = session.full_transcript().await;
                 {
                     let mut store = embedding_store_for_commands.write().await;
                     let session_id = session.id().await;
@@ -295,9 +296,9 @@ pub async fn dispatch(
                     .await
                     .unwrap_or_else(|| "none".to_string());
                 let message_count = history.lock().await.len();
-                let archived_count = session.archived_count().await;
+                let archived_count = session.archived_transcript_count().await;
                 let checkpoint = session.checkpoint().await;
-                let last_relief = session.last_relief().await;
+                let last_projection = session.last_projection().await;
                 let checkpoint_text = checkpoint
                     .map(|item| {
                         format!(
@@ -309,16 +310,16 @@ pub async fn dispatch(
                 let _ = resp_tx.send(turn(
                                         &session.id().await,
                                         TurnEvent::Text(format!(
-                                    "Session: {}\nForked from: {}\nActive messages: {}\nArchived messages: {}\nLoop checkpoint: {}\nLast context relief: {}",
+                                    "Session: {}\nForked from: {}\nModel-window messages: {}\nArchived transcript messages: {}\nLoop checkpoint: {}\nLast context projection: {}",
                                     id,
                                     parent_id,
                                     message_count,
                                     archived_count,
                                     checkpoint_text,
-                                    last_relief
+                                    last_projection
                                         .map(|item| format!(
-                                            "{} -> {} chars",
-                                            item.before_chars, item.after_chars
+                                            "{:?}: {} -> {} chars",
+                                            item.operation, item.before_chars, item.after_chars
                                         ))
                                         .unwrap_or_else(|| "none".to_string())
                                 )),
@@ -384,8 +385,8 @@ pub async fn dispatch(
                 }
                 match session.open(id).await {
                     Ok(()) => {
-                        *history.lock().await = session.messages().await;
-                        let transcript = session.transcript().await;
+                        *history.lock().await = session.model_window().await;
+                        let transcript = session.full_transcript().await;
                         let _ = resp_tx.send(AgentResponse::ConversationReplaced(transcript));
                         let _ = resp_tx.send(turn(
                             &session.id().await,
@@ -530,7 +531,8 @@ pub async fn dispatch(
         }
         Some(BuiltinCmd::Compact) => {
             let mut current = history.lock().await.clone();
-            let settings = CompactionSettings::from_config(config, active_context_window(agent));
+            let settings =
+                ContextProjectionSettings::from_config(config, active_context_window(agent));
             let _ = resp_tx.send(turn(
                 &session.id().await,
                 TurnEvent::Activity("compacting context".to_string()),
@@ -765,7 +767,7 @@ pub async fn dispatch(
                         generation_counter: generation_clone.clone(),
                         session: session.clone(),
                         session_id: session.id().await,
-                        compaction: CompactionSettings::from_config(
+                        projection: ContextProjectionSettings::from_config(
                             config,
                             active_context_window(agent),
                         ),

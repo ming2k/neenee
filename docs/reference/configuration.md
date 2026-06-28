@@ -13,7 +13,7 @@ never breaks parsing.
 Context compaction keeps the uncapped agentic loop bounded. Thresholds are
 derived from the **active model's context window** (token-denominated) and
 re-seeded on every provider switch, so they track the live model rather than a
-fixed budget. See the [harness explanation](../explanation/agent-design/harness.md#context-relief),
+fixed budget. See the [harness explanation](../explanation/agent-design/harness.md#context-projection),
 the [pruning](../explanation/agent-design/context-pruning.md) and
 [compaction](../explanation/agent-design/context-compaction.md) deep-dives, and
 ADR-0019 / ADR-0021 for the design.
@@ -26,7 +26,7 @@ threshold.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `compaction.utilization` | `0.85` | Trigger a full summarizing compaction once pressure reaches this fraction of the window |
-| `compaction.target_utilization` | `0.25` | After a full compaction, compress the active window down to this fraction |
+| `compaction.target_utilization` | `0.25` | After a full compaction, compress the model window down to this fraction |
 | `compaction.prune_utilization` | `0.65` | Trigger cheap tool-result pruning at this fraction (below `utilization`) |
 | `compaction.fallback_window_tokens` | `32000` | Assumed window (tokens) when the model's context window is unknown |
 | `compaction_preserve_turns` | `6` | Number of recent complete user turns kept verbatim after a full compaction |

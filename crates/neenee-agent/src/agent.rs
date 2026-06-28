@@ -40,7 +40,7 @@ pub struct AgentIdentity {
     /// What this agent is for, e.g. `"an expert AI coding assistant with tool
     /// access"`. Empty means "no mission framing".
     pub mission: String,
-    /// Optional full-text identity override. When non-empty, [`preamble`]
+    /// Optional full-text identity override. When non-empty, `preamble`
     /// returns this verbatim (used by subagents whose identity *is* their
     /// role's full system prompt). None/empty → compose from name + mission.
     pub persona: Option<String>,
@@ -95,9 +95,9 @@ pub struct Agent {
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<Arc<dyn Tool>>,
     /// Dynamically refreshable MCP tools, held behind a shared `RwLock` so the
-    /// background [`McpCatalog`](crate::dynamic::McpCatalog) refresh loop can
+    /// background `McpCatalog` refresh loop can
     /// replace them (reconnect, re-discover) without rebuilding the agent.
-    /// [`visible_tools`] / dispatch / snapshot merge this with `tools`.
+    /// `visible_tools` / dispatch / snapshot merge this with `tools`.
     mcp_tools: Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>,
     /// Session-level disabled-tool mask. Names here are hidden from the model
     /// (their schemas are dropped before `prepare_tools`) and rejected at
@@ -121,11 +121,12 @@ pub struct Agent {
     pub(crate) skills_registry: skills::SkillRegistry,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Context-pressure threshold (in tokens) above which the harness asks the
-    /// [`ContextReliefGate`] to relieve pressure between tool rounds. `0` disables
-    /// mid-turn relief. Derived from the active model's context window.
+    /// [`ContextProjectionGate`] to project the model-visible window between
+    /// tool rounds. `0` disables mid-turn projection. Derived from the active
+    /// model's context window.
     context_prune_threshold_tokens: Arc<std::sync::Mutex<usize>>,
-    /// Optional mid-turn context-relief gate (see [`ContextReliefGate`]).
-    context_relief_gate: Arc<std::sync::Mutex<Option<Arc<dyn ContextReliefGate>>>>,
+    /// Optional mid-turn model-context projection gate.
+    context_projection_gate: Arc<std::sync::Mutex<Option<Arc<dyn ContextProjectionGate>>>>,
     /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
     /// tool rounds. Seeded from `Config::agent.hard_stop_rounds` (default `0`
     /// = uncapped, matching ADR-0009) and mutated at runtime via
@@ -274,8 +275,8 @@ pub(crate) struct TurnState {
     /// so a hook can act on "exploration without progress". Reset to 0 by any
     /// round containing an `Execute`/`Write` call.
     pub(crate) consecutive_readonly_rounds: u32,
-    /// The turn-guard registry: holds one or more [`RoundGuard`]s (e.g.
-    /// [`ReadLoopGuard`]) and the tool-call data for the round just dispatched.
+    /// The turn-guard registry: holds one or more `RoundGuard`s (e.g.
+    /// `ReadLoopGuard`) and the tool-call data for the round just dispatched.
     /// Per-turn: lives and dies with this `TurnState` so loop state never
     /// crosses turns.
     pub(crate) guards: crate::loop_guard::RoundGuardState,
@@ -332,7 +333,7 @@ impl Agent {
             skills_registry,
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
-            context_relief_gate: Arc::new(std::sync::Mutex::new(None)),
+            context_projection_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reviews: crate::default_reviews(),
@@ -348,7 +349,7 @@ impl Agent {
     }
 
     /// Context-pressure threshold (in tokens) for mid-turn relief. `0` (the
-    /// default) disables the mid-turn [`ContextReliefGate`]. Re-seed on provider
+    /// default) disables the mid-turn [`ContextProjectionGate`]. Re-seed on provider
     /// switch so the threshold tracks the new model's context window.
     pub fn set_context_prune_threshold(&self, budget_tokens: usize) {
         *self
@@ -422,10 +423,10 @@ impl Agent {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Install (or clear with `None`) the mid-turn context-relief gate.
-    pub fn set_context_relief_gate(&self, gate: Option<Arc<dyn ContextReliefGate>>) {
+    /// Install (or clear with `None`) the mid-turn model-context projection gate.
+    pub fn set_context_projection_gate(&self, gate: Option<Arc<dyn ContextProjectionGate>>) {
         *self
-            .context_relief_gate
+            .context_projection_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = gate;
     }
@@ -535,9 +536,9 @@ impl Agent {
     }
 
     /// Between tool rounds, if context pressure exceeds the configured budget,
-    /// hand the live message list to the [`ContextReliefGate`] for relief (e.g.
-    /// pruning old tool results). The gate owns durability of any originals.
-    async fn relieve_pressure_if_needed(
+    /// hand the live message list to the [`ContextProjectionGate`] so it can
+    /// produce and persist the next model-visible window.
+    async fn project_context_if_needed(
         &self,
         messages: &mut Vec<Message>,
         cancel: &CancellationToken,
@@ -550,7 +551,7 @@ impl Agent {
             return Ok(());
         }
         let gate = self
-            .context_relief_gate
+            .context_projection_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -560,7 +561,7 @@ impl Agent {
         let replacement = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
-            replacement = gate.relieve_pressure(messages.clone()) => replacement,
+            replacement = gate.project_context(messages.clone()) => replacement,
         };
         if let Some(replacement) = replacement {
             if !replacement.is_empty() {
@@ -890,7 +891,7 @@ impl Agent {
     }
 
     /// Seed declarative permission rules from `[permissions]` config. Delegates
-    /// to [`PermissionStore::seed_from_config`].
+    /// to `PermissionStore::seed_from_config`.
     pub fn seed_permissions_from_config(
         &self,
         rules: &[neenee_store::config::PermissionRuleConfig],
@@ -899,7 +900,7 @@ impl Agent {
     }
 
     /// Replace the entire set of dynamically-refreshable MCP tools. Called by
-    /// the [`McpCatalog`](crate::dynamic::McpCatalog) background refresh loop
+    /// the `McpCatalog` background refresh loop
     /// after reconnecting servers and re-discovering their tools. The built-in
     /// tools in `self.tools` are untouched.
     pub fn replace_mcp_tools(&self, tools: Vec<Arc<dyn Tool>>) {
@@ -909,7 +910,7 @@ impl Agent {
     }
 
     /// A clone of the shared MCP-tools holder, for passing to a
-    /// [`McpCatalog`](crate::dynamic::McpCatalog) so its background refresh can
+    /// `McpCatalog` so its background refresh can
     /// update the live tool list.
     pub fn mcp_tools_holder(&self) -> Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>> {
         Arc::clone(&self.mcp_tools)
@@ -1141,7 +1142,7 @@ impl Agent {
                 if self.check_hard_stop(tool_rounds).is_break() {
                     return Err(self.hard_stop_error());
                 }
-                self.relieve_pressure_if_needed(messages, cancel).await?;
+                self.project_context_if_needed(messages, cancel).await?;
                 // Mid-turn save point (ADR-0035): see the streaming path.
                 self.fire_round_persist(messages).await?;
                 self.apply_guard_actions(messages, &mut state, &mut on_event);
@@ -1384,7 +1385,7 @@ impl Agent {
                 if self.check_hard_stop(tool_rounds).is_break() {
                     return Err(self.hard_stop_error());
                 }
-                self.relieve_pressure_if_needed(messages, cancel).await?;
+                self.project_context_if_needed(messages, cancel).await?;
                 // Mid-turn save point (ADR-0035): persist this round's new
                 // messages (the assistant response + all tool results) before
                 // any further work, so a crash leaves the transcript in sync
@@ -1693,7 +1694,7 @@ impl Agent {
 
     /// Whether a tool call's [`ScopeTarget`] is [`ScopeTarget::Unspecified`] —
     /// i.e. the tool declares no locatable target (a pure read/search like
-    /// `read_file`, `grep`). Used to classify a round as read-only for the
+    /// `read_text`, `grep`). Used to classify a round as read-only for the
     /// round-hook streak counter. An unknown tool name reads as `true`
     /// (unspecified), matching the trait default.
     fn tool_target_is_unspecified(&self, name: &str, arguments: &str) -> bool {
@@ -2296,7 +2297,7 @@ fn empty_response_error(response: &Message) -> HarnessError {
 /// Drop assistant messages that carry neither text nor a tool call — the model
 /// occasionally emits an empty assistant frame that would otherwise confuse
 /// the next provider request. Called from the shared
-/// [`crate::prompt::Agent::prepare_turn_messages`] prep funnel, which both
+/// `crate::prompt::Agent::prepare_turn_messages` prep funnel, which both
 /// turn loops route through (ADR-0039).
 pub(crate) fn remove_empty_assistant_messages(messages: &mut Vec<Message>) {
     messages.retain(|message| message.role != Role::Assistant || valid_assistant_response(message));

@@ -70,7 +70,7 @@ model of one agent turn.
    the extension surface that adds practice (format, CI gates, context
    injection) without touching the core loop.
 
-The harness's [context-relief](harness.md#context-relief) section has two
+The harness's [context projection](harness.md#context-projection) section has two
 deep-dive references, read as a pair:
 
 12. [Context pruning](context-pruning.md) — the cheap, implicit first layer:

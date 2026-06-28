@@ -145,7 +145,7 @@ pub(super) fn bold_local_regions(
 /// The byte ranges within `text` that are the `**` bold *delimiter* markers
 /// (the leading/trailing `**`), rendered as zero-width so the bold content
 /// sits flush with its neighbours. Callers store these in
-/// [`BlockRegion::hidden_ranges`] so hit-testing maps screen columns to byte
+/// `BlockRegion::hidden_ranges` so hit-testing maps screen columns to byte
 /// offsets the same way the user sees them.
 pub(super) fn bold_delim_local_ranges(
     text: &str,
@@ -241,7 +241,7 @@ pub(super) fn markup_hidden_ranges(
 /// keeps them. Visually, though, only the inner content is painted on the code
 /// surface (`code_fg` + `code_bg`); the backtick delimiter bytes are visually
 /// elided (zero-width) — same as bold `**` markers — while copy still yields the
-/// exact `` `read_file` `` source.
+/// exact `` `read_text` `` source.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn line_spans_rich(
     prefix: &str,

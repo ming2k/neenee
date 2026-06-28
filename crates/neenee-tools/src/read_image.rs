@@ -30,7 +30,7 @@ impl Tool for ReadImageTool {
     }
     fn description(&self) -> &str {
         "Read an image file (PNG, JPEG, GIF, WebP) to view its contents visually. \
-         Large images are automatically resized. Use `read_file` for text files."
+         Large images are automatically resized. Use `read_text` for text files."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({

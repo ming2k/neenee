@@ -145,9 +145,9 @@ struct McpTool {
     server: Arc<McpServer>,
 }
 
-/// A reconnect-capable MCP server connection. Wraps [`McpClient`] with the
+/// A reconnect-capable MCP server connection. Wraps `McpClient` with the
 /// original config so a crashed server (stdout closed mid-session) can be
-/// transparently restarted. Used by [`McpTool::call`] to retry on connection
+/// transparently restarted. Used by `McpTool::call` to retry on connection
 /// failure.
 pub struct McpServer {
     config: McpServerConfig,
@@ -178,7 +178,7 @@ impl McpServer {
         Ok(client)
     }
 
-    /// Drop the current connection so the next [`ensure_connected`] reconnects.
+    /// Drop the current connection so the next `ensure_connected` reconnects.
     /// Called when a request fails with a connection error.
     pub async fn reset(&self) {
         *self.client.lock().await = None;

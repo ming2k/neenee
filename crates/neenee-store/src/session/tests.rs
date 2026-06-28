@@ -230,10 +230,10 @@ async fn load_for_project_isolates_sessions_per_cwd() {
         // and alpha never sees beta's messages.
         let reloaded_a = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
         reloaded_a.resume(Some(&id_a)).await.unwrap();
-        assert_eq!(reloaded_a.messages().await[0].content, "alpha work");
+        assert_eq!(reloaded_a.model_window().await[0].content, "alpha work");
         let reloaded_b = SessionStore::load_for_project(PathBuf::from("/projects/beta"));
         reloaded_b.resume(Some(&id_b)).await.unwrap();
-        assert_eq!(reloaded_b.messages().await[0].content, "beta work");
+        assert_eq!(reloaded_b.model_window().await[0].content, "beta work");
 
         // list() is scoped per project — alpha only sees its own session.
         let alpha_sessions = reloaded_a.list().await.unwrap();
@@ -362,9 +362,9 @@ async fn fork_preserves_both_durable_branches() {
     );
 
     store.open(&parent_id[..8]).await.unwrap();
-    assert_eq!(store.messages().await[0].content, "parent");
+    assert_eq!(store.model_window().await[0].content, "parent");
     store.open(&fork_id[..8]).await.unwrap();
-    assert_eq!(store.messages().await[0].content, "fork");
+    assert_eq!(store.model_window().await[0].content, "fork");
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -390,7 +390,7 @@ async fn fork_to_side_leaves_primary_active_pointer_intact() {
     // The primary is untouched: same id, still holds "parent", and has no
     // parent link (it did not become a child).
     assert_eq!(store.id().await, parent_id);
-    assert_eq!(store.messages().await[0].content, "parent");
+    assert_eq!(store.model_window().await[0].content, "parent");
     assert!(store.parent_id().await.is_none());
 
     // The side loads into its own store with the inherited history and the
@@ -398,17 +398,17 @@ async fn fork_to_side_leaves_primary_active_pointer_intact() {
     let side = store.open_side(&side_id).await.unwrap();
     assert_eq!(side.id().await, side_id);
     assert_eq!(side.parent_id().await.as_deref(), Some(parent_id.as_str()));
-    assert_eq!(side.messages().await[0].content, "parent");
+    assert_eq!(side.model_window().await[0].content, "parent");
 
     // Writing to the side never reaches the primary.
     side.replace_messages(vec![Message::new(neenee_core::Role::User, "side")])
         .await
         .unwrap();
-    assert_eq!(store.messages().await[0].content, "parent");
+    assert_eq!(store.model_window().await[0].content, "parent");
 
     // The side is independently resumable from disk (self-contained file).
     let reopened = store.open_side(&side_id).await.unwrap();
-    assert_eq!(reopened.messages().await[0].content, "side");
+    assert_eq!(reopened.model_window().await[0].content, "side");
 
     let _ = fs::remove_dir_all(directory);
 }
@@ -517,11 +517,11 @@ async fn startup_new_session_can_resume_most_recent_cache() {
 
     let new_id = store.reset().await.unwrap();
     assert_ne!(new_id, previous_id);
-    assert!(store.messages().await.is_empty());
+    assert!(store.model_window().await.is_empty());
 
     let resumed_id = store.resume(None).await.unwrap();
     assert_eq!(resumed_id, previous_id);
-    assert_eq!(store.messages().await[0].content, "previous");
+    assert_eq!(store.model_window().await[0].content, "previous");
     let _ = fs::remove_dir_all(directory);
 }
 
@@ -547,7 +547,7 @@ async fn event_log_is_authoritative_on_reload() {
     // Re-open: for_path replays the event log, not the snapshot.
     let reloaded = SessionStore::for_path(path.clone());
     assert_eq!(reloaded.id().await, first_id);
-    assert_eq!(reloaded.messages().await[0].content, "first");
+    assert_eq!(reloaded.model_window().await[0].content, "first");
 
     let _ = fs::remove_dir_all(directory);
 }
@@ -589,14 +589,14 @@ async fn append_round_persists_delta_and_survives_reload() {
     store.append_round(&round2).await.unwrap();
 
     // The live in-memory state reflects all appends.
-    let live = store.messages().await;
+    let live = store.model_window().await;
     assert_eq!(live.len(), 4);
     assert_eq!(live[3].content, "done");
 
     // A brand-new store replays the event log and recovers everything,
     // including the appended tail the snapshot never recorded.
     let reloaded = SessionStore::for_path(path.clone());
-    let recovered = reloaded.messages().await;
+    let recovered = reloaded.model_window().await;
     assert_eq!(recovered.len(), 4, "appended rounds survive reload");
     assert_eq!(recovered[2].content, "tool output");
     assert_eq!(recovered[3].content, "done");
@@ -618,7 +618,7 @@ async fn append_round_is_noop_when_nothing_new() {
 
     // Same length, same content → no-op.
     store.append_round(&messages).await.unwrap();
-    assert_eq!(store.messages().await.len(), 1);
+    assert_eq!(store.model_window().await.len(), 1);
 
     let _ = fs::remove_dir_all(directory);
 }
@@ -646,14 +646,14 @@ async fn append_round_falls_back_to_replace_on_divergent_prefix() {
     store.append_round(&divergent).await.unwrap();
 
     // The fallback replaced everything with the incoming history.
-    let live = store.messages().await;
+    let live = store.model_window().await;
     assert_eq!(live.len(), 2);
     assert_eq!(live[0].content, "rewritten");
     assert_eq!(live[1].content, "new");
 
     // And a reload recovers the replaced state, not a corrupt splice.
     let reloaded = SessionStore::for_path(path.clone());
-    let recovered = reloaded.messages().await;
+    let recovered = reloaded.model_window().await;
     assert_eq!(recovered[0].content, "rewritten");
 
     let _ = fs::remove_dir_all(directory);
@@ -699,7 +699,7 @@ async fn snapshot_without_event_log_gets_imported() {
 
         store.resume(Some(&snapshot.id)).await.unwrap();
         assert_eq!(store.id().await, snapshot.id);
-        assert_eq!(store.messages().await[0].content, "from snapshot");
+        assert_eq!(store.model_window().await[0].content, "from snapshot");
         assert!(
             project_dir
                 .join("sessions")
@@ -738,7 +738,7 @@ async fn large_message_content_is_offloaded_to_blob_store() {
 
     // Replaying the event log rehydrates content from the blob store.
     let reloaded = SessionStore::for_path(path.clone());
-    let messages = reloaded.messages().await;
+    let messages = reloaded.model_window().await;
     assert_eq!(messages[0].content, big);
     assert!(
         messages[0].content_blob.is_none(),
@@ -783,7 +783,7 @@ async fn injection_origin_survives_persist_and_reload() {
 
     // Reload via the event-log path (authoritative) rehydrates it intact.
     let reloaded = SessionStore::for_path(path.clone());
-    let messages = reloaded.messages().await;
+    let messages = reloaded.model_window().await;
     assert_eq!(messages.len(), 1);
     let origin = messages[0].origin.as_ref().expect("origin reloaded");
     assert_eq!(
@@ -828,7 +828,7 @@ async fn legacy_snapshot_without_origin_loads_as_none() {
     fs::write(&path, legacy.to_string()).unwrap();
 
     let store = SessionStore::for_path(path.clone());
-    let messages = store.messages().await;
+    let messages = store.model_window().await;
     assert_eq!(messages.len(), 2);
     for (i, m) in messages.iter().enumerate() {
         assert!(
@@ -854,19 +854,20 @@ fn compaction_keeps_recent_complete_turns() {
 
     let result = compact_messages(&messages, 10_000, 1).unwrap();
 
-    assert_eq!(result.active[0].role, neenee_core::Role::User);
-    assert!(result.active[0].hidden);
-    assert_eq!(result.active[1].content, "recent question");
-    assert_eq!(result.active[2].content, "recent answer");
+    assert_eq!(result.checkpoint.operation, ContextProjectionKind::Compact);
+    assert_eq!(result.model_window[0].role, neenee_core::Role::User);
+    assert!(result.model_window[0].hidden);
+    assert_eq!(result.model_window[1].content, "recent question");
+    assert_eq!(result.model_window[2].content, "recent answer");
     assert!(
         result
-            .archived
+            .archived_originals
             .iter()
             .any(|message| message.content == "old tool result")
     );
     assert!(
         !result
-            .archived
+            .archived_originals
             .iter()
             .any(|message| message.role == neenee_core::Role::System)
     );
@@ -928,7 +929,7 @@ fn select_compaction_extracts_previous_summary() {
     // The prior checkpoint lands in the archived head, not the tail.
     assert!(
         selection
-            .archived
+                .archived
             .iter()
             .any(|message| message.content.starts_with("[Conversation checkpoint]"))
     );
@@ -954,9 +955,9 @@ async fn run_compaction_uses_provider_summary() {
         .unwrap();
 
     // The mock provider's canned reply becomes the checkpoint summary.
-    assert!(result.active[0].content.contains("mock AI"));
-    assert_eq!(result.active[1].content, "recent question");
-    assert!(result.active[0].hidden);
+    assert!(result.model_window[0].content.contains("mock AI"));
+    assert_eq!(result.model_window[1].content, "recent question");
+    assert!(result.model_window[0].hidden);
 }
 
 #[tokio::test]
@@ -994,7 +995,7 @@ async fn run_compaction_falls_back_when_provider_errors() {
         .unwrap();
 
     // Fallback excerpt summary references the old question.
-    assert!(result.active[0].content.contains("old question"));
+    assert!(result.model_window[0].content.contains("old question"));
     // Silence the unused MockProvider import warning while keeping the path
     // documented for the success-case test above.
     let _: &dyn Provider = &MockProvider;

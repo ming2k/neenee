@@ -80,7 +80,7 @@ impl PromptSection for ToneGuidance {
 }
 
 /// Model-specific guidance. Each model behaves differently, so the resolved
-/// model's [`Model::model_guidance`] is the per-model hook for whatever
+/// model's `Model::model_guidance` is the per-model hook for whatever
 /// behavioral nudge it needs (e.g. GLM's anti-loop instructions). Renders it
 /// verbatim when non-empty — the model entry is the single source of truth.
 /// Empty for Claude/GPT/Gemini.

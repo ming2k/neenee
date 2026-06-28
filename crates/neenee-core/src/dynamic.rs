@@ -18,7 +18,7 @@
 //! a refresh action, and a cadence. Each implementation owns its own
 //! cache/fallback/load mechanics (they differ too much across subsystems to
 //! generalize), but they all speak this common refresh contract so a single
-//! [`spawn_refresh`] in the wiring layer drives them uniformly.
+//! `spawn_refresh` in the wiring layer drives them uniformly.
 //!
 //! See ADR (dynamic catalog pattern) for the full rationale.
 
@@ -35,7 +35,7 @@ use std::time::Duration;
 ///   → last-known fallback).
 ///
 /// The trait is intentionally minimal: `refresh` + cadence. Each implementation
-/// manages its own [`load`](Self::load) / fallback internally, because the
+/// manages its own `load` / fallback internally, because the
 /// types and storage differ (JSON file vs directory tree vs subprocess state).
 pub trait DynamicCatalog: Send + Sync {
     /// Stable identifier for logging and diagnostics (e.g. `"models-dev"`).

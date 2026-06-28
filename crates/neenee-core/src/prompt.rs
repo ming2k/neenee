@@ -68,8 +68,8 @@ pub struct PromptContext {
     pub last_visible_user_text: String,
     /// Model-specific guidance from the resolved model. Empty for most
     /// models; non-empty when the model entry carries a
-    /// [`Model::model_guidance`] (e.g. GLM family). Rendered verbatim by
-    /// [`ModelGuidance`].
+    /// `Model::model_guidance` (e.g. GLM family). Rendered verbatim by
+    /// `ModelGuidance`.
     pub model_guidance: &'static str,
 }
 

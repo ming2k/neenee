@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use neenee_core::Tool;
 use serde_json::json;
 
-/// Read a file from disk.
-pub struct ReadFileTool;
+/// Read a text file from disk.
+pub struct ReadTextTool;
 
 #[async_trait]
-impl Tool for ReadFileTool {
+impl Tool for ReadTextTool {
     fn name(&self) -> &str {
-        "read_file"
+        "read_text"
     }
     fn description(&self) -> &str {
         "Read a text file. `path` is required. Each line is prefixed with its \
@@ -188,7 +188,7 @@ impl Tool for ReadFileTool {
         })
     }
 }
-neenee_core::register_tool!(ReadFileFactory => ReadFileTool);
+neenee_core::register_tool!(ReadTextFactory => ReadTextTool);
 
 /// Extensions that are always treated as binary and never read as text.
 const BINARY_EXTENSIONS: &[&str] = &[

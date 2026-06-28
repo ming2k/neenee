@@ -6,7 +6,7 @@
 //! Extracted from the `tokio::spawn` block that used to live inline in
 //! `main.rs`. The dozens of `Arc` handles the block closed over are collected
 //! into [`Harness`], which `main` constructs and hands to [`run`]. Each
-//! `AgentRequest` variant is routed to its handler in [`handlers`](crate::handlers);
+//! `AgentRequest` variant is routed to its handler in `handlers`;
 //! the loop body itself is just the prologue (initial snapshots/telemetry) +
 //! the thin dispatch `match`.
 //!

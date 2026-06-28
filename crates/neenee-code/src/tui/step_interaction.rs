@@ -75,7 +75,7 @@ pub fn summary_at(cursor: &SemanticCursor) -> Option<(usize, StepKind)> {
 /// - **Cancelled** → collapsed: an aborted call reads as inert.
 /// - **Ok** → the per-tool default (`density` Comfortable mode, else the
 ///   tool's `[tui.default_expanded]` entry): `edit_file` shows its diff,
-///   `bash`/`read_file` stay collapsed, etc.
+///   `bash`/`read_text` stay collapsed, etc.
 pub fn default_tool_expanded(
     status: ToolStepStatus,
     name: &str,

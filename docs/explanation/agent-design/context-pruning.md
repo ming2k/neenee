@@ -1,6 +1,6 @@
 # Context pruning
 
-Pruning is the cheapest of the three context-relief layers (pruning →
+Pruning is the cheapest of the three context-projection layers (pruning →
 [compaction](context-compaction.md) → overflow recovery). It clears the
 **bodies** of old tool results while leaving the conversation — and the
 `tool_call_id` chain — fully intact. Because nothing about the dialogue's shape
@@ -10,7 +10,7 @@ transcript notice, only a `debug` trace.
 This page is the design reference for pruning. For the summarizing layer that
 takes over when pruning is no longer enough, see
 [Context compaction](context-compaction.md); for where both sit in the turn,
-see [Harness architecture](harness.md#context-relief).
+see [Harness architecture](harness.md#context-projection).
 
 ## What it relieves
 
@@ -89,7 +89,7 @@ chars/4 estimate — see
 | Entry point | When | Code |
 |-------------|------|------|
 | **Pre-turn** | Once at the start of a turn, before the agentic loop begins. Relieves pressure the new user message plus history may already have built up. | `prune_and_commit` in `neenee-agent/src/orchestration.rs` |
-| **Mid-turn** | Between tool rounds *inside* the loop, when a single turn fans out across many tool calls and pressure climbs mid-flight. | `MidTurnPruneGate` (impl of `ContextReliefGate`), driven by `Agent::relieve_pressure_if_needed` |
+| **Mid-turn** | Between tool rounds *inside* the loop, when a single turn fans out across many tool calls and pressure climbs mid-flight. | `MidTurnPruneProjectionGate` (impl of `ContextProjectionGate`), driven by `Agent::project_context_if_needed` |
 
 > **History.** The pre-turn entry point originally ran on *every* turn with no
 > pressure check, so on a 1M-token model it fired at a few percent of the
@@ -108,17 +108,19 @@ a user sees "Compacted …" a real summarization happened, not a prune (ADR-0021
 
 ## Durability
 
-Pruning is lossy in the model-visible window but never in the archive. Both
-entry points commit through `SessionStore::commit_context_relief`, which:
+Pruning is lossy in the model-visible window but never in the durable session.
+Both entry points commit through `SessionStore::commit_context_projection`,
+which:
 
-- extends the session's `archived_messages` with the pruned originals,
-- replaces the active window with the pruned list,
-- appends a `SessionEvent::ContextReliefCommitted` event.
+- extends the session's archived transcript with the pruned originals,
+- replaces the model window with the pruned list,
+- appends a `SessionEvent::ContextProjectionCommitted` event.
 
 The full pre-prune content is thus recoverable from the durable session even
 though the model no longer sees it. This is the shared "archive-and-replace"
-mechanism that compaction also uses; it is named `ContextRelief*` precisely
-because it serves both layers (ADR-0021).
+mechanism that compaction also uses; it is named `ContextProjection*` because
+it records how the durable session is projected into the model window
+(ADR-0040).
 
 ## Configuration
 
@@ -128,15 +130,15 @@ because it serves both layers (ADR-0021).
 | `compaction_prune_protect_tokens` | `6_000` | Recent tool output protected from pruning (converted to chars via `CHARS_PER_TOKEN`). Larger = keep more recent detail, prune less. |
 | `[compaction].prune_utilization` | `0.65` | Window fraction at which pruning engages. |
 
-`CompactionSettings::PRUNE_MIN_RECLAIM_CHARS` (8_000) is the fixed reclaim floor
-and is not configurable.
+`ContextProjectionSettings::PRUNE_MIN_RECLAIM_CHARS` (8_000) is the fixed
+reclaim floor and is not configurable.
 
 ## References
 
 - ADR-0009 — uncapped agentic loop; relief as the runaway backstop.
 - ADR-0019 — model-relative thresholds; the `prune_utilization` design.
-- ADR-0021 — pruning gated at 65%, made implicit, and renamed distinct from
-  compaction.
+- ADR-0021 — pruning gated at 65% and made implicit.
+- ADR-0040 — session state and model-context projection vocabulary.
 - ADR-0023 — relevance-aware selection, tiered degradation, informative
   placeholders, and layered token accounting.
 - [Context compaction](context-compaction.md) — the next, heavier relief layer.

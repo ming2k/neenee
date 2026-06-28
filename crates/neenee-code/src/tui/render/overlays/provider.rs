@@ -226,11 +226,10 @@ fn list_body(
         let label_max = body_width.saturating_sub(PREFIX_COLS).max(1);
         let label = truncate_ellipsis(&rm.label, label_max);
 
-        let matched: std::collections::HashSet<usize> = rm
-            .m
-            .as_ref()
-            .map(|m| m.positions.iter().copied().collect())
-            .unwrap_or_default();
+        let matched: std::collections::HashSet<usize> =
+            rm.m.as_ref()
+                .map(|m| m.positions.iter().copied().collect())
+                .unwrap_or_default();
 
         let mut spans: Vec<Span> = Vec::with_capacity(label.chars().count() + 3);
         spans.push(Span::styled(format!(" {star}"), star_style));

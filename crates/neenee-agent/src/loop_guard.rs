@@ -164,8 +164,8 @@ impl GuardRegistry {
 }
 
 /// Per-turn state bundling a [`GuardRegistry`] with the tool-call data for the
-/// round just dispatched. The agent loop sets [`pending_calls`](Self::pending_calls)
-/// and [`pending_all_read`](Self::pending_all_read) in `dispatch_tool_calls`,
+/// round just dispatched. The agent loop sets `pending_calls`
+/// and `pending_all_read` in `dispatch_tool_calls`,
 /// then consumes them once at the round boundary via [`Self::take_action`].
 ///
 /// This replaces the old `pending_round: RoundClass` + `loop_guard: ReadLoopGuard`
@@ -251,7 +251,7 @@ pub const ESCALATE_AT: u32 = 6;
 pub const PATH_THRESHOLD: u32 = 5;
 
 /// How a completed tool round looks to a guard. Computed by the caller (which
-/// owns tool-access classification) and fed to [`ReadLoopGuard::observe_round`].
+/// owns tool-access classification) and fed to `ReadLoopGuard::observe_round`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RoundClass {
     /// An all-read round, reduced to its canonical signature (see
@@ -302,7 +302,7 @@ impl ReadLoopGuard {
     /// round, which also resets the window.
     ///
     /// This is the legacy entry point (kept for tests). The [`RoundGuard`]
-    /// implementation routes through [`Self::observe_round`] which also checks
+    /// implementation routes through `Self::observe_round` which also checks
     /// the path-bucket axis.
     pub fn observe(&mut self, round: RoundClass) -> Option<String> {
         match round {
@@ -528,7 +528,7 @@ fn build_nudge(signature: &str, count: u32, level: u8) -> String {
 }
 
 /// Turn a machine signature (`name|path|...` or `name|<raw args>`) into a short
-/// human phrase for the nudge, e.g. `read_file src/main.rs`.
+/// human phrase for the nudge, e.g. `read_text src/main.rs`.
 fn humanize(signature: &str) -> String {
     let mut fields = signature.splitn(2, '|');
     let name = fields.next().unwrap_or("").trim();
@@ -570,7 +570,7 @@ mod tests {
 
     fn read(path: &str, offset: u64, limit: u64) -> RoundClass {
         let args = format!(r#"{{"path":"{path}","offset":{offset},"limit":{limit}}}"#);
-        RoundClass::Read(read_signature([("read_file", args.as_str())]))
+        RoundClass::Read(read_signature([("read_text", args.as_str())]))
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         assert!(guard.observe(read("a.rs", 1, 50)).is_none()); // 1st
         assert!(guard.observe(read("a.rs", 1, 50)).is_none()); // 2nd
         let nudge = guard.observe(read("a.rs", 1, 50)).expect("3rd fires");
-        assert!(nudge.contains("read_file a.rs"));
+        assert!(nudge.contains("read_text a.rs"));
         // Same signature again: latched, no repeat nudge until escalation.
         assert!(guard.observe(read("a.rs", 1, 50)).is_none());
         assert!(guard.observe(read("a.rs", 1, 50)).is_none());
@@ -664,9 +664,9 @@ mod tests {
         // "read a.rs", "read a.rs offset=1", "read a.rs offset=1 limit=0" all
         // mean the same read; they must share a signature.
         let mut guard = ReadLoopGuard::new();
-        let bare = RoundClass::Read(read_signature([("read_file", r#"{"path":"a.rs"}"#)]));
+        let bare = RoundClass::Read(read_signature([("read_text", r#"{"path":"a.rs"}"#)]));
         let with_offset = RoundClass::Read(read_signature([(
-            "read_file",
+            "read_text",
             r#"{"path":"a.rs","offset":1}"#,
         )]));
         let full = read("a.rs", 1, 0);
@@ -698,12 +698,12 @@ mod tests {
     fn path_bucket_catches_same_file_many_offsets() {
         // The bug this fixes: read a.rs at offset 1, 50, 100, 150, 200 — five
         // distinct exact signatures, so the exact axis never trips. But the
-        // path-bucket axis collapses them all to "read_file|a.rs" and trips at
+        // path-bucket axis collapses them all to "read_text|a.rs" and trips at
         // PATH_THRESHOLD=5.
         let mut guard = ReadLoopGuard::new();
         for offset in [1, 50, 100, 150, 200] {
             let args = format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#);
-            let call = ("read_file", args.as_str());
+            let call = ("read_text", args.as_str());
             let action = trait_observe(&mut guard, guard_round(&[call]));
             if offset < 200 {
                 assert_eq!(
@@ -730,7 +730,7 @@ mod tests {
         let mut guard = ReadLoopGuard::new();
         for file in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] {
             let args = format!(r#"{{"path":"{file}","offset":1,"limit":50}}"#);
-            let call = ("read_file", args.as_str());
+            let call = ("read_text", args.as_str());
             assert_eq!(
                 trait_observe(&mut guard, guard_round(&[call])),
                 GuardAction::Continue,
@@ -746,7 +746,7 @@ mod tests {
         let mut guard = ReadLoopGuard::new();
         for offset in [1, 50, 100] {
             let args = format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#);
-            let call = ("read_file", args.as_str());
+            let call = ("read_text", args.as_str());
             trait_observe(&mut guard, guard_round(&[call]));
         }
         // Progress round: a write.
@@ -758,7 +758,7 @@ mod tests {
         // After reset, the same file can be read a few times without tripping.
         for offset in [1, 50] {
             let args = format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#);
-            let call = ("read_file", args.as_str());
+            let call = ("read_text", args.as_str());
             assert_eq!(
                 trait_observe(&mut guard, guard_round(&[call])),
                 GuardAction::Continue,

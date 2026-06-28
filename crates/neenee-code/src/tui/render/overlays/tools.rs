@@ -53,17 +53,9 @@ pub fn draw_tools_modal(
 
     if session_context.is_none() {
         // Still loading: a single muted placeholder line.
-        body.push(placeholder(
-            "No tools available.",
-            false,
-            theme.muted(),
-        ));
+        body.push(placeholder("No tools available.", false, theme.muted()));
     } else if tools.is_empty() {
-        body.push(placeholder(
-            "No tools available.",
-            true,
-            theme.muted(),
-        ));
+        body.push(placeholder("No tools available.", true, theme.muted()));
     } else {
         // Geometry of every row: 2-col gutter + glyph(1) + space(1) +
         // name(name_col) + 2-col gap + source + 2-col gap + description, with a
@@ -166,7 +158,9 @@ pub fn draw_tools_modal(
     let body_rect = f.body;
     let visible = body_rect.height as usize;
     let content_lines = body.len();
-    let has_tools = session_context.map(|s| !s.tools.is_empty()).unwrap_or(false);
+    let has_tools = session_context
+        .map(|s| !s.tools.is_empty())
+        .unwrap_or(false);
     let follow = if has_tools && follow_selection {
         selected_line
     } else {
@@ -182,7 +176,10 @@ pub fn draw_tools_modal(
                 FooterHint::always("Esc", "close"),
             ]
         } else if content_lines > visible {
-            &[FooterHint::navigation("↑↓", "scroll"), FooterHint::always("Esc", "close")]
+            &[
+                FooterHint::navigation("↑↓", "scroll"),
+                FooterHint::always("Esc", "close"),
+            ]
         } else {
             &[FooterHint::always("Esc", "close")]
         };

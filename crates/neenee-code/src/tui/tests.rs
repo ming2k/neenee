@@ -186,7 +186,7 @@ fn restored_native_tool_calls_are_visible() {
         reasoning_content: None,
         tool_calls: Some(vec![ToolCall {
             id: "call".to_string(),
-            name: "read_file".to_string(),
+            name: "read_text".to_string(),
             arguments: "{\"path\":\"README.md\"}".to_string(),
         }]),
         tool_call_id: None,
@@ -200,7 +200,7 @@ fn restored_native_tool_calls_are_visible() {
     };
 
     let restored = transcript_message_from_core(message).unwrap();
-    assert!(restored.raw.contains("read_file"));
+    assert!(restored.raw.contains("read_text"));
 }
 
 #[test]
@@ -215,12 +215,12 @@ fn restored_tool_results_merge_into_steps_in_fifo_order() {
             tool_calls: Some(vec![
                 ToolCall {
                     id: "one".to_string(),
-                    name: "read_file".to_string(),
+                    name: "read_text".to_string(),
                     arguments: r#"{"path":"one"}"#.to_string(),
                 },
                 ToolCall {
                     id: "two".to_string(),
-                    name: "read_file".to_string(),
+                    name: "read_text".to_string(),
                     arguments: r#"{"path":"two"}"#.to_string(),
                 },
             ]),
@@ -236,18 +236,18 @@ fn restored_tool_results_merge_into_steps_in_fifo_order() {
         Message::tool_result(
             &ToolCall {
                 id: "one".to_string(),
-                name: "read_file".to_string(),
+                name: "read_text".to_string(),
                 arguments: String::new(),
             },
-            "[read_file result]:\nfirst",
+            "[read_text result]:\nfirst",
         ),
         Message::tool_result(
             &ToolCall {
                 id: "two".to_string(),
-                name: "read_file".to_string(),
+                name: "read_text".to_string(),
                 arguments: String::new(),
             },
-            "[read_file result]:\nsecond",
+            "[read_text result]:\nsecond",
         ),
     ];
 

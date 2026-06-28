@@ -20,7 +20,7 @@ pub enum AgentRequest {
         /// request surfaced by a *subagent* (carried up as a
         /// [`TurnEvent::SubAgent`] / [`SubagentEvent::PermissionRequest`]),
         /// this is the parent tool-call id the request was nested under. The
-        /// harness looks up the live child's [`crate::SubagentHandle`] in the
+        /// harness looks up the live child's `crate::SubagentHandle` in the
         /// task registry by this id and resolves its parked oneshot directly.
         /// `None` means the request came from the top-level (or `/btw` side)
         /// agent and is resolved on `context.agent` as before.
@@ -97,7 +97,7 @@ pub enum AgentRequest {
     /// Abort the current operation and exit the program gracefully. Sent by
     /// the model-facing `abort` tool when it detects a stuck state — a loop,
     /// a dangerous operation, or a dead end it cannot recover from. The
-    /// harness cancels any in-flight turn (same path as [`Interrupt`]) and
+    /// harness cancels any in-flight turn (same path as `Interrupt`) and
     /// replies [`AgentResponse::Exit`], so the normal graceful-exit path runs
     /// (session save + `SessionEnd` hooks) before the process ends and its
     /// background tasks die with it. This is the model's self-initiated
@@ -129,7 +129,7 @@ pub enum AgentResponse {
     /// an empty side transcript buffer keyed by `side_id`, switches to the
     /// side view, and records `primary_id` so per-turn events route by
     /// `session_id` (primary → primary buffer, side → side buffer). Emitted
-    /// by the harness after [`SessionStore::fork_to_side`] + side `Agent`
+    /// by the harness after `SessionStore::fork_to_side` + side `Agent`
     /// construction succeed.
     SideViewOpened {
         side_id: String,
@@ -307,7 +307,7 @@ pub enum TurnEvent {
     HarnessState(HarnessSnapshot),
     PursuitUpdated(Pursuit),
     /// The active pursuit was cleared (`/pursue clear`, or a session switch
-    /// that drops it). A non-gated mirror event: unlike [`HarnessState`],
+    /// that drops it). A non-gated mirror event: unlike `HarnessState`,
     /// clearing the pursuit is *not* a turn lifecycle transition, so it must
     /// not touch the activity bar. The TUI uses it to null out the snapshot's
     /// `pursuit` field without flushing the live activity cell.

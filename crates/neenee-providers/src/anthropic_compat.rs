@@ -19,7 +19,7 @@
 //!   (stop reason / usage), `message_stop`.
 //!
 //! Non-streaming chat assembles the same block list into one assistant
-//! [`Message`](neenee_core::Message). Tool-call argument JSON is accumulated
+//! [`Message`]. Tool-call argument JSON is accumulated
 //! from `input_json_delta` fragments the same way the OpenAI provider
 //! accumulates `tool_calls[].function.arguments`.
 
@@ -340,11 +340,7 @@ impl Provider for AnthropicMessagesProvider {
         });
     }
 
-    fn prepare_tools_with(
-        &self,
-        tools: &[Arc<dyn Tool>],
-        overrides: &neenee_core::ToolOverrides,
-    ) {
+    fn prepare_tools_with(&self, tools: &[Arc<dyn Tool>], overrides: &neenee_core::ToolOverrides) {
         let schemas: Vec<Value> = tools
             .iter()
             .map(|t| t.to_openai_function_with(overrides))

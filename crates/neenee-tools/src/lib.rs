@@ -4,7 +4,7 @@
 //! [`neenee_core::register_tool!`] (collected by `inventory` at link time).
 //! The binary assembles concrete instances from the registry at startup;
 //! this crate does not enumerate them here. Shared helpers live in
-//! [`helpers`], and pluggable web-search backends in [`search`].
+//! `helpers`, and pluggable web-search backends in `search`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -27,7 +27,7 @@ mod web;
 mod write;
 
 // Re-export every tool struct at the crate root so existing consumers
-// (`neenee_tools::ReadFileTool`, etc.) keep resolving unchanged.
+// (`neenee_tools::ReadTextTool`, etc.) keep resolving unchanged.
 pub use abort::AbortTool;
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
@@ -36,7 +36,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListDirTool;
 pub use project::{CreateProjectTool, InitConfigTool};
-pub use read::ReadFileTool;
+pub use read::ReadTextTool;
 pub use read_image::ReadImageTool;
 pub(crate) use web::html_to_text;
 pub use web::{WebFetchTool, WebSearchTool};

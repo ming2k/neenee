@@ -258,15 +258,16 @@ iteration budget is uncapped — `usize::MAX` on the wire, see ADR-0009).
 unfinished checkpoint, and `/session new` cancels old work and creates a
 fresh session id.
 
-## Context relief
+## Context projection
 
-The runner relieves context pressure in three layers, cheapest first. Every
-threshold is derived from the **active model's context window** — measured in
+The runner projects the durable session into a model-visible window in three
+pressure-driven layers, cheapest first. Every threshold is derived from the
+**active model's context window** — measured in
 tokens and re-seeded whenever the provider switches — so a 1M-token model is
 no longer over-compacted at ~3% of its window and a 128k model is no longer
-under-protected (ADR-0019). All three commit through one durable
-archive-and-replace mechanism (`ContextRelief*`), so the complete transcript
-survives while only the model-visible prefix is replaced.
+under-protected (ADR-0019). Pruning and compaction commit through one durable
+model-context projection mechanism (`ContextProjection*`), so the complete
+recoverable scene survives while only the model window changes (ADR-0040).
 
 | Layer | Trigger | Surfaced? |
 |-------|---------|-----------|

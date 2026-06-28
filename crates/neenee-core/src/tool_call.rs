@@ -115,10 +115,10 @@ mod tests {
     #[test]
     fn parse_text_tool_call_ignores_trailing_special_tokens() {
         let call = parse_text_tool_call(
-            "{\"tool\":\"read_file\",\"arguments\":{\"path\":\"x\"}}<|tool_calls_section_end|>",
+            "{\"tool\":\"read_text\",\"arguments\":{\"path\":\"x\"}}<|tool_calls_section_end|>",
         )
         .expect("trailing special token must not break parsing");
-        assert_eq!(call.name, "read_file");
+        assert_eq!(call.name, "read_text");
         assert_eq!(call.arguments, "{\"path\":\"x\"}");
     }
 

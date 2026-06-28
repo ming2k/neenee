@@ -215,7 +215,9 @@ fn bce_clear_to_end_uses_clr_eol_only_for_default_bg() {
     // emits that sequence when handed an explicit ClearEol command.
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
-    let cmd = DrawCmd { w: 10, h: 10,
+    let cmd = DrawCmd {
+        w: 10,
+        h: 10,
         draws: vec![Draw::ClearEol {
             x: 2,
             y: 1,
@@ -236,7 +238,9 @@ fn bce_clear_to_end_uses_clr_eol_only_for_default_bg() {
 fn bce_clear_to_end_falls_back_to_spaces_without_bce() {
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
-    let cmd = DrawCmd { w: 10, h: 10,
+    let cmd = DrawCmd {
+        w: 10,
+        h: 10,
         draws: vec![Draw::ClearEol {
             x: 1,
             y: 0,
@@ -281,8 +285,9 @@ fn diff_collapses_uniform_blank_tail_to_clear_eol() {
 /// understands exactly the sequences the backend emits: cursor moves (CUP),
 /// erase-to-end-of-line (EL), printable glyphs (advancing by display width,
 /// with a wide glyph blanking its trailing column the way real terminals do),
-/// and newlines. SGR (`…m`) and every other CSI are consumed but ignored — we
-/// care about *which glyph sits in which cell*, which is what ghosting is.
+/// and newlines. SGR (`…m`), DECAWM (`?7l`/`?7h`), and every other CSI are
+/// consumed; we care about *which glyph sits in which cell*, which is what
+/// ghosting is.
 struct ModelTerminal {
     w: u16,
     h: u16,
@@ -326,10 +331,8 @@ impl ModelTerminal {
                     match final_byte {
                         'H' | 'f' => {
                             let mut p = params.split(';');
-                            let row =
-                                p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
-                            let col =
-                                p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
+                            let row = p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
+                            let col = p.next().and_then(|s| s.parse().ok()).unwrap_or(1u16);
                             self.cy = row.saturating_sub(1);
                             self.cx = col.saturating_sub(1);
                         }
@@ -441,16 +444,12 @@ fn terminal_tracks_back_across_wide_narrow_transitions() {
 }
 
 #[test]
-fn bottom_right_cell_is_reserved_and_never_written() {
-    // The very last cell of the bottom row is *intentionally* not written: the
-    // backend breaks out of the run there to avoid the auto-wrap+scroll that
-    // would otherwise corrupt the screen (ratatui has the same limitation). The
-    // app keeps that cell blank via its viewport bottom margin, so the
-    // limitation is invisible in practice.
-    //
-    // This test pins that contract: everything up to the last cell renders, and
-    // only the bottom-right cell is left unwritten. If a future change writes
-    // it (e.g. disabling DECAWM to lift the limitation), update this test.
+fn bottom_right_cell_renders_under_line_wrap_guard() {
+    // The backend used to reserve the bottom-right cell to avoid terminal
+    // auto-wrap+scroll. That made the global app background visibly miss one
+    // cell. The correct invariant is stricter: the terminal tracks the back
+    // grid exactly, and writes that reach the bottom-right corner are wrapped
+    // in DECAWM off/on so they cannot scroll the screen.
     for bce in [Bce::Yes, Bce::No] {
         let (w, h) = (4u16, 2u16);
         let mut back = Grid::new(w, h);
@@ -462,13 +461,12 @@ fn bottom_right_cell_is_reserved_and_never_written() {
         let bytes = render_cycle(&mut back, &mut front, bce);
         term.apply(&bytes);
 
-        // Non-bottom rows track the back grid exactly.
         assert_eq!(term.row(0), back_row(&back, 0), "row 0 (bce={bce:?})");
-        // Bottom row tracks back for every cell except the reserved corner,
-        // which stays blank.
-        let mut expected = back_row(&back, 1);
-        *expected.last_mut().unwrap() = " ".to_string();
-        assert_eq!(term.row(1), expected, "bottom row reserved corner (bce={bce:?})");
+        assert_eq!(term.row(1), back_row(&back, 1), "row 1 (bce={bce:?})");
+        assert!(
+            bytes.contains("\x1b[?7l") && bytes.contains("\x1b[?7h"),
+            "bottom-right write must be protected by DECAWM off/on: {bytes:?}"
+        );
     }
 }
 
@@ -496,7 +494,9 @@ fn invalidate_emits_real_sgr_reset() {
 
     // First render a bold run so the terminal genuinely holds the BOLD
     // attribute (this is what a tool-step summary line does).
-    let bold_cmd = DrawCmd { w: 10, h: 10,
+    let bold_cmd = DrawCmd {
+        w: 10,
+        h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,
@@ -534,7 +534,9 @@ fn resize_then_repaint_does_not_inherit_stale_bold() {
     use neenee_tui::diff::{Draw, DrawCmd};
     crossterm::style::force_color_output(true);
 
-    let bold_cmd = DrawCmd { w: 10, h: 10,
+    let bold_cmd = DrawCmd {
+        w: 10,
+        h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,
@@ -542,7 +544,9 @@ fn resize_then_repaint_does_not_inherit_stale_bold() {
             cells: vec![("X".to_string(), 1)],
         }],
     };
-    let plain_cmd = DrawCmd { w: 10, h: 10,
+    let plain_cmd = DrawCmd {
+        w: 10,
+        h: 10,
         draws: vec![Draw::Cells {
             x: 0,
             y: 0,

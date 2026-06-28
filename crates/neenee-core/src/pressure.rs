@@ -57,7 +57,7 @@ pub struct CompactionPolicy {
     /// of the window. The remaining headroom absorbs finishing the current turn
     /// and the summarization call itself, so a value near `1.0` risks overflow.
     pub utilization: f64,
-    /// After a full compaction, compress the active window down to this fraction
+    /// After a full compaction, compress the model window down to this fraction
     /// of the window. Lower values compact less often but deeper — the right
     /// tradeoff for an agentic loop that may run hundreds of rounds.
     pub target_utilization: f64,
@@ -705,26 +705,26 @@ mod tests {
         let mut messages = vec![
             assistant_with_call(
                 "c1",
-                "read_file",
+                "read_text",
                 r#"{"path":"big.rs","offset":1,"limit":800}"#,
             ),
             Message::tool_result(
                 &call(
                     "c1",
-                    "read_file",
+                    "read_text",
                     r#"{"path":"big.rs","offset":1,"limit":800}"#,
                 ),
                 page1,
             ),
             assistant_with_call(
                 "c2",
-                "read_file",
+                "read_text",
                 r#"{"path":"big.rs","offset":900,"limit":800}"#,
             ),
             Message::tool_result(
                 &call(
                     "c2",
-                    "read_file",
+                    "read_text",
                     r#"{"path":"big.rs","offset":900,"limit":800}"#,
                 ),
                 page2,
@@ -754,20 +754,20 @@ mod tests {
         let mut messages = vec![
             assistant_with_call(
                 "c1",
-                "read_file",
+                "read_text",
                 r#"{"path":"big.rs","offset":10,"limit":50}"#,
             ),
             Message::tool_result(
                 &call(
                     "c1",
-                    "read_file",
+                    "read_text",
                     r#"{"path":"big.rs","offset":10,"limit":50}"#,
                 ),
                 page,
             ),
             // Open-ended read from line 1 covers [10,60) -> earlier page is stale.
-            assistant_with_call("c2", "read_file", r#"{"path":"big.rs"}"#),
-            Message::tool_result(&call("c2", "read_file", r#"{"path":"big.rs"}"#), whole),
+            assistant_with_call("c2", "read_text", r#"{"path":"big.rs"}"#),
+            Message::tool_result(&call("c2", "read_text", r#"{"path":"big.rs"}"#), whole),
         ];
 
         let out = prune_tool_results(&mut messages, 0, 1).unwrap();

@@ -176,15 +176,14 @@ impl<W: io::Write> Terminal<W> {
         self.backend.render(&cmd)?;
         diff::promote(&mut self.back, &mut self.front);
 
-        // Apply cursor state via the backend writer.
-        use crossterm::{QueueableCommand, cursor};
+        // Apply cursor state through the backend so its cursor tracker stays
+        // aligned with the real terminal before the next diff render.
         match self.cursor {
             CursorState::Hidden => {
-                self.backend.writer().queue(cursor::Hide)?;
+                self.backend.hide_cursor()?;
             }
             CursorState::Visible(x, y) => {
-                self.backend.writer().queue(cursor::Show)?;
-                self.backend.writer().queue(cursor::MoveTo(x, y))?;
+                self.backend.show_cursor_at(x, y)?;
             }
         }
         self.backend.writer().flush()?;

@@ -23,7 +23,7 @@ const TODO_DESCRIPTION: &str = "Maintain the task list for the current work. Rep
 
 /// Full-replace todo tool. The model sends the desired list each call; the
 /// tool reconciles it against the current list preserving identity (see
-/// [`TodoList::reconcile`]). This is the robust interface: the model never
+/// `TodoList::reconcile`). This is the robust interface: the model never
 /// has to track ids.
 pub struct TodoWriteTool {
     context: TodoToolContext,

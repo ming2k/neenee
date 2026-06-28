@@ -33,7 +33,7 @@
 curl -fsSL https://raw.githubusercontent.com/ming2k/neenee/main/install.sh | bash
 ```
 
-> Pin a version with `NEENEE_VERSION=0.9.0`, or install into a custom dir with `INSTALL_DIR=/usr/local/bin`.
+> Pin a version with `NEENEE_VERSION=0.9.1`, or install into a custom dir with `INSTALL_DIR=/usr/local/bin`.
 
 **Or build from source**:
 

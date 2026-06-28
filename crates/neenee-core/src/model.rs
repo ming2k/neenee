@@ -57,7 +57,7 @@ pub struct Model {
     /// Wire protocol used to reach this model. See [`WireFormat`].
     pub format: WireFormat,
     /// Model-specific prompt guidance injected into the system prompt as a
-    /// [`ModelGuidance`] section. Because each model behaves differently,
+    /// `ModelGuidance` section. Because each model behaves differently,
     /// this is the per-model hook for any behavioral nudge a model needs
     /// (e.g. GLM's anti-loop / one-tool-per-turn instructions). Empty when
     /// the model needs none (Claude, GPT, Gemini). The model entry is the
@@ -70,12 +70,12 @@ pub struct Model {
 /// referenced by any built-in provider preset; user-defined models that are not
 /// in this list fall back to [`fallback_model`] at resolution time.
 ///
-/// [`fallback_model`]: crate::fallback_model
+/// `fallback_model` is defined in this module.
 ///
 /// Model-specific guidance for the GLM family. Because these models can get
 /// stuck re-issuing identical tool calls without making progress, their
 /// [`Model::model_guidance`] carries explicit anti-loop / one-tool-per-turn
-/// instructions. The prompt engine injects it via [`ModelGuidance`] when
+/// instructions. The prompt engine injects it via `ModelGuidance` when
 /// the resolved model carries a non-empty value.
 pub const GLM_GUIDANCE: &str = "\
 # Tool usage policy\n\

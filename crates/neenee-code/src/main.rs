@@ -1,7 +1,7 @@
 use crate::tui::start_tui;
 use neenee_agent::catalog;
 use neenee_agent::orchestration::{
-    MidTurnPruneGate, ProxyProvider, refresh_agent_pursuit, start_repeat_scheduler, turn,
+    MidTurnPruneProjectionGate, ProxyProvider, refresh_agent_pursuit, start_repeat_scheduler, turn,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentTool};
@@ -270,18 +270,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
-    let active_messages = session.messages().await;
-    let restored_messages = session.transcript().await;
+    let active_messages = session.model_window().await;
+    let restored_messages = session.full_transcript().await;
     let history = Arc::new(tokio::sync::Mutex::new(active_messages));
 
-    // Mid-turn context relief: when pruning is enabled, install a gate that
+    // Mid-turn context projection: when pruning is enabled, install a gate that
     // clears old tool results between tool rounds once pressure crosses the
     // prune threshold. The threshold is derived from the active model's context
     // window and re-seeded whenever the provider switches (see
     // `reseed_prune_threshold`), so it tracks the live model rather than a
     // fixed character budget.
     if config.compaction_prune {
-        agent.set_context_relief_gate(Some(Arc::new(MidTurnPruneGate {
+        agent.set_context_projection_gate(Some(Arc::new(MidTurnPruneProjectionGate {
             session: session.clone(),
             prune_protect_chars: config.compaction_prune_protect_tokens * CHARS_PER_TOKEN,
         })));

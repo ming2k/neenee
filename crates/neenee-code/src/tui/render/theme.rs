@@ -179,6 +179,9 @@ impl Theme {
     pub fn code_text(&self) -> Color {
         self.code_fg
     }
+    pub fn code_surface(&self) -> Color {
+        self.code_bg
+    }
     pub fn heading(&self) -> Color {
         self.heading_fg
     }

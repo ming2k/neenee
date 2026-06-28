@@ -54,7 +54,7 @@ impl Tool for SearchHistoryTool {
             .ok_or_else(|| "missing 'query' argument".to_string())?;
         let limit = args["limit"].as_u64().unwrap_or(5) as usize;
 
-        let messages = self.session.transcript().await;
+        let messages = self.session.full_transcript().await;
         {
             let mut store = self.store.write().await;
             let session_id = self.session.id().await;

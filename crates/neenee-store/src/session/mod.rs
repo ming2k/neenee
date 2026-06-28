@@ -6,7 +6,8 @@
 //! conflict. Large payloads are offloaded to the content-addressed
 //! [`crate::blobs::BlobStore`]. Sessions are bucketed per project under
 //! `projects/<sha256(cwd)[..16]>/sessions/`. [`SessionStore`] is the facade
-//! for load/save/resume/fork and for committing context-relief (compaction)
+//! for load/save/resume/fork and for committing model-context projections
+//! (pruning and compaction)
 //! checkpoints; it also drives the one-shot legacy layout migrations.
 
 use crate::blobs::BlobStore;
@@ -49,8 +50,21 @@ pub struct PursuitCheckpoint {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextProjectionKind {
+    /// Legacy snapshots/events did not record whether the projection was prune
+    /// or compact. Keep that uncertainty explicit instead of guessing on load.
+    #[default]
+    Unknown,
+    Prune,
+    Compact,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContextReliefCheckpoint {
+pub struct ContextProjectionCheckpoint {
+    #[serde(default)]
+    pub operation: ContextProjectionKind,
     pub archived_messages: usize,
     pub active_messages: usize,
     pub before_chars: usize,
@@ -64,13 +78,19 @@ struct SessionData {
     parent_id: Option<String>,
     created_at: u64,
     updated_at: u64,
-    messages: Vec<Message>,
-    archived_messages: Vec<Message>,
+    #[serde(rename = "model_window", alias = "messages")]
+    model_window: Vec<Message>,
+    #[serde(rename = "archived_transcript", alias = "archived_messages")]
+    archived_transcript: Vec<Message>,
     loop_checkpoint: Option<PursuitCheckpoint>,
-    /// Stats of the most recent context-relief op (prune or compaction).
-    /// `alias` keeps snapshots written before the rename (`compaction`) loadable.
-    #[serde(rename = "last_relief", alias = "compaction")]
-    last_relief: Option<ContextReliefCheckpoint>,
+    /// Stats of the most recent model-context projection (prune or compaction).
+    /// `alias` keeps snapshots written before the rename loadable.
+    #[serde(
+        rename = "last_projection",
+        alias = "last_relief",
+        alias = "compaction"
+    )]
+    last_projection: Option<ContextProjectionCheckpoint>,
     /// Working directory this session belongs to. Phase 2 (project isolation)
     /// uses this to route archived sessions to the right per-project bucket
     /// during the one-shot legacy migration. Legacy snapshots missing the
@@ -101,7 +121,7 @@ struct SessionData {
     title_manual: bool,
     /// The durable per-session pursuit (ADR-0032). `None` means no pursuit is
     /// set. Mirrors the runtime [`neenee_core::Pursuit`] carried by
-    /// [`crate::pursuit_state::PursuitState`] (the in-memory stop-gate view);
+    /// `crate::pursuit_state::PursuitState` (the in-memory stop-gate view);
     /// this field is the durable authority read on resume and written by the
     /// `/pursue` slash command and the harness completion path. `#[serde(default)]`
     /// so legacy snapshots load with `pursuit = None` and no migration is needed.
@@ -117,10 +137,10 @@ impl Default for SessionData {
             parent_id: None,
             created_at: now,
             updated_at: now,
-            messages: Vec::new(),
-            archived_messages: Vec::new(),
+            model_window: Vec::new(),
+            archived_transcript: Vec::new(),
             loop_checkpoint: None,
-            last_relief: None,
+            last_projection: None,
             project_root: default_project_root(),
             todos: neenee_core::TodoList::default(),
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -218,9 +238,9 @@ fn write_session_file(
 /// with a `content_blob` reference. Operates recursively on nested children.
 fn offload_session_blobs(data: &mut SessionData, blob_store: &BlobStore) -> Result<(), String> {
     for message in data
-        .messages
+        .model_window
         .iter_mut()
-        .chain(data.archived_messages.iter_mut())
+        .chain(data.archived_transcript.iter_mut())
     {
         offload_message_blobs(message, blob_store)?;
     }
@@ -244,9 +264,9 @@ fn offload_message_blobs(message: &mut Message, blob_store: &BlobStore) -> Resul
 /// Rehydrate `content` from `content_blob` references after loading.
 fn load_session_blobs(data: &mut SessionData, blob_store: &BlobStore) -> Result<(), String> {
     for message in data
-        .messages
+        .model_window
         .iter_mut()
-        .chain(data.archived_messages.iter_mut())
+        .chain(data.archived_transcript.iter_mut())
     {
         load_message_blobs(message, blob_store)?;
     }
@@ -301,19 +321,23 @@ fn apply_events(data: &mut SessionData, envelopes: &[crate::events::EventEnvelop
                 data.project_root = project_root.clone();
                 data.schema_version = *schema_version;
             }
-            SessionEvent::MessagesReplaced { messages } => data.messages = messages.clone(),
-            SessionEvent::MessagesAppended { messages } => data.messages.extend(messages.clone()),
+            SessionEvent::MessagesReplaced { messages } => data.model_window = messages.clone(),
+            SessionEvent::MessagesAppended { messages } => {
+                data.model_window.extend(messages.clone())
+            }
             SessionEvent::CheckpointSet { checkpoint } => data.loop_checkpoint = checkpoint.clone(),
-            SessionEvent::ContextReliefCommitted {
-                archived,
-                active,
+            SessionEvent::ContextProjectionCommitted {
+                archived_originals,
+                model_window,
                 checkpoint,
             } => {
-                data.archived_messages.extend(archived.clone());
-                data.messages = active.clone();
-                data.last_relief = Some(checkpoint.clone());
+                data.archived_transcript.extend(archived_originals.clone());
+                data.model_window = model_window.clone();
+                data.last_projection = Some(checkpoint.clone());
             }
-            SessionEvent::Archived { messages } => data.archived_messages.extend(messages.clone()),
+            SessionEvent::Archived { messages } => {
+                data.archived_transcript.extend(messages.clone())
+            }
             SessionEvent::TodosSet { todos } => {
                 data.todos = todos.clone();
             }
@@ -360,22 +384,34 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             schema_version: data.schema_version,
         },
     }];
-    if !data.archived_messages.is_empty() {
+    if let Some(checkpoint) = &data.last_projection {
         events.push(crate::events::EventEnvelope {
             seq: events.len() as u64,
             timestamp: data.updated_at,
-            event: SessionEvent::Archived {
-                messages: data.archived_messages.clone(),
+            event: SessionEvent::ContextProjectionCommitted {
+                archived_originals: data.archived_transcript.clone(),
+                model_window: data.model_window.clone(),
+                checkpoint: checkpoint.clone(),
+            },
+        });
+    } else {
+        if !data.archived_transcript.is_empty() {
+            events.push(crate::events::EventEnvelope {
+                seq: events.len() as u64,
+                timestamp: data.updated_at,
+                event: SessionEvent::Archived {
+                    messages: data.archived_transcript.clone(),
+                },
+            });
+        }
+        events.push(crate::events::EventEnvelope {
+            seq: events.len() as u64,
+            timestamp: data.updated_at,
+            event: SessionEvent::MessagesReplaced {
+                messages: data.model_window.clone(),
             },
         });
     }
-    events.push(crate::events::EventEnvelope {
-        seq: events.len() as u64,
-        timestamp: data.updated_at,
-        event: SessionEvent::MessagesReplaced {
-            messages: data.messages.clone(),
-        },
-    });
     if let Some(checkpoint) = &data.loop_checkpoint {
         events.push(crate::events::EventEnvelope {
             seq: events.len() as u64,
@@ -391,17 +427,6 @@ fn snapshot_to_events(data: &SessionData) -> Vec<crate::events::EventEnvelope> {
             timestamp: data.updated_at,
             event: SessionEvent::TodosSet {
                 todos: data.todos.clone(),
-            },
-        });
-    }
-    if let Some(checkpoint) = &data.last_relief {
-        events.push(crate::events::EventEnvelope {
-            seq: events.len() as u64,
-            timestamp: data.updated_at,
-            event: SessionEvent::ContextReliefCommitted {
-                archived: data.archived_messages.clone(),
-                active: data.messages.clone(),
-                checkpoint: checkpoint.clone(),
             },
         });
     }
@@ -573,14 +598,14 @@ impl SessionStore {
         self.state.lock().await.data.id.clone()
     }
 
-    pub async fn messages(&self) -> Vec<Message> {
-        self.state.lock().await.data.messages.clone()
+    pub async fn model_window(&self) -> Vec<Message> {
+        self.state.lock().await.data.model_window.clone()
     }
 
-    pub async fn transcript(&self) -> Vec<Message> {
+    pub async fn full_transcript(&self) -> Vec<Message> {
         let state = self.state.lock().await;
-        let mut messages = state.data.archived_messages.clone();
-        messages.extend(state.data.messages.clone());
+        let mut messages = state.data.archived_transcript.clone();
+        messages.extend(state.data.model_window.clone());
         messages
     }
 
@@ -607,8 +632,8 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn last_relief(&self) -> Option<ContextReliefCheckpoint> {
-        self.state.lock().await.data.last_relief.clone()
+    pub async fn last_projection(&self) -> Option<ContextProjectionCheckpoint> {
+        self.state.lock().await.data.last_projection.clone()
     }
 
     /// The current session title and whether it was manually set (ADR-0022).
@@ -638,8 +663,8 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn archived_count(&self) -> usize {
-        self.state.lock().await.data.archived_messages.len()
+    pub async fn archived_transcript_count(&self) -> usize {
+        self.state.lock().await.data.archived_transcript.len()
     }
 
     pub async fn parent_id(&self) -> Option<String> {
@@ -709,11 +734,11 @@ impl SessionStore {
 
     pub async fn replace_messages(&self, messages: Vec<Message>) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        state.data.messages = messages;
+        state.data.model_window = messages;
         state.data.updated_at = unix_timestamp();
         ensure_event_log_started(&state.event_log, &state.data)?;
         state.event_log.append(SessionEvent::MessagesReplaced {
-            messages: state.data.messages.clone(),
+            messages: state.data.model_window.clone(),
         })?;
         self.persist_locked(&state)
     }
@@ -722,7 +747,7 @@ impl SessionStore {
     /// write, without rewriting the full snapshot (ADR-0035).
     ///
     /// The caller passes the *current full* turn history. This method diffs it
-    /// against the messages already durable in `data.messages` and appends only
+    /// against the messages already durable in `data.model_window` and appends only
     /// the tail as a `MessagesAppended` event to the append-only log — O(delta),
     /// not O(history). The snapshot cache (`session.json`) is intentionally
     /// **not** rewritten here: it stays at the last turn boundary and is
@@ -736,7 +761,7 @@ impl SessionStore {
     /// no-op.
     pub async fn append_round(&self, current: &[Message]) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        let baseline = state.data.messages.len();
+        let baseline = state.data.model_window.len();
         // Only the strictly-new tail is the delta. If `current` is shorter or
         // equal (compaction rewrote the window, or nothing changed), there is
         // nothing to append.
@@ -749,7 +774,7 @@ impl SessionStore {
             // no `PartialEq`, so we compare the identity-bearing fields.
             let diverged = current[..baseline]
                 .iter()
-                .zip(state.data.messages[..].iter())
+                .zip(state.data.model_window[..].iter())
                 .any(|(incoming, durable)| {
                     incoming.role != durable.role
                         || incoming.content != durable.content
@@ -761,11 +786,11 @@ impl SessionStore {
                     incoming = current.len(),
                     "append_round: incoming prefix diverged from durable state; full replace"
                 );
-                state.data.messages = current.to_vec();
+                state.data.model_window = current.to_vec();
                 state.data.updated_at = unix_timestamp();
                 ensure_event_log_started(&state.event_log, &state.data)?;
                 state.event_log.append(SessionEvent::MessagesReplaced {
-                    messages: state.data.messages.clone(),
+                    messages: state.data.model_window.clone(),
                 })?;
                 return self.persist_locked(&state);
             }
@@ -775,7 +800,7 @@ impl SessionStore {
         };
         // Advance the in-memory state and append the delta event. The snapshot
         // cache is not touched (stays at the turn boundary).
-        state.data.messages.extend(delta.clone());
+        state.data.model_window.extend(delta.clone());
         state.data.updated_at = unix_timestamp();
         ensure_event_log_started(&state.event_log, &state.data)?;
         state
@@ -798,18 +823,24 @@ impl SessionStore {
         self.persist_locked(&state)
     }
 
-    pub async fn commit_context_relief(&self, result: ContextReliefResult) -> Result<(), String> {
+    pub async fn commit_context_projection(
+        &self,
+        result: ContextProjectionResult,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        state.data.archived_messages.extend(result.archived.clone());
-        state.data.messages = result.active.clone();
-        state.data.last_relief = Some(result.checkpoint.clone());
+        state
+            .data
+            .archived_transcript
+            .extend(result.archived_originals.clone());
+        state.data.model_window = result.model_window.clone();
+        state.data.last_projection = Some(result.checkpoint.clone());
         state.data.updated_at = unix_timestamp();
         ensure_event_log_started(&state.event_log, &state.data)?;
         state
             .event_log
-            .append(SessionEvent::ContextReliefCommitted {
-                archived: result.archived,
-                active: result.active,
+            .append(SessionEvent::ContextProjectionCommitted {
+                archived_originals: result.archived_originals,
+                model_window: result.model_window,
                 checkpoint: result.checkpoint,
             })?;
         self.persist_locked(&state)
@@ -865,7 +896,7 @@ impl SessionStore {
     /// parent_id)`.
     pub async fn fork(&self) -> Result<(String, String), String> {
         let mut state = self.state.lock().await;
-        if state.data.messages.is_empty() && state.data.archived_messages.is_empty() {
+        if state.data.model_window.is_empty() && state.data.archived_transcript.is_empty() {
             return Err("Cannot fork an empty session.".to_string());
         }
         let parent_id = state.data.id.clone();
@@ -895,16 +926,16 @@ impl SessionStore {
     }
 
     /// Fork the current session into a **self-contained side file** without
-    /// disturbing this store's active pointer (ADR-0017). Unlike [`fork`],
+    /// disturbing this store's active pointer (ADR-0017). Unlike `fork`,
     /// the primary keeps running: this method only *reads* the current
     /// snapshot, writes a sibling `sessions/<side_id>.{json,jsonl}`, and
     /// returns `(side_id, parent_id)`. The primary's `state` is left
     /// untouched, so a concurrent parent turn is not clobbered.
     ///
-    /// Load the side into its own live store with [`open_side`].
+    /// Load the side into its own live store with `open_side`.
     pub async fn fork_to_side(&self) -> Result<(String, String), String> {
         let state = self.state.lock().await;
-        if state.data.messages.is_empty() && state.data.archived_messages.is_empty() {
+        if state.data.model_window.is_empty() && state.data.archived_transcript.is_empty() {
             return Err("Cannot fork an empty session.".to_string());
         }
         let parent_id = state.data.id.clone();
@@ -933,7 +964,7 @@ impl SessionStore {
     }
 
     /// Construct a live [`SessionStore`] pinned to a side session file that
-    /// lives in this store's `sessions_dir` (written by [`fork_to_side`]). The
+    /// lives in this store's `sessions_dir` (written by `fork_to_side`). The
     /// returned store shares the primary's project root, sessions dir, and blob
     /// store root, so inherited content (including image blobs) resolves the
     /// same way as in the primary. It writes only its own `sessions/<id>.*`
@@ -1170,7 +1201,7 @@ fn summary(data: &SessionData, active: bool) -> SessionSummary {
     SessionSummary {
         id: data.id.clone(),
         parent_id: data.parent_id.clone(),
-        message_count: data.messages.len() + data.archived_messages.len(),
+        message_count: data.model_window.len() + data.archived_transcript.len(),
         updated_at: data.updated_at,
         created_at: data.created_at,
         overview: session_overview(data),
@@ -1189,9 +1220,9 @@ fn session_overview(data: &SessionData) -> String {
         return truncate_preview(title, MAX);
     }
     if let Some(message) = data
-        .messages
+        .model_window
         .iter()
-        .chain(data.archived_messages.iter())
+        .chain(data.archived_transcript.iter())
         .find(|message| message.role == neenee_core::Role::User)
     {
         return truncate_preview(&message.content, MAX);
@@ -1219,10 +1250,10 @@ pub(crate) fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-pub struct ContextReliefResult {
-    pub active: Vec<Message>,
-    pub archived: Vec<Message>,
-    pub checkpoint: ContextReliefCheckpoint,
+pub struct ContextProjectionResult {
+    pub model_window: Vec<Message>,
+    pub archived_originals: Vec<Message>,
+    pub checkpoint: ContextProjectionCheckpoint,
 }
 
 /// Header prepended to every compaction checkpoint message. Doubles as the
@@ -1323,26 +1354,27 @@ pub fn checkpoint_message(summary: &str) -> Message {
     )
 }
 
-/// Assemble the final [`ContextReliefResult`] from a selection and a summary.
+/// Assemble the final [`ContextProjectionResult`] from a selection and a summary.
 pub fn build_compaction_result(
     before_chars: usize,
     selection: CompactionSelection,
     summary: String,
-) -> ContextReliefResult {
+) -> ContextProjectionResult {
     let CompactionSelection { archived, tail, .. } = selection;
-    let mut active = Vec::with_capacity(tail.len() + 1);
-    active.push(checkpoint_message(&summary));
-    active.extend(tail);
-    let after_chars = estimate_chars(&active);
-    ContextReliefResult {
-        checkpoint: ContextReliefCheckpoint {
+    let mut model_window = Vec::with_capacity(tail.len() + 1);
+    model_window.push(checkpoint_message(&summary));
+    model_window.extend(tail);
+    let after_chars = estimate_chars(&model_window);
+    ContextProjectionResult {
+        checkpoint: ContextProjectionCheckpoint {
+            operation: ContextProjectionKind::Compact,
             archived_messages: archived.len(),
-            active_messages: active.len(),
+            active_messages: model_window.len(),
             before_chars,
             after_chars,
         },
-        active,
-        archived,
+        model_window,
+        archived_originals: archived,
     }
 }
 
@@ -1417,7 +1449,7 @@ pub fn compact_messages(
     messages: &[Message],
     target_tokens: usize,
     preserve_turns: usize,
-) -> Option<ContextReliefResult> {
+) -> Option<ContextProjectionResult> {
     let before_chars = estimate_chars(messages);
     let selection = select_compaction(messages, preserve_turns)?;
     let budget_chars = summary_char_budget(target_tokens);
@@ -1680,7 +1712,7 @@ pub async fn run_compaction(
     preserve_turns: usize,
     provider: Option<Arc<dyn Provider>>,
     extra_context: Vec<String>,
-) -> Result<Option<ContextReliefResult>, String> {
+) -> Result<Option<ContextProjectionResult>, String> {
     let before_chars = estimate_chars(history);
     let before_tokens = estimate_tokens(history);
     let Some(selection) = select_compaction(history, preserve_turns) else {
@@ -1727,8 +1759,8 @@ pub async fn run_compaction(
         before_tokens,
         "compaction complete"
     );
-    let active = result.active.clone();
-    *history = active;
+    let model_window = result.model_window.clone();
+    *history = model_window;
     Ok(Some(result))
 }
 
@@ -1752,7 +1784,7 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 /// This moves the legacy root `session.json` → `sessions/<legacy-id>.json` and
 /// `events.jsonl` → `sessions/<legacy-id>.jsonl`, leaving the archived
 /// `sessions/*.json` snapshots where they are (their event logs are seeded
-/// lazily by [`load_or_seed`] when first opened). It is guarded by a
+/// lazily by `load_or_seed` when first opened). It is guarded by a
 /// per-project `flock` on `sessions.lock` so two instances starting for the
 /// first time cannot race the move: the second waits, then sees the root
 /// files gone and no-ops. Fully idempotent and best-effort — a failed move is
@@ -1941,7 +1973,7 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
             self.examined += 1;
             match result {
                 Ok(data) => {
-                    let message_count = data.messages.len() + data.archived_messages.len();
+                    let message_count = data.model_window.len() + data.archived_transcript.len();
                     println!(
                         "ok       {} (schema {}, checksum={}, {} messages)",
                         path.display(),
@@ -2081,7 +2113,7 @@ mod tests {
             .unwrap();
 
         let data: SessionData = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(data.messages[0].content, messages[0].content);
+        assert_eq!(data.model_window[0].content, messages[0].content);
         assert_eq!(data.loop_checkpoint.unwrap().iteration, 2);
         let _ = fs::remove_dir_all(directory);
     }
@@ -2124,12 +2156,12 @@ mod tests {
     #[test]
     fn checksum_computes_and_verifies() {
         let mut data = SessionData::default();
-        data.messages = vec![Message::new(neenee_core::Role::User, "hello")];
+        data.model_window = vec![Message::new(neenee_core::Role::User, "hello")];
         data.checksum = Some(compute_checksum(&data));
         assert!(verify_checksum(&data).is_ok());
 
         // Tamper with a field: verification must fail.
-        data.messages[0].content = "goodbye".to_string();
+        data.model_window[0].content = "goodbye".to_string();
         assert!(verify_checksum(&data).is_err());
     }
 
@@ -2195,7 +2227,7 @@ mod tests {
         let loaded = fs::read_to_string(&path).unwrap();
         let data: SessionData = serde_json::from_str(&loaded).unwrap();
         let tool_msg = data
-            .messages
+            .model_window
             .iter()
             .find(|m| m.role == neenee_core::Role::Tool)
             .expect("tool result message persisted");
@@ -2276,10 +2308,10 @@ mod tests {
             // and alpha never sees beta's messages.
             let reloaded_a = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
             reloaded_a.resume(Some(&id_a)).await.unwrap();
-            assert_eq!(reloaded_a.messages().await[0].content, "alpha work");
+            assert_eq!(reloaded_a.model_window().await[0].content, "alpha work");
             let reloaded_b = SessionStore::load_for_project(PathBuf::from("/projects/beta"));
             reloaded_b.resume(Some(&id_b)).await.unwrap();
-            assert_eq!(reloaded_b.messages().await[0].content, "beta work");
+            assert_eq!(reloaded_b.model_window().await[0].content, "beta work");
 
             // list() is scoped per project — alpha only sees its own session.
             let alpha_sessions = reloaded_a.list().await.unwrap();
@@ -2408,9 +2440,9 @@ mod tests {
         );
 
         store.open(&parent_id[..8]).await.unwrap();
-        assert_eq!(store.messages().await[0].content, "parent");
+        assert_eq!(store.model_window().await[0].content, "parent");
         store.open(&fork_id[..8]).await.unwrap();
-        assert_eq!(store.messages().await[0].content, "fork");
+        assert_eq!(store.model_window().await[0].content, "fork");
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -2436,7 +2468,7 @@ mod tests {
         // The primary is untouched: same id, still holds "parent", and has no
         // parent link (it did not become a child).
         assert_eq!(store.id().await, parent_id);
-        assert_eq!(store.messages().await[0].content, "parent");
+        assert_eq!(store.model_window().await[0].content, "parent");
         assert!(store.parent_id().await.is_none());
 
         // The side loads into its own store with the inherited history and the
@@ -2444,17 +2476,17 @@ mod tests {
         let side = store.open_side(&side_id).await.unwrap();
         assert_eq!(side.id().await, side_id);
         assert_eq!(side.parent_id().await.as_deref(), Some(parent_id.as_str()));
-        assert_eq!(side.messages().await[0].content, "parent");
+        assert_eq!(side.model_window().await[0].content, "parent");
 
         // Writing to the side never reaches the primary.
         side.replace_messages(vec![Message::new(neenee_core::Role::User, "side")])
             .await
             .unwrap();
-        assert_eq!(store.messages().await[0].content, "parent");
+        assert_eq!(store.model_window().await[0].content, "parent");
 
         // The side is independently resumable from disk (self-contained file).
         let reopened = store.open_side(&side_id).await.unwrap();
-        assert_eq!(reopened.messages().await[0].content, "side");
+        assert_eq!(reopened.model_window().await[0].content, "side");
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2478,7 +2510,7 @@ mod tests {
         // then keep the active session empty (the default state).
         let archived = SessionData {
             project_root: directory.clone(),
-            messages: vec![Message::new(neenee_core::Role::User, "archived branch")],
+            model_window: vec![Message::new(neenee_core::Role::User, "archived branch")],
             ..Default::default()
         };
         store.persist_archive(&archived).unwrap();
@@ -2563,11 +2595,11 @@ mod tests {
 
         let new_id = store.reset().await.unwrap();
         assert_ne!(new_id, previous_id);
-        assert!(store.messages().await.is_empty());
+        assert!(store.model_window().await.is_empty());
 
         let resumed_id = store.resume(None).await.unwrap();
         assert_eq!(resumed_id, previous_id);
-        assert_eq!(store.messages().await[0].content, "previous");
+        assert_eq!(store.model_window().await[0].content, "previous");
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -2586,14 +2618,14 @@ mod tests {
         // Corrupt the snapshot cache: the event log must still restore state.
         let mut corrupted: SessionData =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        corrupted.messages[0].content = "tampered".to_string();
+        corrupted.model_window[0].content = "tampered".to_string();
         let test_blobs = BlobStore::new(directory.join("blobs"));
         write_session_file(&path, &corrupted, &test_blobs).unwrap();
 
         // Re-open: for_path replays the event log, not the snapshot.
         let reloaded = SessionStore::for_path(path.clone());
         assert_eq!(reloaded.id().await, first_id);
-        assert_eq!(reloaded.messages().await[0].content, "first");
+        assert_eq!(reloaded.model_window().await[0].content, "first");
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2635,14 +2667,14 @@ mod tests {
         store.append_round(&round2).await.unwrap();
 
         // The live in-memory state reflects all appends.
-        let live = store.messages().await;
+        let live = store.model_window().await;
         assert_eq!(live.len(), 4);
         assert_eq!(live[3].content, "done");
 
         // A brand-new store replays the event log and recovers everything,
         // including the appended tail the snapshot never recorded.
         let reloaded = SessionStore::for_path(path.clone());
-        let recovered = reloaded.messages().await;
+        let recovered = reloaded.model_window().await;
         assert_eq!(recovered.len(), 4, "appended rounds survive reload");
         assert_eq!(recovered[2].content, "tool output");
         assert_eq!(recovered[3].content, "done");
@@ -2664,7 +2696,7 @@ mod tests {
 
         // Same length, same content → no-op.
         store.append_round(&messages).await.unwrap();
-        assert_eq!(store.messages().await.len(), 1);
+        assert_eq!(store.model_window().await.len(), 1);
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2692,14 +2724,14 @@ mod tests {
         store.append_round(&divergent).await.unwrap();
 
         // The fallback replaced everything with the incoming history.
-        let live = store.messages().await;
+        let live = store.model_window().await;
         assert_eq!(live.len(), 2);
         assert_eq!(live[0].content, "rewritten");
         assert_eq!(live[1].content, "new");
 
         // And a reload recovers the replaced state, not a corrupt splice.
         let reloaded = SessionStore::for_path(path.clone());
-        let recovered = reloaded.messages().await;
+        let recovered = reloaded.model_window().await;
         assert_eq!(recovered[0].content, "rewritten");
 
         let _ = fs::remove_dir_all(directory);
@@ -2726,7 +2758,7 @@ mod tests {
 
             let snapshot = SessionData {
                 id: "00000000-0000-0000-0000-000000000001".to_string(),
-                messages: vec![Message::new(neenee_core::Role::User, "from snapshot")],
+                model_window: vec![Message::new(neenee_core::Role::User, "from snapshot")],
                 ..Default::default()
             };
             let blob_store = BlobStore::new(dirs.blobs_dir());
@@ -2745,7 +2777,7 @@ mod tests {
 
             store.resume(Some(&snapshot.id)).await.unwrap();
             assert_eq!(store.id().await, snapshot.id);
-            assert_eq!(store.messages().await[0].content, "from snapshot");
+            assert_eq!(store.model_window().await[0].content, "from snapshot");
             assert!(
                 project_dir
                     .join("sessions")
@@ -2757,6 +2789,40 @@ mod tests {
             paths::set_test_default(None);
             let _ = std::fs::remove_dir_all(root);
         });
+    }
+
+    #[tokio::test]
+    async fn projection_snapshot_import_does_not_duplicate_archive() {
+        let directory =
+            std::env::temp_dir().join(format!("neenee-projection-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("session.json");
+        let blob_store = BlobStore::new(directory.join("blobs"));
+        let snapshot = SessionData {
+            model_window: vec![Message::new(neenee_core::Role::User, "live window")],
+            archived_transcript: vec![Message::new(neenee_core::Role::Assistant, "archived")],
+            last_projection: Some(ContextProjectionCheckpoint {
+                operation: ContextProjectionKind::Compact,
+                archived_messages: 1,
+                active_messages: 1,
+                before_chars: 100,
+                after_chars: 20,
+            }),
+            ..Default::default()
+        };
+        write_session_file(&path, &snapshot, &blob_store).unwrap();
+
+        let store = SessionStore::for_path(path.clone());
+        let transcript = store.full_transcript().await;
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].content, "archived");
+        assert_eq!(transcript[1].content, "live window");
+        assert_eq!(
+            store.last_projection().await.unwrap().operation,
+            ContextProjectionKind::Compact
+        );
+
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[tokio::test]
@@ -2784,7 +2850,7 @@ mod tests {
 
         // Replaying the event log rehydrates content from the blob store.
         let reloaded = SessionStore::for_path(path.clone());
-        let messages = reloaded.messages().await;
+        let messages = reloaded.model_window().await;
         assert_eq!(messages[0].content, big);
         assert!(
             messages[0].content_blob.is_none(),
@@ -2829,7 +2895,7 @@ mod tests {
 
         // Reload via the event-log path (authoritative) rehydrates it intact.
         let reloaded = SessionStore::for_path(path.clone());
-        let messages = reloaded.messages().await;
+        let messages = reloaded.model_window().await;
         assert_eq!(messages.len(), 1);
         let origin = messages[0].origin.as_ref().expect("origin reloaded");
         assert_eq!(
@@ -2874,7 +2940,7 @@ mod tests {
         fs::write(&path, legacy.to_string()).unwrap();
 
         let store = SessionStore::for_path(path.clone());
-        let messages = store.messages().await;
+        let messages = store.model_window().await;
         assert_eq!(messages.len(), 2);
         for (i, m) in messages.iter().enumerate() {
             assert!(
@@ -2900,19 +2966,20 @@ mod tests {
 
         let result = compact_messages(&messages, 10_000, 1).unwrap();
 
-        assert_eq!(result.active[0].role, neenee_core::Role::User);
-        assert!(result.active[0].hidden);
-        assert_eq!(result.active[1].content, "recent question");
-        assert_eq!(result.active[2].content, "recent answer");
+        assert_eq!(result.checkpoint.operation, ContextProjectionKind::Compact);
+        assert_eq!(result.model_window[0].role, neenee_core::Role::User);
+        assert!(result.model_window[0].hidden);
+        assert_eq!(result.model_window[1].content, "recent question");
+        assert_eq!(result.model_window[2].content, "recent answer");
         assert!(
             result
-                .archived
+                .archived_originals
                 .iter()
                 .any(|message| message.content == "old tool result")
         );
         assert!(
             !result
-                .archived
+                .archived_originals
                 .iter()
                 .any(|message| message.role == neenee_core::Role::System)
         );
@@ -3000,9 +3067,9 @@ mod tests {
             .unwrap();
 
         // The mock provider's canned reply becomes the checkpoint summary.
-        assert!(result.active[0].content.contains("mock AI"));
-        assert_eq!(result.active[1].content, "recent question");
-        assert!(result.active[0].hidden);
+        assert!(result.model_window[0].content.contains("mock AI"));
+        assert_eq!(result.model_window[1].content, "recent question");
+        assert!(result.model_window[0].hidden);
     }
 
     #[tokio::test]
@@ -3041,7 +3108,7 @@ mod tests {
             .unwrap();
 
         // Fallback excerpt summary references the old question.
-        assert!(result.active[0].content.contains("old question"));
+        assert!(result.model_window[0].content.contains("old question"));
         // Silence the unused MockProvider import warning while keeping the path
         // documented for the success-case test above.
         let _: &dyn Provider = &MockProvider;

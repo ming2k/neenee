@@ -281,7 +281,7 @@ mod tests {
                 scope: "*".to_string(),
             },
             PermissionRuleConfig {
-                tool: "read_file".to_string(),
+                tool: "read_text".to_string(),
                 scope: "*".to_string(),
             },
         ];
@@ -291,7 +291,7 @@ mod tests {
             scope: "*".to_string(),
         }));
         assert!(store.is_always_allowed(&PermissionRule {
-            tool: "read_file".to_string(),
+            tool: "read_text".to_string(),
             scope: "*".to_string(),
         }));
     }

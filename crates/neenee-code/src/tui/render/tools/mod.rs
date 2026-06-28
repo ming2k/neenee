@@ -94,7 +94,7 @@ impl ToolStatus {
 /// which one applies, so the per-tool dispatch lives in one place (the registry).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResultKind {
-    /// Line-numbered code block (default / unknown tools, `read_file`).
+    /// Line-numbered code block (default / unknown tools, `read_text`).
     Code,
     /// Directory / glob listing.
     Listing,
@@ -131,7 +131,7 @@ pub struct ToolView<'a> {
     pub args: &'a serde_json::Map<String, Value>,
     /// The subagent profile name (`explore` / `plan` / …) when this step is a
     /// subagent run that has announced its role; `None` otherwise. Lets the
-    /// [`SubagentPresenter`] label the step by role instead of "Subagent".
+    /// `SubagentPresenter` label the step by role instead of "Subagent".
     pub profile: Option<&'a str>,
 }
 
@@ -143,7 +143,7 @@ impl ToolView<'_> {
 
     /// Fetch a non-negative integer argument, or `None` when absent /
     /// non-numeric. Used by presenters that surface numeric params such as
-    /// `read_file`'s `offset` / `limit` in their collapsed header.
+    /// `read_text`'s `offset` / `limit` in their collapsed header.
     pub fn u64(&self, key: &str) -> Option<u64> {
         self.args.get(key).and_then(Value::as_u64)
     }
@@ -180,7 +180,7 @@ pub trait ToolPresenter {
 pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
     match name {
         "ask_user" => &ask_user::AskUserPresenter,
-        "read_file" => &read::ReadPresenter,
+        "read_text" => &read::ReadPresenter,
         "read_image" => &read_image::ReadImagePresenter,
         "edit_file" => &edit::EditPresenter,
         "write_file" => &edit::WritePresenter,
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn dispatches_known_tools_to_named_summaries() {
         assert_eq!(
-            summary("read_file", serde_json::json!({"path": "src/main.rs"})),
+            summary("read_text", serde_json::json!({"path": "src/main.rs"})),
             "Read src/main.rs"
         );
         assert_eq!(

@@ -230,16 +230,16 @@ pub struct App {
     pub input: String,
     /// Structured transcript messages (semantic document model).
     pub messages: Vec<TranscriptMessage>,
-    /// Version of the shared runtime buffer that [`messages`] was last synced
+    /// Version of the shared runtime buffer that `messages` was last synced
     /// from. The loop re-clones the buffer only when the runtime version moves
     /// past this, so an unchanged transcript costs no per-frame deep clone.
     /// Starts at 0 (the `Versioned` sentinel) so the first frame always syncs.
     pub messages_version: u64,
     /// Side-conversation transcript (ADR-0017). Populated only while a `/btw`
     /// side session is live; per-turn events tagged with the side `session_id`
-    /// route here instead of into [`messages`].
+    /// route here instead of into `messages`.
     pub side_messages: Vec<TranscriptMessage>,
-    /// Companion to [`messages_version`] for the side buffer.
+    /// Companion to `messages_version` for the side buffer.
     pub side_messages_version: u64,
     /// Per-message laid-out height cache (Stage 2). Lets the transcript renderer
     /// skip re-wrapping off-screen messages, making per-frame layout O(visible)
@@ -420,7 +420,7 @@ pub struct App {
     /// The open question (ask_user) modal's self-contained MVU state, or
     /// `None` when no question modal is open. Replaces the four separate
     /// `question_*` fields that previously scattered the modal's state across
-    /// `App`; all interaction now flows through [`QuestionModel::update`].
+    /// `App`; all interaction now flows through `QuestionModel::update`.
     pub question: Option<crate::tui::question_model::QuestionModel>,
     /// Scroll offset inside `Modal::Question`. Reset to 0 each time a question
     /// modal opens; clamped each frame by the modal's body renderer and, when

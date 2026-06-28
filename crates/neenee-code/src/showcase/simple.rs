@@ -464,7 +464,7 @@ pub fn session() -> io::Result<()> {
             connected: true,
             disabled: false,
             failure: None,
-            tool_names: vec!["read_file".into(), "write_file".into()],
+            tool_names: vec!["read_text".into(), "write_file".into()],
         }],
     };
     let mut state = SessionState {

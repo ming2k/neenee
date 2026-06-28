@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_carries_offset_as_start_line() {
+    async fn read_text_carries_offset_as_start_line() {
         // The structured `Code::start_line` is the contract the renderer relies
         // on to number an offset snippet from its true file line. A read with
         // `offset: 3` must surface `start_line: 3` (and only the post-offset
@@ -71,7 +71,7 @@ mod tests {
         let path = dir.join("lines.txt");
         std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
 
-        let tool = ReadFileTool;
+        let tool = ReadTextTool;
 
         let full = tool
             .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &path.to_string_lossy()))
@@ -140,7 +140,7 @@ mod tests {
         let path = dir.join("small.txt");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
 
-        let out = ReadFileTool
+        let out = ReadTextTool
             .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &path.to_string_lossy()))
             .await
             .unwrap();
@@ -161,7 +161,7 @@ mod tests {
         const LINES: usize = 6000;
         const PAGE: usize = 5000; // 50_000 / (9 + 1)
         let (path, _lines) = make_fixed_width_file(LINES);
-        let tool = ReadFileTool;
+        let tool = ReadTextTool;
         let arg = |offset: usize| {
             format!(
                 r#"{{"path":"{}","offset":{}}}"#,
@@ -218,7 +218,7 @@ mod tests {
             path.to_string_lossy(),
             LINES
         );
-        let (text, _pre, suf) = code_parts(ReadFileTool.call_structured(&arg).await.unwrap());
+        let (text, _pre, suf) = code_parts(ReadTextTool.call_structured(&arg).await.unwrap());
         // Far fewer than the requested 6000 lines — bounded by the budget.
         assert!(text.lines().count() < LINES);
         assert!(
@@ -241,7 +241,7 @@ mod tests {
         let empty = dir.join("empty.txt");
         std::fs::write(&empty, "").unwrap();
         let (text, pre, suf) = code_parts(
-            ReadFileTool
+            ReadTextTool
                 .call_structured(&r#"{"path":"PATH"}"#.replace("PATH", &empty.to_string_lossy()))
                 .await
                 .unwrap(),
@@ -256,7 +256,7 @@ mod tests {
         let small = dir.join("small.txt");
         std::fs::write(&small, "a\nb\n").unwrap();
         let (text, pre, suf) = code_parts(
-            ReadFileTool
+            ReadTextTool
                 .call_structured(
                     &r#"{"path":"PATH","offset":99}"#.replace("PATH", &small.to_string_lossy()),
                 )
@@ -282,7 +282,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("neenee-read-isdir-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let err = ReadFileTool
+        let err = ReadTextTool
             .call(&r#"{"path":"PATH"}"#.replace("PATH", &dir.to_string_lossy()))
             .await
             .unwrap_err();

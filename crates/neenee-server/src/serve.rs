@@ -124,7 +124,7 @@ async fn handle_connection(
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
     // 1. Replay transcript history so the browser sees prior context.
-    let messages = session.transcript().await;
+    let messages = session.full_transcript().await;
     let history = serde_json::to_string(&Wire::History { messages })
         .map_err(|e| format!("serialize history: {e}"))?;
     ws_sink

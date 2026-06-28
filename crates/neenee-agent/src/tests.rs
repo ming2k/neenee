@@ -1582,7 +1582,7 @@ fn estimate_tool_rounds_counts_assistant_tool_call_messages() {
     let mut with_calls = msgs[1].clone();
     with_calls.tool_calls = Some(vec![neenee_core::ToolCall {
         id: "c1".into(),
-        name: "read_file".into(),
+        name: "read_text".into(),
         arguments: "{}".into(),
     }]);
     msgs[1] = with_calls;
@@ -1648,7 +1648,7 @@ async fn review_now_runs_diagnostic_and_returns_verdict() {
     let mut assistant = Message::new(Role::Assistant, String::new());
     assistant.tool_calls = Some(vec![neenee_core::ToolCall {
         id: "c1".into(),
-        name: "read_file".into(),
+        name: "read_text".into(),
         arguments: "{\"path\":\"f\"}".into(),
     }]);
     transcript.push(assistant);

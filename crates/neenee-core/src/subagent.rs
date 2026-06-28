@@ -180,7 +180,7 @@ impl SubagentProfile {
 /// inspection with no side effects. Listed by name so adding a new
 /// side-effecting tool to the parent never silently widens these profiles.
 const READ_ONLY_TOOLS: &[&str] = &[
-    "read_file",
+    "read_text",
     "read_image",
     "grep",
     "glob",
@@ -308,7 +308,7 @@ turns short and report concrete findings, then stop.",
 /// never silently widens this profile.
 const QUANT_ANALYSIS_TOOLS: &[&str] = &[
     // Generic read-only inspection (shared with EXPLORE).
-    "read_file",
+    "read_text",
     "read_image",
     "grep",
     "glob",
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn explore_admits_a_whitelisted_read_tool() {
-        assert!(EXPLORE.tool_policy.admits(&make("read_file")));
+        assert!(EXPLORE.tool_policy.admits(&make("read_text")));
         assert!(EXPLORE.tool_policy.admits(&make("grep")));
     }
 
@@ -443,14 +443,14 @@ mod tests {
     fn explore_rejects_a_whitelisted_tool_that_requires_user() {
         // ask_user is not whitelisted, but even a whitelisted name is rejected
         // when requires_user is set and the profile disallows interaction.
-        assert!(!EXPLORE.tool_policy.admits(&with_user(make("read_file"))));
+        assert!(!EXPLORE.tool_policy.admits(&with_user(make("read_text"))));
     }
 
     #[test]
     fn explore_rejects_dispatch_tool_even_if_named_like_a_read() {
         // Recursion is absolute: even a whitelisted name is excluded when it
         // spawns a subagent.
-        assert!(!EXPLORE.tool_policy.admits(&with_spawn(make("read_file"))));
+        assert!(!EXPLORE.tool_policy.admits(&with_spawn(make("read_text"))));
     }
 
     #[test]
@@ -466,7 +466,7 @@ mod tests {
             write_paths: &[],
             command_allowlist: &[],
         };
-        assert!(!permissive.admits(&with_spawn(make("read_file"))));
+        assert!(!permissive.admits(&with_spawn(make("read_text"))));
         assert!(permissive.admits(&make("bash")));
     }
 
@@ -484,16 +484,16 @@ mod tests {
     #[test]
     fn select_tools_filters_by_name() {
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(make("read_file")),             // admit (whitelisted)
+            Arc::new(make("read_text")),             // admit (whitelisted)
             Arc::new(make("bash")),                  // reject (not whitelisted)
             Arc::new(make("write_file")),            // reject (not whitelisted)
             Arc::new(make("grep")),                  // admit (whitelisted)
-            Arc::new(with_spawn(make("read_file"))), // reject (recursion)
+            Arc::new(with_spawn(make("read_text"))), // reject (recursion)
         ];
         let selected = EXPLORE.select_tools(&tools);
         assert_eq!(selected.len(), 2);
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"read_text"));
         assert!(names.contains(&"grep"));
     }
 
@@ -505,7 +505,7 @@ mod tests {
             write_paths: &[],
             command_allowlist: &[],
         };
-        assert!(open.admits(&make("read_file")));
+        assert!(open.admits(&make("read_text")));
         assert!(open.admits(&make("bash")));
         assert!(open.admits(&make("write_file")));
     }
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn interactive_admits_all_named_tools_but_not_recursion_or_control() {
         use crate::INTERACTIVE;
-        assert!(INTERACTIVE.tool_policy.admits(&make("read_file")));
+        assert!(INTERACTIVE.tool_policy.admits(&make("read_text")));
         assert!(INTERACTIVE.tool_policy.admits(&make("bash")));
         assert!(INTERACTIVE.tool_policy.admits(&make("write_file")));
         assert!(INTERACTIVE.tool_policy.admits(&with_user(make("ask_user"))));
@@ -525,7 +525,7 @@ mod tests {
         assert!(
             !INTERACTIVE
                 .tool_policy
-                .admits(&with_spawn(make("read_file")))
+                .admits(&with_spawn(make("read_text")))
         );
         assert!(!INTERACTIVE.tool_policy.admits(&make_control()));
     }
@@ -545,7 +545,7 @@ mod tests {
         assert!(QUANT.tool_policy.admits(&make("backtest")));
         assert!(QUANT.tool_policy.admits(&make("list_positions")));
         // Shared read-only inspection: admitted.
-        assert!(QUANT.tool_policy.admits(&make("read_file")));
+        assert!(QUANT.tool_policy.admits(&make("read_text")));
         assert!(QUANT.tool_policy.admits(&make("grep")));
         // Live trading is NOT admitted — a quant analyst recommends, never
         // trades. Trading needs a separate, user-supervised profile.
@@ -555,7 +555,7 @@ mod tests {
         assert!(!QUANT.tool_policy.admits(&make("edit_file")));
         assert!(!QUANT.tool_policy.admits(&make("bash")));
         // Recursion and control-flow remain absolute.
-        assert!(!QUANT.tool_policy.admits(&with_spawn(make("read_file"))));
+        assert!(!QUANT.tool_policy.admits(&with_spawn(make("read_text"))));
         assert!(!QUANT.tool_policy.admits(&make_control()));
     }
 

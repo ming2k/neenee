@@ -1802,10 +1802,10 @@ mod tests {
         // so the rendered/copied paragraph still shows the quotes, and the
         // renderer can paint the span on the code surface. This holds across
         // paragraph / heading / list item / quote contexts.
-        let blocks = parse_blocks("Call the `read_file` tool.");
+        let blocks = parse_blocks("Call the `read_text` tool.");
         assert!(matches!(
             &blocks[0],
-            Block::Text { content, .. } if content == "Call the `read_file` tool."
+            Block::Text { content, .. } if content == "Call the `read_text` tool."
         ));
 
         // Heading.
@@ -1860,8 +1860,8 @@ mod tests {
 
     #[test]
     fn inline_code_records_byte_ranges_for_every_prose_context() {
-        // Paragraph: the run is `read_file` including both backticks.
-        let text = "Call the `read_file` tool.";
+        // Paragraph: the run is `read_text` including both backticks.
+        let text = "Call the `read_text` tool.";
         let expected = code_ranges_of(text);
         let blocks = parse_blocks(text);
         let Block::Text {
@@ -2127,10 +2127,10 @@ mod tests {
     #[test]
     fn tool_step_collapses_and_restores_full_semantic_detail() {
         let mut message =
-            TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
+            TranscriptMessage::tool_step("call_1", "read_text", r#"{"path":"README.md"}"#);
         // Collapsed running: human-readable summary only — no tool name.
         assert!(message.raw.contains("Read README.md"));
-        assert!(!message.raw.contains("read_file"));
+        assert!(!message.raw.contains("read_text"));
 
         assert!(message.finish_tool_step(
             "call_1",
@@ -2161,7 +2161,7 @@ mod tests {
         assert_eq!(task.subagent_label(), "explore src");
 
         // A regular tool step is not a subagent task.
-        let read = TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"a"}"#);
+        let read = TranscriptMessage::tool_step("call_1", "read_text", r#"{"path":"a"}"#);
         assert!(!read.is_subagent_task());
         assert!(read.subagent_status_line().is_none());
     }
@@ -2367,8 +2367,8 @@ mod tests {
 
     #[test]
     fn cancel_all_running_is_a_defensive_sweep_that_skips_terminal_steps() {
-        let mut a = TranscriptMessage::tool_step("a", "read_file", "{}");
-        let mut b = TranscriptMessage::tool_step("b", "read_file", "{}");
+        let mut a = TranscriptMessage::tool_step("a", "read_text", "{}");
+        let mut b = TranscriptMessage::tool_step("b", "read_text", "{}");
         // `b` already finished successfully; the sweep must not clobber it.
         assert!(b.finish_tool_step(
             "b",

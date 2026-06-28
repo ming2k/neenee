@@ -376,7 +376,7 @@ fn prev_word_start(input: &str, cursor_position: usize) -> usize {
 
 /// Find the end char index of the next whitespace-delimited word.
 /// Skips leading whitespace (including newlines), then skips the
-/// contiguous run of non-whitespace.  Returns [`input.len()`] when the
+/// contiguous run of non-whitespace.  Returns `input.len()` when the
 /// caret is at the very end; otherwise the returned position can cross
 /// newline boundaries.
 ///
@@ -844,7 +844,11 @@ pub fn process_event(
                 // inserts the text at the cursor (main prompt), or splices it
                 // inline into the modal field (modals).
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         InputAction::Paste
                     } else {
                         InputAction::None
@@ -856,8 +860,11 @@ pub fn process_event(
                 // is edited; a no-op elsewhere so it never inserts a literal
                 // 'b' or scrolls.
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
-                        && *cursor_position > 0
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
                     }
@@ -869,14 +876,22 @@ pub fn process_event(
                 // modals. Outside those (Browse zone, read-only modals) it is
                 // a no-op so it never inserts a literal 'a' or scrolls.
                 KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         cursor_line_start(input, cursor_position);
                     }
                     InputAction::None
                 }
                 // Ctrl+E: move the caret to the end of the current line.
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         cursor_line_end(input, cursor_position);
                     }
                     InputAction::None
@@ -888,7 +903,11 @@ pub fn process_event(
                 // No-op outside free-text surfaces so it never closes a
                 // modal or inserts a literal 'w'.
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         let start = prev_word_start(input, *cursor_position);
                         if start < *cursor_position {
                             let start_byte = input
@@ -913,7 +932,11 @@ pub fn process_event(
                 // drafts only lose the current line; Ctrl+C still clears the
                 // whole buffer when the user wants a full wipe.
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         let mut start = *cursor_position;
                         cursor_line_start(input, &mut start);
                         if start < *cursor_position {
@@ -938,7 +961,11 @@ pub fn process_event(
                 // logical line (readline `kill-line`). Stops at the next
                 // newline so multi-line drafts keep their other lines.
                 KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         let mut end = *cursor_position;
                         cursor_line_end(input, &mut end);
                         if end > *cursor_position {
@@ -960,14 +987,22 @@ pub fn process_event(
                 }
                 // Alt+B: jump back one word (readline `backward-word`).
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         *cursor_position = prev_word_start(input, *cursor_position);
                     }
                     InputAction::None
                 }
                 // Alt+F: jump forward one word (readline `forward-word`).
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         *cursor_position = next_word_end(input, *cursor_position);
                     }
                     InputAction::None
@@ -975,7 +1010,11 @@ pub fn process_event(
                 // Alt+D: delete the next whitespace-delimited word (readline
                 // `kill-word`). Symmetric counterpart to Ctrl+W.
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         let end = next_word_end(input, *cursor_position);
                         if end > *cursor_position {
                             let start_byte = input
@@ -1076,7 +1115,11 @@ pub fn process_event(
                         // inert here (`edits_input_field` is false), so the list
                         // stays a pure browse surface until search is entered.
                         InputAction::HistoryEnterSearch
-                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    } else if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         let byte_pos = input
                             .char_indices()
                             .map(|(i, _)| i)
@@ -1097,8 +1140,11 @@ pub fn process_event(
                 KeyCode::Backspace => {
                     if context.active_modal == super::Modal::Question {
                         InputAction::QuestionBackspace
-                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
-                        && *cursor_position > 0
+                    } else if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) && *cursor_position > 0
                     {
                         // Alt+Backspace / Ctrl+Backspace delete the previous
                         // whitespace-delimited word in one stroke, matching
@@ -1171,8 +1217,11 @@ pub fn process_event(
                         return InputAction::ModalUp;
                     }
 
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
-                        && *cursor_position > 0
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) && *cursor_position > 0
                     {
                         // Ctrl+Left (and Alt+Left on terminals that translate
                         // it) jumps back one whitespace-delimited word,
@@ -1193,8 +1242,11 @@ pub fn process_event(
                         return InputAction::ModalDown;
                     }
 
-                    if edits_input_field(context.active_modal, context.history_searching, context.model_searching)
-                        && *cursor_position < input.chars().count()
+                    if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) && *cursor_position < input.chars().count()
                     {
                         // Ctrl+Right (and Alt+Right) jump forward one word.
                         if key
@@ -1345,7 +1397,11 @@ pub fn process_event(
                             && context.has_focused_target)
                     {
                         InputAction::ScrollTop
-                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    } else if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
                     } else {
@@ -1358,7 +1414,11 @@ pub fn process_event(
                             && context.has_focused_target)
                     {
                         InputAction::ScrollBottom
-                    } else if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+                    } else if edits_input_field(
+                        context.active_modal,
+                        context.history_searching,
+                        context.model_searching,
+                    ) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
                     } else {
@@ -1374,7 +1434,11 @@ pub fn process_event(
             // splice it inline into the focused field in the free-text
             // modals (provider editor, provider picker filter, history
             // search).
-            if edits_input_field(context.active_modal, context.history_searching, context.model_searching) {
+            if edits_input_field(
+                context.active_modal,
+                context.history_searching,
+                context.model_searching,
+            ) {
                 InputAction::BracketedPaste(text)
             } else {
                 InputAction::None

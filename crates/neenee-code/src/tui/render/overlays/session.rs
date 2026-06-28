@@ -162,7 +162,7 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 ///
 /// The dashboard is read-only: it summarizes tools with a one-line count and a
 /// `t → /tools` hint rather than listing them. Interactive tool toggling lives
-/// in the dedicated [`Modal::Tools`](crate::tui::Modal::Tools) manager.
+/// in the dedicated [`Modal::Tools`] manager.
 /// `scroll` is read AND written back, clamped to the body's real height.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_session_modal(

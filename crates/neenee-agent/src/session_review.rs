@@ -350,7 +350,7 @@ mod tests {
                 );
                 m.tool_calls = Some(vec![neenee_core::ToolCall {
                     id: format!("c{i}"),
-                    name: "read_file".to_string(),
+                    name: "read_text".to_string(),
                     arguments: format!("{{\"path\":\"f{i}\"}}"),
                 }]);
                 m

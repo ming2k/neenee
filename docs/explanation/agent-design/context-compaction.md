@@ -1,6 +1,6 @@
 # Context compaction
 
-Compaction is the second context-relief layer (pruning →
+Compaction is the second context-projection layer (pruning →
 [compaction](context-compaction.md) → overflow recovery). Where
 [pruning](context-pruning.md) clears stale tool *bodies* cheaply and silently,
 compaction reclaims **conversation-level** space: it summarizes older complete
@@ -11,12 +11,13 @@ unlike pruning, it **surfaces a transcript notice**.
 
 This page is the design reference for compaction. For the cheaper layer that
 runs first, see [Context pruning](context-pruning.md); for where both sit in a
-turn, see [Harness architecture](harness.md#context-relief).
+turn, see [Harness architecture](harness.md#context-projection).
 
 ## Thresholds are model-relative
 
-Every relief threshold is a fraction of the **active model's context window**,
-measured in tokens and re-seeded whenever the provider switches (ADR-0019). The
+Every projection threshold is a fraction of the **active model's context
+window**, measured in tokens and re-seeded whenever the provider switches
+(ADR-0019). The
 declarative `CompactionPolicy` (`neenee-core/src/pressure.rs`) carries the
 fractions; `CompactionPolicy::resolve(window_tokens)` turns them into a concrete
 `ContextBudget`:
@@ -28,7 +29,7 @@ fractions; `CompactionPolicy::resolve(window_tokens)` turns them into a concrete
 | `target_utilization` | 0.25 | `target_tokens` | **Post-compaction size** |
 
 So on a 1M-token model compaction fires near 850k tokens and compresses the
-active window back toward ~250k — a deep cut that buys many rounds before the
+model window back toward ~250k — a deep cut that buys many rounds before the
 next one. When the window is unknown (local/unregistered models) a conservative
 `fallback_window_tokens` (32_000) substitutes so relief still engages.
 
@@ -37,7 +38,7 @@ next one. When the window is unknown (local/unregistered models) a conservative
 Thresholds are tokens; the live transcript must be measured in the same unit to
 compare against them. `effective_pressure_tokens`
 (`neenee-core/src/pressure.rs`) is the single policy for that, shared by both
-relief layers:
+projection layers:
 
 - A provider-reported `prompt_tokens` is *ground truth* for what the model
   actually saw, so it is preferred when present **and plausible** — at least
@@ -77,8 +78,9 @@ always begins coherently.
    the next compaction find and extend the prior summary. System messages are
    **regenerated** on the next turn rather than archived into model context.
 
-The result is a `ContextReliefResult` (active = checkpoint + tail; archived =
-the original head), committed durably exactly like a prune.
+The result is a `ContextProjectionResult` (model window = checkpoint + tail;
+archived originals = the original head), committed durably exactly like a
+prune.
 
 ## Hooks and veto
 
@@ -88,16 +90,18 @@ it happens; `post_compact` observes the committed checkpoint. The interactive
 runner supplies `RelayCompactionHooks`, which is also what turns a committed
 compaction into the user-facing `AgentResponse::Compacted` event via
 `send_compaction`. These names stay in the `Compaction*` family on purpose:
-after ADR-0021, only the summarizing layer emits `Compacted`, so the
-vocabulary is accurate (pruning uses the neutral `ContextRelief*` mechanism).
+only the summarizing layer emits `Compacted`, so the vocabulary is accurate
+(pruning uses the shared `ContextProjection*` persistence mechanism).
 
 ## Durability and the transcript notice
 
-Compaction commits through `SessionStore::commit_context_relief` — the same
+Compaction commits through `SessionStore::commit_context_projection` — the same
 archive-and-replace mechanism pruning uses — appending a
-`SessionEvent::ContextReliefCommitted` event. The complete pre-compaction
+`SessionEvent::ContextProjectionCommitted` event. The complete pre-compaction
 transcript is recoverable from the durable session even though the model now
-sees only the checkpoint plus the recent tail.
+sees only the checkpoint plus the recent tail. The checkpoint records
+`operation = compact`; legacy projection records without an operation load as
+`unknown`.
 
 Unlike pruning, compaction is **visible**: it emits `AgentResponse::Compacted`,
 which the TUI renders as `Compacted N messages: X -> Y chars.`. A user seeing
@@ -124,9 +128,10 @@ that notice knows a real summarization happened.
 ## References
 
 - ADR-0009 — uncapped agentic loop; compaction as the runaway backstop.
-- ADR-0019 — model-relative thresholds derived from the active window.
-- ADR-0021 — the `ContextRelief*` rename; only compaction keeps the
-  `Compaction`/`Compacted` vocabulary and the transcript notice.
+- ADR-0019 — model-relative thresholds derived from the model window.
+- ADR-0021 — only compaction keeps the `Compaction`/`Compacted` vocabulary and
+  the transcript notice.
+- ADR-0040 — session state and model-context projection vocabulary.
 - [Context pruning](context-pruning.md) — the cheaper layer that runs first.
 - `neenee-store/src/session.rs` — `run_compaction`, `CompactionSelection`,
   `CHECKPOINT_HEADER`, `CompactionHooks`.

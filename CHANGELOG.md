@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Session context vocabulary tightened around model-context projection.** Session
+  snapshots and event logs now write `model_window`, `archived_transcript`,
+  `last_projection`, and `context_projection_committed` instead of the older
+  `messages` / `archived_messages` / `last_relief` / `context_relief_committed`
+  vocabulary. Prune and compact commits now record an explicit projection
+  operation (`prune`, `compact`, or legacy `unknown`), and `/session status`
+  reports the last context projection. Older session files still load through
+  serde aliases.
+
 - **Shell output interleaves stdout/stderr by arrival order.** `bash` no longer
   renders all of stdout followed by all of stderr — both pipes now merge into a
   single arrival-ordered line stream, so the expanded view and detail overlay show

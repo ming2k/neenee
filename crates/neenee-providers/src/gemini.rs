@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn gemini_fallback_tool_results_are_user_context() {
         let body = gemini_request_body(vec![
-            Message::new(Role::Assistant, "{\"tool\":\"read_file\"}"),
+            Message::new(Role::Assistant, "{\"tool\":\"read_text\"}"),
             Message::new(Role::Tool, "file contents"),
             Message::new(Role::User, "next"),
         ]);

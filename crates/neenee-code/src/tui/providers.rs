@@ -223,7 +223,11 @@ pub(crate) fn models_filtered_from(
         rb.favorite
             .cmp(&ra.favorite)
             .then_with(|| rb.last_used_ms.cmp(&ra.last_used_ms))
-            .then_with(|| solutions[a.provider_idx].name.cmp(solutions[b.provider_idx].name))
+            .then_with(|| {
+                solutions[a.provider_idx]
+                    .name
+                    .cmp(solutions[b.provider_idx].name)
+            })
             .then_with(|| a.label.cmp(&b.label))
     });
     rows

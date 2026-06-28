@@ -237,7 +237,7 @@ be incoherent.
 | Concern | Layer | Why it lives there |
 |---------|-------|--------------------|
 | Repeated-call guard | Round | A stuck loop is unbounded by default; the guardrail watches each iteration for the one signature of "stuck" (same name + args) |
-| Mid-turn context relief | Round | Pruning old tool results between rounds reclaims space before the next request, inside one turn |
+| Mid-turn context projection | Round | Pruning old tool results between rounds produces a smaller model window before the next request, inside one turn |
 | Pre-tool retry safety | Round | A round is retryable until its first side effect; after that, retry is terminal |
 | Pursuit token and time accounting | Turn | Cost is booked once the turn's outcome is final, not partway through |
 | Plan staleness | Turn | "Turns since the plan was last updated" is the signal that the model has drifted |

@@ -20,7 +20,7 @@ use crate::side::SideSession;
 /// flip the harness to idle eagerly (before the in-flight turn's own terminal
 /// idle snapshot, which is gated behind persistence fsyncs), then cancel the
 /// live token. The generation counter is deliberately NOT bumped here so the
-/// stale turn still emits its own "... [Interrupted]" cleanup.
+/// stale turn still emits its own "... \[Interrupted\]" cleanup.
 pub async fn interrupt(
     agent: &Agent,
     session: &Arc<SessionStore>,

@@ -196,7 +196,7 @@ pub(super) fn content_modal_area(frame: &Frame, modal: Modal, desired_rows: u16)
 pub fn recess_backdrop(frame: &mut Frame, recess: Recess, theme: &Theme) {
     match recess {
         Recess::None => {}
-        Recess::Dim => dim_surface(frame, theme.modal_dim_factor()),
+        Recess::Dim => dim_surface(frame, theme),
         Recess::Takeover => {
             let area = frame.area();
             frame.render_widget(Clear, area);
@@ -217,10 +217,21 @@ pub fn recess_backdrop(frame: &mut Frame, recess: Recess, theme: &Theme) {
 /// Only [`Color::Rgb`] is scaled (the entire palette is RGB, so this covers
 /// every painted cell); named / Reset colors are left untouched so the dim is
 /// additive rather than lossy where they appear.
-fn dim_surface(frame: &mut Frame, factor: f32) {
+fn dim_surface(frame: &mut Frame, theme: &Theme) {
+    let factor = theme.modal_dim_factor();
+    // Code already starts closer to the dark surface than prose. If foreground
+    // and background are both multiplied by the modal factor, inline/code-block
+    // text loses contrast first. Keep code text a little brighter while still
+    // dimming its surface with the rest of the transcript.
+    let code_fg_factor = (factor + 0.25).min(1.0);
     let buffer = frame.buffer_mut();
     for cell in buffer.content.iter_mut() {
-        cell.fg = scale_color(cell.fg, factor);
+        let fg_factor = if cell.fg == theme.code_text() {
+            code_fg_factor
+        } else {
+            factor
+        };
+        cell.fg = scale_color(cell.fg, fg_factor);
         cell.bg = scale_color(cell.bg, factor);
         cell.style.fg = cell.fg;
         cell.style.bg = cell.bg;
@@ -644,7 +655,7 @@ mod tests {
     use crate::tui::Modal;
 
     use super::*;
-    use neenee_tui::Rect;
+    use neenee_tui::{Frame, Rect, Style};
 
     #[test]
     fn panel_inner_insets_symmetrically_around_left_bar() {
@@ -706,6 +717,42 @@ mod tests {
             }
             ModalHeight::Percent(_) => panic!("session modal should size to content"),
         }
+    }
+
+    #[test]
+    fn dim_surface_preserves_more_code_text_contrast() {
+        let theme = Theme::default();
+        let mut grid = neenee_tui::Grid::new(2, 1);
+        grid.set(
+            0,
+            0,
+            neenee_tui::Cell::narrow(
+                "c",
+                Style::default()
+                    .fg(theme.code_text())
+                    .bg(theme.code_surface()),
+            ),
+        );
+        grid.set(
+            1,
+            0,
+            neenee_tui::Cell::narrow("p", Style::default().fg(theme.fg()).bg(theme.surface())),
+        );
+
+        let mut frame = Frame::new(&mut grid);
+        dim_surface(&mut frame, &theme);
+        let code = frame.buffer_mut()[(0, 0)].clone();
+        let prose = frame.buffer_mut()[(1, 0)].clone();
+
+        assert_eq!(
+            code.bg,
+            scale_color(theme.code_surface(), theme.modal_dim_factor())
+        );
+        assert_eq!(
+            code.fg,
+            scale_color(theme.code_text(), theme.modal_dim_factor() + 0.25)
+        );
+        assert_eq!(prose.fg, scale_color(theme.fg(), theme.modal_dim_factor()));
     }
 
     #[test]

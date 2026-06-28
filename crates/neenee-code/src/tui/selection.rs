@@ -196,7 +196,7 @@ impl SelectionState {
 /// This returns the *original* text data, ignoring any terminal line wrapping.
 /// `table_grid` resolves the last-rendered grid for a `Block::Table` so cell
 /// selection returns the actually-displayed text with borders stripped.
-/// `cell_info` provides context when the selection is a [`Range`] bounded
+/// `cell_info` provides context when the selection is a `Range` bounded
 /// inside a table cell (free substring selection within `│` fences).
 pub fn get_selected_text<'a>(
     state: &SelectionState,
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn expanded_tool_step_copy_uses_semantic_detail() {
         let mut message =
-            TranscriptMessage::tool_step("call_1", "read_file", r#"{"path":"README.md"}"#);
+            TranscriptMessage::tool_step("call_1", "read_text", r#"{"path":"README.md"}"#);
         message.finish_tool_step(
             "call_1",
             "file contents",

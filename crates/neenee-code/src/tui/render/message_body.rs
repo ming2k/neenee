@@ -337,7 +337,7 @@ pub(super) fn draw_message_body(
                             bold_ranges,
                             base,
                             theme.code_text(),
-                            theme.body(),
+                            theme.code_surface(),
                             theme.selected(),
                         )
                     };
@@ -571,7 +571,7 @@ pub(super) fn draw_message_body(
                                     bold_ranges,
                                     base,
                                     theme.code_text(),
-                                    theme.body(),
+                                    theme.code_surface(),
                                     sel_bg,
                                 );
                                 // Skip the empty-prefix span (position 0).
@@ -692,7 +692,7 @@ pub(super) fn draw_message_body(
                 // Borderless code block: a uniform `code_bg` band with a
                 // line-number gutter, matching opencode's clean look. No
                 // `╭─ ╰─` frame, no per-line `│` rule.
-                let code_bg = theme.body();
+                let code_bg = theme.code_surface();
                 // The solid-background band is inset from the transcript edges so it
                 // reads as a distinct panel rather than bleeding into the
                 // terminal frame. Content (gutter + code) lives inside the
@@ -863,7 +863,7 @@ pub(super) fn draw_message_body(
                         bold_ranges,
                         style,
                         theme.code_text(),
-                        theme.body(),
+                        theme.code_surface(),
                         theme.selected(),
                     );
                     // For H1 headings the terminal UNDERLINED modifier fills
@@ -927,7 +927,7 @@ pub(super) fn draw_message_body(
                         bold_ranges,
                         base,
                         theme.code_text(),
-                        theme.body(),
+                        theme.code_surface(),
                         theme.selected(),
                     );
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);
@@ -1018,7 +1018,7 @@ pub(super) fn draw_message_body(
                         bold_ranges,
                         base,
                         theme.code_text(),
-                        theme.body(),
+                        theme.code_surface(),
                         theme.selected(),
                     );
                     let line_rect = Rect::new(area.x, *current_y, area.width, 1);

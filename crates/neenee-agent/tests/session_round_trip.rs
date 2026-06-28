@@ -22,7 +22,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use neenee_agent::Agent;
-use neenee_agent::orchestration::{CompactionSettings, TurnContext, TurnInput, execute_turn};
+use neenee_agent::orchestration::{
+    ContextProjectionSettings, TurnContext, TurnInput, execute_turn,
+};
 use neenee_agent::skills::SkillRegistry;
 use neenee_core::Role;
 use neenee_providers::MockProvider;
@@ -58,7 +60,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             token: CancellationToken::new(),
             session: session.clone(),
             session_id: session.id().await,
-            compaction: CompactionSettings {
+            projection: ContextProjectionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
                 summarize: false,
@@ -86,7 +88,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
 
     // Snapshot the live state before dropping everything.
     let saved_id = session.id().await;
-    let live_messages = session.messages().await;
+    let live_messages = session.model_window().await;
     assert!(
         live_messages
             .iter()
@@ -115,7 +117,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
         .expect("resume reopens the saved session by id");
     assert_eq!(resumed_id, saved_id);
 
-    let reopened_messages = reopened.messages().await;
+    let reopened_messages = reopened.model_window().await;
     assert_eq!(
         reopened_messages.len(),
         live_messages.len(),

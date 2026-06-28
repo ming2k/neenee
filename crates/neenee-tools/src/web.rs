@@ -189,7 +189,7 @@ impl Tool for WebFetchTool {
 }
 
 /// Search the web via a pluggable backend. The provider (and an optional
-/// fallback) are selected from `[websearch]` config; see the [`search`] module
+/// fallback) are selected from `[websearch]` config; see the `search` module
 /// for the available backends. Default backend is Exa (hosted, anonymous,
 /// reliable) with Parallel as fallback — mirroring other coding agents.
 ///

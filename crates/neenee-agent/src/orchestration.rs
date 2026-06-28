@@ -41,7 +41,7 @@ use neenee_store::{
     RepeatStore,
     config::Config,
     session::{
-        ContextReliefCheckpoint, ContextReliefResult, PursuitCheckpoint, SessionStore,
+        ContextProjectionCheckpoint, ContextProjectionResult, PursuitCheckpoint, SessionStore,
         UNCAPPED_ITERATIONS, estimate_chars, estimate_tokens, run_compaction,
     },
 };
@@ -350,7 +350,7 @@ fn slug(value: &str) -> String {
 }
 
 #[derive(Clone)]
-pub struct CompactionSettings {
+pub struct ContextProjectionSettings {
     /// Token thresholds resolved against the active model's context window.
     /// Pressure (estimated in tokens) is compared against these to decide when
     /// to prune and when to run a full summarizing compaction.
@@ -364,7 +364,7 @@ pub struct CompactionSettings {
     pub prune_protect_chars: usize,
 }
 
-impl CompactionSettings {
+impl ContextProjectionSettings {
     /// Mid-turn pruning only fires when it can reclaim at least this many chars,
     /// to avoid pruning churn for negligible gains.
     pub const PRUNE_MIN_RECLAIM_CHARS: usize = 8_000;
@@ -384,35 +384,36 @@ impl CompactionSettings {
     }
 }
 
-/// Mid-turn context-relief gate: prunes old tool results durably when the
-/// active turn is approaching the model's context budget.
-pub struct MidTurnPruneGate {
+/// Mid-turn model-context projection gate: prunes old tool results durably when
+/// the active turn is approaching the model's context budget.
+pub struct MidTurnPruneProjectionGate {
     pub session: Arc<SessionStore>,
     pub prune_protect_chars: usize,
 }
 
 #[async_trait]
-impl neenee_core::ContextReliefGate for MidTurnPruneGate {
-    async fn relieve_pressure(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
+impl neenee_core::ContextProjectionGate for MidTurnPruneProjectionGate {
+    async fn project_context(&self, messages: Vec<Message>) -> Option<Vec<Message>> {
         let mut messages = messages;
         let outcome = neenee_core::prune_tool_results(
             &mut messages,
             self.prune_protect_chars,
-            CompactionSettings::PRUNE_MIN_RECLAIM_CHARS,
+            ContextProjectionSettings::PRUNE_MIN_RECLAIM_CHARS,
         )?;
         let after_chars = estimate_chars(&messages);
-        let checkpoint = ContextReliefCheckpoint {
+        let checkpoint = ContextProjectionCheckpoint {
+            operation: neenee_store::session::ContextProjectionKind::Prune,
             archived_messages: outcome.originals.len(),
             active_messages: messages.len(),
             before_chars: after_chars + outcome.reclaimed_chars,
             after_chars,
         };
-        let result = ContextReliefResult {
-            active: messages.clone(),
-            archived: outcome.originals,
+        let result = ContextProjectionResult {
+            model_window: messages.clone(),
+            archived_originals: outcome.originals,
             checkpoint,
         };
-        if let Err(error) = self.session.commit_context_relief(result).await {
+        if let Err(error) = self.session.commit_context_projection(result).await {
             tracing::warn!(?error, "mid-turn prune commit failed");
         }
         Some(messages)
@@ -468,7 +469,7 @@ pub struct TurnContext {
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
     /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
-    pub compaction: CompactionSettings,
+    pub projection: ContextProjectionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
     pub retry_max_ms: u64,
@@ -493,7 +494,7 @@ pub struct InteractiveTurnContext {
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
     /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
-    pub compaction: CompactionSettings,
+    pub projection: ContextProjectionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
     pub retry_max_ms: u64,
@@ -522,7 +523,7 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
                 token: token.clone(),
                 session: context.session,
                 session_id: context.session_id.clone(),
-                compaction: context.compaction,
+                projection: context.projection,
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,
                 retry_max_ms: context.retry_max_ms,
@@ -566,7 +567,7 @@ pub async fn execute_turn(
         token,
         session,
         session_id,
-        compaction,
+        projection,
         retry_max_attempts,
         retry_base_ms,
         retry_max_ms,
@@ -657,11 +658,11 @@ pub async fn execute_turn(
     // (ADR-0019) so it engages only once pressure crosses that fraction of the
     // window — not every turn — mirroring the mid-turn gate. Pruning also
     // self-limits to runs that reclaim meaningful space.
-    if compaction.prune && estimate_tokens(&turn_history) > compaction.budget.prune_threshold_tokens
+    if projection.prune && estimate_tokens(&turn_history) > projection.budget.prune_threshold_tokens
     {
-        prune_and_commit(&mut turn_history, &session, &compaction).await?;
+        prune_and_commit(&mut turn_history, &session, &projection).await?;
     }
-    if estimate_tokens(&turn_history) > compaction.budget.compaction_threshold_tokens {
+    if estimate_tokens(&turn_history) > projection.budget.compaction_threshold_tokens {
         let _ = tx.send(turn(
             &session_id,
             TurnEvent::Activity("compacting context".to_string()),
@@ -670,7 +671,7 @@ pub async fn execute_turn(
         if let Some(checkpoint) = compact_turn_history(
             &mut turn_history,
             &session,
-            &compaction,
+            &projection,
             Some(agent.provider.clone()),
             extra,
         )
@@ -710,9 +711,9 @@ pub async fn execute_turn(
             && !compacted_after_overflow
             && !tool_activity.load(Ordering::SeqCst)
         {
-            let overflow_settings = CompactionSettings {
-                preserve_turns: compaction.preserve_turns.max(1),
-                ..compaction.clone()
+            let overflow_settings = ContextProjectionSettings {
+                preserve_turns: projection.preserve_turns.max(1),
+                ..projection.clone()
             };
             if compact_turn_history(
                 &mut turn_history,
@@ -728,7 +729,7 @@ pub async fn execute_turn(
                 if streamed_text.swap(false, Ordering::SeqCst) {
                     let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
                 }
-                if let Some(checkpoint) = session.last_relief().await {
+                if let Some(checkpoint) = session.last_projection().await {
                     send_compaction(&tx, &session_id, &checkpoint);
                 }
                 attempt = attempt.saturating_sub(1);
@@ -1052,10 +1053,10 @@ pub fn relay_agent_event(
 pub async fn compact_turn_history(
     history: &mut Vec<Message>,
     session: &SessionStore,
-    settings: &CompactionSettings,
+    settings: &ContextProjectionSettings,
     provider: Option<Arc<dyn Provider>>,
     extra_context: Vec<String>,
-) -> Result<Option<ContextReliefCheckpoint>, String> {
+) -> Result<Option<ContextProjectionCheckpoint>, String> {
     // Skip the model call entirely when summarization is disabled; the excerpt
     // fallback inside `run_compaction` still produces a checkpoint.
     let provider = if settings.summarize { provider } else { None };
@@ -1071,30 +1072,31 @@ pub async fn compact_turn_history(
         return Ok(None);
     };
     let checkpoint = result.checkpoint.clone();
-    session.commit_context_relief(result).await?;
+    session.commit_context_projection(result).await?;
     Ok(Some(checkpoint))
 }
 
 /// Prune old tool results in place and durably commit the change. Pruning is an
-/// implicit context-relief step: it keeps the conversation and the
+/// implicit model-context projection step: it keeps the conversation and the
 /// `tool_call_id` chain intact (only stale tool *bodies* are cleared), so unlike
 /// a summarizing compaction it does **not** surface a transcript notice — it
 /// only records a durable checkpoint and a `debug` trace for observability.
 pub async fn prune_and_commit(
     history: &mut [Message],
     session: &SessionStore,
-    settings: &CompactionSettings,
+    settings: &ContextProjectionSettings,
 ) -> Result<(), String> {
     let before_chars = estimate_chars(history);
     let Some(outcome) = neenee_core::prune_tool_results(
         history,
         settings.prune_protect_chars,
-        CompactionSettings::PRUNE_MIN_RECLAIM_CHARS,
+        ContextProjectionSettings::PRUNE_MIN_RECLAIM_CHARS,
     ) else {
         return Ok(());
     };
     let after_chars = estimate_chars(history);
-    let checkpoint = ContextReliefCheckpoint {
+    let checkpoint = ContextProjectionCheckpoint {
+        operation: neenee_store::session::ContextProjectionKind::Prune,
         archived_messages: outcome.originals.len(),
         active_messages: history.len(),
         before_chars,
@@ -1107,9 +1109,9 @@ pub async fn prune_and_commit(
         "pruned stale tool results"
     );
     session
-        .commit_context_relief(ContextReliefResult {
-            active: history.to_owned(),
-            archived: outcome.originals,
+        .commit_context_projection(ContextProjectionResult {
+            model_window: history.to_owned(),
+            archived_originals: outcome.originals,
             checkpoint,
         })
         .await
@@ -1118,7 +1120,7 @@ pub async fn prune_and_commit(
 pub fn send_compaction(
     tx: &mpsc::UnboundedSender<AgentResponse>,
     session_id: &str,
-    checkpoint: &ContextReliefCheckpoint,
+    checkpoint: &ContextProjectionCheckpoint,
 ) {
     let _ = tx.send(turn(
         session_id,
@@ -1140,7 +1142,7 @@ pub struct PursuitContext {
     pub session: Arc<SessionStore>,
     /// Session id this pursuit belongs to (ADR-0017).
     pub session_id: String,
-    pub compaction: CompactionSettings,
+    pub projection: ContextProjectionSettings,
     pub retry_max_attempts: usize,
     pub retry_base_ms: u64,
     pub retry_max_ms: u64,
@@ -1204,7 +1206,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                 token: token.clone(),
                 session: context.session.clone(),
                 session_id: context.session_id.clone(),
-                compaction: context.compaction.clone(),
+                projection: context.projection.clone(),
                 retry_max_attempts: context.retry_max_attempts,
                 retry_base_ms: context.retry_base_ms,
                 retry_max_ms: context.retry_max_ms,

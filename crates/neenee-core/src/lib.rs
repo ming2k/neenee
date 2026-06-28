@@ -9,7 +9,7 @@
 //! (`RepeatStore`, the SQLite migrations) moved to `neenee-store`; this
 //! crate keeps only the domain shapes
 //! (`Pursuit`, `ThreadPursuit`, `RepeatJob`, `TodoList`, …) and the traits
-//! (`Provider`, `Tool`, `Hook`, `SessionReview`, `ContextReliefGate`) the
+//! (`Provider`, `Tool`, `Hook`, `SessionReview`, `ContextProjectionGate`) the
 //! rest of the stack is built on. Pursuit persistence moved onto
 //! `SessionStore` (`SessionData.pursuit`) in ADR-0032.
 
@@ -57,8 +57,8 @@ pub mod tool_call;
 pub mod tool_registry;
 pub mod webconfig;
 pub use capability::{
-    CommandScope, ContextReliefGate, OperationScope, Provider, ProviderStreamEvent, ScopeTarget,
-    Tool, ToolOverride, ToolOverrides, deep_merge_json, empty_tool_overrides,
+    CommandScope, ContextProjectionGate, OperationScope, Provider, ProviderStreamEvent,
+    ScopeTarget, Tool, ToolOverride, ToolOverrides, deep_merge_json, empty_tool_overrides,
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use dynamic::DynamicCatalog;

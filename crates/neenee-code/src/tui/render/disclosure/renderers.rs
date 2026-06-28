@@ -274,7 +274,7 @@ fn draw_blank_rows(ctx: &mut RenderCtx<'_, '_>, style: Style, rows: usize) {
 }
 
 /// Render text content as a code block with a line-number gutter on
-/// `code_bg`. Used for `read_file` / `edit_file` results and as the
+/// `code_bg`. Used for `read_text` / `edit_file` results and as the
 /// fallback for unrecognized tools. The gutter starts at column `indent`
 /// so the code aligns with the rest of the step body.
 ///
@@ -1961,9 +1961,9 @@ pub fn draw_reasoning_trace(
                         code_ranges,
                         bold_ranges,
                         Style::default().fg(ctx.theme.muted()),
-                        ctx.theme.body(),
-                        ctx.theme.selected(),
                         ctx.theme.code_text(),
+                        ctx.theme.code_surface(),
+                        ctx.theme.selected(),
                     );
                     let used = TRANSCRIPT_BODY_LEADING_INDENT as usize + wl.text.width();
                     let mut line = line;

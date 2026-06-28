@@ -9,7 +9,8 @@
 //! without disturbing the primary's token/generation.
 
 use neenee_agent::orchestration::{
-    CompactionSettings, InteractiveTurnContext, ProxyProvider, TurnInput, start_interactive_turn,
+    ContextProjectionSettings, InteractiveTurnContext, ProxyProvider, TurnInput,
+    start_interactive_turn,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, AgentIdentity};
@@ -56,7 +57,7 @@ impl SideSession {
     ) -> Result<Self, String> {
         let (side_id, _parent_id) = primary.fork_to_side().await?;
         let store = Arc::new(primary.open_side(&side_id).await?);
-        let history = Arc::new(tokio::sync::Mutex::new(store.messages().await));
+        let history = Arc::new(tokio::sync::Mutex::new(store.model_window().await));
 
         // Fresh side agent. The provider is shared through the same
         // `ProxyProvider` holder as the primary, which clones the inner
@@ -147,7 +148,8 @@ pub async fn start_active_turn(
     config: &Config,
     input: TurnInput,
 ) {
-    let compaction = CompactionSettings::from_config(config, active_context_window(primary_agent));
+    let projection =
+        ContextProjectionSettings::from_config(config, active_context_window(primary_agent));
     let retry_max_attempts = config.provider_retry_max_attempts;
     let retry_base_ms = config.provider_retry_base_ms;
     let retry_max_ms = config.provider_retry_max_ms;
@@ -197,7 +199,7 @@ pub async fn start_active_turn(
             generation_counter: generation,
             session,
             session_id,
-            compaction,
+            projection,
             retry_max_attempts,
             retry_base_ms,
             retry_max_ms,

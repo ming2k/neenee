@@ -500,11 +500,7 @@ impl Provider for OpenAiCompatProvider {
         });
     }
 
-    fn prepare_tools_with(
-        &self,
-        tools: &[Arc<dyn Tool>],
-        overrides: &neenee_core::ToolOverrides,
-    ) {
+    fn prepare_tools_with(&self, tools: &[Arc<dyn Tool>], overrides: &neenee_core::ToolOverrides) {
         let schemas: Vec<Value> = tools
             .iter()
             .map(|t| t.to_openai_function_with(overrides))
@@ -819,7 +815,7 @@ mod tests {
 
     #[test]
     fn echo_filter_drops_bare_json_mirror_when_native_calls_present() {
-        let (out, echo) = run_echo_filter(&["{\"name\":\"read_file\",\"arguments\":{}}"], true);
+        let (out, echo) = run_echo_filter(&["{\"name\":\"read_text\",\"arguments\":{}}"], true);
         assert!(echo);
         assert!(out.is_empty(), "got {out:?}");
     }
@@ -920,7 +916,7 @@ mod tests {
         let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
         let matched = ToolCall {
             id: "call_matched".to_string(),
-            name: "read_file".to_string(),
+            name: "read_text".to_string(),
             arguments: "{}".to_string(),
         };
         let assistant_with_call = Message {
@@ -993,7 +989,7 @@ mod tests {
         };
         let call_b = ToolCall {
             id: "b".into(),
-            name: "read_file".into(),
+            name: "read_text".into(),
             arguments: "{}".into(),
         };
         let call_c = ToolCall {
@@ -1145,11 +1141,10 @@ mod tests {
 
     #[test]
     fn prepare_tools_with_threads_overrides_into_request_body() {
-        let provider =
-            OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(DummyTool {
-                name: "read_file",
+                name: "read_text",
                 desc: "built-in description",
             }),
             Arc::new(DummyTool {
@@ -1158,10 +1153,10 @@ mod tests {
             }),
         ];
 
-        // Override read_file only; bash keeps its built-in description.
+        // Override read_text only; bash keeps its built-in description.
         let mut overrides = neenee_core::ToolOverrides::new();
         overrides.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             neenee_core::ToolOverride {
                 description: Some("model-specific wording".to_string()),
                 params: std::collections::HashMap::new(),
@@ -1173,7 +1168,7 @@ mod tests {
         assert_eq!(tool_desc_at(&body, 0), "model-specific wording");
         assert_eq!(tool_desc_at(&body, 1), "built-in bash");
         // Name and type are untouched.
-        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_text");
         assert_eq!(body["tools"][0]["type"], "function");
     }
 
@@ -1184,7 +1179,7 @@ mod tests {
         // configured for the active model.
         let mk = || OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DummyTool {
-            name: "read_file",
+            name: "read_text",
             desc: "built-in description",
         })];
 

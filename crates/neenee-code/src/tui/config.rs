@@ -62,7 +62,7 @@ mod tests {
         assert!(!tool_default_expanded(&cfg, "edit_file"));
         assert!(tool_default_expanded(&cfg, "bash"));
         // Still falls back for unlisted tools.
-        assert!(!tool_default_expanded(&cfg, "read_file"));
+        assert!(!tool_default_expanded(&cfg, "read_text"));
     }
 
     #[test]
@@ -85,7 +85,7 @@ thinking = true
         let cfg: TuiConfig = toml::from_str(toml).expect("parses");
         assert!(tool_default_expanded(&cfg, "edit_file"));
         assert!(tool_default_expanded(&cfg, "bash"));
-        assert!(!tool_default_expanded(&cfg, "read_file"));
+        assert!(!tool_default_expanded(&cfg, "read_text"));
         assert!(thinking_default_expanded(&cfg));
     }
 

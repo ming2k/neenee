@@ -67,7 +67,7 @@ pub use neenee_store::RepeatStore;
 // the Agent struct expects at the crate root have to be listed here by name.
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
-    AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextReliefGate, EXPLORE,
+    AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextProjectionGate, EXPLORE,
     HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message,
     PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision, PermissionRequest, PromptChannel,
     PromptContext, PromptRegistry, PromptSection, Provider, ProviderEntry, ProviderPickerRow,

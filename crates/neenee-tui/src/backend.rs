@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use crossterm::{
     QueueableCommand, cursor,
     style::{Attribute, Color as CtColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, ClearType},
+    terminal::{self, ClearType, DisableLineWrap, EnableLineWrap},
 };
 
 #[allow(unused_imports)]
@@ -156,13 +156,15 @@ impl<W: Write> Backend<W> {
                     self.apply_style(*style)?;
                     let mut current_x = *x;
                     for (sym, w) in cells {
-                        let is_bottom_right = *y == terminal_h.saturating_sub(1) && current_x + (*w as u16) >= terminal_w;
-                        if is_bottom_right {
-                            // Avoid printing to the very last cell of the terminal,
-                            // which would cause the emulator to auto-wrap and scroll.
-                            break;
+                        let reaches_bottom_right = *y == terminal_h.saturating_sub(1)
+                            && current_x + (*w as u16) >= terminal_w;
+                        if reaches_bottom_right {
+                            self.out.queue(DisableLineWrap)?;
                         }
                         self.out.queue(crossterm::style::Print(sym.clone()))?;
+                        if reaches_bottom_right {
+                            self.out.queue(EnableLineWrap)?;
+                        }
                         current_x += *w as u16;
                         // Advance our tracked cursor by the glyph's width; the
                         // trailing continuation column is implicit.
@@ -181,17 +183,19 @@ impl<W: Write> Backend<W> {
                         self.out.queue(terminal::Clear(ClearType::UntilNewLine))?;
                     } else {
                         // No BCE or non-default background: paint explicit styled spaces to the edge.
-                        let mut safe_width = *width;
-                        let is_bottom_row = *y == terminal_h.saturating_sub(1);
-                        if is_bottom_row {
-                            let max_safe_width = terminal_w.saturating_sub(*x).saturating_sub(1);
-                            safe_width = safe_width.min(max_safe_width);
+                        let reaches_bottom_right = *y == terminal_h.saturating_sub(1)
+                            && (*x).saturating_add(*width) >= terminal_w;
+                        if reaches_bottom_right {
+                            self.out.queue(DisableLineWrap)?;
                         }
-                        for _ in 0..safe_width {
+                        for _ in 0..*width {
                             self.out.queue(crossterm::style::Print(" "))?;
                         }
+                        if reaches_bottom_right {
+                            self.out.queue(EnableLineWrap)?;
+                        }
                         if let Some((cx, _cy)) = self.cur.as_mut() {
-                            *cx = cx.saturating_add(safe_width);
+                            *cx = cx.saturating_add(*width);
                         }
                     }
                 }
@@ -208,6 +212,19 @@ impl<W: Write> Backend<W> {
         self.out.queue(cursor::MoveTo(x, y))?;
         self.cur = Some((x, y));
         Ok(())
+    }
+
+    /// Hide the terminal cursor without changing the tracked position.
+    pub fn hide_cursor(&mut self) -> io::Result<()> {
+        self.out.queue(cursor::Hide)?;
+        Ok(())
+    }
+
+    /// Show the terminal cursor at `(x, y)`, keeping the backend's cursor
+    /// tracker in sync with the real terminal.
+    pub fn show_cursor_at(&mut self, x: u16, y: u16) -> io::Result<()> {
+        self.out.queue(cursor::Show)?;
+        self.move_to(x, y)
     }
 
     /// Apply only the style attributes that differ from the currently-applied
@@ -375,6 +392,84 @@ mod tests {
         // Count occurrences of the SGR set; should appear exactly once.
         let count = s.matches("\x1b[38;2;9;9;9m").count();
         assert_eq!(count, 1, "SGR emitted once, got: {s:?}");
+    }
+
+    #[test]
+    fn cursor_positioning_keeps_next_frame_draws_honest() {
+        crossterm::style::force_color_output(true);
+        let first = DrawCmd {
+            w: 4,
+            h: 3,
+            draws: vec![Draw::Cells {
+                x: 0,
+                y: 0,
+                style: Style::default(),
+                cells: vec![("A".to_string(), 1)],
+            }],
+        };
+        let second = DrawCmd {
+            w: 4,
+            h: 3,
+            draws: vec![Draw::Cells {
+                // This is exactly where the first render left the backend's
+                // cursor tracker. If the visible caret move below does not
+                // update that tracker, the second render omits MoveTo and
+                // writes at the real caret position instead.
+                x: 1,
+                y: 0,
+                style: Style::default(),
+                cells: vec![("B".to_string(), 1)],
+            }],
+        };
+
+        let mut buf = Vec::new();
+        {
+            let mut be = Backend::with_bce(&mut buf, Bce::Yes);
+            be.render(&first).unwrap();
+            be.show_cursor_at(0, 2).unwrap();
+            assert_eq!(be.cur, Some((0, 2)));
+            be.render(&second).unwrap();
+        }
+
+        let s = String::from_utf8(buf).unwrap();
+        let caret_move = s
+            .find("\x1b[3;1H")
+            .expect("caret move to row 3 col 1 must be emitted");
+        let redraw_move = s[caret_move..]
+            .find("\x1b[1;2H")
+            .expect("next frame must move back to row 1 col 2 before drawing")
+            + caret_move;
+        let redraw_text = s[redraw_move..]
+            .find('B')
+            .expect("second frame text must be emitted")
+            + redraw_move;
+        assert!(redraw_move < redraw_text, "MoveTo must precede B: {s:?}");
+    }
+
+    #[test]
+    fn non_bce_clear_eol_paints_bottom_right_under_line_wrap_guard() {
+        crossterm::style::force_color_output(true);
+        let cmd = DrawCmd {
+            w: 4,
+            h: 2,
+            draws: vec![Draw::ClearEol {
+                x: 2,
+                y: 1,
+                style: Style::default().bg(Color::Rgb(7, 8, 9)),
+                width: 2,
+            }],
+        };
+
+        let s = render_to_string(&cmd, Bce::No);
+        let guard_off = s
+            .find("\x1b[?7l")
+            .expect("bottom-right clear must disable line wrap");
+        let guard_on = s[guard_off..]
+            .find("\x1b[?7h")
+            .expect("bottom-right clear must restore line wrap")
+            + guard_off;
+        let spaces = s[guard_off..guard_on].matches(' ').count();
+        assert_eq!(spaces, 2, "clear must paint through the corner: {s:?}");
     }
 
     #[test]

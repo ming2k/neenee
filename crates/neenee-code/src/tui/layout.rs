@@ -369,7 +369,8 @@ impl ModalHitMap {
     }
 
     pub fn permission_sheet_contains(&self, x: u16, y: u16) -> bool {
-        self.permission_sheet.is_some_and(|rect| contains(rect, x, y))
+        self.permission_sheet
+            .is_some_and(|rect| contains(rect, x, y))
     }
 }
 

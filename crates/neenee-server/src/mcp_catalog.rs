@@ -15,7 +15,7 @@ use std::time::Duration;
 use neenee_core::{DynamicCatalog, Tool};
 
 /// A [`DynamicCatalog`] for MCP server tools. Holds the reconnect-capable
-/// server handles from the initial [`load_mcp_tools`] call and a shared holder
+/// server handles from the initial `load_mcp_tools` call and a shared holder
 /// into the agent's live tool list.
 pub struct McpCatalog {
     servers: Vec<Arc<neenee_tools::mcp::McpServer>>,

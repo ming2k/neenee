@@ -1,12 +1,12 @@
 //! Session-level AI title runner (ADR-0022): the LLM-backed side of the
-//! [`TITLE`](neenee_core::TITLE) profile.
+//! [`TITLE`] profile.
 //!
 //! Mirrors the split established by [`crate::session_review`]: the domain
 //! vocabulary and the pure post-processing ([`clean_title`]) live in
 //! `neenee-core`, while the provider call lives here next to the `Agent`.
 //! Like `session_review` this runs a bounded subagent of the primary agent,
 //! but the title task is pure text-in/text-out — it needs no tools and no
-//! ReAct loop — so the runner is a single [`Provider::chat`] call framed by
+//! ReAct loop — so the runner is a single `Provider::chat` call framed by
 //! the [`TITLE`] profile's system prompt, not a full
 //! [`Agent::run_streaming_with_events`] turn. The model is told to output
 //! only the title; any tool calls it (incorrectly) emits are ignored, since
@@ -46,9 +46,9 @@ const TITLE_CALL_TIMEOUT: Duration = Duration::from_secs(45);
 impl Agent {
     /// Generate a session title from `transcript`, or `None` on failure.
     ///
-    /// A single [`Provider::chat`] call framed by the [`TITLE`] profile's
+    /// A single `Provider::chat` call framed by the `TITLE` profile's
     /// system prompt. The transcript is condensed to a compact excerpt
-    /// ([`serialize_for_title`]); the model's free-form answer is normalized
+    /// (`serialize_for_title`); the model's free-form answer is normalized
     /// by [`clean_title`]. Best-effort throughout: provider errors, timeouts,
     /// and empty/unparseable answers all return `None` so the caller can leave
     /// the stored title untouched.

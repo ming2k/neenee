@@ -1,4 +1,4 @@
-//! Presenter for `read_file`.
+//! Presenter for `read_text`.
 
 use super::{ToolPresenter, ToolView};
 
@@ -50,7 +50,7 @@ mod tests {
         };
         let args = Box::leak(owned.into());
         ToolView {
-            name: "read_file",
+            name: "read_text",
             args,
             profile: None,
         }

@@ -489,7 +489,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Tool for EchoReadTool {
         fn name(&self) -> &str {
-            "read_file"
+            "read_text"
         }
         fn description(&self) -> &str {
             "test read tool"
@@ -611,12 +611,12 @@ mod tests {
         let admitted = EXPLORE.select_tools(&tools);
         let admitted_names: Vec<&str> = admitted.iter().map(|t| t.name()).collect();
 
-        assert_eq!(admitted_names, vec!["read_file"]);
+        assert_eq!(admitted_names, vec!["read_text"]);
     }
 
     /// Cross-cut regression: `EXPLORE` admits only its whitelisted read tools —
     /// `ask_user`, the non-whitelisted write stub, and recursion are all
-    /// excluded. The read stub is admitted because it is named `read_file`,
+    /// excluded. The read stub is admitted because it is named `read_text`,
     /// which is in [`READ_ONLY_TOOLS`].
     #[test]
     fn explore_profile_excludes_bash_writes_user_and_recursion() {
@@ -635,6 +635,6 @@ mod tests {
         // the write stub, and recursion are all excluded).
         let explore_selected = EXPLORE.select_tools(&tools);
         let explore_names: Vec<&str> = explore_selected.iter().map(|t| t.name()).collect();
-        assert_eq!(explore_names, vec!["read_file"]);
+        assert_eq!(explore_names, vec!["read_text"]);
     }
 }

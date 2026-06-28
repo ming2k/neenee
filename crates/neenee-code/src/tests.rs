@@ -7,7 +7,7 @@
 
 use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    CompactionSettings, ProxyProvider, TurnContext, TurnInput, execute_turn, retry_delay_ms,
+    ContextProjectionSettings, ProxyProvider, TurnContext, TurnInput, execute_turn, retry_delay_ms,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_core::{AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent, async_trait};
@@ -42,7 +42,7 @@ fn registry_collects_all_self_registered_tools() {
     let names: std::collections::HashSet<&str> = collected.iter().map(|t| t.name()).collect();
     for expected in [
         "bash",
-        "read_file",
+        "read_text",
         "read_image",
         "write_file",
         "edit_file",
@@ -223,7 +223,7 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            compaction: CompactionSettings {
+            projection: ContextProjectionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
                 summarize: false,
@@ -314,7 +314,7 @@ async fn turn_does_not_retry_after_tool_activity() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            compaction: CompactionSettings {
+            projection: ContextProjectionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
                 summarize: false,
@@ -377,7 +377,7 @@ async fn turn_exhaustion_message_explains_retry_budget() {
             token: CancellationToken::new(),
             session_id: session.id().await,
             session,
-            compaction: CompactionSettings {
+            projection: ContextProjectionSettings {
                 budget: neenee_core::CompactionPolicy::default().resolve(100_000),
                 preserve_turns: 6,
                 summarize: false,

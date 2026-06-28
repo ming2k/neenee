@@ -110,7 +110,7 @@ async fn serde_shapes() {
         session_id: "s1".into(),
         event: TurnEvent::ToolCall {
             id: "c1".into(),
-            name: "read_file".into(),
+            name: "read_text".into(),
             arguments: "{}".into(),
         },
     };

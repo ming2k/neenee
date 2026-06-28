@@ -64,8 +64,8 @@ impl Tool for BashTool {
         _on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
         on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
     ) -> Result<neenee_core::ToolOutput, String> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
         use neenee_core::tool_output::{ShellLine, ShellStream, strip_ansi};
+        use tokio::io::{AsyncBufReadExt, BufReader};
 
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;

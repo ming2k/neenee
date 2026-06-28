@@ -258,7 +258,7 @@ impl InputReader {
                             // Terminal read error → nothing more to read; stop.
                             Err(_) => break,
                         },
-                        Ok(false) => {} // timeout: loop back to re-check shutdown
+                        Ok(false) => {}  // timeout: loop back to re-check shutdown
                         Err(_) => break, // poll error → stop
                     }
                 }
@@ -571,452 +571,461 @@ pub(super) async fn run_app_loop(
 
         // Draw frame (skipped when nothing changed — see `needs_draw`).
         if needs_draw {
-        terminal.draw(|f| {
-            let mut layout_map = LayoutMap::new();
-            app.modal_hit_map.clear();
-            // Borrow the height cache out of `app` for the duration of the draw:
-            // `view_messages` borrows `app` immutably below, so the cache cannot
-            // also be reached through `app` at the same time. It is restored once
-            // `view_messages` is no longer borrowed (see below).
-            let mut height_cache = std::mem::take(&mut app.layout_height_cache);
-            let activity_for_display = app.activity_status.as_str();
-            let status = display_status(
-                &app.loop_status,
-                activity_for_display,
-                app.pending_permission.is_some(),
-            );
-
-            // Compute the displayed input text first so the transcript layout can
-            // reserve the right height for a wrapping, growing input box.
-            let masked_input = if app.active_modal == Modal::ModelEditor && app.editor_field == 0 {
-                // Mask the API key everywhere it could be rendered (the editor
-                // field itself, and any layout pass that inspects the input).
-                "•".repeat(app.input.chars().count())
-            } else {
-                app.input.clone()
-            };
-
-            // Modal recess policy (single source of truth: `Modal::recess`).
-            // A terminal cannot alpha-blend, so a modal either floats, darkens
-            // the live surface in place, or fully occludes it:
-            // - Takeover (Sessions): the footer collapses to zero height and
-            //   the surface is occluded — opening a different session is a full
-            //   context switch, so a clean slate is the intent.
-            // - Dim (every other centered modal): the footer keeps its height
-            //   so layout is stable, and the whole surface is darkened in place
-            //   by the recess pass just before the modal is drawn. Context
-            //   (transcript, input, hint bar, activity bar) stays visible for
-            //   focus while the centered panel reads as the focal layer.
-            // - None (Question / Permission): floats on the fully-live surface.
-            // Provider / ModelEditor / HistorySearch borrow the input line as
-            // their own field, so the composer is suppressed for them (its rect
-            // stays as recessed surface) — no duplicate field, and no
-            // masked-cursor panic in the editor.
-            let recess = app.active_modal.recess();
-            let chrome_hidden = recess == Recess::Takeover;
-
-            // When zoomed into a subagent, render its child messages and show
-            // a navigation bar; otherwise render the root conversation.
-            let view_messages = app.focused_messages();
-            // `/btw` side banner (ADR-0017): shown only while the side view is
-            // active. The subagent zoom and the side view are mutually
-            // exclusive, so the two banners never coexist.
-            let side_banner = app.in_side_view.then_some(app.parent_status);
-            let subagent_bar = app.focus_stack.last().and_then(|current| {
-                let tasks: Vec<&TranscriptMessage> = app
-                    .messages
-                    .iter()
-                    .filter(|message| message.is_subagent_task())
-                    .collect();
-                let idx = tasks.iter().position(|message| {
-                    message.tool_step_call_id() == Some(current.call_id.as_str())
-                })?;
-                Some(render::SubagentBarInfo {
-                    label: tasks.get(idx)?.subagent_label(),
-                    index: idx + 1,
-                    total: tasks.len(),
-                })
-            });
-
-            // Suppress the hover affordance whenever a full-overlay modal is
-            // open so no stale highlight bleeds through. The permission sheet
-            // keeps the transcript interactive, so it is exempted.
-            let chrome_interactive = matches!(app.active_modal, Modal::None | Modal::Permission);
-
-            let transcript_render = render::draw_transcript(
-                f,
-                &mut layout_map,
-                render::TranscriptView {
-                    messages: view_messages,
-                    scroll: app.scroll,
-                    selection: &app.selection,
-                    cell_selection: app.drag.cell_info.as_ref(),
-                    activity: &status,
-                    // ~100ms per phase keeps one breathing cycle near 1.2s
-                    // (SPINNER_PHASES steps); `breathing_color` wraps modulo.
-                    spinner_phase: (app.spinner_epoch.elapsed().as_millis() / 100) as usize,
-                    input: &masked_input,
-                    byte_cursor: app.byte_cursor(),
-                    chrome_hidden,
-                    subagent_bar,
-                    side_banner,
-                    pursuit: app.current_pursuit.as_ref(),
-                    todos: app.todos.as_ref(),
-                    review_alert: app.review_alert.clone(),
-                    turn_started_at: app.turn_started_at,
-                    hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
-                    focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
-                    logo: app.logo.as_deref(),
-                    theme: &app.theme,
-                    height_cache: Some(&mut height_cache),
-                },
-            );
-            let input_rect = transcript_render.input_rect;
-            let hint_rect = transcript_render.hint_rect;
-            let activity_rect = transcript_render.activity_rect;
-            let todos_rect = transcript_render.todos_rect;
-            let content_lines = transcript_render.content_lines;
-            let view_height = transcript_render.view_height;
-            let sticky = transcript_render.sticky;
-
-            // The hint bar (model / context) lives directly below the input
-            // box. Rendered only when the chrome is visible. It is drawn before
-            // the composer because it borrows `view_messages` (an immutable
-            // borrow of `app`) while `draw_composer` needs a mutable borrow of
-            // `app.input_scroll`.
-            // The permission sheet takes over the hint line as well as the
-            // input box, so suppress the hint bar while it is open.
-            if !chrome_hidden && hint_rect.height > 0 && app.active_modal != Modal::Permission {
-                render::draw_hint_bar(
-                    f,
-                    hint_rect,
-                    render::HintBarView {
-                        current_provider: &app.current_provider,
-                        current_model: &app.current_model,
-                        messages: view_messages,
-                        shell_active: app.focused_target.is_none()
-                            && app.active_modal == Modal::None
-                            && app.input.starts_with('!'),
-                        unattended: app.unattended,
-                    },
-                    &app.theme,
+            terminal.draw(|f| {
+                let mut layout_map = LayoutMap::new();
+                app.modal_hit_map.clear();
+                // Borrow the height cache out of `app` for the duration of the draw:
+                // `view_messages` borrows `app` immutably below, so the cache cannot
+                // also be reached through `app` at the same time. It is restored once
+                // `view_messages` is no longer borrowed (see below).
+                let mut height_cache = std::mem::take(&mut app.layout_height_cache);
+                let activity_for_display = app.activity_status.as_str();
+                let status = display_status(
+                    &app.loop_status,
+                    activity_for_display,
+                    app.pending_permission.is_some(),
                 );
-            }
 
-            // The input box is only shown when no overlay modal is open. The
-            // `focused` flag drops the panel to its dim "blurred" palette and
-            // hides the caret whenever keyboard focus is on the conversation
-            // stream (Browse zone), so the user can see at a glance which
-            // surface the next keypress will land on. A pending permission
-            // request replaces the composer with the inline permission sheet.
-            if !chrome_hidden {
-                if app.active_modal == Modal::Permission {
-                    if let Some(request) = app.pending_permission.as_ref() {
-                        // Extend the slot down by the hint-line height so the
-                        // sheet also covers (replaces) the hint bar.
-                        let permission_rect = neenee_tui::Rect::new(
-                            input_rect.x,
-                            input_rect.y,
-                            input_rect.width,
-                            input_rect.height + hint_rect.height,
-                        );
-                        let max_scroll = render::draw_permission_sheet(
+                // Compute the displayed input text first so the transcript layout can
+                // reserve the right height for a wrapping, growing input box.
+                let masked_input =
+                    if app.active_modal == Modal::ModelEditor && app.editor_field == 0 {
+                        // Mask the API key everywhere it could be rendered (the editor
+                        // field itself, and any layout pass that inspects the input).
+                        "•".repeat(app.input.chars().count())
+                    } else {
+                        app.input.clone()
+                    };
+
+                // Modal recess policy (single source of truth: `Modal::recess`).
+                // A terminal cannot alpha-blend, so a modal either floats, darkens
+                // the live surface in place, or fully occludes it:
+                // - Takeover (Sessions): the footer collapses to zero height and
+                //   the surface is occluded — opening a different session is a full
+                //   context switch, so a clean slate is the intent.
+                // - Dim (every other centered modal): the footer keeps its height
+                //   so layout is stable, and the whole surface is darkened in place
+                //   by the recess pass just before the modal is drawn. Context
+                //   (transcript, input, hint bar, activity bar) stays visible for
+                //   focus while the centered panel reads as the focal layer.
+                // - None (Question / Permission): floats on the fully-live surface.
+                // Provider / ModelEditor / HistorySearch borrow the input line as
+                // their own field, so the composer is suppressed for them (its rect
+                // stays as recessed surface) — no duplicate field, and no
+                // masked-cursor panic in the editor.
+                let recess = app.active_modal.recess();
+                let chrome_hidden = recess == Recess::Takeover;
+
+                // When zoomed into a subagent, render its child messages and show
+                // a navigation bar; otherwise render the root conversation.
+                let view_messages = app.focused_messages();
+                // `/btw` side banner (ADR-0017): shown only while the side view is
+                // active. The subagent zoom and the side view are mutually
+                // exclusive, so the two banners never coexist.
+                let side_banner = app.in_side_view.then_some(app.parent_status);
+                let subagent_bar = app.focus_stack.last().and_then(|current| {
+                    let tasks: Vec<&TranscriptMessage> = app
+                        .messages
+                        .iter()
+                        .filter(|message| message.is_subagent_task())
+                        .collect();
+                    let idx = tasks.iter().position(|message| {
+                        message.tool_step_call_id() == Some(current.call_id.as_str())
+                    })?;
+                    Some(render::SubagentBarInfo {
+                        label: tasks.get(idx)?.subagent_label(),
+                        index: idx + 1,
+                        total: tasks.len(),
+                    })
+                });
+
+                // Suppress the hover affordance whenever a full-overlay modal is
+                // open so no stale highlight bleeds through. The permission sheet
+                // keeps the transcript interactive, so it is exempted.
+                let chrome_interactive =
+                    matches!(app.active_modal, Modal::None | Modal::Permission);
+
+                let transcript_render = render::draw_transcript(
+                    f,
+                    &mut layout_map,
+                    render::TranscriptView {
+                        messages: view_messages,
+                        scroll: app.scroll,
+                        selection: &app.selection,
+                        cell_selection: app.drag.cell_info.as_ref(),
+                        activity: &status,
+                        // ~100ms per phase keeps one breathing cycle near 1.2s
+                        // (SPINNER_PHASES steps); `breathing_color` wraps modulo.
+                        spinner_phase: (app.spinner_epoch.elapsed().as_millis() / 100) as usize,
+                        input: &masked_input,
+                        byte_cursor: app.byte_cursor(),
+                        chrome_hidden,
+                        subagent_bar,
+                        side_banner,
+                        pursuit: app.current_pursuit.as_ref(),
+                        todos: app.todos.as_ref(),
+                        review_alert: app.review_alert.clone(),
+                        turn_started_at: app.turn_started_at,
+                        hovered_step: chrome_interactive.then_some(app.hovered_step).flatten(),
+                        focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
+                        logo: app.logo.as_deref(),
+                        theme: &app.theme,
+                        height_cache: Some(&mut height_cache),
+                    },
+                );
+                let input_rect = transcript_render.input_rect;
+                let hint_rect = transcript_render.hint_rect;
+                let activity_rect = transcript_render.activity_rect;
+                let todos_rect = transcript_render.todos_rect;
+                let content_lines = transcript_render.content_lines;
+                let view_height = transcript_render.view_height;
+                let sticky = transcript_render.sticky;
+
+                // The hint bar (model / context) lives directly below the input
+                // box. Rendered only when the chrome is visible. It is drawn before
+                // the composer because it borrows `view_messages` (an immutable
+                // borrow of `app`) while `draw_composer` needs a mutable borrow of
+                // `app.input_scroll`.
+                // The permission sheet takes over the hint line as well as the
+                // input box, so suppress the hint bar while it is open.
+                if !chrome_hidden && hint_rect.height > 0 && app.active_modal != Modal::Permission {
+                    render::draw_hint_bar(
+                        f,
+                        hint_rect,
+                        render::HintBarView {
+                            current_provider: &app.current_provider,
+                            current_model: &app.current_model,
+                            messages: view_messages,
+                            shell_active: app.focused_target.is_none()
+                                && app.active_modal == Modal::None
+                                && app.input.starts_with('!'),
+                            unattended: app.unattended,
+                        },
+                        &app.theme,
+                    );
+                }
+
+                // The input box is only shown when no overlay modal is open. The
+                // `focused` flag drops the panel to its dim "blurred" palette and
+                // hides the caret whenever keyboard focus is on the conversation
+                // stream (Browse zone), so the user can see at a glance which
+                // surface the next keypress will land on. A pending permission
+                // request replaces the composer with the inline permission sheet.
+                if !chrome_hidden {
+                    if app.active_modal == Modal::Permission {
+                        if let Some(request) = app.pending_permission.as_ref() {
+                            // Extend the slot down by the hint-line height so the
+                            // sheet also covers (replaces) the hint bar.
+                            let permission_rect = neenee_tui::Rect::new(
+                                input_rect.x,
+                                input_rect.y,
+                                input_rect.width,
+                                input_rect.height + hint_rect.height,
+                            );
+                            let max_scroll = render::draw_permission_sheet(
+                                f,
+                                &mut app.modal_hit_map,
+                                request,
+                                app.modal_index,
+                                app.permission_confirm_always,
+                                app.permission_show_details,
+                                app.permission_scroll,
+                                permission_rect,
+                                &app.theme,
+                            );
+                            app.permission_max_scroll = max_scroll;
+                            app.permission_scroll =
+                                app.permission_scroll.min(app.permission_max_scroll);
+                        }
+                    } else if matches!(
+                        app.active_modal,
+                        Modal::Provider | Modal::ModelEditor | Modal::HistorySearch
+                    ) {
+                        // These modals borrow the input line as their own field
+                        // (filter / key+model / history-query), so the composer
+                        // underneath would only duplicate the same `app.input` the
+                        // modal already shows — and, since both are bound to the
+                        // one buffer, would read as a second live input field
+                        // accepting the same keystrokes. Its rect stays mounted
+                        // (so the footer layout is stable) but is left as recessed
+                        // surface — the dim pass darkens it like the rest of the
+                        // background. For the editor's key field the composer would
+                        // also panic: the masked key's byte cursor is computed
+                        // against the unmasked string.
+                    } else if !app.in_subagent_view() {
+                        // The composer stays mounted for the dim-recess modals
+                        // (Help / ToolStepDetail / Session /
+                        // Activity) so the footer layout doesn't shift when the
+                        // overlay opens or closes; the recess pass darkens it in
+                        // place with the rest of the surface. When a transcript
+                        // step carries keyboard focus (Ctrl+↑/↓), the composer drops
+                        // to its dim "blurred" palette and hides the caret so the
+                        // user can see at a glance that the next keypress targets
+                        // the step, not the input box. Typing into the box clears
+                        // the focus and re-brightens it immediately.
+                        let step_focused = app.focused_target.is_some();
+                        let show_caret = !step_focused
+                            && app.active_modal == Modal::None
+                            && !app.selection.is_active();
+                        render::draw_composer(
                             f,
-                            &mut app.modal_hit_map,
-                            request,
-                            app.modal_index,
-                            app.permission_confirm_always,
-                            app.permission_show_details,
-                            app.permission_scroll,
-                            permission_rect,
+                            input_rect,
+                            &app.input,
+                            app.byte_cursor(),
+                            !step_focused,
+                            show_caret,
+                            &app.theme,
+                            &mut layout_map,
+                            true,
+                            &mut app.input_scroll,
+                            &app.selection,
+                        );
+                    }
+                }
+
+                // Now that `view_messages` is no longer borrowed, persist the
+                // per-frame layout state back onto `app` for the next iteration
+                // and for click routing.
+                // Restore the height cache (populated/refreshed during this draw)
+                // so the next frame can reuse it.
+                app.layout_height_cache = height_cache;
+                app.content_lines = content_lines;
+                app.view_height = view_height;
+                app.activity_rect = activity_rect;
+                app.todos_rect = todos_rect;
+                match sticky {
+                    Some(info) => {
+                        app.sticky_step = Some(info.message_idx);
+                        app.sticky_rect = Some(info.rect);
+                        app.sticky_summary_line = Some(info.summary_line);
+                    }
+                    None => {
+                        app.sticky_step = None;
+                        app.sticky_rect = None;
+                        app.sticky_summary_line = None;
+                    }
+                }
+
+                // Completion menu: slash commands or `@path` file mentions.
+                // Honors `completion_dismissed` so Esc / Enter-commit keep the
+                // popup hidden until the next edit clears the latch.
+                if app.active_modal == Modal::None
+                    && !app.completion_dismissed
+                    && app.completion_kind() != CompletionKind::None
+                {
+                    let completions = app.completions();
+                    if !completions.is_empty() {
+                        render::draw_completion_menu(
+                            f,
+                            &mut layout_map,
+                            &completions,
+                            app.suggestion_index,
+                            input_rect,
                             &app.theme,
                         );
-                        app.permission_max_scroll = max_scroll;
-                        app.permission_scroll =
-                            app.permission_scroll.min(app.permission_max_scroll);
                     }
-                } else if matches!(app.active_modal, Modal::Provider | Modal::ModelEditor) {
-                    // These modals borrow the input line as their own field
-                    // (filter / key+model), so the composer underneath would
-                    // only duplicate the same `app.input` the modal already
-                    // shows. Its rect stays mounted (so the footer layout is
-                    // stable) but is left as recessed surface — the dim pass
-                    // darkens it like the rest of the background. For the
-                    // editor's key field the composer would also panic: the
-                    // masked key's byte cursor is computed against the
-                    // unmasked string.
-                } else if !app.in_subagent_view() {
-                    // The composer stays mounted for the dim-recess modals
-                    // (Help / ToolStepDetail / Session /
-                    // Activity) so the footer layout doesn't shift when the
-                    // overlay opens or closes; the recess pass darkens it in
-                    // place with the rest of the surface. When a transcript
-                    // step carries keyboard focus (Ctrl+↑/↓), the composer drops
-                    // to its dim "blurred" palette and hides the caret so the
-                    // user can see at a glance that the next keypress targets
-                    // the step, not the input box. Typing into the box clears
-                    // the focus and re-brightens it immediately.
-                    let step_focused = app.focused_target.is_some();
-                    let show_caret = !step_focused
-                        && app.active_modal == Modal::None
-                        && !app.selection.is_active();
-                    render::draw_composer(
+                }
+
+                // Recess the live surface for the open modal: darken it in place
+                // (Dim), occlude it fully (Takeover), or leave it untouched (None).
+                // Done after the transcript + chrome are drawn and before the modal
+                // panel so the panel overpaints its own crisp area on top of the
+                // recessed background.
+                render::recess_backdrop(f, recess, &app.theme);
+
+                // Modals
+                let drawn_modal_rect = match app.active_modal {
+                    Modal::Provider => {
+                        let ranked = app.models_filtered();
+                        Some(render::draw_models_modal(
+                            f,
+                            &mut layout_map,
+                            &ranked,
+                            &app.current_provider,
+                            &app.current_model,
+                            app.modal_index,
+                            &app.key_status,
+                            &app.input,
+                            app.cursor_position,
+                            &mut app.model_scroll,
+                            app.model_modal_follow,
+                            app.model_search,
+                            &app.theme,
+                        ))
+                    }
+                    Modal::HistorySearch => {
+                        let ranked = app.history_rows();
+                        Some(render::draw_history_modal(
+                            f,
+                            &mut layout_map,
+                            &app.input_history,
+                            &app.input,
+                            app.cursor_position,
+                            &ranked,
+                            app.modal_index,
+                            &mut app.history_scroll,
+                            app.history_modal_follow,
+                            app.history_preview,
+                            app.history_search,
+                            &app.theme,
+                        ))
+                    }
+                    Modal::Permission => None,
+                    Modal::Question => {
+                        if let Some(ref qmodel) = app.question {
+                            Some(render::draw_question_modal(
+                                f,
+                                &mut app.modal_hit_map,
+                                qmodel.request(),
+                                qmodel.current(),
+                                qmodel.selected(),
+                                qmodel.other_text(),
+                                qmodel.highlight(),
+                                &mut app.question_scroll,
+                                app.question_modal_follow,
+                                &app.theme,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    Modal::ModelEditor => {
+                        let title = app
+                            .editor_target
+                            .and_then(|idx| PROVIDERS.get(idx))
+                            .map(|s| s.name)
+                            .unwrap_or("model");
+                        Some(render::draw_model_editor(
+                            f,
+                            title,
+                            app.editor_field,
+                            &app.editor_key,
+                            &app.editor_model,
+                            &app.input,
+                            app.cursor_position,
+                            &app.theme,
+                        ))
+                    }
+                    Modal::Help => {
+                        Some(render::draw_help_modal(f, &mut app.help_scroll, &app.theme))
+                    }
+                    Modal::ToolStepDetail => {
+                        if let Some(msg) = app
+                            .tool_detail_message_idx
+                            .and_then(|idx| app.messages.get(idx))
+                        {
+                            Some(render::draw_tool_step_detail_overlay(
+                                f,
+                                msg,
+                                app.tool_detail_scroll,
+                                &app.theme,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    Modal::Sessions => Some(render::draw_sessions_modal(
                         f,
-                        input_rect,
-                        &app.input,
-                        app.byte_cursor(),
-                        !step_focused,
-                        show_caret,
+                        &app.sessions_overview,
+                        app.modal_index
+                            .min(app.sessions_overview.len().saturating_sub(1)),
                         &app.theme,
-                        &mut layout_map,
-                        true,
-                        &mut app.input_scroll,
-                        &app.selection,
-                    );
-                }
-            }
-
-            // Now that `view_messages` is no longer borrowed, persist the
-            // per-frame layout state back onto `app` for the next iteration
-            // and for click routing.
-            // Restore the height cache (populated/refreshed during this draw)
-            // so the next frame can reuse it.
-            app.layout_height_cache = height_cache;
-            app.content_lines = content_lines;
-            app.view_height = view_height;
-            app.activity_rect = activity_rect;
-            app.todos_rect = todos_rect;
-            match sticky {
-                Some(info) => {
-                    app.sticky_step = Some(info.message_idx);
-                    app.sticky_rect = Some(info.rect);
-                    app.sticky_summary_line = Some(info.summary_line);
-                }
-                None => {
-                    app.sticky_step = None;
-                    app.sticky_rect = None;
-                    app.sticky_summary_line = None;
-                }
-            }
-
-            // Completion menu: slash commands or `@path` file mentions.
-            // Honors `completion_dismissed` so Esc / Enter-commit keep the
-            // popup hidden until the next edit clears the latch.
-            if app.active_modal == Modal::None
-                && !app.completion_dismissed
-                && app.completion_kind() != CompletionKind::None
-            {
-                let completions = app.completions();
-                if !completions.is_empty() {
-                    render::draw_completion_menu(
+                    )),
+                    Modal::Session => Some(render::draw_session_modal(
                         f,
-                        &mut layout_map,
-                        &completions,
-                        app.suggestion_index,
-                        input_rect,
-                        &app.theme,
-                    );
-                }
-            }
-
-            // Recess the live surface for the open modal: darken it in place
-            // (Dim), occlude it fully (Takeover), or leave it untouched (None).
-            // Done after the transcript + chrome are drawn and before the modal
-            // panel so the panel overpaints its own crisp area on top of the
-            // recessed background.
-            render::recess_backdrop(f, recess, &app.theme);
-
-            // Modals
-            let drawn_modal_rect = match app.active_modal {
-                Modal::Provider => {
-                    let ranked = app.models_filtered();
-                    Some(render::draw_models_modal(
-                        f,
-                        &mut layout_map,
-                        &ranked,
                         &app.current_provider,
                         &app.current_model,
-                        app.modal_index,
                         &app.key_status,
-                        &app.input,
-                        app.cursor_position,
-                        &mut app.model_scroll,
-                        app.model_modal_follow,
-                        app.model_search,
+                        &app.mcp_statuses,
+                        app.session_context.as_ref(),
+                        &mut app.session_scroll,
                         &app.theme,
-                    ))
-                }
-                Modal::HistorySearch => {
-                    let ranked = app.history_rows();
-                    Some(render::draw_history_modal(
+                    )),
+                    Modal::Tools => Some(render::draw_tools_modal(
                         f,
-                        &mut layout_map,
-                        &app.input_history,
-                        &app.input,
-                        app.cursor_position,
-                        &ranked,
+                        app.session_context.as_ref(),
                         app.modal_index,
-                        &mut app.history_scroll,
-                        app.history_modal_follow,
-                        app.history_preview,
-                        app.history_search,
+                        &mut app.session_scroll,
+                        app.session_modal_follow,
                         &app.theme,
-                    ))
-                }
-                Modal::Permission => None,
-                Modal::Question => {
-                    if let Some(ref qmodel) = app.question {
-                        Some(render::draw_question_modal(
+                    )),
+                    Modal::Permissions => Some(render::draw_permissions_manager(
+                        f,
+                        app.session_context.as_ref(),
+                        app.modal_index,
+                        &mut app.permissions_scroll,
+                        &app.theme,
+                    )),
+                    Modal::Activity => {
+                        let user_prompt: Option<String> = app
+                            .focused_messages()
+                            .iter()
+                            .rev()
+                            // Only a genuine chat prompt is the turn's driving
+                            // prompt. Slash commands (`/review …`) and shell
+                            // passthroughs (`!ls`) are surfaced as `Role::User`
+                            // in the transcript but are handled by the harness /
+                            // bash tool, never seen by the model — so they must
+                            // not be shown as the Activity modal's "Prompt".
+                            .find(|m| {
+                                m.role == neenee_core::Role::User
+                                    && m.origin == crate::tui::document::UserMessageOrigin::Chat
+                            })
+                            .map(|m| m.raw.clone());
+                        Some(render::draw_activity_modal(
                             f,
-                            &mut app.modal_hit_map,
-                            qmodel.request(),
-                            qmodel.current(),
-                            qmodel.selected(),
-                            qmodel.other_text(),
-                            qmodel.highlight(),
-                            &mut app.question_scroll,
-                            app.question_modal_follow,
+                            render::ActivityModalView {
+                                active_tab: app.activity_tab,
+                                pursuit: app.current_pursuit.as_ref(),
+                                todos: app.todos.as_ref(),
+                                user_prompt: user_prompt.as_deref(),
+                                turn_count: app.turn_count,
+                                current_round: app.current_round,
+                                review_alert: &app.review_alert,
+                                current_model: app.current_model.as_str(),
+                                turn_started_at: app.turn_started_at,
+                                activity: &status,
+                            },
+                            &mut app.activity_scroll,
                             &app.theme,
                         ))
-                    } else {
-                        None
                     }
-                }
-                Modal::ModelEditor => {
-                    let title = app
-                        .editor_target
-                        .and_then(|idx| PROVIDERS.get(idx))
-                        .map(|s| s.name)
-                        .unwrap_or("model");
-                    Some(render::draw_model_editor(
+                    Modal::None => None,
+                };
+
+                // Copy toast
+                if app.copy_toast_until.is_some() {
+                    render::draw_copy_toast(
                         f,
-                        title,
-                        app.editor_field,
-                        &app.editor_key,
-                        &app.editor_model,
-                        &app.input,
-                        app.cursor_position,
+                        &app.copy_toast_message,
+                        app.copy_toast_failed,
                         &app.theme,
-                    ))
+                    );
+                } else if app.ctrl_c_armed_ticks > 0 {
+                    // The copy toast and the armed toast render at the same
+                    // screen position, so only one shows at a time. The
+                    // clearing-input path surfaces the armed state through the
+                    // copy toast itself ("input cleared — Ctrl+C again to
+                    // exit"); once it expires, the standalone armed toast
+                    // takes over for the remainder of the quit window.
+                    render::draw_armed_toast(f, "press Ctrl+C again to exit", &app.theme);
                 }
-                Modal::Help => Some(render::draw_help_modal(f, &mut app.help_scroll, &app.theme)),
-                Modal::ToolStepDetail => {
-                    if let Some(msg) = app
-                        .tool_detail_message_idx
-                        .and_then(|idx| app.messages.get(idx))
-                    {
-                        Some(render::draw_tool_step_detail_overlay(
-                            f,
-                            msg,
-                            app.tool_detail_scroll,
-                            &app.theme,
-                        ))
-                    } else {
-                        None
-                    }
+                if app.esc_armed_ticks > 0 {
+                    render::draw_armed_toast(f, "press Esc again to interrupt", &app.theme);
                 }
-                Modal::Sessions => Some(render::draw_sessions_modal(
-                    f,
-                    &app.sessions_overview,
-                    app.modal_index
-                        .min(app.sessions_overview.len().saturating_sub(1)),
-                    &app.theme,
-                )),
-                Modal::Session => Some(render::draw_session_modal(
-                    f,
-                    &app.current_provider,
-                    &app.current_model,
-                    &app.key_status,
-                    &app.mcp_statuses,
-                    app.session_context.as_ref(),
-                    &mut app.session_scroll,
-                    &app.theme,
-                )),
-                Modal::Tools => Some(render::draw_tools_modal(
-                    f,
-                    app.session_context.as_ref(),
-                    app.modal_index,
-                    &mut app.session_scroll,
-                    app.session_modal_follow,
-                    &app.theme,
-                )),
-                Modal::Permissions => Some(render::draw_permissions_manager(
-                    f,
-                    app.session_context.as_ref(),
-                    app.modal_index,
-                    &mut app.permissions_scroll,
-                    &app.theme,
-                )),
-                Modal::Activity => {
-                    let user_prompt: Option<String> = app
-                        .focused_messages()
-                        .iter()
-                        .rev()
-                        // Only a genuine chat prompt is the turn's driving
-                        // prompt. Slash commands (`/review …`) and shell
-                        // passthroughs (`!ls`) are surfaced as `Role::User`
-                        // in the transcript but are handled by the harness /
-                        // bash tool, never seen by the model — so they must
-                        // not be shown as the Activity modal's "Prompt".
-                        .find(|m| {
-                            m.role == neenee_core::Role::User
-                                && m.origin == crate::tui::document::UserMessageOrigin::Chat
-                        })
-                        .map(|m| m.raw.clone());
-                    Some(render::draw_activity_modal(
-                        f,
-                        render::ActivityModalView {
-                            active_tab: app.activity_tab,
-                            pursuit: app.current_pursuit.as_ref(),
-                            todos: app.todos.as_ref(),
-                            user_prompt: user_prompt.as_deref(),
-                            turn_count: app.turn_count,
-                            current_round: app.current_round,
-                            review_alert: &app.review_alert,
-                            current_model: app.current_model.as_str(),
-                            turn_started_at: app.turn_started_at,
-                            activity: &status,
-                        },
-                        &mut app.activity_scroll,
-                        &app.theme,
-                    ))
-                }
-                Modal::None => None,
-            };
 
-            // Copy toast
-            if app.copy_toast_until.is_some() {
-                render::draw_copy_toast(
-                    f,
-                    &app.copy_toast_message,
-                    app.copy_toast_failed,
-                    &app.theme,
-                );
-            } else if app.ctrl_c_armed_ticks > 0 {
-                // The copy toast and the armed toast render at the same
-                // screen position, so only one shows at a time. The
-                // clearing-input path surfaces the armed state through the
-                // copy toast itself ("input cleared — Ctrl+C again to
-                // exit"); once it expires, the standalone armed toast
-                // takes over for the remainder of the quit window.
-                render::draw_armed_toast(f, "press Ctrl+C again to exit", &app.theme);
-            }
-            if app.esc_armed_ticks > 0 {
-                render::draw_armed_toast(f, "press Esc again to interrupt", &app.theme);
-            }
+                app.layout_map = layout_map;
 
-            app.layout_map = layout_map;
-
-            // Record the open modal's actual panel rect (when one is
-            // dismissable) so a click on the backdrop outside it can close it.
-            // The rect comes from the renderer that just painted the panel, so
-            // dynamic-height modals and click hit-tests cannot drift apart.
-            app.modal_rect = if app.active_modal.dismissable_by_outside_click() {
-                drawn_modal_rect
-            } else {
-                None
-            };
-        })?;
+                // Record the open modal's actual panel rect (when one is
+                // dismissable) so a click on the backdrop outside it can close it.
+                // The rect comes from the renderer that just painted the panel, so
+                // dynamic-height modals and click hit-tests cannot drift apart.
+                app.modal_rect = if app.active_modal.dismissable_by_outside_click() {
+                    drawn_modal_rect
+                } else {
+                    None
+                };
+            })?;
         } // end `if needs_draw`
 
         // Cursor visibility follows the focus zone so the caret only shows up
@@ -2418,13 +2427,13 @@ pub(super) async fn run_app_loop(
                         };
                     }
                     Modal::Help
-                        | Modal::ToolStepDetail
-                        | Modal::Question
-                        | Modal::ModelEditor
-                        | Modal::Session
-                        | Modal::Tools
-                        | Modal::Activity
-                        | Modal::None => {}
+                    | Modal::ToolStepDetail
+                    | Modal::Question
+                    | Modal::ModelEditor
+                    | Modal::Session
+                    | Modal::Tools
+                    | Modal::Activity
+                    | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
                     Modal::Provider => {
@@ -2861,7 +2870,7 @@ pub(super) async fn run_app_loop(
 
 pub(super) fn tool_activity_status(name: &str) -> &'static str {
     match name {
-        "read_file" | "read_image" | "list_dir" | "use_skill" => "exploring",
+        "read_text" | "read_image" | "list_dir" | "use_skill" => "exploring",
         "grep" => "searching codebase",
         "write_file" | "edit_file" => "making edits",
         "bash" => "running command",
@@ -2938,7 +2947,7 @@ pub(super) fn focused_messages_mut<'a>(
 
 /// Extract selected text from either transcript messages or the live input box,
 /// depending on which the semantic selection covers. `cell_info` supplies the
-/// cell context when the selection is a [`Range`] bounded inside a table cell.
+/// cell context when the selection is a `Range` bounded inside a table cell.
 pub(super) fn extract_selection_text(
     sel: &SelectionState,
     messages: &[crate::tui::document::TranscriptMessage],
@@ -3051,7 +3060,7 @@ pub(super) fn display_status(
     }
 }
 
-/// Execute the side effects that the pure [`QuestionModel::update`] described.
+/// Execute the side effects that the pure `QuestionModel::update` described.
 ///
 /// This is the effect interpreter — the *only* place the question modal touches
 /// the agent channel, the pending-request queue, or the modal/queue sync. The

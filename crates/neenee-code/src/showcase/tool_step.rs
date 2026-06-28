@@ -220,7 +220,7 @@ fn lifecycles() -> Vec<TranscriptMessage> {
 
 // ── fixture builders ──────────────────────────────────────────────────────
 
-/// A finished, Ok `read_file` step. `present` controls whether the payload
+/// A finished, Ok `read_text` step. `present` controls whether the payload
 /// carries real content (rendering a code block when expanded) or is empty.
 fn read(id: &str, path: &str, present: bool) -> TranscriptMessage {
     let args = format!(r#"{{"path":"{path}"}}"#);
@@ -236,7 +236,7 @@ fn read(id: &str, path: &str, present: bool) -> TranscriptMessage {
         prefix: None,
         suffix: None,
     };
-    let mut m = TranscriptMessage::tool_step(id, "read_file", &args);
+    let mut m = TranscriptMessage::tool_step(id, "read_text", &args);
     m.finish_tool_step(id, structured.to_text(), structured, 42);
     m.set_tool_step_expanded(false);
     m

@@ -21,8 +21,8 @@ pub async fn resume_session(
     id: Option<&str>,
 ) -> Result<(String, Vec<Message>), String> {
     let id = session.resume(id).await?;
-    *history.lock().await = session.messages().await;
-    Ok((id, session.transcript().await))
+    *history.lock().await = session.model_window().await;
+    Ok((id, session.full_transcript().await))
 }
 
 /// First 8 characters of a session id — short enough for picker rows while

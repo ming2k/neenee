@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ming2k/neenee/main/install.sh | bash
 #
 # Or, to pin a version:
-#   NEENEE_VERSION=0.9.0 curl -fsSL .../install.sh | bash
+#   NEENEE_VERSION=0.9.1 curl -fsSL .../install.sh | bash
 #
 # Installs the `neenee-code` binary into ~/.local/bin (or $INSTALL_DIR if set).
 # Detects OS + architecture and pulls the matching release tarball from GitHub.
@@ -22,7 +22,7 @@ BIN_NAME="neenee-code"
 # Where the binary lands. Honour an explicit override, otherwise ~/.local/bin
 # (no sudo needed; create it if missing).
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
-# Pin a version with NEENEE_VERSION="0.9.0". Empty means "latest release".
+# Pin a version with NEENEE_VERSION="0.9.1". Empty means "latest release".
 NEENEE_VERSION="${NEENEE_VERSION:-}"
 
 # --- pretty printing ----------------------------------------------------
@@ -91,7 +91,7 @@ if [[ -z "$NEENEE_VERSION" ]]; then
         | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')"
     [[ -n "$NEENEE_VERSION" ]] || abort "Could not determine the latest release."
 fi
-# Allow the user to pass either "0.9.0" or "v0.9.0".
+# Allow the user to pass either "0.9.1" or "v0.9.1".
 version="${NEENEE_VERSION#v}"
 info "Installing ${fmt_bold}neenee-code v${version}${fmt_reset}"
 

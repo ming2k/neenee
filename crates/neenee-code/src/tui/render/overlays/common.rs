@@ -59,7 +59,7 @@ pub(crate) fn truncate_ellipsis(s: &str, max: usize) -> String {
 /// Display column of the caret within a rendered input field, given its char
 /// index. Each modal field renders its own masked/verbatim `display` string, so
 /// mapping through chars (not bytes) keeps wide glyphs and `•` masks right. The
-/// final byte→column step goes through the engine's [`cursor_column`], the same
+/// final byte→column step goes through the engine's `cursor_column`, the same
 /// primitive the composer uses, so both caret sites can never disagree with the
 /// grid's paint width.
 pub(crate) fn caret_column(display: &str, cursor_position: usize) -> u16 {

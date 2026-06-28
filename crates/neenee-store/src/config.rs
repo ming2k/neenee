@@ -100,7 +100,7 @@ pub struct TuiConfig {
 /// scope = "*"
 ///
 /// [[permissions.allow]]
-/// tool = "read_file"
+/// tool = "read_text"
 /// scope = "*"
 /// ```
 ///
@@ -117,7 +117,7 @@ pub struct PermissionConfig {
 /// One declarative permission rule from `[permissions]`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRuleConfig {
-    /// Tool name (e.g. `"bash"`, `"read_file"`, `"mcp__fs__read"`).
+    /// Tool name (e.g. `"bash"`, `"read_text"`, `"mcp__fs__read"`).
     pub tool: String,
     /// Permission scope. `"*"` matches every call to the tool; a specific scope
     /// (e.g. a path prefix) allows only matching calls.
@@ -292,11 +292,11 @@ pub struct Config {
 /// ```toml
 /// [tool_overrides."kimi-k2.7-code"]            # model id (quoted: has dots)
 /// # A bare string replaces the tool's description.
-/// read_file = "Read a file. Always pass offset/limit for large files."
+/// read_text = "Read a file. Always pass offset/limit for large files."
 ///
-/// [tool_overrides."glm-5.2".read_file]         # tool name as a sub-table
+/// [tool_overrides."glm-5.2".read_text]         # tool name as a sub-table
 /// description = "读取文件……"
-/// [tool_overrides."glm-5.2".read_file.params.limit]
+/// [tool_overrides."glm-5.2".read_text.params.limit]
 /// description = "不得低于 10"                   # merged into limit's schema
 /// minimum = 10                                 # adds a constraint
 /// ```
@@ -501,7 +501,7 @@ mod tests {
         // contains dots/hyphens. Each tool is a sub-table carrying an optional
         // `description` and optional `[.params.<name>]` patches.
         let toml_src = r#"
-            [tool_overrides."kimi-k2.7-code".read_file]
+            [tool_overrides."kimi-k2.7-code".read_text]
             description = "Always pass offset and limit."
 
             [tool_overrides."kimi-k2.7-code".todo]
@@ -515,7 +515,7 @@ mod tests {
         // Known model → its map; unknown tool within a known model → absent.
         let kimi = cfg.tool_overrides.for_model("kimi-k2.7-code");
         assert_eq!(
-            kimi.get("read_file").unwrap().description.as_deref(),
+            kimi.get("read_text").unwrap().description.as_deref(),
             Some("Always pass offset and limit.")
         );
         assert_eq!(
@@ -530,7 +530,7 @@ mod tests {
             glm.get("bash").unwrap().description.as_deref(),
             Some("Prefer explicit, idempotent commands.")
         );
-        assert!(glm.get("read_file").is_none());
+        assert!(glm.get("read_text").is_none());
 
         // Unknown model → empty (but borrowable without an Option).
         let unknown = cfg.tool_overrides.for_model("does-not-exist");
@@ -543,12 +543,12 @@ mod tests {
 
     #[test]
     fn tool_overrides_param_patches_parse() {
-        // The motivating use case: for glm-5.2, re-word read_file AND patch the
+        // The motivating use case: for glm-5.2, re-word read_text AND patch the
         // `limit` parameter's description + add a `minimum` constraint.
         let toml_src = r#"
-            [tool_overrides."glm-5.2".read_file]
+            [tool_overrides."glm-5.2".read_text]
             description = "读取文件。"
-            [tool_overrides."glm-5.2".read_file.params.limit]
+            [tool_overrides."glm-5.2".read_text.params.limit]
             description = "不得低于 10"
             minimum = 10
         "#;
@@ -556,7 +556,7 @@ mod tests {
         let rf = cfg
             .tool_overrides
             .for_model("glm-5.2")
-            .get("read_file")
+            .get("read_text")
             .unwrap();
         assert_eq!(rf.description.as_deref(), Some("读取文件。"));
         let limit = rf.params.get("limit").unwrap();
@@ -569,7 +569,7 @@ mod tests {
         let mut cfg = Config::default();
         let mut tools = neenee_core::ToolOverrides::new();
         tools.insert(
-            "read_file".to_string(),
+            "read_text".to_string(),
             neenee_core::ToolOverride {
                 description: Some("desc A".to_string()),
                 params: std::collections::HashMap::new(),
@@ -589,7 +589,7 @@ mod tests {
         let parsed: Config = toml::from_str(&serialised).unwrap();
         let resolved = parsed.tool_overrides.for_model("kimi-k2.7-code");
         assert_eq!(
-            resolved.get("read_file").unwrap().description.as_deref(),
+            resolved.get("read_text").unwrap().description.as_deref(),
             Some("desc A")
         );
         assert_eq!(
@@ -598,5 +598,3 @@ mod tests {
         );
     }
 }
-
-

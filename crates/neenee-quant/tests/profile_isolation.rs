@@ -31,7 +31,7 @@ fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
         Arc::new(ListPositionsTool::new()),
         Arc::new(PlaceOrderTool::new()),
         // Coding domain (would come from neenee-tools in a real binary).
-        Arc::new(neenee_tools::ReadFileTool),
+        Arc::new(neenee_tools::ReadTextTool),
         Arc::new(neenee_tools::WriteFileTool),
         Arc::new(neenee_tools::EditFileTool),
         Arc::new(neenee_tools::BashTool),
@@ -44,7 +44,7 @@ fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
     assert!(names.contains(&"market_data"), "got: {names:?}");
     assert!(names.contains(&"backtest"), "got: {names:?}");
     assert!(names.contains(&"list_positions"), "got: {names:?}");
-    assert!(names.contains(&"read_file"), "got: {names:?}");
+    assert!(names.contains(&"read_text"), "got: {names:?}");
 
     // Excluded: live trading.
     assert!(
