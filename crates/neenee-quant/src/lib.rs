@@ -13,7 +13,7 @@
 //!
 //! The built-in coding tools in `neenee-tools` self-register via
 //! [`neenee_core::register_tool!`] so the coding binary collects them with a
-//! single `collect_tools` call. These quant tools deliberately do **not**
+//! single `collect_toolset` call. These quant tools deliberately do **not**
 //! self-register: a coding agent should never see a `place_order` tool in its
 //! schema list, and a quant agent should never see `write_file`. Mixing them
 //! would bloat the model's context and invite wrong-domain calls (exactly the

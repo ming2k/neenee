@@ -9,7 +9,8 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::{
-    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, ToolOverrides, WebSearchConfig,
+    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, VariantSelection,
+    WebSearchConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -277,51 +278,45 @@ pub struct Config {
     /// shell command at one lifecycle point; see [`HookSpec`].
     #[serde(default)]
     pub hooks: Vec<HookSpec>,
-    /// Per-model tool-description overrides (`[tool_overrides."<model-id>"]`
-    /// table). When talking to the named model, each listed tool's built-in
-    /// description is replaced in the function schema. See [`ToolOverridesConfig`].
+    /// Per-model tool-variant selection (`[tool_variants."<model-id>"]`
+    /// table). When talking to the named model, each listed capability is
+    /// realized by the named variant instead of its default. See
+    /// [`ToolVariantsConfig`].
     #[serde(default)]
-    pub tool_overrides: ToolOverridesConfig,
+    pub tool_variants: ToolVariantsConfig,
 }
 
-/// Per-model tool overrides, deserialized from the `[tool_overrides]` section
-/// of `config.toml`. Maps a model id to a `tool_name → ToolOverride` map. Each
-/// override can replace the tool's `description` and/or deep-merge
-/// per-parameter patches into the tool's `parameters` JSON Schema.
+/// Per-model tool-variant selection, deserialized from the `[tool_variants]`
+/// section of `config.toml`. Maps a model id to a `capability → variant_id`
+/// map. A capability is realized by the named variant (a genuinely different
+/// implementation/schema/description), not a re-worded copy of one impl.
 ///
 /// ```toml
-/// [tool_overrides."kimi-k2.7-code"]            # model id (quoted: has dots)
-/// # A bare string replaces the tool's description.
-/// read_text = "Read a file. Always pass offset/limit for large files."
-///
-/// [tool_overrides."glm-5.2".read_text]         # tool name as a sub-table
-/// description = "读取文件……"
-/// [tool_overrides."glm-5.2".read_text.params.limit]
-/// description = "不得低于 10"                   # merged into limit's schema
-/// minimum = 10                                 # adds a constraint
+/// [tool_variants."glm-5.2"]       # model id (quoted: has dots)
+/// read_text = "terse"            # capability = variant id
+/// bash      = "strict"
 /// ```
 ///
-/// For a given tool you may use *either* the bare-string form (description
-/// only) *or* the sub-table form (description + params) — not both. Tools and
-/// models not listed are unaffected.
+/// Capabilities and models not listed use their default variant.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ToolOverridesConfig(pub HashMap<String, ModelToolOverrides>);
+pub struct ToolVariantsConfig(pub HashMap<String, ModelToolVariants>);
 
-/// One model's tool overrides: a transparent wrapper around the
-/// `tool_name → ToolOverride` map so it serializes directly as a TOML table.
+/// One model's variant selection: a transparent wrapper around the
+/// `capability → variant_id` map so it serializes directly as a TOML table.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ModelToolOverrides(pub ToolOverrides);
+pub struct ModelToolVariants(pub VariantSelection);
 
-impl ToolOverridesConfig {
-    /// Look up the tool overrides for `model_id`, if any. Returns an empty map
-    /// (not `None`) for unknown models so callers can always borrow `&ToolOverrides`.
-    pub fn for_model(&self, model_id: &str) -> &ToolOverrides {
+impl ToolVariantsConfig {
+    /// Look up the variant selection for `model_id`, if any. Returns an empty
+    /// map (not `None`) for unknown models so callers can always borrow
+    /// `&VariantSelection`.
+    pub fn for_model(&self, model_id: &str) -> &VariantSelection {
         self.0
             .get(model_id)
             .map(|m| &m.0)
-            .unwrap_or_else(|| neenee_core::empty_tool_overrides())
+            .unwrap_or_else(|| neenee_core::empty_variant_selection())
     }
 }
 
@@ -386,7 +381,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             agent: AgentConfig::default(),
             hooks: Vec::new(),
-            tool_overrides: ToolOverridesConfig::default(),
+            tool_variants: ToolVariantsConfig::default(),
         }
     }
 }
@@ -494,107 +489,53 @@ mod tests {
     }
 
     #[test]
-    fn tool_overrides_table_parses_and_resolves_per_model() {
-        // The table name mirrors the Config field name (`tool_overrides`), as
-        // serde maps struct fields to TOML keys verbatim — same convention as
-        // `[websearch]`, `[skills]`, etc. The model id is quoted because it
-        // contains dots/hyphens. Each tool is a sub-table carrying an optional
-        // `description` and optional `[.params.<name>]` patches.
+    fn tool_variants_table_parses_and_resolves_per_model() {
+        // The table name mirrors the Config field name (`tool_variants`), as
+        // serde maps struct fields to TOML keys verbatim. The model id is
+        // quoted because it contains dots/hyphens. Each entry maps a capability
+        // name to the variant id chosen for that model.
         let toml_src = r#"
-            [tool_overrides."kimi-k2.7-code".read_text]
-            description = "Always pass offset and limit."
+            [tool_variants."kimi-k2.7-code"]
+            read_text = "terse"
+            bash = "strict"
 
-            [tool_overrides."kimi-k2.7-code".todo]
-            description = "Keep the list honest."
-
-            [tool_overrides."glm-5.2".bash]
-            description = "Prefer explicit, idempotent commands."
+            [tool_variants."glm-5.2"]
+            read_text = "verbose"
         "#;
         let cfg: Config = toml::from_str(toml_src).unwrap();
 
-        // Known model → its map; unknown tool within a known model → absent.
-        let kimi = cfg.tool_overrides.for_model("kimi-k2.7-code");
-        assert_eq!(
-            kimi.get("read_text").unwrap().description.as_deref(),
-            Some("Always pass offset and limit.")
-        );
-        assert_eq!(
-            kimi.get("todo").unwrap().description.as_deref(),
-            Some("Keep the list honest.")
-        );
-        assert!(kimi.get("bash").is_none());
+        // Known model → its map; unlisted capability within a known model → absent.
+        let kimi = cfg.tool_variants.for_model("kimi-k2.7-code");
+        assert_eq!(kimi.get("read_text").map(String::as_str), Some("terse"));
+        assert_eq!(kimi.get("bash").map(String::as_str), Some("strict"));
+        assert!(kimi.get("grep").is_none());
 
         // A different model gets its own independent map.
-        let glm = cfg.tool_overrides.for_model("glm-5.2");
-        assert_eq!(
-            glm.get("bash").unwrap().description.as_deref(),
-            Some("Prefer explicit, idempotent commands.")
-        );
-        assert!(glm.get("read_text").is_none());
+        let glm = cfg.tool_variants.for_model("glm-5.2");
+        assert_eq!(glm.get("read_text").map(String::as_str), Some("verbose"));
+        assert!(glm.get("bash").is_none());
 
         // Unknown model → empty (but borrowable without an Option).
-        let unknown = cfg.tool_overrides.for_model("does-not-exist");
-        assert!(unknown.is_empty());
+        assert!(cfg.tool_variants.for_model("does-not-exist").is_empty());
 
         // Absent table entirely → empty config, every lookup is empty.
         let cfg: Config = toml::from_str("").unwrap();
-        assert!(cfg.tool_overrides.for_model("kimi-k2.7-code").is_empty());
+        assert!(cfg.tool_variants.for_model("kimi-k2.7-code").is_empty());
     }
 
     #[test]
-    fn tool_overrides_param_patches_parse() {
-        // The motivating use case: for glm-5.2, re-word read_text AND patch the
-        // `limit` parameter's description + add a `minimum` constraint.
-        let toml_src = r#"
-            [tool_overrides."glm-5.2".read_text]
-            description = "读取文件。"
-            [tool_overrides."glm-5.2".read_text.params.limit]
-            description = "不得低于 10"
-            minimum = 10
-        "#;
-        let cfg: Config = toml::from_str(toml_src).unwrap();
-        let rf = cfg
-            .tool_overrides
-            .for_model("glm-5.2")
-            .get("read_text")
-            .unwrap();
-        assert_eq!(rf.description.as_deref(), Some("读取文件。"));
-        let limit = rf.params.get("limit").unwrap();
-        assert_eq!(limit["description"], "不得低于 10");
-        assert_eq!(limit["minimum"], 10);
-    }
-
-    #[test]
-    fn tool_overrides_round_trip_through_serialise() {
+    fn tool_variants_round_trip_through_serialise() {
         let mut cfg = Config::default();
-        let mut tools = neenee_core::ToolOverrides::new();
-        tools.insert(
-            "read_text".to_string(),
-            neenee_core::ToolOverride {
-                description: Some("desc A".to_string()),
-                params: std::collections::HashMap::new(),
-            },
-        );
-        tools.insert(
-            "bash".to_string(),
-            neenee_core::ToolOverride {
-                description: Some("desc B".to_string()),
-                params: std::collections::HashMap::new(),
-            },
-        );
-        cfg.tool_overrides
+        let mut sel = neenee_core::VariantSelection::new();
+        sel.insert("read_text".to_string(), "terse".to_string());
+        sel.insert("bash".to_string(), "strict".to_string());
+        cfg.tool_variants
             .0
-            .insert("kimi-k2.7-code".to_string(), ModelToolOverrides(tools));
+            .insert("kimi-k2.7-code".to_string(), ModelToolVariants(sel));
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
-        let resolved = parsed.tool_overrides.for_model("kimi-k2.7-code");
-        assert_eq!(
-            resolved.get("read_text").unwrap().description.as_deref(),
-            Some("desc A")
-        );
-        assert_eq!(
-            resolved.get("bash").unwrap().description.as_deref(),
-            Some("desc B")
-        );
+        let resolved = parsed.tool_variants.for_model("kimi-k2.7-code");
+        assert_eq!(resolved.get("read_text").map(String::as_str), Some("terse"));
+        assert_eq!(resolved.get("bash").map(String::as_str), Some("strict"));
     }
 }

@@ -38,8 +38,8 @@ fn registry_collects_all_self_registered_tools() {
     ));
     builder.provide(neenee_agent::AgentIdentity::default());
     let ctx = builder.build();
-    let collected = neenee_core::collect_tools(&ctx);
-    let names: std::collections::HashSet<&str> = collected.iter().map(|t| t.name()).collect();
+    let collected = neenee_core::collect_toolset(&ctx);
+    let names: std::collections::HashSet<&str> = collected.capability_names().collect();
     for expected in [
         "bash",
         "read_text",

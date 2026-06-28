@@ -129,7 +129,7 @@ impl SessionRegistry {
         //   1. let session = Arc::new(SessionStore::load_for_project(...));
         //   2. let (req_tx, req_rx) = mpsc::unbounded_channel();
         //   3. let (events_tx, _) = broadcast::channel(RESPONSE_BROADCAST_CAPACITY);
-        //   4. assemble tools via neenee_core::collect_tools(&tool_ctx);
+        //   4. assemble the toolset via neenee_core::collect_toolset(&tool_ctx);
         //   5. let agent = Agent::new(self.shared.agent_provider.clone(), ...);
         //   6. bind pursuit / thread_id / todos / hooks / permissions;
         //   7. spawn a driver task: drain req_rx, dispatch to handlers, and

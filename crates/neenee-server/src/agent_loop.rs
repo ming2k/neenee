@@ -18,7 +18,7 @@ use neenee_agent::catalog;
 use neenee_agent::orchestration::send_harness_state;
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, SubagentRegistry};
-use neenee_core::{AgentRequest, AgentResponse, McpConnectionStatus, Message, Provider, Tool};
+use neenee_core::{AgentRequest, AgentResponse, Message, Provider, Tool};
 use neenee_store::{
     RepeatStore, config::Config, embedding, provider_usage::ProviderUsage, session::SessionStore,
 };
@@ -34,6 +34,7 @@ use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::UiBridge;
+use crate::mcp_runtime::McpRuntime;
 use crate::session_view::{build_sessions_overview, provider_key_status};
 use crate::side::SideSession;
 use crate::startup::StartupMode;
@@ -72,8 +73,10 @@ pub struct Harness {
     /// id to the live child handle so a permission / ask_user reply can be
     /// routed back down into the specific subagent that surfaced it.
     pub subagent_registry: Arc<SubagentRegistry>,
-    /// MCP server name → connection status snapshot.
-    pub mcp_statuses: Vec<(String, McpConnectionStatus)>,
+    /// Live MCP runtime: the connected server set, their tools, and status.
+    /// Mutated by the `/mcp` modal (toggle / reconnect) and the periodic
+    /// catalog refresh; read for the session-context snapshot's MCP pane.
+    pub mcp_runtime: Arc<McpRuntime>,
     /// User-defined `/<name>` commands (`commands_for_task` in the old code).
     pub commands: Arc<HashMap<String, CustomCommand>>,
     /// Project embedding index for `/search` (`embedding_store_for_commands`).
@@ -128,7 +131,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
         provider_holder: provider_for_task,
         skills_registry,
         subagent_registry,
-        mcp_statuses,
+        mcp_runtime,
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,
         repeat_store: repeat_store_for_commands,
@@ -263,7 +266,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 crate::handlers_session::query_context(
                     &agent,
                     &skills_registry,
-                    &mcp_statuses,
+                    &mcp_runtime,
                     &config,
                     &resp_tx,
                 );
@@ -272,7 +275,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 crate::handlers_session::revoke_permission(
                     &agent,
                     &skills_registry,
-                    &mcp_statuses,
+                    &mcp_runtime,
                     &config,
                     &resp_tx,
                     tool,
@@ -283,7 +286,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 crate::handlers_session::clear_all_permissions(
                     &agent,
                     &skills_registry,
-                    &mcp_statuses,
+                    &mcp_runtime,
                     &config,
                     &resp_tx,
                 );
@@ -292,12 +295,35 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 crate::handlers_session::toggle_tool(
                     &agent,
                     &skills_registry,
-                    &mcp_statuses,
+                    &mcp_runtime,
                     &config,
                     &resp_tx,
                     name,
                     enabled,
                 );
+            }
+            AgentRequest::ToggleMcpServer { name, enabled } => {
+                crate::handlers_session::toggle_mcp_server(
+                    &agent,
+                    &skills_registry,
+                    &mcp_runtime,
+                    &config,
+                    &resp_tx,
+                    name,
+                    enabled,
+                )
+                .await;
+            }
+            AgentRequest::ReconnectMcpServer { name } => {
+                crate::handlers_session::reconnect_mcp_server(
+                    &agent,
+                    &skills_registry,
+                    &mcp_runtime,
+                    &config,
+                    &resp_tx,
+                    name,
+                )
+                .await;
             }
             AgentRequest::SlashCommand(cmd) => {
                 crate::handlers_slash::dispatch(
@@ -315,7 +341,6 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     &provider_for_task,
                     skills_registry.clone(),
                     &skills_registry_for_commands,
-                    &mcp_statuses,
                     &commands_for_task,
                     &embedding_store_for_commands,
                     &repeat_store_for_commands,

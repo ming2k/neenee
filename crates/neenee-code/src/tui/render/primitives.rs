@@ -103,7 +103,6 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
         Modal::Question => fixed(78, 70),
         Modal::ModelEditor => fixed(60, 36),
         Modal::Help => fixed(58, 70),
-        Modal::ToolStepDetail => fixed(92, 84),
         Modal::Sessions => fixed(80, 64),
         Modal::Permissions => fixed(64, 60),
         Modal::Activity => fixed(72, 70),
@@ -124,6 +123,17 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
             width_percent: 64,
             height: ModalHeight::Content {
                 min_rows: 11,
+                max_viewport_percent: 84,
+            },
+            header: true,
+            footer: true,
+        },
+        // MCP manager: same content-sized flat list as the tools manager — one
+        // row per configured server.
+        Modal::Mcp => ModalSpec {
+            width_percent: 64,
+            height: ModalHeight::Content {
+                min_rows: 9,
                 max_viewport_percent: 84,
             },
             header: true,
@@ -688,10 +698,10 @@ mod tests {
             Modal::Question,
             Modal::ModelEditor,
             Modal::Help,
-            Modal::ToolStepDetail,
             Modal::Sessions,
             Modal::Session,
             Modal::Tools,
+            Modal::Mcp,
             Modal::Permissions,
             Modal::Activity,
         ] {

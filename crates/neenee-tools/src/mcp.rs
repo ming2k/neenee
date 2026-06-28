@@ -325,6 +325,47 @@ pub async fn refresh_mcp_tools(
     (tools, statuses)
 }
 
+/// Connect a single server from its config and discover its tools. Returns the
+/// reconnect-capable handle alongside its tool adapters, or a failure string.
+/// Used to bring a server online on demand (e.g. the `/mcp` modal re-enabling a
+/// previously disabled server, which never went through [`load_mcp_tools`]).
+pub async fn connect_server(
+    name: &str,
+    config: &McpServerConfig,
+) -> Result<(Arc<McpServer>, Vec<Arc<dyn Tool>>), String> {
+    timeout(MCP_CONNECT_TIMEOUT, async {
+        let server = Arc::new(McpServer::new(
+            config.clone(),
+            name.to_string(),
+            config.read_only,
+        ));
+        let tools = build_tools_from_server(&server).await?;
+        Ok::<_, String>((server, tools))
+    })
+    .await
+    .map_err(|_| "connection timed out".to_string())?
+}
+
+/// Reset and re-establish one server's connection, re-discovering its tools.
+/// The single-server analogue of [`refresh_mcp_tools`]; returns the refreshed
+/// tools and the connection status. Used by the `/mcp` modal's reconnect action.
+pub async fn reconnect_server(
+    server: &Arc<McpServer>,
+) -> (Vec<Arc<dyn Tool>>, McpConnectionStatus) {
+    server.reset().await;
+    match timeout(MCP_CONNECT_TIMEOUT, build_tools_from_server(server)).await {
+        Ok(Ok(tools)) => {
+            let count = tools.len();
+            (tools, McpConnectionStatus::Connected { tools: count })
+        }
+        Ok(Err(error)) => (Vec::new(), McpConnectionStatus::Failed(error)),
+        Err(_) => (
+            Vec::new(),
+            McpConnectionStatus::Failed("connection timed out".to_string()),
+        ),
+    }
+}
+
 /// Build [`McpTool`] adapters from a connected server's `tools/list` response.
 /// Each tool holds the [`McpServer`] handle so it can auto-reconnect on
 /// failure.

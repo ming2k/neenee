@@ -51,7 +51,7 @@ macro_rules! define_builtin_commands {
 define_builtin_commands! {
     Provider    = "/provider"     : "Select an LLM provider",
     Tools       = "/tools"        : "Manage session tools (enable/disable)",
-    Mcp         = "/mcp"          : "Show configured MCP server status",
+    Mcp         = "/mcp"          : "Manage MCP servers (enable/disable, reconnect)",
     Compact     = "/compact"      : "Compact older complete turns now",
     Clear       = "/clear"        : "Clear the conversation history",
     Permissions = "/permissions"  : "Show or clear always-allowed tool rules",

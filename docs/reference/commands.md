@@ -12,7 +12,7 @@ Project and user-defined commands are covered under
 | Command | Description |
 |---------|-------------|
 | `/provider` | Select an LLM provider |
-| `/mcp` | Show configured MCP server status |
+| `/mcp` | Manage MCP servers (enable/disable, reconnect) |
 | `/compact` | Compact older complete turns now |
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |

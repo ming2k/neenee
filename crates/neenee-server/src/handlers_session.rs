@@ -7,12 +7,13 @@
 
 use neenee_agent::Agent;
 use neenee_agent::skills::SkillRegistry;
-use neenee_core::{AgentResponse, McpConnectionStatus};
+use neenee_core::AgentResponse;
 use neenee_store::{config::Config, session::SessionStore};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 
+use crate::mcp_runtime::McpRuntime;
 use crate::session_view::{build_session_context, build_sessions_overview};
 use crate::side::SideSession;
 
@@ -40,11 +41,12 @@ pub async fn delete(
 pub fn query_context(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
-    mcp_statuses: &[(String, McpConnectionStatus)],
+    mcp_runtime: &Arc<McpRuntime>,
     config: &Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
 ) {
-    let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
+    let snapshot =
+        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -53,7 +55,7 @@ pub fn query_context(
 pub fn revoke_permission(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
-    mcp_statuses: &[(String, McpConnectionStatus)],
+    mcp_runtime: &Arc<McpRuntime>,
     config: &Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     tool: String,
@@ -61,7 +63,8 @@ pub fn revoke_permission(
 ) {
     let removed = agent.revoke_allowed_tool(&tool, &scope);
     if removed {
-        let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
+        let snapshot =
+            build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
         let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
     } else {
         let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -77,12 +80,13 @@ pub fn revoke_permission(
 pub fn clear_all_permissions(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
-    mcp_statuses: &[(String, McpConnectionStatus)],
+    mcp_runtime: &Arc<McpRuntime>,
     config: &Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
 ) {
     agent.clear_allowed_tools();
-    let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
+    let snapshot =
+        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -93,14 +97,15 @@ pub fn clear_all_permissions(
 pub fn toggle_tool(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,
-    mcp_statuses: &[(String, McpConnectionStatus)],
+    mcp_runtime: &Arc<McpRuntime>,
     config: &Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     name: String,
     enabled: bool,
 ) {
     let changed = agent.set_tool_enabled(&name, enabled);
-    let snapshot = build_session_context(agent, skills_registry, mcp_statuses, config);
+    let snapshot =
+        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
     if !changed {
         let _ = resp_tx.send(AgentResponse::Error(format!(
             "Tool '{}' is unknown or already {}.",
@@ -108,6 +113,46 @@ pub fn toggle_tool(
             if enabled { "enabled" } else { "disabled" }
         )));
     }
+    let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+}
+
+/// `AgentRequest::ToggleMcpServer` — connect/disconnect a configured MCP server
+/// for the live session (session-scoped; config.toml is untouched). The runtime
+/// rebuilds the agent's tool list, then we push a refreshed snapshot. A failure
+/// to connect surfaces as a soft error but still refreshes the snapshot so the
+/// row settles on its new (Failed) status.
+pub async fn toggle_mcp_server(
+    agent: &Agent,
+    skills_registry: &Arc<SkillRegistry>,
+    mcp_runtime: &Arc<McpRuntime>,
+    config: &Config,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    name: String,
+    enabled: bool,
+) {
+    if let Err(error) = mcp_runtime.set_enabled(&name, enabled).await {
+        let _ = resp_tx.send(AgentResponse::Error(error));
+    }
+    let snapshot =
+        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
+}
+
+/// `AgentRequest::ReconnectMcpServer` — re-establish one server's connection on
+/// demand (the `/mcp` modal's `r` action) and push a refreshed snapshot.
+pub async fn reconnect_mcp_server(
+    agent: &Agent,
+    skills_registry: &Arc<SkillRegistry>,
+    mcp_runtime: &Arc<McpRuntime>,
+    config: &Config,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    name: String,
+) {
+    if let Err(error) = mcp_runtime.reconnect(&name).await {
+        let _ = resp_tx.send(AgentResponse::Error(error));
+    }
+    let snapshot =
+        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 

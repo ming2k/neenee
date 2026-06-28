@@ -11,71 +11,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Per-model overrides for one tool: an optional replacement `description` and
-/// an optional set of per-parameter overrides. When the agent builds a
-/// provider's tool schemas for the active model, the `description` replaces the
-/// tool's built-in [`Tool::description`], and each parameter override is
-/// *deep-merged* into the tool's `parameters` JSON Schema — only the named
-/// fields on the named parameters change; everything else is preserved. This is
-/// how a single toolset can be re-worded and re-constrained to play to a
-/// particular model's strengths (or quirks) without forking the tool
-/// implementations.
+/// Per-model (and per-subagent-profile) variant selection: a map from a
+/// capability name (a [`Tool::name`]) to the [`Tool::variant`] id chosen for
+/// it. When the agent resolves its toolset for the active model, a capability
+/// listed here is realized by its named variant; capabilities absent from the
+/// map fall back to their default variant. This is how one logical toolset can
+/// hand different models a genuinely different *implementation* of a tool
+/// (different description, schema, and behaviour) rather than a re-worded copy
+/// of a single impl.
 ///
-/// Configured per model id under `[tool_overrides."<model-id>"]` in
-/// `config.toml`; the agent selects the entry matching `Provider::model()`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolOverride {
-    /// Replacement for the tool's built-in `description`. Omit to keep the
-    /// built-in text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Per-parameter overrides, keyed by parameter name. Each value is
-    /// deep-merged into the corresponding entry under
-    /// `parameters.properties.<name>`.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub params: HashMap<String, serde_json::Map<String, serde_json::Value>>,
-}
-
-/// Per-model tool overrides: maps a tool's name to its [`ToolOverride`]. When
-/// the agent builds a provider's tool schemas for the active model, an entry
-/// here is applied to that tool's function schema (description replacement +
-/// parameter deep-merge); the tool name and un-overridden fields are untouched.
-///
-/// Configured per model id under `[tool_overrides."<model-id>"]` in
+/// Configured per model id under `[tool_variants."<model-id>"]` in
 /// `config.toml`; the agent selects the map matching `Provider::model()`.
-pub type ToolOverrides = HashMap<String, ToolOverride>;
+/// Subagent profiles carry their own static selection (see
+/// [`crate::SubagentProfile`]).
+pub type VariantSelection = HashMap<String, String>;
 
-/// A shared empty [`ToolOverrides`] map, handy as a default borrow target so
-/// callers can always hand out `&ToolOverrides` without an `Option`.
-pub fn empty_tool_overrides() -> &'static ToolOverrides {
-    static EMPTY: std::sync::LazyLock<ToolOverrides> = std::sync::LazyLock::new(ToolOverrides::new);
+/// A shared empty [`VariantSelection`] map, handy as a default borrow target so
+/// callers can always hand out `&VariantSelection` without an `Option`.
+pub fn empty_variant_selection() -> &'static VariantSelection {
+    static EMPTY: std::sync::LazyLock<VariantSelection> =
+        std::sync::LazyLock::new(VariantSelection::new);
     &EMPTY
-}
-
-/// Deep-merge `patch` into `target` in place. For each key in `patch`: if both
-/// `target[key]` and `patch[key]` are objects, recurse; otherwise `patch`
-/// overwrites `target[key]`. Used to fold per-parameter overrides into a tool's
-/// `parameters` JSON Schema so only the named fields change.
-pub fn deep_merge_json(target: &mut serde_json::Value, patch: &serde_json::Value) {
-    use serde_json::Value;
-    match (target, patch) {
-        (Value::Object(t), Value::Object(p)) => {
-            for (key, patch_val) in p {
-                match t.get_mut(key) {
-                    Some(Value::Object(_)) if patch_val.is_object() => {
-                        if let Some(child) = t.get_mut(key) {
-                            deep_merge_json(child, patch_val);
-                        }
-                    }
-                    _ => {
-                        t.insert(key.clone(), patch_val.clone());
-                    }
-                }
-            }
-        }
-        // Non-object target: patch wins outright (replaces).
-        (target, patch) => *target = patch.clone(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,21 +70,13 @@ pub trait Provider: Send + Sync {
             .boxed())
     }
 
-    /// Called by the agent before each turn so the provider can prepare tool schemas.
-    /// Default is a no-op for providers that don't support native function calling.
-    fn prepare_tools(&self, _tools: &[Arc<dyn Tool>]) {}
-
     /// Called by the agent before each turn so the provider can prepare tool
-    /// schemas, with per-model description overrides. When a tool's name is
-    /// present in `overrides`, its built-in description is replaced in the
-    /// generated function schema. The default delegates to
-    /// [`prepare_tools`](Self::prepare_tools), so providers that haven't opted
-    /// in simply ignore overrides. Providers that build function schemas
-    /// (OpenAI-/Anthropic-compatible) override this to thread overrides into
-    /// [`Tool::to_openai_function_with`].
-    fn prepare_tools_with(&self, tools: &[Arc<dyn Tool>], _overrides: &ToolOverrides) {
-        self.prepare_tools(tools);
-    }
+    /// schemas. The agent hands in the already-resolved toolset — exactly one
+    /// variant per capability for the active model — so each tool's own
+    /// [`Tool::to_openai_function`] is authoritative; there is no per-model
+    /// patching at this layer. Default is a no-op for providers that don't
+    /// support native function calling.
+    fn prepare_tools(&self, _tools: &[Arc<dyn Tool>]) {}
 
     /// Stable provider/solution identifier (e.g. `"kimi-code"`, `"gemini"`).
     /// The harness stamps it onto assistant messages so a session that mixes
@@ -184,6 +132,17 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
+
+    /// The variant id distinguishing this implementation from other variants of
+    /// the same capability ([`name`](Self::name)). A capability with a single
+    /// implementation uses the default; multiple variants of one capability
+    /// share `name()` and differ only in `variant()`. The variant id never
+    /// reaches the model — it is the selection key under
+    /// `[tool_variants."<model-id>"]` config and in subagent profiles, by which
+    /// a model or profile picks which implementation of a capability it sees.
+    fn variant(&self) -> &str {
+        "default"
+    }
 
     /// Whether executing this tool may block awaiting a live human decision
     /// (e.g. `ask_user`, an approval-gated mode switch). Non-interactive
@@ -300,7 +259,9 @@ pub trait Tool: Send + Sync {
         self.call(arguments).await
     }
 
-    /// Generate an OpenAI-compatible function schema for this tool.
+    /// Generate an OpenAI-compatible function schema for this tool. This is the
+    /// authoritative schema for the variant; per-model differences are expressed
+    /// by selecting a different variant, not by patching this output.
     fn to_openai_function(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
@@ -310,74 +271,6 @@ pub trait Tool: Send + Sync {
                 "parameters": self.parameters(),
             }
         })
-    }
-
-    /// Like [`to_openai_function`](Self::to_openai_function), but applies
-    /// per-model overrides: if `overrides` contains an entry for this tool's
-    /// name, its `description` (if any) replaces the built-in one, and each
-    /// parameter override is deep-merged into the `parameters` JSON Schema. An
-    /// empty or miss-having `overrides` map yields the same schema as the plain
-    /// method.
-    fn to_openai_function_with(&self, overrides: &ToolOverrides) -> serde_json::Value {
-        let mut parameters = self.parameters();
-        let description = match overrides.get(self.name()) {
-            Some(ToolOverride {
-                description: Some(desc),
-                params,
-            }) => {
-                if !params.is_empty() {
-                    apply_param_overrides(&mut parameters, params);
-                }
-                desc.as_str()
-            }
-            Some(ToolOverride {
-                description: None,
-                params,
-            }) => {
-                if !params.is_empty() {
-                    apply_param_overrides(&mut parameters, params);
-                }
-                self.description()
-            }
-            None => self.description(),
-        };
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": self.name(),
-                "description": description,
-                "parameters": parameters,
-            }
-        })
-    }
-}
-
-/// Fold per-parameter overrides into a tool's `parameters` JSON Schema. For
-/// each `param_name → patch`, the patch is deep-merged into
-/// `parameters.properties.<param_name>`; if that property doesn't exist it is
-/// inserted. Only the named fields on the named parameters change — everything
-/// else (other parameters, `required`, top-level `type`) is preserved.
-fn apply_param_overrides(
-    parameters: &mut serde_json::Value,
-    overrides: &HashMap<String, serde_json::Map<String, serde_json::Value>>,
-) {
-    use serde_json::Value;
-    let Some(obj) = parameters.as_object_mut() else {
-        return;
-    };
-    // Ensure `properties` is an object we can mutate.
-    if !obj.contains_key("properties") {
-        obj.insert("properties".to_string(), Value::Object(Default::default()));
-    }
-    let Some(props) = obj.get_mut("properties").and_then(Value::as_object_mut) else {
-        return;
-    };
-    for (param, patch) in overrides {
-        let entry = props
-            .entry(param.clone())
-            .or_insert_with(|| Value::Object(Default::default()));
-        let patch_value = Value::Object(patch.clone());
-        deep_merge_json(entry, &patch_value);
     }
 }
 
@@ -539,7 +432,6 @@ fn resolve_for_check(path: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{CommandScope, OperationScope, ScopeTarget, Tool};
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[test]
@@ -620,10 +512,11 @@ mod tests {
         assert_eq!(super::leading_program("  git   status "), "git");
     }
 
-    /// A minimal [`Tool`] stand-in so the schema-with-overrides tests can run
-    /// without pulling in the whole tool crate.
+    /// A minimal [`Tool`] stand-in so the schema tests can run without pulling
+    /// in the whole tool crate.
     struct DummyTool {
         name: &'static str,
+        variant: &'static str,
         desc: &'static str,
     }
 
@@ -631,6 +524,9 @@ mod tests {
     impl super::Tool for DummyTool {
         fn name(&self) -> &str {
             self.name
+        }
+        fn variant(&self) -> &str {
+            self.variant
         }
         fn description(&self) -> &str {
             self.desc
@@ -648,161 +544,26 @@ mod tests {
     }
 
     #[test]
-    fn schema_uses_built_in_description_when_no_override() {
+    fn variant_defaults_to_default() {
         let tool = DummyTool {
             name: "read_text",
-            desc: "built-in description",
+            variant: "default",
+            desc: "built-in",
         };
-        let empty = super::ToolOverrides::new();
-        let schema = tool.to_openai_function_with(&empty);
-        assert_eq!(desc_of(&schema), "built-in description");
-        // Plain method agrees (the override path is a strict superset).
-        assert_eq!(desc_of(&tool.to_openai_function()), "built-in description");
+        assert_eq!(tool.variant(), "default");
     }
 
     #[test]
-    fn override_replaces_description_for_named_tool_only() {
-        let tool = DummyTool {
+    fn function_schema_uses_the_variant_own_description() {
+        // A variant's own description is authoritative: the function schema
+        // carries it verbatim, keyed by the shared capability name.
+        let terse = DummyTool {
             name: "read_text",
-            desc: "built-in description",
+            variant: "terse",
+            desc: "terse wording",
         };
-        let mut overrides = super::ToolOverrides::new();
-        overrides.insert(
-            "read_text".to_string(),
-            super::ToolOverride {
-                description: Some("custom model-specific wording".to_string()),
-                params: HashMap::new(),
-            },
-        );
-        overrides.insert(
-            "other_tool".to_string(),
-            super::ToolOverride {
-                description: Some("unused".to_string()),
-                params: HashMap::new(),
-            },
-        );
-        let schema = tool.to_openai_function_with(&overrides);
-        assert_eq!(desc_of(&schema), "custom model-specific wording");
-        // Name is never touched by an override.
+        let schema = terse.to_openai_function();
         assert_eq!(schema["function"]["name"], "read_text");
-    }
-
-    #[test]
-    fn override_miss_leaves_built_in_description_intact() {
-        let tool = DummyTool {
-            name: "bash",
-            desc: "built-in description",
-        };
-        let mut overrides = super::ToolOverrides::new();
-        overrides.insert(
-            "read_text".to_string(),
-            super::ToolOverride {
-                description: Some("irrelevant".to_string()),
-                params: HashMap::new(),
-            },
-        );
-        let schema = tool.to_openai_function_with(&overrides);
-        assert_eq!(desc_of(&schema), "built-in description");
-    }
-
-    // --- parameter deep-merge ---
-
-    /// A richer Tool with real `properties` so parameter merging is testable.
-    struct ParamTool;
-    #[async_trait::async_trait]
-    impl super::Tool for ParamTool {
-        fn name(&self) -> &str {
-            "read_text"
-        }
-        fn description(&self) -> &str {
-            "built-in"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "a file path" },
-                    "limit": { "type": "integer", "description": "max lines" }
-                },
-                "required": ["path"]
-            })
-        }
-        async fn call(&self, _: &str) -> Result<String, String> {
-            Ok(String::new())
-        }
-    }
-
-    #[test]
-    fn param_override_deep_merges_named_field_and_preserves_the_rest() {
-        let mut overrides = super::ToolOverrides::new();
-        let mut limit_patch = serde_json::Map::new();
-        limit_patch.insert("description".to_string(), "不得低于 10".into());
-        limit_patch.insert("minimum".to_string(), 10.into());
-        let mut params = HashMap::new();
-        params.insert("limit".to_string(), limit_patch);
-        overrides.insert(
-            "read_text".to_string(),
-            super::ToolOverride {
-                description: None,
-                params,
-            },
-        );
-
-        let schema = ParamTool.to_openai_function_with(&overrides);
-        let limit = &schema["function"]["parameters"]["properties"]["limit"];
-        // Patched fields applied…
-        assert_eq!(limit["description"], "不得低于 10");
-        assert_eq!(limit["minimum"], 10);
-        // …but the pre-existing type on `limit` is preserved (not overwritten).
-        assert_eq!(limit["type"], "integer");
-        // Other parameters and top-level keys are untouched.
-        assert_eq!(
-            schema["function"]["parameters"]["properties"]["path"]["description"],
-            "a file path"
-        );
-        assert_eq!(
-            schema["function"]["parameters"]["required"],
-            serde_json::json!(["path"])
-        );
-    }
-
-    #[test]
-    fn param_override_inserts_into_a_property_that_did_not_exist() {
-        let mut overrides = super::ToolOverrides::new();
-        let mut patch = serde_json::Map::new();
-        patch.insert("type".to_string(), "boolean".into());
-        let mut params = HashMap::new();
-        params.insert("verbose".to_string(), patch);
-        overrides.insert(
-            "read_text".to_string(),
-            super::ToolOverride {
-                description: None,
-                params,
-            },
-        );
-        let schema = ParamTool.to_openai_function_with(&overrides);
-        assert_eq!(
-            schema["function"]["parameters"]["properties"]["verbose"]["type"],
-            "boolean"
-        );
-        // Original properties survive.
-        assert!(schema["function"]["parameters"]["properties"]["path"].is_object());
-    }
-
-    #[test]
-    fn deep_merge_json_recurses_into_nested_objects() {
-        use serde_json::json;
-        let mut target = json!({
-            "a": { "x": 1, "y": 2 },
-            "b": "keep"
-        });
-        let patch = json!({
-            "a": { "y": 99, "z": 3 }
-        });
-        super::deep_merge_json(&mut target, &patch);
-        assert_eq!(target["a"]["x"], 1); // preserved
-        assert_eq!(target["a"]["y"], 99); // overwritten
-        assert_eq!(target["a"]["z"], 3); // inserted
-        assert_eq!(target["b"], "keep"); // untouched
+        assert_eq!(desc_of(&schema), "terse wording");
     }
 }

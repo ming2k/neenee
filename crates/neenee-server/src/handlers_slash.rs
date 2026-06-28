@@ -29,7 +29,7 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 use neenee_core::{
-    AgentNotice, AgentRequest, AgentResponse, CronExpr, McpConnectionStatus, Message, NoticeKind,
+    AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind,
     NoticeSeverity, NoticeSource, NoticeSurface, Provider, Pursuit, Tool, TurnEvent,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
@@ -69,7 +69,6 @@ pub async fn dispatch(
     provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
     skills_registry: Arc<SkillRegistry>,
     skills_registry_for_commands: &Arc<SkillRegistry>,
-    mcp_statuses: &[(String, McpConnectionStatus)],
     commands_for_task: &HashMap<String, CustomCommand>,
     embedding_store_for_commands: &Arc<AsyncRwLock<embedding::EmbeddingStore>>,
     repeat_store_for_commands: &RepeatStore,
@@ -94,19 +93,11 @@ pub async fn dispatch(
             // locally; it is never forwarded here as a SlashCommand).
         }
         Some(BuiltinCmd::Mcp) => {
-            let message = if mcp_statuses.is_empty() {
-                "No MCP servers configured.".to_string()
-            } else {
-                format!(
-                    "MCP servers:\n{}",
-                    mcp_statuses
-                        .iter()
-                        .map(|(name, status)| format!("- {}: {}", name, status))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
-            };
-            let _ = resp_tx.send(turn(&session.id().await, TurnEvent::Text(message)));
+            // Handled in TUI: `/mcp` opens the MCP manager modal locally
+            // (intercepted in input.rs as `InputAction::OpenMcp`) and is never
+            // forwarded here as a SlashCommand. The modal reads the live
+            // session-context snapshot, whose MCP pane the harness keeps current
+            // via the shared `McpRuntime`.
         }
         Some(BuiltinCmd::Permissions) => {
             if parts.get(1) == Some(&"clear") {

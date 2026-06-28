@@ -15,14 +15,14 @@ use neenee_store::{
     session::{self, SessionStore},
 };
 use neenee_tools::commands::{CustomCommand, discover_commands};
-use neenee_tools::mcp::load_mcp_tools;
 #[cfg(debug_assertions)]
 mod showcase;
 mod tui;
 
 pub(crate) use neenee_server::{
-    agent_loop, agent_setup, hooks, mcp_catalog, pursuits, side, startup,
+    agent_loop, agent_setup, hooks, mcp_catalog, mcp_runtime, pursuits, side, startup,
 };
+use mcp_runtime::McpRuntime;
 
 /// This CLI's identity, handed to the engine as its opening system prompt.
 /// Lives here (not in `neenee-agent`) so the engine stays identity-agnostic
@@ -122,9 +122,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (*skills_registry).clone(),
     ));
 
-    let mcp = load_mcp_tools(&config.mcp).await;
-    let mcp_statuses = mcp.statuses;
-
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
     // `neenee doctor` -> verify stored session integrity.
     let (startup, project_override, unattended_at_start, single_instance) =
@@ -212,36 +209,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.provide(req_tx.clone());
         builder.build()
     };
-    let mut tools: Vec<Arc<dyn neenee_core::Tool>> = neenee_core::collect_tools(&tool_ctx);
-    // MCP tools are NOT layered into `tools` here; they go into the agent's
+    let mut toolset: neenee_core::ToolSet = neenee_core::collect_toolset(&tool_ctx);
+    // MCP tools are NOT layered into the toolset here; they go into the agent's
     // dynamically-refreshable `mcp_tools` holder after Agent::new, so the
     // background McpCatalog can reconnect/re-discover them at runtime.
-    // Snapshot of the shared toolset (built-in + MCP) before the `SubagentTool` is
-    // layered on. A `/btw` side session (ADR-0017) rebuilds its `Agent` from
-    // this same snapshot — minus its own `SubagentTool`, mirroring the subagent
-    // profile filter so a side chat can recurse no further than the primary.
-    let base_tools: Arc<Vec<Arc<dyn neenee_core::Tool>>> = Arc::new(tools.clone());
-    // SubagentTool gets a snapshot of the toolset (excluding itself) so spawned
+    // Snapshot of the shared toolset (built-in default variants) before the
+    // `SubagentTool` is layered on. A `/btw` side session (ADR-0017) rebuilds
+    // its `Agent` from this same snapshot — minus its own `SubagentTool`,
+    // mirroring the subagent profile filter so a side chat can recurse no
+    // further than the primary.
+    let base_tools: Arc<Vec<Arc<dyn neenee_core::Tool>>> = Arc::new(toolset.default_view());
+    // SubagentTool gets the full capability set (excluding itself) so spawned
     // sub-agents cannot recurse and inherit the live provider. It binds the
     // EXPLORE profile (read-only / non-interactive / non-recursive).
     let subagent_tool = Arc::new(SubagentTool::new(
         agent_provider.clone(),
-        tools.clone(),
+        toolset.clone(),
         &EXPLORE,
     ));
     // Full-duplex (ADR-0029): capture the subagent tool's subagent registry so the
     // request loop can route a user's permission / ask_user reply down into the
     // specific live child that surfaced the request (looked up by the parent
     // tool-call id the TUI tags onto the reply). Captured before `subagent_tool`
-    // moves into the tool vec.
+    // is layered into the capability set.
     let subagent_registry = subagent_tool.registry();
-    tools.push(subagent_tool);
-    let agent = Arc::new(Agent::new(
+    // Keep a typed handle so we can bind the parent's variant selection into the
+    // subagent tool once the agent (which owns that selection) exists. The same
+    // underlying `Arc<SubagentTool>` is what gets layered into the toolset.
+    let subagent_tool_handle = subagent_tool.clone();
+    toolset.insert(subagent_tool);
+    let agent = Arc::new(Agent::from_toolset(
         agent_provider,
-        tools,
+        toolset,
         (*skills_registry).clone(),
         neenee_identity(),
     ));
+    // Override axis (model): subagents are agents on the same model, so they
+    // inherit the parent's tool-variant selection. The profile still owns the
+    // orthogonal scope axis.
+    subagent_tool_handle.bind_variant_selection(agent.variant_selection_handle());
     // Wire the per-project "always allow" allowlist so prior `Always`
     // approvals survive across sessions in this project. Best-effort: a
     // missing or unreadable permissions.json just means we re-prompt.
@@ -250,16 +256,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // policies are data-driven. Runtime "Always" decisions still write to
     // permissions.json; these config rules re-apply on every start.
     agent.seed_permissions_from_config(&config.permissions.allow);
-    // Seed MCP tools into the dynamically-refreshable holder and start the
-    // background reconnect/re-discover loop. Individual tool calls also
-    // auto-reconnect on failure (McpTool::call).
-    agent.replace_mcp_tools(mcp.tools);
-    if !mcp.servers.is_empty() {
-        neenee_agent::dynamic::spawn_refresh(crate::mcp_catalog::McpCatalog::new(
-            mcp.servers,
-            agent.mcp_tools_holder(),
-        ));
-    }
+    // Connect every configured MCP server, seeding the agent's shared tool
+    // holder, and start the background reconnect/re-discover loop. The runtime
+    // is the live source of truth the `/mcp` modal toggles/reconnects against.
+    // Individual tool calls also auto-reconnect on failure (McpTool::call).
+    let mcp_runtime = Arc::new(
+        McpRuntime::connect_all(config.mcp.clone(), agent.mcp_tools_holder()).await,
+    );
+    neenee_agent::dynamic::spawn_refresh(crate::mcp_catalog::McpCatalog::new(mcp_runtime.clone()));
     if unattended_at_start {
         agent.set_unattended(true);
         let _ = resp_tx.send(turn(
@@ -288,10 +292,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reseed_prune_threshold(&agent, &config);
     }
 
-    // Seed per-model tool-description overrides for the startup model. The
-    // function schemas sent to the provider swap in any listed tool's
-    // replacement description; re-seeded on provider/model switch.
-    agent_setup::reseed_tool_overrides(&agent, &config);
+    // Seed per-model tool-variant selection for the startup model. Each listed
+    // capability is realized by its chosen variant in the schemas sent to the
+    // provider; re-seeded on provider/model switch.
+    agent_setup::reseed_tool_variants(&agent, &config);
 
     // Wire the `[agent]` config table: the opt-in hard-stop budget and the
     // verify hard-nudge toggle. (Session review is on-demand via `/review`,
@@ -363,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_m_name = catalog::resolved_model_name(&config, &initial_p_name);
 
     // Spawn Agent Background Task
-    let mcp_statuses_for_tui = mcp_statuses.clone();
+    let mcp_statuses_for_tui = mcp_runtime.statuses_snapshot();
     // The agent background task takes ownership of `config`; pull the TUI
     // presentation config out first so it can be handed to the TUI later.
     let tui_config = config.tui.clone();
@@ -381,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_holder: provider_for_task,
         skills_registry,
         subagent_registry,
-        mcp_statuses,
+        mcp_runtime,
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,
         repeat_store: repeat_store_for_commands,

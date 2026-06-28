@@ -81,8 +81,15 @@ impl SubagentRegistry {
 /// stays in control of any write operations and any questions for the user.
 pub struct SubagentTool {
     provider: Arc<dyn neenee_core::Provider>,
-    tools: Vec<Arc<dyn neenee_core::Tool>>,
+    toolset: neenee_core::ToolSet,
     profile: &'static SubagentProfile,
+    /// Shared handle to the parent agent's variant selection (the **override**
+    /// axis). Bound after the parent agent is built (see
+    /// [`SubagentTool::bind_variant_selection`]). At spawn the child resolves
+    /// its scoped capabilities to the model's chosen variants by snapshotting
+    /// this, so a subagent — an agent on the same model — inherits the parent's
+    /// overrides. `None` (the default, e.g. in tests) means default variants.
+    parent_variants: std::sync::Mutex<Option<Arc<std::sync::Mutex<neenee_core::VariantSelection>>>>,
     /// Full-duplex handle registry (ADR-0029): each spawned subagent's
     /// [`SubagentHandle`] is lodged here keyed by the parent tool-call id, so
     /// the harness can route a user's permission / `ask_user` reply back down
@@ -93,20 +100,46 @@ pub struct SubagentTool {
 }
 
 impl SubagentTool {
-    /// `tools` should be the parent agent's full toolset; `profile` declares
-    /// what the spawned subagent may actually use (admission + framing). The
-    /// caller binds the role explicitly — `&EXPLORE` for the `subagent` tool.
+    /// `toolset` should be the parent agent's full capability set; `profile`
+    /// declares what the spawned subagent may actually use (admission + variant
+    /// pins + framing). The caller binds the role explicitly — `&EXPLORE` for
+    /// the `subagent` tool.
     pub fn new(
         provider: Arc<dyn neenee_core::Provider>,
-        tools: Vec<Arc<dyn neenee_core::Tool>>,
+        toolset: neenee_core::ToolSet,
         profile: &'static SubagentProfile,
     ) -> Self {
         Self {
             provider,
-            tools,
+            toolset,
             profile,
+            parent_variants: std::sync::Mutex::new(None),
             registry: Arc::new(SubagentRegistry::default()),
         }
+    }
+
+    /// Bind the parent agent's variant-selection handle (the **override** axis)
+    /// so spawned subagents inherit the model's tool overrides. Called once,
+    /// after the parent agent is constructed (the agent owns the handle). When
+    /// unbound, subagents use each capability's default variant.
+    pub fn bind_variant_selection(
+        &self,
+        handle: Arc<std::sync::Mutex<neenee_core::VariantSelection>>,
+    ) {
+        *self
+            .parent_variants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// Snapshot the parent's current variant selection (empty when unbound).
+    fn variant_snapshot(&self) -> neenee_core::VariantSelection {
+        self.parent_variants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default()
     }
 
     /// The shared handle registry for sub-agents spawned by this tool. The
@@ -250,10 +283,13 @@ impl SubagentTool {
             profile: self.profile.name.to_string(),
         });
 
-        // Subagent tools come from the bound profile's policy — the single
-        // source of truth for read-only / non-interactive / non-recursive
-        // admission. See ADR-0011.
-        let sub_tools: Vec<Arc<dyn neenee_core::Tool>> = self.profile.select_tools(&self.tools);
+        // Scope (profile) ∘ override (model). First resolve every capability to
+        // the model's chosen variant (inherited from the parent — a subagent is
+        // an agent on the same model), then narrow to what the profile admits.
+        // The profile owns *which* tools (scope, ADR-0011); the model owns
+        // *which variant* of each (override).
+        let resolved = self.toolset.resolve(&self.variant_snapshot());
+        let sub_tools = self.profile.select_tools(&resolved);
 
         // The subagent's identity *is* its profile's system prompt — that is the
         // persona/mission framing for this role (e.g. EXPLORE's research
@@ -502,11 +538,68 @@ mod tests {
         }
     }
 
+    /// A terse `read_text` variant and a write tool, to prove a subagent
+    /// resolves the *model's* variant (override axis) and then narrows to the
+    /// *profile's* scope (scope axis) — the two are orthogonal.
+    struct TerseReadTool;
+    #[async_trait::async_trait]
+    impl Tool for TerseReadTool {
+        fn name(&self) -> &str {
+            "read_text"
+        }
+        fn variant(&self) -> &str {
+            "terse"
+        }
+        fn description(&self) -> &str {
+            "terse read tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+        async fn call(&self, _arguments: &str) -> Result<String, String> {
+            Ok("terse".to_string())
+        }
+    }
+    #[test]
+    fn subagent_inherits_model_variant_then_applies_profile_scope() {
+        // `StubWriteTool` (name "stub_write") is not in EXPLORE's read-only
+        // scope, so it is always excluded; `read_text` has two variants.
+        let toolset = neenee_core::ToolSet::from_tools([
+            std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>,
+            std::sync::Arc::new(TerseReadTool) as std::sync::Arc<dyn Tool>,
+            std::sync::Arc::new(StubWriteTool) as std::sync::Arc<dyn Tool>,
+        ]);
+        let tool = SubagentTool::new(std::sync::Arc::new(CannedProvider), toolset, &EXPLORE);
+
+        // Unbound (no model override) → read_text resolves to its default
+        // variant; the out-of-scope write tool is excluded regardless.
+        let scoped = tool
+            .profile
+            .select_tools(&tool.toolset.resolve(&tool.variant_snapshot()));
+        let read = scoped.iter().find(|t| t.name() == "read_text");
+        assert_eq!(read.map(|t| t.variant()), Some("default"));
+        assert!(scoped.iter().all(|t| t.name() != "stub_write"));
+
+        // Bind a model selection pinning read_text=terse: the subagent inherits
+        // the override (terse), while scope is still profile-driven.
+        let mut sel = neenee_core::VariantSelection::new();
+        sel.insert("read_text".to_string(), "terse".to_string());
+        tool.bind_variant_selection(std::sync::Arc::new(std::sync::Mutex::new(sel)));
+        let scoped = tool
+            .profile
+            .select_tools(&tool.toolset.resolve(&tool.variant_snapshot()));
+        let read = scoped.iter().find(|t| t.name() == "read_text");
+        assert_eq!(read.map(|t| t.variant()), Some("terse"));
+        assert!(scoped.iter().all(|t| t.name() != "stub_write"));
+    }
+
     #[tokio::test]
     async fn task_tool_runs_read_only_subagent_and_returns_answer() {
         let tool = SubagentTool::new(
             std::sync::Arc::new(CannedProvider),
-            vec![std::sync::Arc::new(EchoReadTool)],
+            neenee_core::ToolSet::from_tools([
+                std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>
+            ]),
             &EXPLORE,
         );
 
@@ -527,7 +620,9 @@ mod tests {
     async fn subagent_head_system_message_has_no_dead_task_line() {
         let tool = SubagentTool::new(
             std::sync::Arc::new(CannedProvider),
-            vec![std::sync::Arc::new(EchoReadTool)],
+            neenee_core::ToolSet::from_tools([
+                std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>
+            ]),
             &EXPLORE,
         );
         let outcome = tool
@@ -565,7 +660,11 @@ mod tests {
 
     #[tokio::test]
     async fn task_tool_rejects_missing_fields() {
-        let tool = SubagentTool::new(std::sync::Arc::new(CannedProvider), Vec::new(), &EXPLORE);
+        let tool = SubagentTool::new(
+            std::sync::Arc::new(CannedProvider),
+            neenee_core::ToolSet::default(),
+            &EXPLORE,
+        );
         assert!(tool.call(r#"{"description":"x"}"#).await.is_err());
         assert!(tool.call(r#"{"prompt":"x"}"#).await.is_err());
     }
@@ -599,7 +698,8 @@ mod tests {
     #[test]
     fn explore_profile_excludes_user_write_and_recursion_using_real_tools() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
-        let subagent_tool = SubagentTool::new(provider.clone(), Vec::new(), &EXPLORE);
+        let subagent_tool =
+            SubagentTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
             std::sync::Arc::new(EchoReadTool),
@@ -621,7 +721,8 @@ mod tests {
     #[test]
     fn explore_profile_excludes_bash_writes_user_and_recursion() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
-        let subagent_tool = SubagentTool::new(provider.clone(), Vec::new(), &EXPLORE);
+        let subagent_tool =
+            SubagentTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
             std::sync::Arc::new(EchoReadTool),

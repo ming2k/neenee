@@ -500,16 +500,6 @@ impl Provider for OpenAiCompatProvider {
         });
     }
 
-    fn prepare_tools_with(&self, tools: &[Arc<dyn Tool>], overrides: &neenee_core::ToolOverrides) {
-        let schemas: Vec<Value> = tools
-            .iter()
-            .map(|t| t.to_openai_function_with(overrides))
-            .collect();
-        let _ = self.tools.lock().map(|mut guard| {
-            *guard = Some(schemas);
-        });
-    }
-
     fn provider_id(&self) -> String {
         self.id.clone()
     }
@@ -1109,18 +1099,22 @@ mod tests {
         assert_eq!(msgs[4]["content"], "all done");
     }
 
-    // --- per-model tool-description override end-to-end ---
+    // --- resolved-variant schema reaches the request body ---
 
-    /// Minimal Tool stand-in so the override wiring can be exercised without
-    /// pulling in the whole tools crate. Mirrors the one in neenee-core's tests.
+    /// Minimal Tool stand-in carrying a variant id, so resolving a toolset and
+    /// preparing its schemas can be exercised without the whole tools crate.
     struct DummyTool {
         name: &'static str,
+        variant: &'static str,
         desc: &'static str,
     }
     #[async_trait::async_trait]
     impl Tool for DummyTool {
         fn name(&self) -> &str {
             self.name
+        }
+        fn variant(&self) -> &str {
+            self.variant
         }
         fn description(&self) -> &str {
             self.desc
@@ -1140,57 +1134,38 @@ mod tests {
     }
 
     #[test]
-    fn prepare_tools_with_threads_overrides_into_request_body() {
-        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
-        let tools: Vec<Arc<dyn Tool>> = vec![
+    fn prepare_tools_emits_the_selected_variants_schema() {
+        // A `read_text` capability with two variants; the agent resolves a
+        // selection before handing the toolset to the provider, so whichever
+        // variant is selected is the one whose schema reaches the request body.
+        let toolset = neenee_core::ToolSet::from_tools(vec![
             Arc::new(DummyTool {
                 name: "read_text",
-                desc: "built-in description",
-            }),
+                variant: "default",
+                desc: "default wording",
+            }) as Arc<dyn Tool>,
             Arc::new(DummyTool {
-                name: "bash",
-                desc: "built-in bash",
-            }),
-        ];
+                name: "read_text",
+                variant: "terse",
+                desc: "terse wording",
+            }) as Arc<dyn Tool>,
+        ]);
 
-        // Override read_text only; bash keeps its built-in description.
-        let mut overrides = neenee_core::ToolOverrides::new();
-        overrides.insert(
-            "read_text".to_string(),
-            neenee_core::ToolOverride {
-                description: Some("model-specific wording".to_string()),
-                params: std::collections::HashMap::new(),
-            },
-        );
-        provider.prepare_tools_with(&tools, &overrides);
-
+        // Default selection → default variant's description in the body.
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        provider.prepare_tools(&toolset.default_view());
         let body = provider.request_body(vec![Message::new(Role::User, "go")], false);
-        assert_eq!(tool_desc_at(&body, 0), "model-specific wording");
-        assert_eq!(tool_desc_at(&body, 1), "built-in bash");
-        // Name and type are untouched.
+        assert_eq!(tool_desc_at(&body, 0), "default wording");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_text");
+
+        // Selecting the terse variant → terse description in the body, same name.
+        let mut selection = neenee_core::VariantSelection::new();
+        selection.insert("read_text".to_string(), "terse".to_string());
+        let provider = OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
+        provider.prepare_tools(&toolset.resolve(&selection));
+        let body = provider.request_body(vec![Message::new(Role::User, "go")], false);
+        assert_eq!(tool_desc_at(&body, 0), "terse wording");
         assert_eq!(body["tools"][0]["function"]["name"], "read_text");
         assert_eq!(body["tools"][0]["type"], "function");
-    }
-
-    #[test]
-    fn prepare_tools_without_overrides_matches_plain_prepare_tools() {
-        // The override path with an empty map must be byte-identical to the
-        // plain path, so existing behaviour is preserved when no overrides are
-        // configured for the active model.
-        let mk = || OpenAiCompatProvider::new("test-key".to_string(), "test-model".to_string());
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DummyTool {
-            name: "read_text",
-            desc: "built-in description",
-        })];
-
-        let plain = mk();
-        plain.prepare_tools(&tools);
-        let plain_body = plain.request_body(vec![Message::new(Role::User, "go")], false);
-
-        let with = mk();
-        with.prepare_tools_with(&tools, &neenee_core::ToolOverrides::new());
-        let with_body = with.request_body(vec![Message::new(Role::User, "go")], false);
-
-        assert_eq!(plain_body, with_body);
     }
 }

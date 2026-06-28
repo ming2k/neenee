@@ -120,7 +120,15 @@ pub struct SubagentProfile {
 }
 
 impl SubagentProfile {
-    /// Filter a parent toolset down to what this profile admits.
+    /// Filter a parent toolset down to what this profile admits, by
+    /// [`ToolPolicy`]. This is the **scope** axis and the profile's whole job:
+    /// *which* capabilities the subagent may use. It is deliberately blind to
+    /// *which variant* of each capability is used — that is the **override**
+    /// axis, owned by the model ([`crate::VariantSelection`]), not the profile.
+    ///
+    /// Callers pass an already variant-resolved list (one tool per capability,
+    /// at the model's chosen variant), so the subagent inherits the model's
+    /// overrides while the profile only narrows the scope.
     pub fn select_tools(&self, tools: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
         tools
             .iter()

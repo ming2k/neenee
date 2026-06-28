@@ -190,6 +190,50 @@ impl Tool for ReadTextTool {
 }
 neenee_core::register_tool!(ReadTextFactory => ReadTextTool);
 
+/// The terse `read_text` variant: same capability name and identical behaviour
+/// (it delegates execution to [`ReadTextTool`]), but a stripped-down,
+/// instruction-light description and schema. Selected by the **model** under
+/// `[tool_variants."<model-id>"] read_text = "terse"` for models that follow a
+/// tight contract better than verbose usage guidance. A subagent on such a
+/// model inherits this choice automatically (variant is the model's axis, not
+/// the profile's). This is the concrete demonstration that a capability can
+/// offer a genuinely different *presentation* of the same tool rather than a
+/// re-worded copy patched in at schema-build time.
+pub struct ReadTextTerseTool;
+
+#[async_trait]
+impl Tool for ReadTextTerseTool {
+    fn name(&self) -> &str {
+        "read_text"
+    }
+    fn variant(&self) -> &str {
+        "terse"
+    }
+    fn description(&self) -> &str {
+        "Read a text file; lines are prefixed with line numbers. Optional \
+         `offset` (1-based) and `limit`. Large reads paginate and report the \
+         next `offset`."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "offset": { "type": "integer" },
+                "limit": { "type": "integer" }
+            },
+            "required": ["path"]
+        })
+    }
+    async fn call(&self, arguments: &str) -> Result<String, String> {
+        ReadTextTool.call(arguments).await
+    }
+    async fn call_structured(&self, arguments: &str) -> Result<neenee_core::ToolOutput, String> {
+        ReadTextTool.call_structured(arguments).await
+    }
+}
+neenee_core::register_tool!(ReadTextTerseFactory => ReadTextTerseTool);
+
 /// Extensions that are always treated as binary and never read as text.
 const BINARY_EXTENSIONS: &[&str] = &[
     "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "exe", "dll", "so", "dylib", "o", "a", "lib",

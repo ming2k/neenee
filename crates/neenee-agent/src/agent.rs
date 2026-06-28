@@ -93,11 +93,22 @@ struct AskUserState {
 
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
-    pub tools: Vec<Arc<dyn Tool>>,
+    /// The full capability set: every tool keyed by capability, with all its
+    /// variants. The single source of truth from which the model-visible
+    /// [`resolved_tools`](Self::resolved_tools) view is derived for the active
+    /// [`variant_selection`](Self::variant_selection).
+    pub(crate) toolset: neenee_core::ToolSet,
+    /// The active resolved view: exactly one variant per capability, for the
+    /// current model's [`variant_selection`]. Both advertising
+    /// (`visible_tools` → `prepare_tools`) and dispatch (`find` by name) read
+    /// this, so re-resolving it on a model/selection switch makes *both* the
+    /// schema and the executed implementation track the chosen variant. Held
+    /// behind a `RwLock` because it is swapped wholesale on selection change.
+    resolved_tools: std::sync::RwLock<Vec<Arc<dyn Tool>>>,
     /// Dynamically refreshable MCP tools, held behind a shared `RwLock` so the
     /// background `McpCatalog` refresh loop can
     /// replace them (reconnect, re-discover) without rebuilding the agent.
-    /// `visible_tools` / dispatch / snapshot merge this with `tools`.
+    /// `visible_tools` / dispatch / snapshot merge this with `resolved_tools`.
     mcp_tools: Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>,
     /// Session-level disabled-tool mask. Names here are hidden from the model
     /// (their schemas are dropped before `prepare_tools`) and rejected at
@@ -191,12 +202,16 @@ pub struct Agent {
     /// sections in rank order. User-channel sections are added in later
     /// migration stages.
     pub(crate) prompt_registry: crate::PromptRegistry,
-    /// Per-model tool-description overrides for the *current* model. When the
-    /// agent builds tool schemas for a turn, any tool whose name is present
-    /// here has its built-in description replaced. Seeded from
-    /// `[tool_overrides."<model-id>"]` config via [`Agent::set_tool_overrides`]
-    /// and re-seeded on model switch so it always tracks the live model.
-    tool_overrides: std::sync::Mutex<neenee_core::ToolOverrides>,
+    /// Per-model tool-variant selection (the **override** axis) for the
+    /// *current* model: a `capability → variant_id` map. Seeded from
+    /// `[tool_variants."<model-id>"]` config via
+    /// [`Agent::set_variant_selection`] and re-seeded on model switch so the
+    /// resolved toolset always tracks the live model. Held behind an `Arc` so a
+    /// spawned subagent — which is an agent on the *same* model — can inherit
+    /// the same overrides by sharing this handle (see
+    /// [`Agent::variant_selection_handle`]); the profile decides scope, the
+    /// model decides variant.
+    variant_selection: Arc<std::sync::Mutex<neenee_core::VariantSelection>>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -295,16 +310,39 @@ impl TurnState {
 }
 
 impl Agent {
+    /// Construct an agent from a flat tool list. The tools are grouped into a
+    /// [`neenee_core::ToolSet`] (one capability per [`Tool::name`], one variant
+    /// per [`Tool::variant`]) — the common case for a single-variant toolset or
+    /// an already-resolved subagent toolset. Use [`Agent::from_toolset`] to
+    /// preserve a multi-variant set so per-model variant selection can switch
+    /// between variants at runtime.
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,
         skills_registry: skills::SkillRegistry,
         identity: AgentIdentity,
     ) -> Self {
+        Self::from_toolset(
+            provider,
+            neenee_core::ToolSet::from_tools(tools),
+            skills_registry,
+            identity,
+        )
+    }
+
+    /// Construct an agent from a full [`neenee_core::ToolSet`], preserving every
+    /// capability's variants so [`Agent::set_variant_selection`] can swap the
+    /// model-visible variant at runtime.
+    pub fn from_toolset(
+        provider: Arc<dyn Provider>,
+        toolset: neenee_core::ToolSet,
+        skills_registry: skills::SkillRegistry,
+        identity: AgentIdentity,
+    ) -> Self {
         let pursuit_state = crate::pursuit_state::PursuitState::new();
         let thread_id = Arc::new(std::sync::Mutex::new(None));
 
-        let mut tools = tools;
+        let mut toolset = toolset;
 
         // The unified task list shares its cell + turn counter with the
         // todo tools. An ad-hoc task edit (todo / todo_update) moves the
@@ -313,16 +351,20 @@ impl Agent {
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
         let todo_context =
             neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
-        tools.push(Arc::new(crate::todo_tools::TodoWriteTool::new(
+        toolset.insert(Arc::new(crate::todo_tools::TodoWriteTool::new(
             todo_context.clone(),
         )));
-        tools.push(Arc::new(crate::todo_tools::TodoUpdateTool::new(
-            todo_context,
-        )));
+        toolset.insert(Arc::new(crate::todo_tools::TodoUpdateTool::new(todo_context)));
+
+        // Seed the model-visible view with the default variant of every
+        // capability; re-seeded by `set_variant_selection` once the model's
+        // `[tool_variants]` selection is known.
+        let resolved_tools = std::sync::RwLock::new(toolset.default_view());
 
         Self {
             provider,
-            tools,
+            toolset,
+            resolved_tools,
             mcp_tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             disabled_tools: Arc::new(std::sync::Mutex::new(HashSet::new())),
             todos,
@@ -344,7 +386,7 @@ impl Agent {
             identity,
             round_persist: std::sync::Mutex::new(None),
             prompt_registry: crate::prompt::default_prompt_registry(),
-            tool_overrides: std::sync::Mutex::new(neenee_core::ToolOverrides::new()),
+            variant_selection: Arc::new(std::sync::Mutex::new(neenee_core::VariantSelection::new())),
         }
     }
 
@@ -359,15 +401,39 @@ impl Agent {
     }
 
     /// Replace the tool-description overrides applied to the current model's
-    /// tool schemas. Seeded from `[tool_overrides."<model-id>"]` config and
-    /// re-applied on model switch so the wording always tracks the live model.
-    /// An empty map (the default) leaves every tool's built-in description
-    /// untouched.
-    pub fn set_tool_overrides(&self, overrides: neenee_core::ToolOverrides) {
+    /// Replace the per-model tool-variant selection and re-resolve the
+    /// model-visible toolset to match. Seeded from `[tool_variants."<model-id>"]`
+    /// config and re-applied on model switch so the resolved variants always
+    /// track the live model. An empty map (the default) realizes every
+    /// capability with its default variant.
+    pub fn set_variant_selection(&self, selection: neenee_core::VariantSelection) {
         *self
-            .tool_overrides
+            .resolved_tools
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = self.toolset.resolve(&selection);
+        *self
+            .variant_selection
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = overrides;
+            .unwrap_or_else(|e| e.into_inner()) = selection;
+    }
+
+    /// The current model-visible toolset: exactly one variant per capability for
+    /// the active selection. A snapshot clone for external readers (e.g. a
+    /// subagent dispatch that scopes this resolved list down to its profile).
+    pub fn installed_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.resolved_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// A shared handle to this agent's live variant selection (the **override**
+    /// axis). Handed to a spawned subagent's dispatch tool so the subagent — an
+    /// agent on the same model — resolves its admitted capabilities to the same
+    /// variants the parent uses, tracking model switches live. The profile still
+    /// owns the orthogonal **scope** axis.
+    pub fn variant_selection_handle(&self) -> Arc<std::sync::Mutex<neenee_core::VariantSelection>> {
+        Arc::clone(&self.variant_selection)
     }
 
     /// Replace the prompt registry wholesale. Used by sub-callers that need a
@@ -902,7 +968,7 @@ impl Agent {
     /// Replace the entire set of dynamically-refreshable MCP tools. Called by
     /// the `McpCatalog` background refresh loop
     /// after reconnecting servers and re-discovering their tools. The built-in
-    /// tools in `self.tools` are untouched.
+    /// built-in capabilities are untouched.
     pub fn replace_mcp_tools(&self, tools: Vec<Arc<dyn Tool>>) {
         if let Ok(mut guard) = self.mcp_tools.write() {
             *guard = tools;
@@ -920,7 +986,7 @@ impl Agent {
     /// unknown (so a stale toggle from the modal cannot poison the dispatch
     /// table). Returns whether the flag actually changed.
     pub fn set_tool_enabled(&self, name: &str, enabled: bool) -> bool {
-        let known = self.tools.iter().any(|t| t.name() == name);
+        let known = self.toolset.variants_of(name).is_some();
         if !known {
             return false;
         }
@@ -960,7 +1026,9 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner());
         let is_visible = |t: &Arc<dyn Tool>| !disabled.contains(t.name());
         let mut tools: Vec<Arc<dyn Tool>> = self
-            .tools
+            .resolved_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|t| is_visible(t))
             .cloned()
@@ -981,11 +1049,15 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let subagent = ["subagent"];
-        // Merge built-in tools and dynamically-refreshable MCP tools.
-        let mcp_guard = self.mcp_tools.read().ok();
-        let mut all_tools: Vec<&Arc<dyn Tool>> = self.tools.iter().collect();
-        if let Some(guard) = &mcp_guard {
-            all_tools.extend(guard.iter());
+        // Merge the resolved built-in view and dynamically-refreshable MCP
+        // tools into one owned list (one variant per capability).
+        let mut all_tools: Vec<Arc<dyn Tool>> = self
+            .resolved_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Ok(guard) = self.mcp_tools.read() {
+            all_tools.extend(guard.iter().cloned());
         }
         let mut infos: Vec<neenee_core::ToolInfo> = all_tools
             .iter()
@@ -1058,12 +1130,7 @@ impl Agent {
         // applied here so a toggled-off tool's schema never reaches the
         // provider, which keeps the model from naming it in the first place.
         let visible = self.visible_tools();
-        let overrides = self
-            .tool_overrides
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        self.provider.prepare_tools_with(&visible, &overrides);
+        self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
             guards: TurnState::guards_default(),
@@ -1185,12 +1252,7 @@ impl Agent {
         // applied here so a toggled-off tool's schema never reaches the
         // provider, which keeps the model from naming it in the first place.
         let visible = self.visible_tools();
-        let overrides = self
-            .tool_overrides
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        self.provider.prepare_tools_with(&visible, &overrides);
+        self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
             guards: TurnState::guards_default(),
@@ -1698,7 +1760,13 @@ impl Agent {
     /// round-hook streak counter. An unknown tool name reads as `true`
     /// (unspecified), matching the trait default.
     fn tool_target_is_unspecified(&self, name: &str, arguments: &str) -> bool {
-        match self.tools.iter().find(|t| t.name() == name) {
+        match self
+            .resolved_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|t| t.name() == name)
+        {
             Some(t) => matches!(
                 t.scope_target(arguments),
                 neenee_core::ScopeTarget::Unspecified
@@ -1955,7 +2023,9 @@ impl Agent {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> ToolOutput {
         let tool: Arc<dyn Tool> = match self
-            .tools
+            .resolved_tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .find(|t| t.name() == call.name)
             .cloned()

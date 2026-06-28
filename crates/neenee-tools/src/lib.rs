@@ -36,7 +36,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListDirTool;
 pub use project::{CreateProjectTool, InitConfigTool};
-pub use read::ReadTextTool;
+pub use read::{ReadTextTerseTool, ReadTextTool};
 pub use read_image::ReadImageTool;
 pub(crate) use web::html_to_text;
 pub use web::{WebFetchTool, WebSearchTool};

@@ -91,10 +91,6 @@ pub enum Modal {
     ModelEditor,
     Help,
     Sessions,
-    /// Full-output detail overlay for a focused tool step. The step is
-    /// identified by `App::tool_detail_message_idx`; `tool_detail_scroll`
-    /// holds the overlay's own scroll offset.
-    ToolStepDetail,
     /// Session context modal: a single scrollable **read-only** dashboard of
     /// the live session's model, MCP servers, and skills. Opened with the
     /// `/session` slash command. The dashboard's `TOOLS` line is a one-row
@@ -108,6 +104,14 @@ pub enum Modal {
     /// [`App::modal_index`] is its selection cursor; data comes from the same
     /// session-context snapshot `/session` uses.
     Tools,
+    /// MCP manager modal: a centered, dismissable, selectable list of every
+    /// configured MCP server with its connection status (connected / disabled /
+    /// failed) and tool count. Opened with the `/mcp` slash command. `Space`
+    /// toggles a server on/off for the session (connect/disconnect, applied
+    /// live without rewriting config.toml); `r` reconnects the selected server.
+    /// [`App::modal_index`] is its selection cursor; data comes from the same
+    /// session-context snapshot `/session` uses (its `mcp` pane).
+    Mcp,
     /// Permissions manager modal: a centered, dismissable overlay listing the
     /// session's cached "always allow" rules with per-row revoke and a
     /// clear-all action. Opened with the `/permissions` slash command. This
@@ -162,7 +166,7 @@ impl Modal {
 
     /// Whether this modal closes when the user clicks outside its rect
     /// (click-outside-to-dismiss). True for the read-only / info overlays
-    /// (Help, ToolStepDetail, Session, Sessions, Activity) and for the history
+    /// (Help, Session, Sessions, Activity) and for the history
     /// modal and the model picker: their filter query is ephemeral and the real
     /// composer draft is safely parked in `stashed_input`, so an outside click
     /// closes them and restores the draft (via [`App::restore_history_draft`]) —
@@ -178,9 +182,9 @@ impl Modal {
         matches!(
             self,
             Modal::Help
-                | Modal::ToolStepDetail
                 | Modal::Session
                 | Modal::Tools
+                | Modal::Mcp
                 | Modal::Sessions
                 | Modal::Permissions
                 | Modal::Activity
@@ -483,11 +487,6 @@ pub struct App {
     /// Global tool-step density (false = Compact default, true = Comfortable:
     /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
-    /// Message index of the tool step shown in the [`Modal::ToolStepDetail`]
-    /// overlay. `None` when the overlay is closed.
-    pub tool_detail_message_idx: Option<usize>,
-    /// Scroll offset (rows) of the [`Modal::ToolStepDetail`] overlay.
-    pub tool_detail_scroll: u16,
     /// Keyboard-focused activatable target in the current frame, and the TUI's
     /// only navigation state — there is no separate "browse mode". `None` means
     /// every key has its ordinary input-box meaning (typing flows into the

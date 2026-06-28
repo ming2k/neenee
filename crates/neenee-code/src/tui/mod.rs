@@ -872,8 +872,6 @@ pub async fn run_tui(
         modal_hit_map: crate::tui::layout::ModalHitMap::new(),
         hovered_step: None,
         tool_density: tool_density.clone(),
-        tool_detail_message_idx: None,
-        tool_detail_scroll: 0,
         focused_target: None,
         cursor_hidden: false,
         copy_toast_until: None,

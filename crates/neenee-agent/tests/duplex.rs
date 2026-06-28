@@ -328,7 +328,9 @@ async fn subagent_tool_registry_routes_reply_into_live_subagent() {
     let ran = Arc::new(AtomicUsize::new(0));
     let subagent_tool = Arc::new(SubagentTool::new(
         Arc::new(StreamWriteCallProvider(AtomicUsize::new(0))),
-        vec![Arc::new(BrokerGatedTool(Arc::clone(&ran))) as Arc<dyn Tool>],
+        neenee_core::ToolSet::from_tools([
+            Arc::new(BrokerGatedTool(Arc::clone(&ran))) as Arc<dyn Tool>
+        ]),
         &INTERACTIVE,
     ));
     let registry = subagent_tool.registry();

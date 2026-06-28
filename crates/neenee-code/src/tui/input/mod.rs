@@ -120,6 +120,16 @@ pub enum InputAction {
     /// Enter from the session dashboard's TOOLS line. The request is never
     /// forwarded — it only opens the overlay.
     OpenTools,
+    /// Open the MCP manager modal: a centered, selectable list of every
+    /// configured MCP server with `Space` toggle and `r` reconnect. Reached via
+    /// the `/mcp` slash command (intercepted locally, never sent to the
+    /// backend). The request is never forwarded — it only opens the overlay.
+    OpenMcp,
+    /// Connect/disconnect the selected MCP server in the MCP manager modal.
+    /// Bound to `Space`.
+    McpToggle,
+    /// Reconnect the selected MCP server in the MCP manager modal. Bound to `r`.
+    McpReconnect,
     /// Revoke the selected "always allow" rule in the permissions manager
     /// modal. Bound to `Space`.
     PermissionsActivate,
@@ -729,9 +739,9 @@ pub fn process_event(
                     super::Modal::Permission => InputAction::PermissionSubmit,
                     super::Modal::Question => InputAction::QuestionSubmit,
                     super::Modal::Help => InputAction::CloseModal,
-                    super::Modal::ToolStepDetail => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
                     super::Modal::Tools => InputAction::CloseModal,
+                    super::Modal::Mcp => InputAction::CloseModal,
                     super::Modal::Permissions => InputAction::CloseModal,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::None => {
@@ -776,6 +786,7 @@ pub fn process_event(
                                 "/session" => InputAction::OpenSession,
                                 "/permissions" => InputAction::OpenPermissions,
                                 "/tools" => InputAction::OpenTools,
+                                "/mcp" => InputAction::OpenMcp,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
                             }
@@ -1057,6 +1068,14 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Tools && c == ' ' {
                         return InputAction::SessionActivate;
                     }
+                    // Space toggles the selected server in the MCP manager;
+                    // `r` reconnects it.
+                    if context.active_modal == super::Modal::Mcp && c == ' ' {
+                        return InputAction::McpToggle;
+                    }
+                    if context.active_modal == super::Modal::Mcp && c == 'r' {
+                        return InputAction::McpReconnect;
+                    }
                     // Space inside the permissions manager revokes the
                     // selected rule.
                     if context.active_modal == super::Modal::Permissions && c == ' ' {
@@ -1297,12 +1316,12 @@ pub fn process_event(
                             InputAction::ScrollUp
                         }
                     }
-                    super::Modal::ToolStepDetail => InputAction::ScrollUp,
                     super::Modal::Activity => InputAction::ScrollUp,
                     // The session dashboard is now read-only; Up/Down scroll its
                     // body. Tool selection lives in the Tools modal.
                     super::Modal::Session => InputAction::ScrollUp,
                     super::Modal::Tools => InputAction::SessionSelect { forward: false },
+                    super::Modal::Mcp => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
@@ -1344,11 +1363,11 @@ pub fn process_event(
                             InputAction::ScrollDown
                         }
                     }
-                    super::Modal::ToolStepDetail => InputAction::ScrollDown,
                     super::Modal::Activity => InputAction::ScrollDown,
                     // Read-only dashboard: Up/Down scroll, not select.
                     super::Modal::Session => InputAction::ScrollDown,
                     super::Modal::Tools => InputAction::SessionSelect { forward: true },
+                    super::Modal::Mcp => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
                     super::Modal::ModelEditor => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,

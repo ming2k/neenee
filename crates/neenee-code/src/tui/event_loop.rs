@@ -754,7 +754,7 @@ pub(super) async fn run_app_loop(
                         // against the unmasked string.
                     } else if !app.in_subagent_view() {
                         // The composer stays mounted for the dim-recess modals
-                        // (Help / ToolStepDetail / Session /
+                        // (Help / Session /
                         // Activity) so the footer layout doesn't shift when the
                         // overlay opens or closes; the recess pass darkens it in
                         // place with the rest of the surface. When a transcript
@@ -909,21 +909,6 @@ pub(super) async fn run_app_loop(
                     Modal::Help => {
                         Some(render::draw_help_modal(f, &mut app.help_scroll, &app.theme))
                     }
-                    Modal::ToolStepDetail => {
-                        if let Some(msg) = app
-                            .tool_detail_message_idx
-                            .and_then(|idx| app.messages.get(idx))
-                        {
-                            Some(render::draw_tool_step_detail_overlay(
-                                f,
-                                msg,
-                                app.tool_detail_scroll,
-                                &app.theme,
-                            ))
-                        } else {
-                            None
-                        }
-                    }
                     Modal::Sessions => Some(render::draw_sessions_modal(
                         f,
                         &app.sessions_overview,
@@ -942,6 +927,14 @@ pub(super) async fn run_app_loop(
                         &app.theme,
                     )),
                     Modal::Tools => Some(render::draw_tools_modal(
+                        f,
+                        app.session_context.as_ref(),
+                        app.modal_index,
+                        &mut app.session_scroll,
+                        app.session_modal_follow,
+                        &app.theme,
+                    )),
+                    Modal::Mcp => Some(render::draw_mcp_modal(
                         f,
                         app.session_context.as_ref(),
                         app.modal_index,
@@ -1733,6 +1726,44 @@ pub(super) async fn run_app_loop(
                     app.session_modal_follow = true;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
+                input::InputAction::OpenMcp => {
+                    // The MCP manager modal. Reached via `/mcp` (intercepted
+                    // locally). Shares the session-context snapshot, so kick a
+                    // fresh query and let the modal populate from its `mcp` pane.
+                    app.active_modal = Modal::Mcp;
+                    app.modal_index = 0;
+                    app.session_scroll = 0;
+                    app.session_modal_follow = true;
+                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::McpToggle => {
+                    // Connect/disconnect the selected server for the session.
+                    // The "enabled intent" is the inverse of its disabled flag;
+                    // the harness replies with a fresh snapshot.
+                    if let Some(server) = app
+                        .session_context
+                        .as_ref()
+                        .and_then(|s| s.mcp.get(app.modal_index))
+                    {
+                        let _ = app.tx.send(AgentRequest::ToggleMcpServer {
+                            name: server.name.clone(),
+                            enabled: server.disabled,
+                        });
+                    }
+                }
+                input::InputAction::McpReconnect => {
+                    // Reconnect the selected server on demand. The harness
+                    // replies with a fresh snapshot reflecting the new status.
+                    if let Some(server) = app
+                        .session_context
+                        .as_ref()
+                        .and_then(|s| s.mcp.get(app.modal_index))
+                    {
+                        let _ = app.tx.send(AgentRequest::ReconnectMcpServer {
+                            name: server.name.clone(),
+                        });
+                    }
+                }
                 input::InputAction::PermissionsActivate => {
                     // Revoke the selected "always allow" rule. The harness
                     // replies with a fresh snapshot so the list re-renders.
@@ -1752,11 +1783,19 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                 }
                 input::InputAction::SessionSelect { forward } => {
-                    // Move the tool-selection cursor (the body scroll follows
-                    // it). When there are no tools yet (still loading / none),
-                    // Up/Down scrolls the dashboard body directly so the other
-                    // sections stay reachable.
-                    let list_len = app.session_tools_len();
+                    // Move the selection cursor (the body scroll follows it).
+                    // The list is the tools list, except in the MCP manager
+                    // where it is the configured-server list. When empty (still
+                    // loading / none), Up/Down scrolls the body directly so the
+                    // other content stays reachable.
+                    let list_len = if app.active_modal == Modal::Mcp {
+                        app.session_context
+                            .as_ref()
+                            .map(|s| s.mcp.len())
+                            .unwrap_or(0)
+                    } else {
+                        app.session_tools_len()
+                    };
                     if list_len > 0 {
                         app.modal_index = if forward {
                             (app.modal_index + 1) % list_len
@@ -1834,10 +1873,6 @@ pub(super) async fn run_app_loop(
                         app.model_modal_follow = true;
                         return_to_picker = true;
                     }
-                    if app.active_modal == Modal::ToolStepDetail {
-                        app.tool_detail_message_idx = None;
-                        app.tool_detail_scroll = 0;
-                    }
                     app.active_modal = if return_to_picker {
                         Modal::Provider
                     } else {
@@ -1845,9 +1880,7 @@ pub(super) async fn run_app_loop(
                     };
                 }
                 input::InputAction::ScrollUp => {
-                    if app.active_modal == Modal::ToolStepDetail {
-                        app.tool_detail_scroll = app.tool_detail_scroll.saturating_sub(1);
-                    } else if app.active_modal == Modal::Activity {
+                    if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_sub(1);
@@ -1877,9 +1910,7 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ScrollDown => {
-                    if app.active_modal == Modal::ToolStepDetail {
-                        app.tool_detail_scroll = app.tool_detail_scroll.saturating_add(1);
-                    } else if app.active_modal == Modal::Activity {
+                    if app.active_modal == Modal::Activity {
                         app.activity_scroll = app.activity_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_add(1);
@@ -2147,15 +2178,14 @@ pub(super) async fn run_app_loop(
                                     drop(messages);
                                     app.enter_subagent(id);
                                 } else {
-                                    // Open the full-output detail overlay instead
-                                    // of the inline expand/collapse (the latter is
-                                    // the cramped UX the redesign replaces). The
-                                    // bulk `ctrl+t` toggle still inline-expands
-                                    // every step if desired.
+                                    // Enter mirrors the mouse click on a tool
+                                    // step's summary: toggle its inline
+                                    // disclosure (expand/collapse) rather than
+                                    // popping a modal. Keeping keyboard and
+                                    // pointer parity is the expected behavior
+                                    // for the disclosure affordance.
+                                    app.toggle_step_pinned(&mut messages, target.message_idx);
                                     drop(messages);
-                                    app.tool_detail_message_idx = Some(target.message_idx);
-                                    app.tool_detail_scroll = 0;
-                                    app.active_modal = Modal::ToolStepDetail;
                                 }
                             }
                             InteractiveTargetKind::Thinking => {
@@ -2427,11 +2457,11 @@ pub(super) async fn run_app_loop(
                         };
                     }
                     Modal::Help
-                    | Modal::ToolStepDetail
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
                     | Modal::Tools
+                    | Modal::Mcp
                     | Modal::Activity
                     | Modal::None => {}
                 },
@@ -2467,11 +2497,11 @@ pub(super) async fn run_app_loop(
                         app.modal_index = (app.modal_index + 1) % count;
                     }
                     Modal::Help
-                    | Modal::ToolStepDetail
                     | Modal::Question
                     | Modal::ModelEditor
                     | Modal::Session
                     | Modal::Tools
+                    | Modal::Mcp
                     | Modal::Activity
                     | Modal::None => {}
                 },
@@ -2801,19 +2831,19 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::RightClick { x, y } => {
-                    // Right-click on a tool-step summary opens the full-output
-                    // detail overlay. For permission-denied steps this is the
-                    // fastest way to surface the "Permission denied" message
-                    // and the terminated-turn feedback.
+                    // Right-click on a tool-step summary toggles its inline
+                    // disclosure (same as left-click / Enter). For
+                    // permission-denied steps the inline body surfaces the
+                    // "Permission denied" message directly.
                     if let ClickTarget::StepSummary {
                         message_idx,
                         kind: StepKind::ToolStep,
                     } = interaction::classify_click(&app.layout_map, x, y)
                     {
                         app.focused_target = Some(InteractiveTarget::tool_step(message_idx));
-                        app.tool_detail_message_idx = Some(message_idx);
-                        app.tool_detail_scroll = 0;
-                        app.active_modal = Modal::ToolStepDetail;
+                        let mut messages = runtime.messages.write().await;
+                        app.toggle_step_pinned(&mut messages, message_idx);
+                        drop(messages);
                     }
                     app.selection = SelectionState::None;
                     app.drag.cancel();

@@ -88,7 +88,10 @@ impl Agent {
         // Read-only, non-interactive, non-recursive toolset — the reviewer may
         // open a file to check a looping claim but cannot mutate anything or
         // spawn further agents.
-        let sub_tools = REVIEW.select_tools(&self.tools);
+        // Scope (profile) ∘ override (model): start from the parent's
+        // variant-resolved view so the reviewer inherits the model's tool
+        // overrides, then narrow to the REVIEW profile's read-only scope.
+        let sub_tools = REVIEW.select_tools(&self.installed_tools());
         let mut reviewer = Agent::new(
             self.provider.clone(),
             sub_tools,

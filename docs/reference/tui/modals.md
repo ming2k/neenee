@@ -48,9 +48,7 @@ Every centered modal goes through the same primitives in
                 └───────────────────────────────────┘
 ```
 
-The one non-`modal_frame` exception — the [tool-step detail overlay](#tool-step-detail-overlay)
-— manages its own `Paragraph` scroll directly. The two [toasts](#toasts)
-are non-modal and use a different `toast` helper.
+The two [toasts](#toasts) are non-modal and use a different `toast` helper.
 
 ## Overview
 
@@ -64,7 +62,6 @@ are non-modal and use a different `toast` helper.
 | [History search](#history-search-modal) | `Ctrl+R` | 70 × 72 | `draw_history_modal` |
 | [Question](#question-modal) | `ask_user` tool | 78 × 70 | `draw_question_modal` |
 | [Permission sheet](#permission-sheet) | Automatic | (inline, not centered) | `draw_permission_sheet` |
-| [Tool-step detail](#tool-step-detail-overlay) | `Enter` on focused tool step | 92 × 84 | `draw_tool_step_detail_overlay` |
 | [Help](#help-modal) | `Ctrl+H` / `/help` | 58 × 70 | `draw_help_modal` |
 | [Activity](#activity-modal) | Click activity bar | 72 × 70 | `draw_activity_modal` |
 | [Toasts](#toasts) | Transient | top-right, 3 rows | `draw_armed_toast`, `draw_copy_toast` |
@@ -378,28 +375,6 @@ to `Confirm always · Cancel`.
 
 The sheet uses a warn-colored left bar (`panel_block(theme.warn(), …)`) as
 its severity cue, and `theme.raised()` for the footer band.
-
-## Tool-step detail overlay
-
-Full-output detail overlay for a focused tool step (ADR-0001 step 8). Shows
-the step's complete output in a scrollable panel so a long result can be
-inspected without scrolling the whole transcript. The largest centered
-modal: 92% × 84%.
-
-```text
-┃ Run shell command · cargo test              ← brand+bold summary
-┃
-┃ $ cargo test                                ← bold fg
-┃ running 12 tests
-┃ test result: ok. 12 passed                  ← fg
-┃ warning: unused import                      ← err color
-┃ [output truncated]                          ← warn (only if truncated)
-┃ ↑/↓ or wheel scroll · esc close             ← muted
-```
-
-For non-`Shell` results, the body is just the per-line output in `fg`. See
-[Tool step](tool-step.md#detail-overlay) for how the overlay is triggered
-and how it relates to inline expansion.
 
 ## Help modal
 

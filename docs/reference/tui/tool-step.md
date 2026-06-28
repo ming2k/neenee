@@ -80,17 +80,17 @@ summary line is:
 single breathing anchor, so the parent summary carries a steady accent while
 running — no luminance sweep.)
 
-## Detail overlay
+## Inline disclosure
 
-`Enter` on a focused tool step opens a centered, scrollable panel showing the
-step's complete output — the full structured payload, not the
-transcript-truncated view. For `Shell` it renders `$ command`, the captured
-lines in **arrival order** (stdout and stderr interleaved as written, stderr in
+Activating a focused tool step — `Enter`, a click on its summary, or a
+right-click — toggles its inline disclosure, expanding the body in place to
+show the full structured payload (not the transcript-truncated view). For
+`Shell` the expanded body renders `$ command`, the captured lines in
+**arrival order** (stdout and stderr interleaved as written, stderr in
 `error_fg`), and the exit/truncation footer directly from the
-`ToolOutput::Shell` fields. `↑`/`↓`/wheel scrolls; `Esc`/`Enter` closes.
-Sub-agent `subagent` steps still navigate into the child session on `Enter`
-instead of opening the overlay. The bulk `Ctrl+T` toggle still inline-expands
-every step for those who want the old all-expanded view. See
+`ToolOutput::Shell` fields. Sub-agent `subagent` steps navigate into the
+child session on `Enter`/click instead of expanding. The bulk `Ctrl+T`
+toggle expands or collapses every step at once. See
 [ADR-0001](../../adr/0001-tool-rendering-redesign.md).
 
 ## Interaction
@@ -98,8 +98,8 @@ every step for those who want the old all-expanded view. See
 See [expandable step](expandable-step.md#behavior) for the shared toggle,
 sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 
-- `Enter` on a focused tool step opens the [detail overlay](#detail-overlay)
-  (clicking the header toggles it inline).
+- `Enter` on a focused tool step toggles its inline disclosure — the same
+  effect as clicking its summary or right-clicking it.
 - `Ctrl+T` expands or collapses all tool steps.
 - `↑` / `↓` while a step is focused includes visible tool steps in the keyboard focus order.
 
@@ -121,6 +121,4 @@ is resolved by `bash_command_for`. Presenters (summary / `result_kind` /
 `arg_layout`) live in `crates/neenee-code/src/tui/render/tools/`. The structured
 payload comes from `ToolOutput`
 ([ADR-0001](../../adr/0001-tool-rendering-redesign.md)); header data from
-`tool_step_header()` and `parse_arguments_kv()` in `document.rs`. The detail
-overlay is `draw_tool_step_detail_overlay` in
-`crates/neenee-code/src/tui/render/overlays/tool_step_detail.rs`.
+`tool_step_header()` and `parse_arguments_kv()` in `document.rs`.

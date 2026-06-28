@@ -53,6 +53,7 @@ pub mod handlers_session;
 pub mod handlers_slash;
 pub mod hooks;
 pub mod mcp_catalog;
+pub mod mcp_runtime;
 pub mod pursuits;
 pub mod registry;
 pub mod review;

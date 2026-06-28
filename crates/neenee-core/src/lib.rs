@@ -58,7 +58,7 @@ pub mod tool_registry;
 pub mod webconfig;
 pub use capability::{
     CommandScope, ContextProjectionGate, OperationScope, Provider, ProviderStreamEvent,
-    ScopeTarget, Tool, ToolOverride, ToolOverrides, deep_merge_json, empty_tool_overrides,
+    ScopeTarget, Tool, VariantSelection, empty_variant_selection,
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use dynamic::DynamicCatalog;
@@ -82,5 +82,7 @@ pub use session_title::{TITLE_MAX_LEN, clean_title};
 pub use skillsconfig::SkillsConfig;
 pub use subagent::{EXPLORE, INTERACTIVE, QUANT, REVIEW, SubagentProfile, TITLE, ToolPolicy};
 pub use tool_output::truncate_utf8;
-pub use tool_registry::{ToolContext, ToolContextBuilder, ToolFactory, collect_tools};
+pub use tool_registry::{
+    Capability, ToolContext, ToolContextBuilder, ToolFactory, ToolSet, collect_toolset,
+};
 pub use webconfig::WebSearchConfig;

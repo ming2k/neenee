@@ -46,9 +46,9 @@ use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
-    draw_history_modal, draw_model_editor, draw_models_modal, draw_permission_sheet,
-    draw_permissions_manager, draw_question_modal, draw_session_modal, draw_sessions_modal,
-    draw_tool_step_detail_overlay, draw_tools_modal,
+    draw_history_modal, draw_mcp_modal, draw_model_editor, draw_models_modal,
+    draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
+    draw_sessions_modal, draw_tools_modal,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;

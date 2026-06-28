@@ -81,6 +81,26 @@ pub enum AgentRequest {
         name: String,
         enabled: bool,
     },
+    /// Enable or disable a configured MCP server for the live session. Unlike
+    /// [`ToggleTool`] (which only flips a session flag on an already-installed
+    /// tool), this connects/disconnects the server: disabling drops its tools
+    /// from the live tool list and closes the connection; enabling reconnects
+    /// it from `[mcp.<name>]` config and re-discovers its tools. Session-scoped
+    /// — config.toml is not rewritten, so a restart restores the configured
+    /// state. The harness replies with an updated
+    /// [`AgentResponse::SessionContext`].
+    ToggleMcpServer {
+        name: String,
+        enabled: bool,
+    },
+    /// Reset and re-establish one MCP server's connection, re-discovering its
+    /// tools (the per-server analogue of the periodic catalog refresh). Used by
+    /// the `/mcp` modal's `r` action to recover a crashed/failed server on
+    /// demand. The harness replies with an updated
+    /// [`AgentResponse::SessionContext`].
+    ReconnectMcpServer {
+        name: String,
+    },
     /// Run a shell command directly through the `bash` tool, bypassing the
     /// LLM. Triggered by the TUI's `!` prefix (e.g. `!git status`). The
     /// harness emits a synthetic `ToolCall`, live `ToolStream` events, and a
