@@ -107,6 +107,7 @@ pub fn build_session_context(
                 McpConnectionStatus::Connected { .. } => (true, false, None),
                 McpConnectionStatus::Disabled => (false, true, None),
                 McpConnectionStatus::Failed(reason) => (false, false, Some(reason.clone())),
+                McpConnectionStatus::Connecting => (false, false, None),
             };
             McpServerInfo {
                 name: name.clone(),

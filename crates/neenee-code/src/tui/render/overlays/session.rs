@@ -304,7 +304,8 @@ pub fn draw_session_modal(
                 } else if srv.connected {
                     McpRow::connected(srv.tool_names.clone())
                 } else {
-                    McpRow::disabled()
+                    // Neither connected, disabled, nor failed: still connecting.
+                    McpRow::connecting()
                 };
                 (srv.name.clone(), row)
             })
@@ -317,6 +318,7 @@ pub fn draw_session_modal(
                     McpConnectionStatus::Connected { tools } => {
                         McpRow::connected(vec![format!("+{tools} more")])
                     }
+                    McpConnectionStatus::Connecting => McpRow::connecting(),
                     McpConnectionStatus::Disabled => McpRow::disabled(),
                     McpConnectionStatus::Failed(r) => McpRow::failed(r.clone()),
                 };

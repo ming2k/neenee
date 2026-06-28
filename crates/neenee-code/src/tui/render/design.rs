@@ -125,6 +125,27 @@ pub(super) const MODAL_BODY_LEADING_INDENT: usize = 2;
 /// (e.g. the Todos `done/total` counter), so title + meta read as one line.
 pub(super) const MODAL_TITLE_META_GAP: usize = 2;
 
+// ── Block-level code/text surfaces ────────────────────────────────────────
+// Every block-level content surface — the markdown `Block::Code` band and the
+// tool-step result blocks (read / bash / listing / grep / diff) — shares ONE
+// design contract so a code block looks the same whether it sits in assistant
+// prose or inside an expanded tool step. These tokens are that contract: the
+// geometry every code band agrees on. Colors live in `theme` (incl. the diff
+// tokens); spacing/gutter live here.
+
+/// Columns of left padding inside a code band before the line-number gutter.
+/// Markdown and tool-step bands use the same inner left margin so the code
+/// text column lines up across block origins.
+pub(super) const CODE_BAND_LEFT_INDENT: usize = 2;
+
+/// Empty columns between the line-number gutter and the code text. Wide enough
+/// to read the gutter as a distinct column, narrow enough not to waste width.
+pub(super) const CODE_BAND_GUTTER_GAP: usize = 1;
+
+/// Minimum width of the line-number column so single-digit files align
+/// cleanly. Grows to fit the highest displayed line number in either band.
+pub(super) const CODE_BAND_GUTTER_MIN_WIDTH: usize = 2;
+
 // ── Left-bar panels (panel_block family) ─────────────────────────────────
 // `panel_block` is a borderless solid-bg panel with a single thick colored
 // left `┃` bar — the severity/identity cue shared by the tool-step detail

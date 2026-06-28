@@ -25,9 +25,10 @@ use crate::tui::render::text_layout::{
 };
 use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::tui::render::{
-    EnvoyBarInfo, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    STEP_MIN_WIDTH, StickyInfo, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
-    TRANSCRIPT_BODY_LEADING_INDENT, Theme,
+    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, EnvoyBarInfo,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
+    Theme,
 };
 
 /// Cursor + environment carried through the tool-step body renderers.
@@ -274,9 +275,14 @@ fn draw_blank_rows(ctx: &mut RenderCtx<'_, '_>, style: Style, rows: usize) {
 }
 
 /// Render text content as a code block with a line-number gutter on
-/// `code_bg`. Used for `read_text` / `edit_file` results and as the
+/// `code_surface`. Used for `read_text` / `edit_file` results and as the
 /// fallback for unrecognized tools. The gutter starts at column `indent`
 /// so the code aligns with the rest of the step body.
+///
+/// When `language` is `Some`, a subtle language tag is drawn on its own dim
+/// line above the gutter — matching the markdown `Block::Code` band, so a
+/// code block reads identically whether it sits in assistant prose or inside
+/// an expanded tool step (the block-level design contract).
 ///
 /// `start_line` is the 1-based file line of the first row of `content`
 /// (carried by `ToolOutput::Code::start_line`). `0` means "unknown" — the
@@ -290,11 +296,12 @@ fn draw_code_content(
     block_idx: usize,
     content: &str,
     start_line: usize,
+    language: Option<&str>,
     selection: &SelectionState,
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.code_surface();
     let mut logical_lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split('\n') {
@@ -306,12 +313,27 @@ fn draw_code_content(
     // uniform.
     let first_line = start_line.max(1);
     let last_line = first_line.saturating_add(logical_lines.len().saturating_sub(1));
-    let gutter_width = last_line.to_string().len().max(2);
+    let gutter_width = last_line.to_string().len().max(CODE_BAND_GUTTER_MIN_WIDTH);
     let left_indent = indent;
-    let gutter_gap = 1usize;
+    let gutter_gap = CODE_BAND_GUTTER_GAP;
     let gutter_indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
     let wrap_width = inner_w.saturating_sub(1 + gutter_width + gutter_gap);
     let sel_range = block_selection_range(selection, mi, block_idx);
+
+    // Subtle language tag on its own dim line above the gutter — mirrors the
+    // markdown `Block::Code` band so both block origins share one code-block
+    // design.
+    if let Some(lang) = language.filter(|l| !l.is_empty()) {
+        let pad = Style::default().bg(code_bg);
+        let used = left_indent + 1 + lang.len();
+        let line = Line::from(vec![
+            Span::styled(" ".repeat(left_indent), pad),
+            Span::styled(" ", pad),
+            Span::styled(lang.to_string(), Style::default().bg(code_bg).fg(ctx.theme.dim())),
+            Span::styled(padded_tail(ctx.full_width, used), pad),
+        ]);
+        ctx.paint(line);
+    }
 
     for (line_idx, (line_start_byte, logical_line)) in logical_lines.iter().enumerate() {
         let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_width));
@@ -358,7 +380,7 @@ fn draw_listing_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.code_surface();
     let pad = Style::default().bg(code_bg);
     let dir_fg = ctx.theme.info();
     let file_fg = ctx.theme.code_text();
@@ -501,7 +523,7 @@ fn draw_grep_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.code_surface();
     let pad = Style::default().bg(code_bg);
     let header_style = Style::default()
         .bg(code_bg)
@@ -633,7 +655,7 @@ fn draw_bash_content(
     indent: usize,
     inner_w: usize,
 ) {
-    let result_bg = ctx.theme.code_bg;
+    let result_bg = ctx.theme.code_surface();
     let pad = Style::default().bg(result_bg);
     let base = Style::default().bg(result_bg).fg(ctx.theme.code_text());
     let stderr_style = Style::default().bg(result_bg).fg(ctx.theme.err());
@@ -906,23 +928,25 @@ fn draw_tool_result(
             // Prefer the structured payload: `Code::text` is pure file content
             // (the model-facing `prefix`/`suffix` framing is ignored here) and
             // `start_line` carries the read `offset` so an offset snippet
-            // numbers from its true file line. `Patch::new` handles the
-            // `write_file` case: a full-file write rendered as a simple code
-            // block with line numbers (no diff gutter — there is no "old" side).
+            // numbers from its true file line. `lang` is surfaced as a
+            // language-tag line so the block matches the markdown code band.
+            // `Patch::new` handles the `write_file` case: a full-file write
+            // rendered as a simple code block with line numbers (no diff
+            // gutter — there is no "old" side).
             // Legacy/restored steps without a payload fall back to the
             // flattened `output` string with `start_line = 0` (slice-relative
             // 1-based numbering).
-            let (content, start_line) = match structured {
+            let (content, start_line, lang) = match structured {
                 Some(neenee_core::ToolOutput::Code {
-                    text, start_line, ..
-                }) => (text.as_str(), *start_line),
+                    text, start_line, lang, ..
+                }) => (text.as_str(), *start_line, lang.as_deref()),
                 Some(neenee_core::ToolOutput::Patch {
                     new, start_line, ..
-                }) => (new.as_str(), *start_line),
-                _ => (output, 0),
+                }) => (new.as_str(), *start_line, None),
+                _ => (output, 0, None),
             };
             draw_code_content(
-                ctx, mi, block_idx, content, start_line, selection, indent, inner_w,
+                ctx, mi, block_idx, content, start_line, lang, selection, indent, inner_w,
             )
         }
         ResultKind::Diff => {
@@ -984,7 +1008,7 @@ fn draw_diff_content(
     if n == 0 {
         return;
     }
-    let code_bg = ctx.theme.code_bg;
+    let code_bg = ctx.theme.code_surface();
     let gutter_fg = ctx.theme.muted();
     // Each number column is at least 2 chars wide so single-digit files
     // align cleanly (GitHub-style: right-aligned old_no | new_no).
@@ -1001,11 +1025,13 @@ fn draw_diff_content(
     // opencode-style banding: the whole row carries a low-chroma tint so
     // added/removed blocks read at a glance, and the exact edited word sits
     // on a brighter tint on top of the row band. Context rows stay on the
-    // neutral code surface so they recede.
-    let add_row_bg = Color::Rgb(18, 31, 22);
-    let del_row_bg = Color::Rgb(32, 20, 20);
-    let add_hi_bg = Color::Rgb(42, 64, 48);
-    let del_hi_bg = Color::Rgb(64, 40, 40);
+    // neutral code surface so they recede. All four tints are first-class
+    // theme tokens (the block-level design contract) — no inline literals —
+    // so retuning the palette here retunes every block-level surface.
+    let add_row_bg = ctx.theme.diff_add_bg();
+    let del_row_bg = ctx.theme.diff_del_bg();
+    let add_hi_bg = ctx.theme.diff_add_hl();
+    let del_hi_bg = ctx.theme.diff_del_hl();
     let info_fg = ctx.theme.info();
 
     let mut idx = 0usize;

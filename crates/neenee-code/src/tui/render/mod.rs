@@ -26,6 +26,7 @@ pub use chrome::draw_activity_bar;
 pub use chrome::{HintBarView, draw_completion_menu, draw_hint_bar};
 pub use composer::{INPUT_MSG_IDX, draw_composer};
 use design::{
+    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH,
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
     COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, ENVOY_BAR_ROWS, FOOTER_H_INSET,
     HINT_BAR_ROWS, MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,

@@ -6,7 +6,7 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, EnvoyTool};
 use neenee_core::{
-    AgentRequest, AgentResponse, CHARS_PER_TOKEN, DynamicCatalog, EXPLORE, Provider, TurnEvent,
+    AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent,
 };
 use neenee_store::{
     RepeatStore,
@@ -49,6 +49,22 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _tracing_guard = init_tracing();
+
+    // Parse CLI up front. `showcase` (debug-only) and `doctor` are purely
+    // local: no agent, no session, no network. They must short-circuit BEFORE
+    // any of the expensive startup plumbing below — otherwise a component
+    // showcase would pay the full production startup cost (models.dev fetch,
+    // skill scan, MCP connects, agent construction) for nothing. The
+    // Showcase variant only exists under `debug_assertions`, so the guard
+    // here mirrors it.
+    let (startup, project_override, unattended_at_start, single_instance) =
+        parse_args(std::env::args().skip(1).collect());
+
+    #[cfg(debug_assertions)]
+    if let StartupMode::Showcase(component) = &startup {
+        return showcase::run(component);
+    }
+
     let (req_tx, req_rx) = mpsc::unbounded_channel::<AgentRequest>();
     let (resp_tx, resp_rx) = mpsc::unbounded_channel::<AgentResponse>();
     let custom_commands = discover_commands()
@@ -79,9 +95,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::load();
 
+    // Resolve the project root early: it feeds the per-project lock, the
+    // session store, and the embedding index. CLI parsing happened at the top
+    // of `main` (showcase/doctor already returned).
+    let project_root = project_override.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+
     // Durable store for `/repeat` cron jobs. Opened once; cloned for the
     // command handler and the background scheduler.
-    let repeat_store = RepeatStore::open(paths::get().repeat_db()).await?;
+    //
+    // Open it concurrently with the independent `EmbeddingStore::open` (a file
+    // read for the semantic-search index), so the two blocking I/O opens run
+    // in parallel instead of sequentially.
+    let (repeat_store, embedding_store) = tokio::try_join!(
+        RepeatStore::open(paths::get().repeat_db()),
+        embedding::EmbeddingStore::open(
+            paths::get().project_embeddings(&project_root),
+            Arc::new(embedding::MockEmbeddingProvider::new(384)),
+        ),
+    )?;
+    let embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>> =
+        Arc::new(AsyncRwLock::new(embedding_store));
     // Background scheduler: every 30s prune expired jobs and fire any that are
     // due, dispatching each prompt as a normal chat turn.
     start_repeat_scheduler(
@@ -95,15 +130,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // env-var-then-config resolution rules shared with runtime switching. See
     // `docs/adr/0002-model-channel-abstraction.md`.
     //
-    // Refresh the models.dev catalog first so the catalog-driven providers
-    // (opencode-go) read a fresh model list and wire-format mapping. Best
-    // effort: a failed fetch is logged and the catalog falls back to the
-    // compiled-in registry, so this never blocks startup.
-    let models_dev_catalog = neenee_agent::modelsdev::ModelsDevCatalog;
-    if let Err(error) = models_dev_catalog.refresh().await {
-        tracing::warn!(%error, "could not refresh models.dev catalog; using fallback");
-    }
-    neenee_agent::dynamic::spawn_refresh(models_dev_catalog);
+    // Refresh the models.dev catalog in the BACKGROUND so a slow/blocked
+    // network fetch (15s timeout) never delays the first frame. The catalog
+    // has a compiled-in fallback registry, so `build_provider_for` below works
+    // immediately; the background task writes the fresh copy to the cache,
+    // and the hourly `spawn_refresh` keeps it warm. Previously this was an
+    // eager `.await` that blocked the whole startup despite its own comment
+    // claiming it "never blocks startup".
+    neenee_agent::dynamic::spawn_refresh(neenee_agent::modelsdev::ModelsDevCatalog);
 
     let initial_provider: Arc<dyn Provider> =
         catalog::build_provider_for(&config, catalog::default_provider_id(&config));
@@ -113,22 +147,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent_provider = Arc::new(ProxyProvider::new(provider_holder));
 
-    // Shared skills registry for the skill tools. The background refresh loop
-    // re-scans all sources (local dirs, remote repos, bundled) every hour so
-    // new/updated skills appear without a restart; failed remote fetches fall
-    // back to the cached copy.
-    let skills_registry = Arc::new(SkillRegistry::load(&config.skills).await);
+    // Shared skills registry for the skill tools. The registry starts EMPTY so
+    // discovering skills (scanning local dirs, cloning/fetching remote repos)
+    // never blocks the first frame; the background refresh loop re-scans all
+    // sources immediately on spawn and then every hour. The `Arc` is shared
+    // across the skill tools, the envoy profile, and the TUI, so once the
+    // background load lands they all observe the populated state.
+    let skills_registry = Arc::new(SkillRegistry::empty_with_config(&config.skills));
     neenee_agent::dynamic::spawn_refresh(neenee_agent::dynamic::SkillCatalog::new(
         (*skills_registry).clone(),
     ));
 
     // CLI: `neenee` -> fresh session; `neenee resume [id]` -> resume a session;
-    // `neenee doctor` -> verify stored session integrity.
-    let (startup, project_override, unattended_at_start, single_instance) =
-        parse_args(std::env::args().skip(1).collect());
-    let project_root = project_override.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
+    // `neenee doctor` -> verify stored session integrity. (`showcase` already
+    // returned above.) The project root was resolved above, before the stores
+    // were opened.
 
     // ADR-0018: the per-project advisory lock is opt-in. The default is
     // unlocked so multiple `neenee` instances can run in one project — each
@@ -150,12 +183,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Showcase: render a single UI component standalone. No agent, session, or
-    // network — just the component's model + renderer on a live terminal. Early
-    // return so none of the agent/session plumbing below runs.
+    // network — just the component's model + renderer on a live terminal.
+    // It already returned at the top of `main`, before any of the agent/session
+    // plumbing below was constructed.
     #[cfg(debug_assertions)]
-    if let StartupMode::Showcase(component) = &startup {
-        return showcase::run(component);
-    }
+    debug_assert!(
+        !matches!(startup, StartupMode::Showcase(_)),
+        "showcase must return before the agent/session plumbing runs"
+    );
 
     // Session loading honors the startup mode. Under ADR-0018
     // `load_for_project` pins a fresh `sessions/<id>.{json,jsonl}`, so a bare
@@ -176,17 +211,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(debug_assertions)]
         StartupMode::Showcase(_) => unreachable!("showcase returns before this match"),
     };
-
-    // C12: lightweight semantic-search index for this project. The provider is
-    // a deterministic mock; swap it for a local model or cloud API to get real
-    // semantic similarity.
-    let embedding_store: Arc<AsyncRwLock<embedding::EmbeddingStore>> = Arc::new(AsyncRwLock::new(
-        embedding::EmbeddingStore::open(
-            paths::get().project_embeddings(&project_root),
-            Arc::new(embedding::MockEmbeddingProvider::new(384)),
-        )
-        .await?,
-    ));
 
     // Built-in tools self-register via `inventory` (each tool carries a
     // `register_tool!` submission at its definition site) and are collected
@@ -256,12 +280,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // policies are data-driven. Runtime "Always" decisions still write to
     // permissions.json; these config rules re-apply on every start.
     agent.seed_permissions_from_config(&config.permissions.allow);
-    // Connect every configured MCP server, seeding the agent's shared tool
-    // holder, and start the background reconnect/re-discover loop. The runtime
-    // is the live source of truth the `/mcp` modal toggles/reconnects against.
-    // Individual tool calls also auto-reconnect on failure (McpTool::call).
+    // Connect every configured MCP server in the BACKGROUND so a slow/unreachable
+    // server (8s connect timeout each) never delays the first frame. The
+    // runtime is ready immediately with every enabled server in `Connecting`;
+    // a spawned task performs the real concurrent connects and seeds the
+    // agent's shared tool holder as each comes online. The TUI's status
+    // snapshot (taken below) reflects this transient state, and the periodic
+    // McpCatalog refresh keeps it live thereafter.
     let mcp_runtime =
-        Arc::new(McpRuntime::connect_all(config.mcp.clone(), agent.mcp_tools_holder()).await);
+        Arc::new(McpRuntime::start_background(config.mcp.clone(), agent.mcp_tools_holder()));
+    let mcp_runtime_for_bg = Arc::clone(&mcp_runtime);
+    tokio::spawn(async move {
+        mcp_runtime_for_bg.refresh_all().await;
+    });
     neenee_agent::dynamic::spawn_refresh(crate::mcp_catalog::McpCatalog::new(mcp_runtime.clone()));
     if unattended_at_start {
         agent.set_unattended(true);
@@ -272,6 +303,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ));
     }
+
+    // Kick off the two independent file reads on the blocking pool NOW so they
+    // run concurrently with the agent seeding, pursuit restore, and todo
+    // restore below (rather than serially blocking the executor). Both read
+    // from `paths::get()` globals and return owned, `Send` data, so a plain
+    // `spawn_blocking` closure is self-contained. They are awaited later where
+    // their results feed the harness / TUI.
+    let input_history_handle =
+        tokio::task::spawn_blocking(Config::load_history);
+    let provider_usage_handle =
+        tokio::task::spawn_blocking(provider_usage::ProviderUsage::load);
 
     let active_messages = session.model_window().await;
     let restored_messages = session.full_transcript().await;
@@ -336,13 +378,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.set_todos(persisted_todos);
     }
 
-    // Load history
-    let input_history = Config::load_history();
+    // Load history — awaited here after running concurrently with the agent
+    // setup above. `unwrap` is safe: `spawn_blocking` only panics if the
+    // closure panics, and neither read does.
+    let input_history = input_history_handle
+        .await
+        .unwrap_or_else(|_| Config::load_history());
 
     // Load per-model usage telemetry (recency signal for the picker,
     // ADR-0002 phase 2). Moved into the agent task so both the startup
     // activation and runtime switches record through one instance.
-    let provider_usage = provider_usage::ProviderUsage::load();
+    let provider_usage = provider_usage_handle
+        .await
+        .unwrap_or_default();
 
     let current_task_token = Arc::new(AsyncRwLock::new(None::<CancellationToken>));
     let task_generation = Arc::new(AtomicU64::new(0));

@@ -36,6 +36,10 @@ impl Default for McpServerConfig {
 /// `neenee-tools::mcp` produces these, and frontends render them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpConnectionStatus {
+    /// A connection attempt is in flight (background connect at startup, or a
+    /// reconnect). The server is not usable yet; the model sees none of its
+    /// tools until it transitions to `Connected`.
+    Connecting,
     Connected { tools: usize },
     Disabled,
     Failed(String),
@@ -44,6 +48,7 @@ pub enum McpConnectionStatus {
 impl std::fmt::Display for McpConnectionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Connecting => write!(f, "connecting…"),
             Self::Connected { tools } => write!(f, "connected ({} tools)", tools),
             Self::Disabled => write!(f, "disabled"),
             Self::Failed(error) => write!(f, "failed: {}", error),

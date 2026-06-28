@@ -57,6 +57,20 @@ pub struct Theme {
     pub warning: Color,
     pub success: Color,
     pub info: Color,
+    /// Diff banding. Every block-level code/text surface shares one
+    /// design contract (see the disclosure module): colors flow through
+    /// theme tokens rather than magic `Color::Rgb` literals, so retuning
+    /// the palette in one place retunes every block. The diff block is
+    /// the reference renderer — it owns the row/highlight pair — and the
+    /// flat code blocks (read / bash / listing / grep / markdown) reuse
+    /// the same token system via [`code_surface`](Theme::code_surface).
+    /// Low-chroma row tint so added/removed blocks read at a glance.
+    pub diff_add_bg: Color,
+    pub diff_del_bg: Color,
+    /// Brighter per-word highlight tint layered on top of the row band;
+    /// the exact edited word sits on this brighter surface.
+    pub diff_add_hl: Color,
+    pub diff_del_hl: Color,
 }
 
 impl Default for Theme {
@@ -92,6 +106,13 @@ impl Default for Theme {
             warning: Color::Rgb(181, 149, 93),
             success: Color::Rgb(117, 148, 117),
             info: Color::Rgb(128, 153, 156),
+            // Diff banding. Lifted from the ad-hoc literals that used to live
+            // inline in `draw_diff_content`; kept here as the single source so
+            // every block-level surface can share one design contract.
+            diff_add_bg: Color::Rgb(18, 31, 22),
+            diff_del_bg: Color::Rgb(32, 20, 20),
+            diff_add_hl: Color::Rgb(42, 64, 48),
+            diff_del_hl: Color::Rgb(64, 40, 40),
         }
     }
 }
@@ -181,6 +202,24 @@ impl Theme {
     }
     pub fn code_surface(&self) -> Color {
         self.code_bg
+    }
+    /// Diff block row band — the low-chroma tint a whole added line sits on.
+    /// The reference block-level renderer's colors are first-class tokens so
+    /// every block-level surface shares one palette contract.
+    pub fn diff_add_bg(&self) -> Color {
+        self.diff_add_bg
+    }
+    /// Diff block row band for a whole removed line.
+    pub fn diff_del_bg(&self) -> Color {
+        self.diff_del_bg
+    }
+    /// Diff block per-word highlight on an added line (brighter than the row band).
+    pub fn diff_add_hl(&self) -> Color {
+        self.diff_add_hl
+    }
+    /// Diff block per-word highlight on a removed line (brighter than the row band).
+    pub fn diff_del_hl(&self) -> Color {
+        self.diff_del_hl
     }
     pub fn heading(&self) -> Color {
         self.heading_fg

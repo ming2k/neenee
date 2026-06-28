@@ -55,6 +55,10 @@ pub struct McpRuntime {
 impl McpRuntime {
     /// Connect every enabled configured server and seed `holder` with their
     /// tools. Disabled servers are recorded as such without a connection.
+    ///
+    /// Enabled servers are connected **concurrently** (a bounded `join_all`)
+    /// rather than serially, so the worst-case startup latency is the slowest
+    /// single server's connect timeout, not the sum of all of them.
     pub async fn connect_all(
         configs: HashMap<String, McpServerConfig>,
         holder: Arc<RwLock<Vec<Arc<dyn Tool>>>>,
@@ -62,20 +66,23 @@ impl McpRuntime {
         let mut names: Vec<String> = configs.keys().cloned().collect();
         names.sort();
 
-        let mut entries = Vec::with_capacity(names.len());
-        for name in names {
-            let config = &configs[&name];
-            if !config.enabled {
-                entries.push(McpEntry {
-                    name,
-                    server: None,
-                    tools: Vec::new(),
-                    status: McpConnectionStatus::Disabled,
-                });
-                continue;
+        // Connect every enabled server concurrently. Disabled ones become
+        // entries inline (no I/O).
+        let connect_futures = names.into_iter().map(|name| {
+            let config = configs[&name].clone();
+            async move {
+                if !config.enabled {
+                    return McpEntry {
+                        name,
+                        server: None,
+                        tools: Vec::new(),
+                        status: McpConnectionStatus::Disabled,
+                    };
+                }
+                connect_entry(name, &config).await
             }
-            entries.push(connect_entry(name, config).await);
-        }
+        });
+        let entries: Vec<McpEntry> = futures::future::join_all(connect_futures).await;
 
         let runtime = Self {
             configs,
@@ -88,6 +95,49 @@ impl McpRuntime {
             runtime.publish(&entries);
         }
         runtime
+    }
+
+    /// Build a runtime that records every configured server but defers the
+    /// actual connections to a background task. Every enabled server starts in
+    /// the `Connecting` status (so the UI can show a spinner / "connecting…"
+    /// row) with no tools; disabled servers are marked `Disabled` immediately.
+    ///
+    /// The returned runtime is ready to use the instant this returns. The
+    /// caller should spawn [`McpRuntime::refresh_all`] in the background to
+    /// perform the real concurrent connections and publish results into the
+    /// shared tool holder + status table — without blocking the first frame.
+    pub fn start_background(
+        configs: HashMap<String, McpServerConfig>,
+        holder: Arc<RwLock<Vec<Arc<dyn Tool>>>>,
+    ) -> Self {
+        let mut names: Vec<String> = configs.keys().cloned().collect();
+        names.sort();
+        let entries: Vec<McpEntry> = names
+            .iter()
+            .map(|name| McpEntry {
+                server: None,
+                tools: Vec::new(),
+                status: if configs[name].enabled {
+                    McpConnectionStatus::Connecting
+                } else {
+                    McpConnectionStatus::Disabled
+                },
+                name: name.clone(),
+            })
+            .collect();
+        // Seed the sync status table directly from the initial entries — no
+        // background task has touched it yet, so there is nothing to lock.
+        let statuses: Vec<(String, McpConnectionStatus)> = entries
+            .iter()
+            .map(|e| (e.name.clone(), e.status.clone()))
+            .collect();
+
+        Self {
+            configs,
+            entries: Mutex::new(entries),
+            statuses: RwLock::new(statuses),
+            holder,
+        }
     }
 
     /// A name-sorted snapshot of every configured server's connection status,
@@ -155,26 +205,71 @@ impl McpRuntime {
         Ok(())
     }
 
-    /// Reconnect every enabled server (the periodic catalog refresh). Disabled
-    /// servers stay disabled.
+    /// Reconnect every enabled server (the periodic catalog refresh, and the
+    /// initial background connect). Disabled servers stay disabled.
+    ///
+    /// The reconnections run **concurrently**: each server's I/O is
+    /// independent, so connecting N servers in parallel takes the slowest
+    /// single timeout rather than the sum.
     pub async fn refresh_all(&self) {
-        let mut entries = self.entries.lock().await;
-        for entry in entries.iter_mut() {
-            if matches!(entry.status, McpConnectionStatus::Disabled) {
-                continue;
-            }
-            match &entry.server {
-                Some(server) => {
-                    let (tools, status) = reconnect_server(server).await;
-                    entry.tools = tools;
-                    entry.status = status;
-                }
-                None => {
-                    if let Some(config) = self.configs.get(&entry.name).cloned() {
-                        let name = entry.name.clone();
-                        *entry = connect_entry(name, &config).await;
+        // Snapshot the work while holding the lock, then release it so the
+        // per-server I/O can run concurrently. Each item carries either a live
+        // server handle (to re-discover through) or marks a fresh connect.
+        enum Job {
+            Reconnect(Arc<McpServer>),
+            Connect,
+            Skip,
+        }
+        let jobs: Vec<(usize, String, Job)> = {
+            let entries = self.entries.lock().await;
+            entries
+                .iter()
+                .enumerate()
+                .map(|(idx, entry)| {
+                    if matches!(entry.status, McpConnectionStatus::Disabled) {
+                        return (idx, entry.name.clone(), Job::Skip);
                     }
+                    match &entry.server {
+                        Some(server) => {
+                            (idx, entry.name.clone(), Job::Reconnect(Arc::clone(server)))
+                        }
+                        None => (idx, entry.name.clone(), Job::Connect),
+                    }
+                })
+                .collect()
+        };
+
+        // Run each job concurrently, producing a fresh entry per server.
+        let refresh_futures = jobs.into_iter().map(|(idx, name, job)| async move {
+            match job {
+                Job::Skip => (idx, None),
+                Job::Reconnect(server) => {
+                    let (tools, status) = reconnect_server(&server).await;
+                    (idx, Some(McpEntry { name, server: Some(server), tools, status }))
                 }
+                Job::Connect => {
+                    let config = self.configs.get(&name);
+                    let entry = match config {
+                        Some(config) => connect_entry(name.clone(), config).await,
+                        None => McpEntry {
+                            name,
+                            server: None,
+                            tools: Vec::new(),
+                            status: McpConnectionStatus::Failed("not configured".into()),
+                        },
+                    };
+                    (idx, Some(entry))
+                }
+            }
+        });
+        let results: Vec<(usize, Option<McpEntry>)> =
+            futures::future::join_all(refresh_futures).await;
+
+        // Write the refreshed entries back and republish.
+        let mut entries = self.entries.lock().await;
+        for (idx, entry) in results {
+            if let Some(entry) = entry {
+                entries[idx] = entry;
             }
         }
         self.publish(&entries);

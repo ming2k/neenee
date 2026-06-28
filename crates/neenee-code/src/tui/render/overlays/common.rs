@@ -81,6 +81,7 @@ pub(crate) fn caret_column(display: &str, cursor_position: usize) -> u16 {
 /// per-server tool names so the MCP pane can list them rather than just a count.
 pub(crate) enum McpRow {
     Connected(Vec<String>),
+    Connecting,
     Disabled,
     Failed(String),
 }
@@ -88,6 +89,9 @@ pub(crate) enum McpRow {
 impl McpRow {
     pub(crate) fn connected(tools: Vec<String>) -> Self {
         Self::Connected(tools)
+    }
+    pub(crate) fn connecting() -> Self {
+        Self::Connecting
     }
     pub(crate) fn disabled() -> Self {
         Self::Disabled
@@ -106,6 +110,7 @@ impl McpRow {
                 theme.ok(),
                 "●",
             ),
+            Self::Connecting => ("connecting…".to_string(), theme.muted(), "◌"),
             Self::Disabled => ("disabled".to_string(), theme.muted(), "○"),
             Self::Failed(reason) => (format!("failed · {reason}"), theme.err(), "●"),
         }

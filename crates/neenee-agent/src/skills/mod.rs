@@ -58,10 +58,28 @@ struct RegistryInner {
 }
 
 impl SkillRegistry {
-    /// Create an empty registry.
+    /// Create an empty registry with no configuration. `reload()` on such a
+    /// registry re-runs discovery with a default (empty) config, so prefer
+    /// [`SkillRegistry::empty_with_config`] when the real config is known.
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(RwLock::new(RegistryInner::default())),
+        }
+    }
+
+    /// Create an empty registry that remembers `config`. The registry starts
+    /// with no discovered skills, but a subsequent [`reload`](Self::reload)
+    /// (e.g. from the background refresh loop) re-runs discovery using this
+    /// config and populates the registry in place. This is the entry point
+    /// for non-blocking startup: hand back an empty registry immediately, let
+    /// the background task fill it.
+    pub fn empty_with_config(config: &SkillsConfig) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RegistryInner {
+                skills: Vec::new(),
+                errors: Vec::new(),
+                config: config.clone(),
+            })),
         }
     }
 

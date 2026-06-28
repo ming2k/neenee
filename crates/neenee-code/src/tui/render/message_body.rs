@@ -13,6 +13,7 @@ use crate::tui::selection::{
 };
 
 use super::design::{
+    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, CODE_BAND_LEFT_INDENT,
     USER_MESSAGE_OUTER_GUTTER_COLS, USER_MESSAGE_RIGHT_PAD_COLS, USER_MESSAGE_TEXT_GAP_COLS,
     USER_MESSAGE_TRANSITION_ROWS,
 };
@@ -712,11 +713,13 @@ pub(super) fn draw_message_body(
                     offset += line.len() + 1; // +1 for the '\n'
                 }
 
-                let gutter_width = logical_lines.len().to_string().len().max(2);
+                let gutter_width = logical_lines.len().to_string().len().max(CODE_BAND_GUTTER_MIN_WIDTH);
                 // The code band is a uniform background with a line-number
-                // gutter — no left accent bar.
-                let left_indent = 2usize;
-                let gutter_gap = 1usize;
+                // gutter — no left accent bar. Geometry shares the block-level
+                // design contract with tool-step code bands so a code block
+                // looks identical in prose and inside a tool step.
+                let left_indent = CODE_BAND_LEFT_INDENT;
+                let gutter_gap = CODE_BAND_GUTTER_GAP;
                 let indent = left_indent + 1 /* space */ + gutter_width + gutter_gap;
                 let wrap_width = full_width.saturating_sub(indent + 1);
 
