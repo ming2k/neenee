@@ -17,7 +17,7 @@ use serde_json::json;
 ///
 /// Side-effecting and account-mutating. Reports a [`ScopeTarget::Command`]
 /// style target so an operation-scope gate can restrain live trading if
-/// desired (e.g. a "paper-only" sub-agent scope).
+/// desired (e.g. a "paper-only" envoy scope).
 pub struct PlaceOrderTool {
     _private: (),
 }
@@ -63,7 +63,7 @@ impl Tool for PlaceOrderTool {
         })
     }
     /// Surfaced as a Command target so an operation scope can gate live
-    /// trading (e.g. a paper-trading sub-agent). The command string carries
+    /// trading (e.g. a paper-trading envoy). The command string carries
     /// the symbol/side so a permission prompt is informative.
     fn scope_target(&self, arguments: &str) -> ScopeTarget {
         let side = serde_json::from_str::<serde_json::Value>(arguments)
@@ -168,7 +168,7 @@ mod tests {
         assert!(!t.description().is_empty());
         // Live trading is interactive-capable by nature but does not spawn
         // agents or control the process.
-        assert!(!t.spawns_subagent());
+        assert!(!t.spawns_envoy());
         assert!(!t.affects_control_flow());
     }
 
@@ -273,7 +273,7 @@ mod tests {
         let t = ListPositionsTool::new();
         assert_eq!(t.name(), "list_positions");
         assert!(!t.requires_user());
-        assert!(!t.spawns_subagent());
+        assert!(!t.spawns_envoy());
         assert!(!t.affects_control_flow());
         // Read-only account query declares no scope target.
         assert!(matches!(t.scope_target("{}"), ScopeTarget::Unspecified));

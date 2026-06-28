@@ -192,7 +192,7 @@ impl PermissionStore {
 
     /// Designate the project whose bucket backs the persistent "always"
     /// allowlist, and load any rules already on disk into the in-memory set.
-    /// Pass `None` to disable persistence (sub-agents and most tests do this).
+    /// Pass `None` to disable persistence (envoys and most tests do this).
     pub fn set_project_root(&self, root: Option<std::path::PathBuf>) {
         {
             *lock(&self.project_root) = root.clone();

@@ -45,7 +45,7 @@ pub enum ToolStatus {
     Ok,
     /// Output present and the call failed. Failure is determined by the
     /// structured [`ToolStepStatus`] (set from `ToolOutput::is_error()` in
-    /// `document.rs`), not by string-sniffing the output text — subagent
+    /// `document.rs`), not by string-sniffing the output text — envoy
     /// failures carry an explicit `failed` flag and tool errors use
     /// `ToolOutput::Error`.
     Failed,
@@ -69,7 +69,7 @@ impl ToolStatus {
     }
 
     /// Theme color used for the status rail / step accent. Centralizes the
-    /// status→color mapping that step headers, sticky pins, and subagent steps
+    /// status→color mapping that step headers, sticky pins, and envoy steps
     /// previously each duplicated.
     pub fn color(self, theme: &Theme) -> Color {
         match self {
@@ -129,9 +129,9 @@ pub enum ArgLayout {
 pub struct ToolView<'a> {
     pub name: &'a str,
     pub args: &'a serde_json::Map<String, Value>,
-    /// The subagent profile name (`explore` / `plan` / …) when this step is a
-    /// subagent run that has announced its role; `None` otherwise. Lets the
-    /// `SubagentPresenter` label the step by role instead of "Subagent".
+    /// The envoy profile name (`explore` / `plan` / …) when this step is a
+    /// envoy run that has announced its role; `None` otherwise. Lets the
+    /// `EnvoyPresenter` label the step by role instead of "Envoy".
     pub profile: Option<&'a str>,
 }
 
@@ -191,7 +191,7 @@ pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
         "webfetch" => &web::WebFetchPresenter,
         "websearch" => &web::WebSearchPresenter,
         "todo" => &meta::TodoPresenter,
-        "subagent" => &meta::SubagentPresenter,
+        "envoy" => &meta::EnvoyPresenter,
         "use_skill" => &meta::UseSkillPresenter,
         "create_project" => &meta::CreateProjectPresenter,
         _ => &fallback::FallbackPresenter,

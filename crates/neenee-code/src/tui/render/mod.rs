@@ -27,15 +27,15 @@ pub use chrome::{HintBarView, draw_completion_menu, draw_hint_bar};
 pub use composer::{INPUT_MSG_IDX, draw_composer};
 use design::{
     COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
-    COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
-    MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
-    SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH, SUBAGENT_BAR_ROWS,
+    COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, ENVOY_BAR_ROWS, FOOTER_H_INSET,
+    HINT_BAR_ROWS, MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH,
     TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
     TRANSCRIPT_H_INSET,
 };
 use disclosure::{
-    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
-    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
+    StickyStep, draw_envoy_bar, draw_envoy_inline_step, draw_reasoning_trace, draw_side_banner,
+    draw_sticky_summary_if_needed, draw_tool_step,
 };
 /// Parse a raw logo file into clamped display lines for the empty-state hero.
 /// Re-exported so the startup loader and the renderer share one clamp rule.
@@ -76,7 +76,7 @@ use std::collections::HashMap;
 /// [`TRANSCRIPT_H_INSET`] left+right `app_bg` gutters. This is the **single
 /// point** where the horizontal inset is applied — called exactly three times
 /// in `draw_transcript`: once for the content stream (the `band` every
-/// downstream component receives), and once each for the subagent bar and side
+/// downstream component receives), and once each for the envoy bar and side
 /// banner rects so they align with the content band. Individual components no
 /// longer clip or hand-pad their own gutter; they trust the rect they receive.
 pub(super) fn transcript_band_rect(area: Rect) -> Rect {
@@ -109,9 +109,9 @@ pub struct TranscriptView<'a> {
     pub byte_cursor: usize,
     /// When true, the hint bar and input box are hidden (overlay modal open).
     pub chrome_hidden: bool,
-    /// When set, the view is zoomed into a subagent task: a navigation bar is
+    /// When set, the view is zoomed into an envoy task: a navigation bar is
     /// rendered and `messages` is the focused task's child stream.
-    pub subagent_bar: Option<SubagentBarInfo>,
+    pub envoy_bar: Option<EnvoyBarInfo>,
     /// When set, the view is inside a `/btw` side conversation (ADR-0017): a
     /// top banner is rendered reading `Side from main · <status> · Esc back`.
     /// Carries the coarse primary-session status to surface.
@@ -199,13 +199,13 @@ impl HeightCache {
     }
 }
 
-/// Info for the subagent navigation bar (shown when zoomed into a task).
-pub struct SubagentBarInfo {
-    /// Label for the focused subagent (its task description).
+/// Info for the envoy navigation bar (shown when zoomed into a task).
+pub struct EnvoyBarInfo {
+    /// Label for the focused envoy (its task description).
     pub label: String,
-    /// 1-based index of the focused subagent among its siblings.
+    /// 1-based index of the focused envoy among its siblings.
     pub index: usize,
-    /// Total number of sibling subagent tasks.
+    /// Total number of sibling envoy tasks.
     pub total: usize,
 }
 
@@ -217,7 +217,7 @@ pub struct TranscriptRender {
     pub hint_rect: Rect,
     /// Screen rect of the activity bar for the current frame, so clicks inside
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
-    /// streaming, subagent view, or chrome hidden).
+    /// streaming, envoy view, or chrome hidden).
     pub activity_rect: Option<Rect>,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
@@ -261,7 +261,7 @@ pub fn draw_transcript(
         input,
         byte_cursor,
         chrome_hidden,
-        subagent_bar,
+        envoy_bar,
         side_banner,
         pursuit,
         todos,
@@ -292,24 +292,22 @@ pub fn draw_transcript(
 
     let size = viewport;
 
-    // When zoomed into a subagent task, the footer (status bar, plan panel,
+    // When zoomed into an envoy task, the footer (status bar, plan panel,
     // input box, hint bar) is hidden: the task detail page is a read-only view
-    // whose only chrome is the subagent navigation bar.
-    let in_subagent = subagent_bar.is_some();
+    // whose only chrome is the envoy navigation bar.
+    let in_envoy = envoy_bar.is_some();
 
     // The status bar (animated spinner + activity text) sits on its own line
     // directly above the input box. It is shown for every active phase —
     // including streaming ("responding"), which is the longest phase and the
     // one where the breathing dot's liveness signal matters most — and hidden
     // only when the harness is idle, so the row returns to the transcript.
-    let status_active =
-        !chrome_hidden && !in_subagent && !activity.is_empty() && activity != "idle";
+    let status_active = !chrome_hidden && !in_envoy && !activity.is_empty() && activity != "idle";
     // The persistent todos badge (right-pinned) keeps the activity row alive
     // even when the harness is idle, so an active task list is always visible
     // — not only while a turn is running.
     let has_visible_todos = todos.map(|l| !l.items.is_empty()).unwrap_or(false);
-    let activity_row_needed =
-        status_active || (has_visible_todos && !chrome_hidden && !in_subagent);
+    let activity_row_needed = status_active || (has_visible_todos && !chrome_hidden && !in_envoy);
     let status_height: u16 = if activity_row_needed {
         STATUS_BAR_ROWS
     } else {
@@ -329,7 +327,7 @@ pub fn draw_transcript(
     let input_wrapped_lines = composer::input_row_count(input, input_text_width, byte_cursor);
     let desired_input_height = input_wrapped_lines as u16 + COMPOSER_VERTICAL_CHROME_ROWS;
     let max_input_height = (size.height / COMPOSER_MAX_HEIGHT_DIVISOR).max(COMPOSER_MIN_HEIGHT);
-    let input_box_height = if in_subagent {
+    let input_box_height = if in_envoy {
         0
     } else {
         desired_input_height.min(max_input_height)
@@ -337,12 +335,12 @@ pub fn draw_transcript(
     // The hint bar is a single-line status strip pinned directly below the
     // input box. It carries the model + context-usage info. Hidden alongside
     // the rest of the chrome while an overlay modal is open.
-    let hint_height: u16 = if chrome_hidden || in_subagent {
+    let hint_height: u16 = if chrome_hidden || in_envoy {
         0
     } else {
         HINT_BAR_ROWS
     };
-    let footer_height: u16 = if chrome_hidden || in_subagent {
+    let footer_height: u16 = if chrome_hidden || in_envoy {
         0
     } else {
         status_height + input_box_height + hint_height
@@ -356,12 +354,12 @@ pub fn draw_transcript(
         .split(size);
 
     // 1. Transcript History
-    // When zoomed into a subagent, reserve a 1-line navigation band at the
-    // bottom of the transcript viewport for the subagent bar.
-    let (mut transcript_area, subagent_bar_rect) = if subagent_bar.is_some() {
+    // When zoomed into an envoy, reserve a 1-line navigation band at the
+    // bottom of the transcript viewport for the envoy bar.
+    let (mut transcript_area, envoy_bar_rect) = if envoy_bar.is_some() {
         let sub = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(SUBAGENT_BAR_ROWS)])
+            .constraints([Constraint::Min(0), Constraint::Length(ENVOY_BAR_ROWS)])
             .split(chunks[0]);
         (
             sub[0],
@@ -374,7 +372,7 @@ pub fn draw_transcript(
     };
     // `/btw` side banner (ADR-0017): a 1-line band at the TOP of the
     // transcript viewport reading `Side from main · <status> · Esc back`.
-    // The side view keeps the footer (composer), unlike the subagent zoom,
+    // The side view keeps the footer (composer), unlike the envoy zoom,
     // so only this top band is carved off.
     if let Some(status) = side_banner {
         let sub = Layout::default()
@@ -408,13 +406,13 @@ pub fn draw_transcript(
     let mut last_shown_attribution: Option<(String, String)> = None;
 
     // Empty-state replacement (ADR-0033): when the session has no messages and
-    // no subagent/side view is open, the transcript is replaced by a centered
+    // no envoy/side view is open, the transcript is replaced by a centered
     // logo hero rather than rendering an empty stream. This is a component
     // substitution, not transcript content — the hero never participates in
     // scroll, selection, or attribution, so the whole message-rendering
     // pipeline (loop, badges, sticky pinning) is skipped. The footer below
     // renders exactly as in a live session.
-    let show_empty_state = messages.is_empty() && subagent_bar.is_none() && side_banner.is_none();
+    let show_empty_state = messages.is_empty() && envoy_bar.is_none() && side_banner.is_none();
 
     if show_empty_state {
         empty_state::draw_empty_state(frame, transcript_area, logo, theme);
@@ -463,7 +461,7 @@ pub fn draw_transcript(
             // regions even while scrolled above the viewport, so they always draw.
             let body_before = content_lines;
             let skippable = msg.is_notice()
-                || (!msg.is_subagent_task() && !msg.is_tool_step() && !msg.is_thinking());
+                || (!msg.is_envoy_task() && !msg.is_tool_step() && !msg.is_thinking());
             let cached_height = if skippable {
                 height_cache.get(msg.id)
             } else {
@@ -492,8 +490,8 @@ pub fn draw_transcript(
                     &mut content_lines,
                     theme,
                 );
-            } else if msg.is_subagent_task() {
-                draw_subagent_inline_step(
+            } else if msg.is_envoy_task() {
+                draw_envoy_inline_step(
                     frame,
                     band,
                     msg,
@@ -558,7 +556,7 @@ pub fn draw_transcript(
             }
             // Record the freshly-measured body height so future frames can skip
             // this message while it is off-screen and unchanged. Only skippable
-            // kinds are cached; tool/thinking/subagent rows always redraw.
+            // kinds are cached; tool/thinking/envoy rows always redraw.
             if skippable && cached_height.is_none() {
                 height_cache.set(msg.id, (content_lines - body_before) as u16);
             }
@@ -581,11 +579,11 @@ pub fn draw_transcript(
             // step followed by any tool step suppresses the row.
             let next_is_tool_step = messages
                 .get(mi + 1)
-                .is_some_and(|next| next.is_tool_step() || next.is_subagent_task());
+                .is_some_and(|next| next.is_tool_step() || next.is_envoy_task());
             let collapsed_tool_into_tool_step =
                 msg.is_tool_step() && msg.tool_step_expanded() == Some(false) && next_is_tool_step;
             let next_is_step = messages.get(mi + 1).is_some_and(|next| {
-                next.is_thinking() || next.is_tool_step() || next.is_subagent_task()
+                next.is_thinking() || next.is_tool_step() || next.is_envoy_task()
             });
             if collapsed_tool_into_tool_step {
                 // Flush stack: no separating row between adjacent collapsed tool
@@ -624,10 +622,10 @@ pub fn draw_transcript(
         }
     }
 
-    // Subagent navigation band, drawn across the full transcript width (inside the
+    // Envoy navigation band, drawn across the full transcript width (inside the
     // app_bg gutters) so it reads as a continuous bar pinned above the input.
-    if let (Some(bar), Some(rect)) = (subagent_bar.as_ref(), subagent_bar_rect) {
-        draw_subagent_bar(frame, rect, bar, theme);
+    if let (Some(bar), Some(rect)) = (envoy_bar.as_ref(), envoy_bar_rect) {
+        draw_envoy_bar(frame, rect, bar, theme);
     }
 
     // The footer stacks, from top to bottom: the transient activity bar (when
@@ -806,7 +804,7 @@ mod tests {
                         input: "hello",
                         byte_cursor: 5,
                         chrome_hidden: false,
-                        subagent_bar: None,
+                        envoy_bar: None,
                         side_banner: None,
                         pursuit: None,
                         todos: None,
@@ -1033,20 +1031,20 @@ mod tests {
         });
     }
 
-    /// Render both the compact subagent step (root view) and the zoomed-in
-    /// subagent view with its navigation bar, ensuring no layout panics.
+    /// Render both the compact envoy step (root view) and the zoomed-in
+    /// envoy view with its navigation bar, ensuring no layout panics.
     #[test]
-    fn subagent_step_and_view_render_without_panicking() {
+    fn envoy_step_and_view_render_without_panicking() {
         let theme = Theme::default();
         let mut terminal = neenee_tui::TestTerminal::new(80, 30);
 
-        // Root view: a completed subagent task renders as a compact step.
+        // Root view: a completed envoy task renders as a compact step.
         let mut task = TranscriptMessage::tool_step(
             "task_1",
-            "subagent",
+            "envoy",
             r#"{"description":"explore the codebase","prompt":"..."}"#,
         );
-        task.push_subagent_event(&neenee_core::SubagentEvent::ToolCall {
+        task.push_envoy_event(&neenee_core::EnvoyEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
@@ -1072,12 +1070,12 @@ mod tests {
                     scroll: 0,
                     selection: &SelectionState::None,
                     cell_selection: None,
-                    activity: "running subagent",
+                    activity: "running envoy",
                     spinner_phase: 0,
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -1092,9 +1090,9 @@ mod tests {
             );
         });
 
-        // Zoomed-in subagent view: the task's children are the message stream
+        // Zoomed-in envoy view: the task's children are the message stream
         // and the navigation bar is shown.
-        let children = root_messages[1].subagent_children().unwrap().to_vec();
+        let children = root_messages[1].envoy_children().unwrap().to_vec();
         terminal.draw(|f| {
             let mut layout_map = LayoutMap::new();
             let _ = draw_transcript(
@@ -1110,7 +1108,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: Some(SubagentBarInfo {
+                    envoy_bar: Some(EnvoyBarInfo {
                         label: "explore the codebase".to_string(),
                         index: 1,
                         total: 1,
@@ -1176,7 +1174,7 @@ mod tests {
                         input: "",
                         byte_cursor: 0,
                         chrome_hidden: false,
-                        subagent_bar: None,
+                        envoy_bar: None,
                         side_banner: None,
                         pursuit: None,
                         todos: None,
@@ -1329,7 +1327,7 @@ mod tests {
                         input,
                         byte_cursor: input.len(),
                         chrome_hidden: false,
-                        subagent_bar: None,
+                        envoy_bar: None,
                         side_banner: None,
                         pursuit: None,
                         todos: None,
@@ -1745,7 +1743,7 @@ mod tests {
                     input: &long_input,
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -1887,7 +1885,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -1963,7 +1961,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2404,7 +2402,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2457,7 +2455,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2519,7 +2517,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2568,7 +2566,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2642,7 +2640,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2712,7 +2710,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,
@@ -2781,7 +2779,7 @@ mod tests {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,

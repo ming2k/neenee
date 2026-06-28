@@ -7,7 +7,7 @@
 //!
 //! Built with REAL tool instances (the quant tools from this crate + the real
 //! coding tools from `neenee-tools`), not stubs. This proves the per-role
-//! tool allocation holds end-to-end: a quant sub-agent receives exactly its
+//! tool allocation holds end-to-end: a quant envoy receives exactly its
 //! read-only quant + inspection set, and never receives a coding write/edit
 //! tool or the live-trading `place_order`. This is the "separate tool allocation
 //! per role" contract pinned with concrete instances.

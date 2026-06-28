@@ -4,7 +4,7 @@ use neenee_agent::orchestration::{
     MidTurnPruneProjectionGate, ProxyProvider, refresh_agent_pursuit, start_repeat_scheduler, turn,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::{Agent, SubagentTool};
+use neenee_agent::{Agent, EnvoyTool};
 use neenee_core::{
     AgentRequest, AgentResponse, CHARS_PER_TOKEN, DynamicCatalog, EXPLORE, Provider, TurnEvent,
 };
@@ -19,10 +19,10 @@ use neenee_tools::commands::{CustomCommand, discover_commands};
 mod showcase;
 mod tui;
 
+use mcp_runtime::McpRuntime;
 pub(crate) use neenee_server::{
     agent_loop, agent_setup, hooks, mcp_catalog, mcp_runtime, pursuits, side, startup,
 };
-use mcp_runtime::McpRuntime;
 
 /// This CLI's identity, handed to the engine as its opening system prompt.
 /// Lives here (not in `neenee-agent`) so the engine stays identity-agnostic
@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tools' search config, the shared skill registry, the embedding index +
     // session store) pull it out of the context by type — see
     // `neenee_core::tool_registry`. Meta-tools that genuinely depend on the
-    // *rest* of the toolset (the subagent dispatch `task`) cannot
+    // *rest* of the toolset (the envoy dispatch `task`) cannot
     // self-register and are assembled explicitly below. MCP tools are
     // discovered at runtime from configured servers and layered on last.
     let tool_ctx = {
@@ -214,40 +214,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // dynamically-refreshable `mcp_tools` holder after Agent::new, so the
     // background McpCatalog can reconnect/re-discover them at runtime.
     // Snapshot of the shared toolset (built-in default variants) before the
-    // `SubagentTool` is layered on. A `/btw` side session (ADR-0017) rebuilds
-    // its `Agent` from this same snapshot — minus its own `SubagentTool`,
-    // mirroring the subagent profile filter so a side chat can recurse no
+    // `EnvoyTool` is layered on. A `/btw` side session (ADR-0017) rebuilds
+    // its `Agent` from this same snapshot — minus its own `EnvoyTool`,
+    // mirroring the envoy profile filter so a side chat can recurse no
     // further than the primary.
     let base_tools: Arc<Vec<Arc<dyn neenee_core::Tool>>> = Arc::new(toolset.default_view());
-    // SubagentTool gets the full capability set (excluding itself) so spawned
-    // sub-agents cannot recurse and inherit the live provider. It binds the
+    // EnvoyTool gets the full capability set (excluding itself) so spawned
+    // envoys cannot recurse and inherit the live provider. It binds the
     // EXPLORE profile (read-only / non-interactive / non-recursive).
-    let subagent_tool = Arc::new(SubagentTool::new(
+    let envoy_tool = Arc::new(EnvoyTool::new(
         agent_provider.clone(),
         toolset.clone(),
         &EXPLORE,
     ));
-    // Full-duplex (ADR-0029): capture the subagent tool's subagent registry so the
+    // Full-duplex (ADR-0029): capture the envoy tool's envoy registry so the
     // request loop can route a user's permission / ask_user reply down into the
     // specific live child that surfaced the request (looked up by the parent
-    // tool-call id the TUI tags onto the reply). Captured before `subagent_tool`
+    // tool-call id the TUI tags onto the reply). Captured before `envoy_tool`
     // is layered into the capability set.
-    let subagent_registry = subagent_tool.registry();
+    let envoy_registry = envoy_tool.registry();
     // Keep a typed handle so we can bind the parent's variant selection into the
-    // subagent tool once the agent (which owns that selection) exists. The same
-    // underlying `Arc<SubagentTool>` is what gets layered into the toolset.
-    let subagent_tool_handle = subagent_tool.clone();
-    toolset.insert(subagent_tool);
+    // envoy tool once the agent (which owns that selection) exists. The same
+    // underlying `Arc<EnvoyTool>` is what gets layered into the toolset.
+    let envoy_tool_handle = envoy_tool.clone();
+    toolset.insert(envoy_tool);
     let agent = Arc::new(Agent::from_toolset(
         agent_provider,
         toolset,
         (*skills_registry).clone(),
         neenee_identity(),
     ));
-    // Override axis (model): subagents are agents on the same model, so they
+    // Override axis (model): envoys are agents on the same model, so they
     // inherit the parent's tool-variant selection. The profile still owns the
     // orthogonal scope axis.
-    subagent_tool_handle.bind_variant_selection(agent.variant_selection_handle());
+    envoy_tool_handle.bind_variant_selection(agent.variant_selection_handle());
     // Wire the per-project "always allow" allowlist so prior `Always`
     // approvals survive across sessions in this project. Best-effort: a
     // missing or unreadable permissions.json just means we re-prompt.
@@ -260,9 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // holder, and start the background reconnect/re-discover loop. The runtime
     // is the live source of truth the `/mcp` modal toggles/reconnects against.
     // Individual tool calls also auto-reconnect on failure (McpTool::call).
-    let mcp_runtime = Arc::new(
-        McpRuntime::connect_all(config.mcp.clone(), agent.mcp_tools_holder()).await,
-    );
+    let mcp_runtime =
+        Arc::new(McpRuntime::connect_all(config.mcp.clone(), agent.mcp_tools_holder()).await);
     neenee_agent::dynamic::spawn_refresh(crate::mcp_catalog::McpCatalog::new(mcp_runtime.clone()));
     if unattended_at_start {
         agent.set_unattended(true);
@@ -301,8 +300,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // verify hard-nudge toggle. (Session review is on-demand via `/review`,
     // so it has no config to seed.) All default to sensible values when the
     // table is absent, so this is a no-op for the common case.
-    agent.set_hard_stop_rounds(config.agent.hard_stop_rounds);
-    agent.set_loop_review_enabled(config.agent.loop_review_enabled);
+    agent.set_hard_stop_rounds(config.principal.hard_stop_rounds);
+    agent.set_loop_review_enabled(config.principal.loop_review_enabled);
 
     // Lifecycle event hooks (ADR-0025): each `[[hooks]]` entry runs a shell
     // command at one lifecycle point (PreToolUse / PostToolUse / Stop / …).
@@ -384,7 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_usage,
         provider_holder: provider_for_task,
         skills_registry,
-        subagent_registry,
+        envoy_registry,
         mcp_runtime,
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,

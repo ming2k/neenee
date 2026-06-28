@@ -53,7 +53,7 @@ pub fn run() -> io::Result<()> {
                     input: "Resize the terminal, scroll, or switch fixtures...",
                     byte_cursor: "Resize the terminal, scroll, or switch fixtures...".len(),
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,

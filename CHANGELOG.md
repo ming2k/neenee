@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — agent vocabulary is now Principal / Envoy.** "Agent" is kept only
+  as the umbrella term for the execution engine (the `Agent` struct, the
+  `neenee-agent` crate, and the `AgentRequest`/`AgentResponse`/`AgentEvent`/
+  `AgentOp` protocol). The two concrete roles are renamed: the top-level,
+  human-facing agent is the **Principal**, and the isolated child it spawns to
+  research a sub-question is an **Envoy**. Two breaking surfaces: the
+  `[agent]` config table is now `[principal]` (move `hard_stop_rounds` /
+  `loop_review_enabled` under it — an `[agent]` table is silently ignored), and
+  the `subagent` tool is renamed to `envoy`. No compatibility aliases. See
+  [ADR-0042](docs/adr/0042-principal-envoy-role-vocabulary.md).
+
+- **Question modal single-select is now live — no marker, no Space step.**
+  Single-select questions drop the `●`/`○` radio dots entirely: the highlighted
+  row *is* the selection, so moving with `↑`/`↓` (or jumping with a digit key)
+  immediately commits the choice and `Enter` submits exactly the highlighted
+  option — there is no longer a separate "navigate, then Space to confirm, then
+  Enter" sequence. Multi-select is unchanged (still `[x]`/`[ ]` checkboxes with
+  a `Space` toggle); the footer's `Space select` hint is now shown only for
+  multi-select, since it is a harmless no-op for single-select.
+
 ## [0.10.0] - 2026-06-29
 
 ### Changed

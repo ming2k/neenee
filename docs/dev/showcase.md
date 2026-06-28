@@ -30,7 +30,7 @@ mid-interaction, so you can never get trapped in a raw-mode terminal.
 
 | Component | What it exercises | Key bindings |
 |-----------|-------------------|--------------|
-| `question` | ask\_user modal: single-select, multi-select, multi-page | `↑↓` `Space` `1-9` `Enter` `Tab`=next fixture |
+| `question` | ask\_user modal: single-select (live — highlight is the selection), multi-select (Space toggle), multi-page | `↑↓` `Space` *(multi)* `1-9` `Enter` `Tab`=next fixture |
 | `permission` | tool-permission sheet + confirm-always sub-step + Details scroll | `←→` `Enter` `↑↓` `Tab`=next fixture |
 | `provider` | `/provider` model picker with filter | `↑↓` type to filter `Enter` |
 | `model-editor` | API-key / model-id editor | `Tab` switch field, type to edit |

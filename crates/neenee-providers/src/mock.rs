@@ -23,7 +23,7 @@ impl Provider for MockProvider {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         })
     }

@@ -172,7 +172,7 @@ Migration:
 - Predecessor: [ADR-0005](0005-strict-layering-and-renames.md) — why
   `TaskTool` lives in `neenee-agent` (orchestration primitive), which is why
   the profile primitive lives one layer down in `neenee-core`.
-- [Sub-agents](../explanation/agent-design/subagents.md) — rewritten tool
+- [Sub-agents](../explanation/agent-design/envoys.md) — rewritten tool
   admission section.
 - [Built-in tools](../reference/tools/index.md) — `task` special-tool entry and the
   new capability axes.

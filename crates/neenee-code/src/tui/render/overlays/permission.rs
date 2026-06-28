@@ -30,7 +30,9 @@ const PERMISSION_MAX_BODY_ROWS: u16 = 14;
 
 /// options; the user navigates with ↑/↓, selects with Space or Enter, and
 /// submits with Enter. Multi-select questions use checkboxes; single-select
-/// uses radio buttons. A numbered digit key (1-9) jumps directly to an option.
+/// shows no marker at all — the highlight *is* the selection (it moves live
+/// with ↑/↓ and a digit jump), so pressing Enter submits the highlighted row
+/// directly. A numbered digit key (1-9) jumps directly to an option.
 const OTHER_OPTION_LABEL: &str = "Other";
 
 #[allow(clippy::too_many_arguments)] // modal draw fns thread many context args by nature
@@ -168,19 +170,20 @@ pub fn draw_question_modal(
     record_question_hits(hit_map, f.body, &option_rows, *scroll);
 
     if let Some(fo) = f.footer {
-        render_modal_footer(
-            frame,
-            fo,
-            &[
-                FooterHint::navigation("↑↓", "navigate"),
-                FooterHint::navigation("wheel/Pg", "scroll"),
-                FooterHint::primary("Enter", "submit"),
-                FooterHint::secondary("Space", "select"),
-                FooterHint::secondary("1-9", "jump"),
-                FooterHint::always("Esc", "cancel"),
-            ],
-            theme,
-        );
+        // Single-select is live (the highlight is the selection), so there is
+        // no "select" action to advertise — Space is a no-op there. Only
+        // multi-select offers the Space toggle.
+        let mut hints = vec![
+            FooterHint::navigation("↑↓", "navigate"),
+            FooterHint::navigation("wheel/Pg", "scroll"),
+            FooterHint::primary("Enter", "submit"),
+        ];
+        if question.is_some_and(|q| q.multi_select) {
+            hints.push(FooterHint::secondary("Space", "select"));
+        }
+        hints.push(FooterHint::secondary("1-9", "jump"));
+        hints.push(FooterHint::always("Esc", "cancel"));
+        render_modal_footer(frame, fo, &hints, theme);
     }
     area
 }
@@ -263,24 +266,36 @@ fn render_question_option(
 ) {
     // No row-number prefix and no `❯` focus glyph — the hover is signalled
     // purely by the font color of the highlighted row (brand tone + bold),
-    // not by a background band. The selection marker (radio ●/○, checkbox
-    // [x]/[ ]) stays because it is the only way to tell a *selected* row from
-    // a merely *hovered* one.
-    let marker = if multi_select {
-        if is_selected { "[x]" } else { "[ ]" }
+    // not by a background band.
+    //
+    // Marker policy:
+    // - Multi-select: a `[x]`/`[ ]` checkbox, because selection is a separate
+    //   toggle set from the highlight — the checkbox is the only way to tell
+    //   a *selected* row from a merely *hovered* one.
+    // - Single-select: no marker. The highlight is *live* (it moves with
+    //   ↑/↓ and commits immediately), so the highlighted row is, by
+    //   definition, the selected one. Showing a radio dot would be redundant
+    //   with the brand-colored highlight and would imply a two-step
+    //   (mark-then-confirm) flow that does not exist.
+    let (marker, marker_style) = if multi_select {
+        let m = if is_selected { "[x]" } else { "[ ]" };
+        let style = if is_selected {
+            Style::default().fg(theme.ok()).add_modifier(Modifier::BOLD)
+        } else if is_highlighted {
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted())
+        };
+        (m, style)
     } else {
-        if is_selected { "●" } else { "○" }
+        // Single-select: no marker. Use an empty span styled as the muted
+        // baseline so the line keeps the same indentation rhythm as the
+        // multi-select rows.
+        ("", Style::default().fg(theme.muted()))
     };
 
-    let marker_style = if is_selected {
-        Style::default().fg(theme.ok()).add_modifier(Modifier::BOLD)
-    } else if is_highlighted {
-        Style::default()
-            .fg(theme.brand())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.muted())
-    };
     let text_style = if is_highlighted {
         Style::default()
             .fg(theme.brand())
@@ -289,6 +304,10 @@ fn render_question_option(
         Style::default().fg(theme.fg())
     };
 
+    // Keep the label column aligned whether or not a marker is shown: the
+    // prefix reserves a fixed-width slot ("  [x] " for multi-select, "    "
+    // for the marker-less single-select) so single- and multi-select rows
+    // line up the same.
     let first_prefix = format!("  {} ", marker);
     let continuation_prefix = "     ";
     push_wrapped_styled_with_prefix_style(

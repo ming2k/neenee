@@ -1,7 +1,7 @@
 //! Step rendering implementation: the summary primitives, the per-tool body
 //! content renderers (code, listing, grep, bash, diff), and the top-level
 //! orchestrators (`draw_tool_step`, `draw_reasoning_trace`,
-//! `draw_subagent_inline_step`, `draw_subagent_bar`) that compose them. Also
+//! `draw_envoy_inline_step`, `draw_envoy_bar`) that compose them. Also
 //! produces the sticky pinned-step summary that
 //! [`super::super::draw_transcript`] overlays while a step body is scrolled
 //! into view. State and color resolution live in [`super`] (re-exported from
@@ -25,8 +25,8 @@ use crate::tui::render::text_layout::{
 };
 use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::tui::render::{
-    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo,
-    SubagentBarInfo, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
+    EnvoyBarInfo, REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS,
+    STEP_MIN_WIDTH, StickyInfo, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
     TRANSCRIPT_BODY_LEADING_INDENT, Theme,
 };
 
@@ -181,7 +181,7 @@ fn truncate_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
-/// Build the summary line for a tool/subagent step: an optional expand marker
+/// Build the summary line for a tool/envoy step: an optional expand marker
 /// followed by the summary text, padded to `full_width`.
 ///
 /// The focus affordance is carried entirely by color (resolved upstream through
@@ -1199,13 +1199,13 @@ fn fmt_no(no: Option<usize>, width: usize) -> String {
     }
 }
 
-/// Render a subagent `task` tool step as a compact, non-expandable step.
-/// Activating it (click / Enter) navigates into a dedicated subagent view
+/// Render an envoy `task` tool step as a compact, non-expandable step.
+/// Activating it (click / Enter) navigates into a dedicated envoy view
 /// rather than expanding a body inline. The step shows a one-line summary
 /// (the task description + duration) and a live status line summarizing the
-/// subagent's progress.
+/// envoy's progress.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_subagent_inline_step(
+pub fn draw_envoy_inline_step(
     frame: &mut Frame,
     transcript_area: Rect,
     msg: &TranscriptMessage,
@@ -1285,7 +1285,7 @@ pub fn draw_subagent_inline_step(
     }
 
     // Live status line (e.g. "↳ Running: grep foo" / "↳ Completed · 3 calls").
-    if let Some(status) = msg.subagent_status_line() {
+    if let Some(status) = msg.envoy_status_line() {
         let inner_width = ctx.full_width.saturating_sub(2);
         let wrapped = wrap_text(&status, inner_width.max(1));
         let bg_style = Style::default().bg(bg);
@@ -1297,7 +1297,7 @@ pub fn draw_subagent_inline_step(
                 Span::styled(padded_tail(ctx.full_width, used), bg_style),
             ]);
             // Make the whole status line part of the same clickable summary so
-            // clicking anywhere on the step enters the subagent view.
+            // clicking anywhere on the step enters the envoy view.
             if let Some(rect) = ctx.paint(line) {
                 ctx.layout_map.push(BlockRegion {
                     message_idx: mi,
@@ -1314,10 +1314,10 @@ pub fn draw_subagent_inline_step(
     }
 }
 
-/// Render the subagent navigation bar: the focused task's label + position
+/// Render the envoy navigation bar: the focused task's label + position
 /// among siblings on the left, and the return / cycle-sibling hints on the
 /// right. Drawn across the full transcript width inside the app_bg gutters.
-pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, theme: &Theme) {
+pub fn draw_envoy_bar(frame: &mut Frame, rect: Rect, bar: &EnvoyBarInfo, theme: &Theme) {
     // `rect` arrives already inset by `draw_transcript`.
     let full_width = rect.width as usize;
     if full_width < STEP_MIN_WIDTH {
@@ -1331,7 +1331,7 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
         .add_modifier(Modifier::BOLD);
     let accent = Style::default().bg(bg).fg(theme.brand());
 
-    let left_label = format!(" {} ", "Subagent");
+    let left_label = format!(" {} ", "Envoy");
     let desc = bar.label.to_string();
     let count = if bar.total > 1 {
         format!(" ({} of {}) ", bar.index, bar.total)
@@ -1360,7 +1360,7 @@ pub fn draw_subagent_bar(frame: &mut Frame, rect: Rect, bar: &SubagentBarInfo, t
 }
 
 /// Render the `/btw` side banner (ADR-0017): a top band reading
-/// `Side from main · <parent status> · Esc back`. Mirrors `draw_subagent_bar`'s
+/// `Side from main · <parent status> · Esc back`. Mirrors `draw_envoy_bar`'s
 /// style palette so the two zoom modes share a visual language; the parent
 /// status segment is accented so the user notices when the main session hits a
 /// running / idle transition.
@@ -1602,7 +1602,7 @@ pub fn draw_tool_step(
             }
         }
 
-        // ── Nested subagent children ──.
+        // ── Nested envoy children ──.
         if let crate::tui::document::MessageKind::ToolStep { children, .. } = &msg.kind {
             if !children.is_empty() {
                 let mut ctx = RenderCtx::from_cursor(

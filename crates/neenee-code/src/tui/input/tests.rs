@@ -26,7 +26,7 @@ fn enter(input: &mut String, exact: bool) -> InputAction {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -68,7 +68,7 @@ fn enter_with_completion(
             suggestion_index,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -165,7 +165,7 @@ fn enter_without_highlight_still_sends_path_message() {
 #[test]
 fn esc_closes_slash_completion_menu() {
     // When a slash completion popup is open, Esc dismisses it rather
-    // than falling through to subagent exit / interrupt / no-op.
+    // than falling through to envoy exit / interrupt / no-op.
     let mut input = "/mc".to_string();
     let mut cursor = 3;
     let mut drag = SelectionDrag::default();
@@ -187,7 +187,7 @@ fn esc_closes_slash_completion_menu() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -224,7 +224,7 @@ fn esc_closes_path_completion_menu() {
             suggestion_index: Some(1),
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -260,7 +260,7 @@ fn esc_falls_through_when_no_completion_is_open() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -293,7 +293,7 @@ fn typing_in_compose_returns_insert_char() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -326,7 +326,7 @@ fn backspace_in_compose_returns_backspace_action() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -363,7 +363,7 @@ fn backspace_atomically_deletes_an_image_chip() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -400,7 +400,7 @@ fn backspace_atomically_deletes_a_paste_chip_without_trailing_space() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -432,7 +432,7 @@ fn backspace_falls_through_to_single_char_outside_a_chip() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -505,7 +505,7 @@ fn enter_shell(input: &mut String) -> InputAction {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -538,7 +538,7 @@ fn escape_returns_from_always_confirmation() {
             suggestion_index: None,
             permission_confirm_always: true,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -567,7 +567,7 @@ fn plain_ctrl_c_maps_to_semantic_ctrl_c() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -596,7 +596,7 @@ fn star_in_models_modal_toggles_favorite() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -627,7 +627,7 @@ fn letter_in_models_modal_feeds_the_fuzzy_filter() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -660,7 +660,7 @@ fn ctrl_t_toggles_tool_steps() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -685,7 +685,7 @@ fn ctrl_m_opens_models_modal_when_no_modal_is_open() {
         suggestion_index: None,
         permission_confirm_always: false,
         permission_show_details: false,
-        in_subagent_view: false,
+        in_envoy_view: false,
         in_side_view: false,
         has_focused_target: false,
         has_queued: false,
@@ -721,7 +721,7 @@ fn ctrl_m_opens_models_modal_when_no_modal_is_open() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -732,7 +732,7 @@ fn ctrl_m_opens_models_modal_when_no_modal_is_open() {
     assert_eq!(action, InputAction::None);
 }
 
-fn key_in_view(code: KeyCode, in_subagent_view: bool, input: &mut String) -> InputAction {
+fn key_in_view(code: KeyCode, in_envoy_view: bool, input: &mut String) -> InputAction {
     let mut cursor = input.chars().count();
     let mut drag = SelectionDrag::default();
     process_event(
@@ -748,7 +748,7 @@ fn key_in_view(code: KeyCode, in_subagent_view: bool, input: &mut String) -> Inp
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view,
+            in_envoy_view,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -775,7 +775,7 @@ fn key_with_focus(code: KeyCode) -> InputAction {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: true,
             has_queued: false,
@@ -916,13 +916,13 @@ fn q_while_focused_inserts_instead_of_quitting() {
 }
 
 #[test]
-fn escape_exits_subagent_view() {
+fn escape_exits_envoy_view() {
     let mut input = String::new();
     assert_eq!(
         key_in_view(KeyCode::Esc, true, &mut input),
-        InputAction::ExitSubAgent
+        InputAction::ExitEnvoy
     );
-    // Outside a subagent view, Esc does nothing when idle (no modal).
+    // Outside an envoy view, Esc does nothing when idle (no modal).
     assert_eq!(
         key_in_view(KeyCode::Esc, false, &mut input),
         InputAction::None
@@ -942,12 +942,12 @@ fn bracket_keys_cycle_siblings_only_when_typing_is_empty() {
     );
 
     // While typing (non-empty input), the brackets insert as characters,
-    // not navigation, even inside a subagent view.
+    // not navigation, even inside an envoy view.
     let mut typing = "x".to_string();
     key_in_view(KeyCode::Char('['), true, &mut typing);
     assert_eq!(typing, "x[");
 
-    // Outside a subagent view, brackets always insert.
+    // Outside an envoy view, brackets always insert.
     let mut other = String::new();
     key_in_view(KeyCode::Char(']'), false, &mut other);
     assert_eq!(other, "]");
@@ -983,7 +983,7 @@ fn run_key(
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: has_focus,
             has_queued: false,
@@ -1095,7 +1095,7 @@ fn mouse_ctx_for(modal: crate::tui::Modal) -> InputContext {
         suggestion_index: None,
         permission_confirm_always: false,
         permission_show_details: false,
-        in_subagent_view: false,
+        in_envoy_view: false,
         in_side_view: false,
         has_focused_target: false,
         has_queued: false,
@@ -1694,7 +1694,7 @@ fn run_history_key(
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -1783,7 +1783,7 @@ fn ctrl_r_opens_history_modal_when_no_modal_is_open() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -1811,7 +1811,7 @@ fn ctrl_r_opens_history_modal_when_no_modal_is_open() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -1843,7 +1843,7 @@ fn up_with_queued(has_queued: bool) -> InputAction {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued,
@@ -1894,7 +1894,7 @@ fn up_arrow_in_browse_does_not_recall_queued() {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: true,
             has_queued: true,
@@ -1928,7 +1928,7 @@ fn run_paste(
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -2051,7 +2051,7 @@ fn multiline_arrow(seed: &str, cursor: usize, code: KeyCode) -> (InputAction, us
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,

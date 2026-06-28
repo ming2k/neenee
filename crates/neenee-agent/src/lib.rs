@@ -33,7 +33,7 @@
 //! `ask_user_tool_blocks_and_returns_selected_answers` integration test
 //! can construct a real `AskUserTool`; dev-deps do not form cycles.)
 //!
-//! ## Why catalog and SubagentTool live here (not in store / tools)
+//! ## Why catalog and EnvoyTool live here (not in store / tools)
 //!
 //! Both got relocated here from their intuitive homes to keep the
 //! dependency graph strictly layered (see ADR-0005):
@@ -43,10 +43,10 @@
 //!   `neenee-providers` — an inversion, since store is otherwise a peer
 //!   of providers. The catalog is fundamentally a factory consumed by
 //!   orchestration, so it lives where orchestration lives.
-//! - **`SubagentTool`** spawns sub-agents via `Agent::new`. It used to live
+//! - **`EnvoyTool`** spawns envoys via `Agent::new`. It used to live
 //!   in `neenee-tools`, which forced tools to depend on this crate —
 //!   another inversion, since tools are below the agent layer. The
-//!   subagent tool is fundamentally an orchestration primitive that
+//!   envoy tool is fundamentally an orchestration primitive that
 //!   happens to satisfy the `Tool` trait, so it lives here too.
 //!
 //! Everything `neenee-core` exports is re-exported here so consumers can
@@ -68,16 +68,15 @@ pub use neenee_store::RepeatStore;
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
     AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextProjectionGate, EXPLORE,
-    HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus, McpServerConfig, Message,
-    PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision, PermissionRequest, PromptChannel,
-    PromptContext, PromptRegistry, PromptSection, Provider, ProviderEntry, ProviderPickerRow,
-    ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role,
-    SessionOverview, SkillsConfig, SubagentEvent, SubagentProfile, TITLE, ThreadPursuit,
-    TokenUsage, Tool, ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport,
-    TurnOutcome, TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply,
-    UserQuestionRequest, WebSearchConfig, estimate_chars, estimate_tokens, is_context_overflow,
-    parse_retryable_error, prune_tool_results, public_error_message, retryable_error,
-    truncate_utf8,
+    EnvoyEvent, EnvoyProfile, HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus,
+    McpServerConfig, Message, PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision,
+    PermissionRequest, PromptChannel, PromptContext, PromptRegistry, PromptSection, Provider,
+    ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome,
+    Pursuit, RetryableError, Role, SessionOverview, SkillsConfig, TITLE, ThreadPursuit, TokenUsage,
+    Tool, ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome,
+    TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    WebSearchConfig, estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
+    prune_tool_results, public_error_message, retryable_error, truncate_utf8,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from
@@ -138,17 +137,17 @@ mod permission_store;
 // Shadows core's `prompt` module under the `pub use neenee_core::*` glob
 // above; deliberate — see the note there. The prompt *types* are re-exported
 // by name in the explicit list.
+pub mod envoy_tool;
 #[allow(hidden_glob_reexports)]
 mod prompt;
 mod pursuit_state;
 pub mod session_review;
 pub mod session_title;
 pub mod skills;
-pub mod subagent_tool;
 pub mod todo_tools;
 
+pub use envoy_tool::{EnvoyRegistry, EnvoyTool};
 pub use session_review::{LoopingReview, default_reviews};
-pub use subagent_tool::{SubagentRegistry, SubagentTool};
 pub use todo_tools::{TodoUpdateTool, TodoWriteTool};
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //!
 //! This is a **replacement** for the transcript stream, not content rendered
 //! *inside* it: `draw_transcript` short-circuits to this component when
-//! `messages` is empty (and no subagent/side view is open), keeping the empty
+//! `messages` is empty (and no envoy/side view is open), keeping the empty
 //! state out of the message-rendering pipeline entirely. Responsibilities stay
 //! clean — the empty state never participates in scroll, selection, or
 //! attribution logic.

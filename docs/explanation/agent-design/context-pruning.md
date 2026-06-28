@@ -16,7 +16,7 @@ see [Harness architecture](harness.md#context-projection).
 
 In an agentic loop the bulkiest, most disposable context is **tool output**:
 hundreds of lines of `bash` logs, whole files from `read`, search dumps, a
-sub-agent's full transcript. These age badly — an early `grep` result rarely
+envoy's full transcript. These age badly — an early `grep` result rarely
 informs a decision fifty rounds later — yet they keep occupying the window.
 
 Pruning cannot simply delete an old tool message: the OpenAI-style protocol
@@ -69,10 +69,10 @@ Selection is **not** FIFO-by-age. For each older tool result it decides both
 
 It is **idempotent and convergent**: an already-cleared result is skipped, and a
 truncated result escalates to a clear on the next pass, so repeated calls settle.
-Nested sub-agent transcripts descend the same policy: a `subagent` result carries
+Nested envoy transcripts descend the same policy: an `envoy` result carries
 its child's whole conversation as `children`, which is real weight the parent
 pays for, so the same plan recurses into it (bounded by the schema rule that
-prevents `subagent` from spawning `subagent`).
+prevents `envoy` from spawning `envoy`).
 
 ## Two entry points, one threshold
 

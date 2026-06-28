@@ -1,6 +1,6 @@
 //! User configuration schema and persistence.
 //!
-//! Deserializes/serializes the TOML config file (`agent`, `tui`, providers,
+//! Deserializes/serializes the TOML config file (`principal`, `tui`, providers,
 //! channels, MCP servers, hooks, skills, web-search) via [`crate::fsutil`]'s
 //! atomic-write helpers, and loads/saves the input history. Config is state
 //! (recency-merged under a companion file lock, ADR-0018); the live
@@ -21,13 +21,13 @@ use std::path::PathBuf;
 /// Reasoning isn't a tool, so each frontend addresses it by name.
 pub const THINKING_KEY: &str = "thinking";
 
-/// User-tunable agent behaviour, deserialized from the optional `[agent]`
+/// User-tunable principal (top-level agent) behaviour, deserialized from the optional `[principal]`
 /// table of `config.toml`. All fields default sensibly, so a
-/// `config.toml` with no `[agent]` table (or a partially specified one)
+/// `config.toml` with no `[principal]` table (or a partially specified one)
 /// is valid.
 ///
 /// ```toml
-/// [agent]
+/// [principal]
 /// # Hard-stop a turn after this many total tool rounds. 0 (the default)
 /// # means no hard stop — an opt-in execution budget only. This is the sole
 /// # turn cap; the loop otherwise runs until the model stops, the user
@@ -41,7 +41,7 @@ pub const THINKING_KEY: &str = "thinking";
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AgentConfig {
+pub struct PrincipalConfig {
     /// Opt-in hard-stop budget: abort a turn after this many total tool
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
     /// `Agent::set_hard_stop_rounds`.
@@ -52,14 +52,14 @@ pub struct AgentConfig {
     /// Whether the deterministic read-loop guard may inject its anti-anchoring
     /// nudge when the model repeats the same read without progress (see
     /// `neenee_agent::loop_guard`). Default `true`; wired through
-    /// `Agent::set_loop_review_enabled`, and flipped off for sub-agents and the
+    /// `Agent::set_loop_review_enabled`, and flipped off for envoys and the
     /// `/review` diagnostic. Detection is pure signature bookkeeping (no model
     /// call) and the nudge is non-terminating — distinct from the removed
     /// ADR-0030 semantic review, and unrelated to on-demand `/review`.
     pub loop_review_enabled: bool,
 }
 
-impl Default for AgentConfig {
+impl Default for PrincipalConfig {
     fn default() -> Self {
         Self {
             hard_stop_rounds: 0,
@@ -269,11 +269,11 @@ pub struct Config {
     /// TUI presentation (`[tui]` table): per-step-kind default expand state.
     #[serde(default)]
     pub tui: TuiConfig,
-    /// Agent behaviour (`[agent]` table): opt-in hard-stop budget and the
-    /// verify hard-nudge toggle. See [`AgentConfig`] for the per-field
+    /// Principal behaviour (`[principal]` table): opt-in hard-stop budget and the
+    /// verify hard-nudge toggle. See [`PrincipalConfig`] for the per-field
     /// semantics and TOML examples.
     #[serde(default)]
-    pub agent: AgentConfig,
+    pub principal: PrincipalConfig,
     /// Lifecycle event hooks (`[[hooks]]` array, ADR-0025). Each entry fires a
     /// shell command at one lifecycle point; see [`HookSpec`].
     #[serde(default)]
@@ -379,7 +379,7 @@ impl Default for Config {
             permissions: PermissionConfig::default(),
             websearch: WebSearchConfig::default(),
             tui: TuiConfig::default(),
-            agent: AgentConfig::default(),
+            principal: PrincipalConfig::default(),
             hooks: Vec::new(),
             tool_variants: ToolVariantsConfig::default(),
         }
@@ -454,20 +454,20 @@ mod tests {
 
     #[test]
     fn agent_table_round_trips_through_toml() {
-        // The `[agent]` table must round-trip: partial TOML keeps defaults,
+        // The `[principal]` table must round-trip: partial TOML keeps defaults,
         // full TOML preserves explicit overrides. Legacy `[agent.review]`
         // sub-tables (ADR-0016) are accepted but ignored — `hard_stop_rounds`
-        // now lives directly under `[agent]` (ADR-0018).
+        // now lives directly under `[principal]` (ADR-0018).
         let toml_full = r#"
-            [agent]
+            [principal]
             hard_stop_rounds = 40
         "#;
         let cfg: Config = toml::from_str(toml_full).unwrap();
-        assert_eq!(cfg.agent.hard_stop_rounds, 40);
+        assert_eq!(cfg.principal.hard_stop_rounds, 40);
 
-        // Missing `[agent]` table → defaults match the documented values.
+        // Missing `[principal]` table → defaults match the documented values.
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.agent.hard_stop_rounds, 0);
+        assert_eq!(cfg.principal.hard_stop_rounds, 0);
 
         // A legacy `[agent.review]` block no longer maps to anything; it must
         // not break parsing (unknown sub-tables are ignored) and the new
@@ -478,14 +478,14 @@ mod tests {
             hard_stop_rounds = 99
         "#;
         let cfg: Config = toml::from_str(toml_legacy).unwrap();
-        assert_eq!(cfg.agent.hard_stop_rounds, 0);
+        assert_eq!(cfg.principal.hard_stop_rounds, 0);
 
         // Round-trip through save+load format (serialize then parse).
         let mut cfg = Config::default();
-        cfg.agent.hard_stop_rounds = 99;
+        cfg.principal.hard_stop_rounds = 99;
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.agent.hard_stop_rounds, 99);
+        assert_eq!(parsed.principal.hard_stop_rounds, 99);
     }
 
     #[test]

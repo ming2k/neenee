@@ -61,7 +61,7 @@ impl Tool for BashTool {
         &self,
         _call_id: &str,
         arguments: &str,
-        _on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
+        _on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
         on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
     ) -> Result<neenee_core::ToolOutput, String> {
         use neenee_core::tool_output::{ShellLine, ShellStream, strip_ansi};

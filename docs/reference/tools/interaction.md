@@ -7,8 +7,8 @@ All are `Read` and bypass the permission broker. `ask_user` lives in
 ### `ask_user`
 
 `AskUserTool` overrides `requires_user() = true`, so it is excluded from every
-sub-agent profile — a sub-agent has no user reachable to answer it. See
-[Sub-agent admission](../../explanation/agent-design/subagents.md#tool-admission)
+envoy profile — an envoy has no user reachable to answer it. See
+[Envoy admission](../../explanation/agent-design/envoys.md#tool-admission)
 and [User questions](../../explanation/agent-design/user-questions.md).
 
 | Parameter | Type | Required | Notes |

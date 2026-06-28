@@ -11,6 +11,16 @@
 //!   open question modal — the request, which question is active, the
 //!   highlighted option, the per-question selected indices, and the per-question
 //!   "Other" free-text. It is plain data: clone it, inspect it, render it.
+//!
+//! ## Single vs. multi select semantics
+//!
+//! - **Single-select** is *live*: the highlight is the selection. Moving with
+//!   `↑`/`↓` or a digit jump immediately moves the selected index, so `Enter`
+//!   submits exactly what is highlighted — there is no separate "commit" step
+//!   and no radio-button marker is shown.
+//! - **Multi-select** keeps a separate toggle set: `↑`/`↓` only moves the
+//!   highlight, `Space` toggles a row on/off, and `Enter` submits the whole
+//!   set. The `[x]`/`[ ]` marker stays.
 //! - **View**: already pure and lives in `render::draw_question_modal`, which
 //!   reads straight off the model via the [`QuestionModel`] accessors.
 //! - **Update** ([`QuestionModel::update`]): the pure state transition. It
@@ -55,7 +65,11 @@ pub enum QuestionAction {
     Up,
     /// Move the highlight down, wrapping past the last row to the top.
     Down,
-    /// Toggle/select the highlighted row (Space or Enter on a row).
+    /// Toggle the highlighted row. Multi-select flips the row on/off; for
+    /// single-select this is a no-op selection-wise (the highlight already
+    /// *is* the live selection), but it still maps to the Space key so the
+    /// old reflex of "navigate then Space" does nothing harmful rather than
+    /// nothing at all.
     Toggle,
     /// Jump the highlight to the 1-based `n`-th row AND select it.
     Select(usize),
@@ -64,7 +78,8 @@ pub enum QuestionAction {
     InsertChar(char),
     /// Delete the last character from the "Other" field.
     Backspace,
-    /// Submit all answers (Enter when not toggling a row).
+    /// Submit all answers (Enter). For single-select this submits the
+    /// highlighted option; for multi-select it submits the whole toggle set.
     Submit,
     /// Cancel the modal (Esc).
     Cancel,
@@ -78,7 +93,7 @@ pub enum QuestionAction {
 pub enum QuestionEffect {
     /// Send the computed answers back to the agent. Carries the request id,
     /// one array of selected option labels per question, and the optional
-    /// subagent parent tool-call id the reply must be tagged with for routing.
+    /// envoy parent tool-call id the reply must be tagged with for routing.
     Reply {
         request_id: String,
         answers: Vec<Vec<String>>,
@@ -106,7 +121,9 @@ pub struct QuestionModel {
     /// where `options.len()` is the synthetic "Other" row).
     highlight: usize,
     /// Per-question selected option indices. Parallels `request.questions`.
-    /// Multi-select questions may hold several; single-select holds at most one.
+    /// Multi-select questions may hold several (and never include the
+    /// highlight unless toggled); single-select questions always hold exactly
+    /// the highlighted index, kept in sync by [`QuestionModel::sync_selection`].
     selected: Vec<Vec<usize>>,
     /// Per-question free text for the "Other" row. Parallels
     /// `request.questions`; only meaningful when that row is selected.
@@ -116,8 +133,10 @@ pub struct QuestionModel {
 impl QuestionModel {
     /// Initialize a model from a freshly-arriving request, applying the
     /// default-selection rule: multi-select questions start with nothing
-    /// selected, single-select questions start with the first option selected.
-    /// The highlight begins on the first row.
+    /// selected, single-select questions start with the first option selected
+    /// (matching the initial highlight on row 0 — single-select is *live*,
+    /// so the highlight is always the selection). The highlight begins on the
+    /// first row.
     pub fn open(request: UserQuestionRequest) -> Self {
         let selected = request
             .questions
@@ -156,6 +175,31 @@ impl QuestionModel {
     /// renderer and update logic treat the non-empty case as the norm.
     fn active_question(&self) -> Option<&UserQuestion> {
         self.request.questions.get(self.current)
+    }
+
+    /// Whether the active question is multi-select. The showcase footer (and
+    /// any future caller that needs to know whether to advertise a `Space`
+    /// toggle) reads this; `false` for single-select, whose selection is the
+    /// live highlight.
+    #[cfg(debug_assertions)]
+    pub fn active_multi_select(&self) -> bool {
+        self.active_question().is_some_and(|q| q.multi_select)
+    }
+
+    /// Enforce the single-select invariant: the selected index is the
+    /// highlighted index. No-op for multi-select (whose selection is an
+    /// independent toggle set). This is what makes single-select *live* —
+    /// navigation immediately commits the selection, so `Enter` submits the
+    /// highlighted row with no separate "Space to confirm" step. Bound-checks
+    /// the question slot.
+    fn sync_selection(&mut self, q: usize, multi: bool) {
+        if multi {
+            return;
+        }
+        if let Some(sel) = self.selected.get_mut(q) {
+            sel.clear();
+            sel.push(self.highlight);
+        }
     }
 
     /// Compute the reply answers from the current selections. One array of
@@ -224,20 +268,32 @@ impl QuestionModel {
                 } else {
                     self.highlight - 1
                 };
+                self.sync_selection(q, multi);
                 Vec::new()
             }
             QuestionAction::Down => {
                 self.highlight = (self.highlight + 1) % rows.max(1);
+                self.sync_selection(q, multi);
                 Vec::new()
             }
             QuestionAction::Toggle => {
-                self.toggle(self.highlight, q, multi);
+                // Multi-select flips the highlighted row on/off. Single-select
+                // is live, so Space is a harmless no-op — the highlight is
+                // already the selection, but syncing keeps the invariant
+                // bulletproof if anything ever leaves them out of step.
+                if multi {
+                    self.toggle(self.highlight, q, multi);
+                } else {
+                    self.sync_selection(q, multi);
+                }
                 Vec::new()
             }
             QuestionAction::Select(n) => {
                 if n > 0 && n <= rows {
                     self.highlight = n - 1;
                     self.toggle(n - 1, q, multi);
+                    // single-select: `toggle` already replaced the selection
+                    // with n-1 == highlight, so we are synced.
                 }
                 Vec::new()
             }
@@ -260,6 +316,9 @@ impl QuestionModel {
                 Vec::new()
             }
             QuestionAction::Submit => {
+                // Selections are already committed (single-select is live, and
+                // multi-select was toggled explicitly), so submit just
+                // computes the reply from the current model state.
                 let request_id = self.request.id.clone();
                 let answers = self.compute_answers();
                 vec![
@@ -279,9 +338,12 @@ impl QuestionModel {
         (self, effects)
     }
 
-    /// Shared toggle logic for `Toggle` and `Select`. Multi-select removes the
-    /// index if already present (and sorts for stable ordering), otherwise
-    /// appends; single-select replaces. Bound-checks the question slot.
+    /// Shared toggle logic. Multi-select removes the index if already present
+    /// (and sorts for stable ordering), otherwise appends; single-select
+    /// replaces with the given index. Bound-checks the question slot. This is
+    /// used by the multi-select `Toggle` action and by the digit-jump `Select`
+    /// action (for both modes). For single-select arrow navigation use
+    /// [`QuestionModel::sync_selection`], which keys off `highlight` directly.
     fn toggle(&mut self, idx: usize, q: usize, multi: bool) {
         let Some(sel) = self.selected.get_mut(q) else {
             return;
@@ -464,18 +526,22 @@ mod tests {
     // ── Toggle / select (single-select) ──────────────────────────────────
 
     #[test]
-    fn single_select_toggle_replaces_selection() {
+    fn single_select_toggle_after_move_keeps_live_selection() {
+        // Single-select is live: Down to "thiserror" already commits the
+        // selection (highlight == selection). Space is now a harmless no-op
+        // there, so the selection stays at [1] without any extra step.
         let m = QuestionModel::open(single_select_req());
-        let m = m.update(QuestionAction::Down).0; // highlight -> 1 (thiserror)
-        let (m, eff) = m.update(QuestionAction::Toggle);
+        let m = m.update(QuestionAction::Down).0; // highlight -> 1, selected -> 1
+        assert_eq!(m.selected(), &[vec![1]], "navigation commits the selection");
+        let (m, eff) = m.update(QuestionAction::Toggle); // Space is a no-op now
         assert_eq!(m.selected(), &[vec![1]]);
         assert!(eff.is_empty());
     }
 
     #[test]
-    fn single_select_toggle_same_option_keeps_it() {
-        // Toggling the already-selected index in single-select replaces with
-        // itself (clears then pushes) — so it stays selected.
+    fn single_select_toggle_on_default_keeps_it() {
+        // Space on the already-highlighted default row is a no-op that keeps
+        // the selection (single-select: the highlight is always the selection).
         let m = QuestionModel::open(single_select_req());
         let (m, _) = m.update(QuestionAction::Toggle); // highlight 0 already selected
         assert_eq!(m.selected(), &[vec![0]]);
@@ -643,9 +709,11 @@ mod tests {
     // ── Single-select: switch selection back and forth ──────────────────
 
     #[test]
-    fn single_select_switches_selection_on_repeated_toggle() {
-        // Select "thiserror" (1), then switch back to "anyhow" (0). The
-        // single-select contract is "replace", so each toggle overwrites.
+    fn single_select_switches_selection_on_repeated_jump() {
+        // Select "thiserror" (2), then switch back to "anyhow" (1) via digit
+        // jumps. Single-select is "replace", so each jump overwrites the
+        // selection — and because it is live, the highlight and selection
+        // move together.
         let m = QuestionModel::open(single_select_req());
         let m = m.update(QuestionAction::Select(2)).0; // -> thiserror (idx 1)
         assert_eq!(m.selected(), &[vec![1]]);
@@ -654,40 +722,59 @@ mod tests {
     }
 
     #[test]
-    fn single_select_arrow_then_space_replaces() {
-        // The keyboard path: Down to highlight "thiserror", Space to confirm.
+    fn single_select_arrow_commits_space_is_noop() {
+        // The keyboard path is now one step: Down to highlight "thiserror"
+        // already commits it (the highlight is the selection). Space adds
+        // nothing, and Enter then submits [1].
         let m = QuestionModel::open(single_select_req());
-        let m = m.update(QuestionAction::Down).0; // highlight 1
-        let (m, eff) = m.update(QuestionAction::Toggle); // Space
+        let m = m.update(QuestionAction::Down).0; // highlight 1 -> selected
+        assert_eq!(m.selected(), &[vec![1]]);
+        let (m, eff) = m.update(QuestionAction::Toggle); // Space is a no-op
         assert_eq!(m.selected(), &[vec![1]]);
         assert!(eff.is_empty(), "selecting emits no effect");
+    }
+
+    #[test]
+    fn single_select_arrow_then_arrow_moves_live_selection() {
+        // Discontinuous: move away from the default, keep moving — the
+        // committed selection follows the highlight at every step.
+        let m = QuestionModel::open(single_select_req());
+        let m = m.update(QuestionAction::Down).0; // highlight thiserror -> selected
+        assert_eq!(m.selected(), &[vec![1]]);
+        let m = m.update(QuestionAction::Down).0; // move to Other -> selected
+        assert_eq!(m.highlight(), 2);
+        assert_eq!(m.selected(), &[vec![2]], "selection follows the highlight");
     }
 
     // ── Single-select: discontinuous keystrokes (move, then pick) ────────
 
     #[test]
-    fn single_select_move_then_move_again_without_selecting_keeps_default() {
-        // Navigating with arrows alone never changes the selection — the
-        // default stays until the user explicitly Space/selects a row.
+    fn single_select_arrows_commit_the_selection_live() {
+        // Single-select is *live*: navigating with arrows moves the selection
+        // along with the highlight — there is no separate "commit" step, so
+        // the selected index always tracks the highlight.
         let m = QuestionModel::open(single_select_req()); // anyhow selected
-        let m = m.update(QuestionAction::Down).0; // highlight thiserror
-        let m = m.update(QuestionAction::Down).0; // highlight Other
-        let m = m.update(QuestionAction::Up).0; // back to thiserror
+        let m = m.update(QuestionAction::Down).0; // highlight thiserror -> selected
         assert_eq!(m.highlight(), 1);
-        assert_eq!(m.selected(), &[vec![0]], "arrows never select");
+        assert_eq!(m.selected(), &[vec![1]], "arrows commit the selection");
+        let m = m.update(QuestionAction::Down).0; // highlight Other -> selected
+        assert_eq!(m.highlight(), 2);
+        assert_eq!(m.selected(), &[vec![2]]);
+        let m = m.update(QuestionAction::Up).0; // back to thiserror -> selected
+        assert_eq!(m.highlight(), 1);
+        assert_eq!(m.selected(), &[vec![1]]);
     }
 
     #[test]
-    fn single_select_arrow_then_space_then_arrow_again() {
-        // Discontinuous: move away from the default, confirm with Space, then
-        // keep moving — the committed selection must persist.
-        let m = QuestionModel::open(single_select_req());
-        let m = m.update(QuestionAction::Down).0; // highlight thiserror
-        let m = m.update(QuestionAction::Toggle).0; // Space -> select it
-        assert_eq!(m.selected(), &[vec![1]]);
-        let m = m.update(QuestionAction::Down).0; // move to Other
-        assert_eq!(m.highlight(), 2);
-        assert_eq!(m.selected(), &[vec![1]], "selection persists after moving");
+    fn single_select_arrow_moves_live_without_commit() {
+        // Moving around continuously leaves the selection equal to the final
+        // highlight — no stale default lingers once the user has navigated.
+        let m = QuestionModel::open(single_select_req()); // anyhow selected
+        let m = m.update(QuestionAction::Down).0; // thiserror
+        let m = m.update(QuestionAction::Down).0; // Other
+        let m = m.update(QuestionAction::Up).0; // thiserror
+        assert_eq!(m.highlight(), 1);
+        assert_eq!(m.selected(), &[vec![1]], "selection tracks the highlight");
     }
 
     #[test]
@@ -951,19 +1038,25 @@ mod tests {
         insta::assert_snapshot!(film);
     }
 
-    /// Single-select film: the radio-dot selection replacing on jump, and the
-    /// highlight ring moving with arrow keys.
+    /// Single-select film: no marker is shown — the highlight *is* the
+    /// selection, so navigating with ↓ moves the brand-colored highlight and
+    /// commits the selection live (Enter then submits it). No radio dot, no
+    /// Space step.
     #[test]
     fn question_modal_film_single_select_jump() {
         let m = QuestionModel::open(single_select_req());
         let mut film = String::new();
-        film.push_str("=== open (first selected by default) ===\n");
+        film.push_str("=== open (first row highlighted = selected) ===\n");
         film.push_str(&render_question_grid(&m, 64, 16));
 
-        // ↓ to "thiserror", Space replaces the selection
+        // ↓ moves the highlight (and, live, the selection) to "thiserror"
         let m = m.update(QuestionAction::Down).0;
-        let m = m.update(QuestionAction::Toggle).0;
-        film.push_str("\n\n=== down + space → select 'thiserror' ===\n");
+        film.push_str("\n\n=== down → highlight 'thiserror' (selected, no marker) ===\n");
+        film.push_str(&render_question_grid(&m, 64, 16));
+
+        // Enter would submit now; instead jump to "Other" to show the field
+        let m = m.update(QuestionAction::Select(3)).0;
+        film.push_str("\n\n=== '3' → jump to 'Other' (now the live selection) ===\n");
         film.push_str(&render_question_grid(&m, 64, 16));
 
         insta::assert_snapshot!(film);

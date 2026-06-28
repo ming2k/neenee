@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// Typed result of a tool invocation.
 ///
-/// Neither `PartialEq` nor `Eq` is derived: the [`ToolOutput::Subagent`]
+/// Neither `PartialEq` nor `Eq` is derived: the [`ToolOutput::Envoy`]
 /// variant carries `Vec<Message>` and `Message` does not implement either
 /// trait (its `Vec<ImagePart>` base64 payloads make structural equality
 /// expensive and uninteresting). Compare via [`ToolOutput::to_text`] or by
@@ -103,19 +103,19 @@ pub enum ToolOutput {
         new: String,
         start_line: usize,
     },
-    /// A read-only subagent run (produced by the `task` tool). Carries the
-    /// subagent's full internal transcript so it can be persisted on the
+    /// A read-only envoy run (produced by the `task` tool). Carries the
+    /// envoy's full internal transcript so it can be persisted on the
     /// parent session and replayed on resume, plus the actual token usage so
     /// parent-side pursuit accounting no longer under-counts by 100x. `summary`
     /// is the short text the parent model sees as the tool result.
     ///
-    /// `failed` is the structured failure flag set explicitly by the subagent tool
-    /// when the subagent hit a guardrail or errored, replacing the old
+    /// `failed` is the structured failure flag set explicitly by the envoy tool
+    /// when the envoy hit a guardrail or errored, replacing the old
     /// `summary.starts_with("Error")` text sniff. The summary text still
     /// carries an `Error:` prefix for the *parent model's* benefit (so it
     /// understands the sub-task did not succeed), but UI classification now
     /// reads this field instead of pattern-matching the prose.
-    Subagent {
+    Envoy {
         summary: String,
         messages: Vec<crate::Message>,
         usage: crate::TokenUsage,
@@ -345,10 +345,10 @@ impl ToolOutput {
                 PatchOp::Edit => format!("Edited '{}' successfully", path),
                 PatchOp::Delete => format!("Deleted '{}'", path),
             },
-            // The parent model sees the subagent's textual summary only; the
+            // The parent model sees the envoy's textual summary only; the
             // structured transcript travels out-of-band via the parent harness
             // attaching `messages` to the Tool-role message's `children`.
-            ToolOutput::Subagent { summary, .. } => summary.clone(),
+            ToolOutput::Envoy { summary, .. } => summary.clone(),
             // Images are not rendered as text for the model; the harness
             // injects the real image into a follow-up user message. The tool
             // message itself only needs a legal string placeholder.
@@ -367,7 +367,7 @@ impl ToolOutput {
             ToolOutput::Error { .. } => true,
             ToolOutput::PermissionDenied { .. } => true,
             ToolOutput::Shell { exit, .. } => !matches!(*exit, Some(0)),
-            ToolOutput::Subagent { failed, .. } => *failed,
+            ToolOutput::Envoy { failed, .. } => *failed,
             ToolOutput::Text(_)
             | ToolOutput::Code { .. }
             | ToolOutput::Listing { .. }
@@ -377,13 +377,13 @@ impl ToolOutput {
         }
     }
 
-    /// If this output is a [`ToolOutput::Subagent`], return its nested
+    /// If this output is a [`ToolOutput::Envoy`], return its nested
     /// transcript and token usage so the harness can attach `children` to the
     /// parent's tool-result message and accumulate real cost into the parent
     /// turn's accounting. Returns `None` for every other variant.
-    pub fn subagent_payload(&self) -> Option<(&[crate::Message], crate::TokenUsage)> {
+    pub fn envoy_payload(&self) -> Option<(&[crate::Message], crate::TokenUsage)> {
         match self {
-            ToolOutput::Subagent {
+            ToolOutput::Envoy {
                 messages, usage, ..
             } => Some((messages, *usage)),
             _ => None,
@@ -664,17 +664,17 @@ mod tests {
     }
 
     #[test]
-    fn subagent_to_text_returns_summary_only() {
+    fn envoy_to_text_returns_summary_only() {
         // The parent model only sees the summary; the structured transcript
         // travels out-of-band. This is the contract that lets us persist the
-        // subagent transcript without polluting the parent's context window.
+        // envoy transcript without polluting the parent's context window.
         let usage = crate::TokenUsage {
             prompt_tokens: 1000,
             completion_tokens: 200,
             total_tokens: 1200,
         };
         let messages = vec![crate::Message::new(crate::Role::Assistant, "internal")];
-        let o = ToolOutput::Subagent {
+        let o = ToolOutput::Envoy {
             summary: "external summary".into(),
             messages,
             usage,
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_payload_returns_messages_and_usage() {
+    fn envoy_payload_returns_messages_and_usage() {
         let usage = crate::TokenUsage {
             prompt_tokens: 50,
             completion_tokens: 10,
@@ -695,29 +695,29 @@ mod tests {
             crate::Message::new(crate::Role::System, "sys"),
             crate::Message::new(crate::Role::Assistant, "answer"),
         ];
-        let o = ToolOutput::Subagent {
+        let o = ToolOutput::Envoy {
             summary: "s".into(),
             messages: messages.clone(),
             usage,
             failed: false,
         };
-        let (got_messages, got_usage) = o.subagent_payload().expect("subagent payload");
+        let (got_messages, got_usage) = o.envoy_payload().expect("envoy payload");
         assert_eq!(got_messages.len(), 2);
         assert_eq!(got_usage, usage);
     }
 
     #[test]
-    fn non_subagent_payload_returns_none() {
+    fn non_envoy_payload_returns_none() {
         let o = ToolOutput::text("plain");
-        assert!(o.subagent_payload().is_none());
+        assert!(o.envoy_payload().is_none());
     }
 
     #[test]
-    fn subagent_failed_flag_drives_is_error_not_summary_text() {
-        // Regression for the text-sniff removal: a subagent whose summary
+    fn envoy_failed_flag_drives_is_error_not_summary_text() {
+        // Regression for the text-sniff removal: an envoy whose summary
         // starts with "Error" but carries `failed: false` must NOT classify
         // as an error, and vice versa.
-        let with_flag = ToolOutput::Subagent {
+        let with_flag = ToolOutput::Envoy {
             summary: "partial findings".into(),
             messages: Vec::new(),
             usage: crate::TokenUsage::default(),
@@ -725,7 +725,7 @@ mod tests {
         };
         assert!(with_flag.is_error());
 
-        let no_flag = ToolOutput::Subagent {
+        let no_flag = ToolOutput::Envoy {
             summary: "Error: legacy text".into(),
             messages: Vec::new(),
             usage: crate::TokenUsage::default(),

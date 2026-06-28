@@ -34,15 +34,15 @@ description says so explicitly.
 damage*). This axis classifies *process control*, and it — not `access()` — is
 what gates the tool:
 
-- **Sub-agent exclusion (unconditional).** A control-flow tool is excluded from
-  *every* subagent profile, even the maximally permissive `INTERACTIVE` one. A
+- **Envoy exclusion (unconditional).** A control-flow tool is excluded from
+  *every* envoy profile, even the maximally permissive `INTERACTIVE` one. A
   spawned agent must never be able to tear down the whole program.
 - **Broker bypass.** The filesystem permission broker does not prompt for it
   (an escape hatch that waits for approval is useless). Its `access()` is `Read`
   purely so the broker does not intercept it.
 
 See [Capability axes](access.md#capability-axes). `abort` is the first
-consumer of this axis; `requires_user` and `spawns_subagent` are the other two
+consumer of this axis; `requires_user` and `spawns_envoy` are the other two
 non-filesystem axes.
 
 ## Why it exists

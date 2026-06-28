@@ -2,8 +2,8 @@
 //! the orchestration side of the on-demand transcript diagnostic.
 //!
 //! Domain types ([`SessionReview`], [`ReviewVerdict`]) live in `neenee-core`;
-//! this module owns the LLM-backed runner that lives next to [`crate::SubagentTool`]
-//! because — like the `task` tool — it spawns a bounded read-only subagent via
+//! this module owns the LLM-backed runner that lives next to [`crate::EnvoyTool`]
+//! because — like the `task` tool — it spawns a bounded read-only envoy via
 //! [`crate::Agent`]. The difference is who drives it: `task` is a *model* tool
 //! call, whereas the review runner is *user* driven, fired by the `/review`
 //! command ([`Agent::review_now`]) rather than on a round cadence.
@@ -13,7 +13,7 @@
 //! [`LoopingReview`] is the first registered dimension ("is the agent stuck in
 //! an exploration loop?"). Adding a dimension is a new [`SessionReview`] impl
 //! registered on the agent — no dispatch changes, no extra model calls, since
-//! the runner asks one subagent to verdict every dimension at once.
+//! the runner asks one envoy to verdict every dimension at once.
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use crate::agent::Agent;
 use crate::skills::SkillRegistry;
 
 /// Character budget for the transcript snapshot handed to the diagnostic
-/// subagent. Keeps the reviewer's prompt cheap while still showing enough
+/// envoy. Keeps the reviewer's prompt cheap while still showing enough
 /// recent tool traffic to judge progress. The most recent messages are kept.
 const TRANSCRIPT_SNAPSHOT_BUDGET_CHARS: usize = 8_000;
 
@@ -55,7 +55,7 @@ impl SessionReview for LoopingReview {
 }
 
 /// The default set of review dimensions registered on a primary agent.
-/// Sub-agents register none (they have no `/review` path), so this is only
+/// Envoys register none (they have no `/review` path), so this is only
 /// consulted when [`Agent::review_now`] runs.
 pub fn default_reviews() -> Vec<Arc<dyn SessionReview>> {
     vec![Arc::new(LoopingReview)]
@@ -65,9 +65,9 @@ impl Agent {
     /// Run the periodic session-review diagnostic against the live transcript
     /// snapshot and return one verdict per registered dimension.
     ///
-    /// Spawns a bounded read-only subagent (the [`REVIEW`] profile) with its
+    /// Spawns a bounded read-only envoy (the [`REVIEW`] profile) with its
     /// own review disabled (so it cannot recurse) and a tight hard stop (so a
-    /// runaway reviewer cannot loop). The subagent reasons over a compact,
+    /// runaway reviewer cannot loop). The envoy reasons over a compact,
     /// most-recent-first transcript excerpt and returns structured verdicts.
     ///
     /// Failures are deliberately soft: a provider error or unparseable answer
@@ -137,7 +137,7 @@ impl Agent {
         match result {
             Ok(outcome) => parse_verdicts(&outcome.message.content, &dimensions),
             Err(err) => {
-                tracing::warn!(error = %err, "session-review subagent failed");
+                tracing::warn!(error = %err, "session-review envoy failed");
                 vec![ReviewVerdict {
                     dimension: "review".to_string(),
                     status: ReviewStatus::Watch,

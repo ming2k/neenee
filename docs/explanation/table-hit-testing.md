@@ -189,7 +189,7 @@ chain in
 
 ```
 ┌─ Input box?            → focus Compose, start text selection
-├─ Step summary?         → navigate subagent / toggle step
+├─ Step summary?         → navigate envoy / toggle step
 └─ Content region?       → resolve cursor, then:
     ├─ table_cell_at(x,y) hits?  → drag.start_in_cell()  [cell-locked]
     └─ otherwise                 → drag.start(cursor)     [free text drag]

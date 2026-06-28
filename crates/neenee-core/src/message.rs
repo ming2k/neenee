@@ -75,7 +75,7 @@ pub enum InjectionKind {
     /// Visible parent→child steering payload (`AgentOp::InjectUserMessage`,
     /// codex `inject_if_running` analogue). Site: `Agent::drain_inbox`.
     /// Lands as a *visible* user message, hence distinct from `InterAgent`.
-    SubagentSteer,
+    EnvoySteer,
     /// Implicit skill auto-load: the latest user turn mentioned a skill name,
     /// so the skill body was injected in-context. Site:
     /// `Agent::inject_implicit_skills`.
@@ -97,7 +97,7 @@ pub enum InjectionKind {
     /// under the stable checkpoint header. Site: `checkpoint_message`.
     CompactionCheckpoint,
     /// A harness-internal prompt admitted as a hidden user turn (resume/replay,
-    /// subagent tasking, `/review` re-runs). Site: `orchestrate_turn`
+    /// envoy tasking, `/review` re-runs). Site: `orchestrate_turn`
     /// `input.hidden` branch.
     HiddenTurnInput,
 }
@@ -141,28 +141,28 @@ pub struct Message {
     pub model: Option<String>,
     #[serde(default)]
     pub hidden: bool,
-    /// Nested subagent transcript. Populated only on the `Tool`-role result
-    /// message of a `task` tool call (see `SubagentTool`). Each entry is a
-    /// `Message` from the subagent's own conversation (System, User,
+    /// Nested envoy transcript. Populated only on the `Tool`-role result
+    /// message of a `task` tool call (see `EnvoyTool`). Each entry is a
+    /// `Message` from the envoy's own conversation (System, User,
     /// Assistant with tool_calls, Tool results, …), in chronological order.
-    /// Recursive: a subagent's own `task` results carry their own `children`,
-    /// so arbitrarily deep subagent trees round-trip through session.json.
+    /// Recursive: an envoy's own `task` results carry their own `children`,
+    /// so arbitrarily deep envoy trees round-trip through session.json.
     ///
-    /// `None` for every message that is not a subagent's tool result; this
+    /// `None` for every message that is not an envoy's tool result; this
     /// keeps the legacy flat shape unchanged for non-task messages and lets
     /// old session.json files (which predate the field) deserialize as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<Message>>,
-    /// Metadata about the subagent run that produced [`Message::children`].
+    /// Metadata about the envoy run that produced [`Message::children`].
     /// Populated only on the same message that has `children = Some(_)`. The
     /// two fields are convention-paired (presence of one implies presence of
     /// the other); they are kept separate rather than bundled into a single
-    /// `subagent: Option<Payload>` field so the schema stays backward-
+    /// `envoy: Option<Payload>` field so the schema stays backward-
     /// compatible without a custom deserializer — old session.json files
-    /// simply have `subagent_meta = None` and `children = Some(...)`, and the
+    /// simply have `envoy_meta = None` and `children = Some(...)`, and the
     /// harness fills in best-effort defaults on read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_meta: Option<SubagentMeta>,
+    pub envoy_meta: Option<EnvoyMeta>,
     /// Provenance of a harness-injected message (`None` for genuine user input,
     /// assistant replies, and tool results). See [`InjectionOrigin`] / the
     /// closed [`InjectionKind`] classifier. `#[serde(default,
@@ -173,39 +173,39 @@ pub struct Message {
     pub origin: Option<InjectionOrigin>,
 }
 
-/// Sidecar metadata for a subagent run. Lives next to
+/// Sidecar metadata for an envoy run. Lives next to
 /// [`Message::children`] on the same `Tool`-role result message. Captures
 /// information that the live event stream knows but the bare transcript
 /// cannot reconstruct on resume.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SubagentMeta {
+pub struct EnvoyMeta {
     /// The task description supplied by the parent agent (from the `task`
     /// tool_call's `arguments.description` field). Cached here so the TUI
-    /// does not have to re-parse the JSON arguments to label the subagent
+    /// does not have to re-parse the JSON arguments to label the envoy
     /// view's navigation bar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Wall-clock duration of the subagent run in milliseconds. Filled from
+    /// Wall-clock duration of the envoy run in milliseconds. Filled from
     /// the parent `record_tool_result`'s `duration_ms` parameter (which
-    /// already measures the full subagent run because the `task` tool blocks
-    /// until the subagent finishes).
+    /// already measures the full envoy run because the `task` tool blocks
+    /// until the envoy finishes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Number of read-only tools the subagent had access to. Useful as a
+    /// Number of read-only tools the envoy had access to. Useful as a
     /// debugging signal when reviewing archived runs.
     #[serde(default)]
     pub toolset_count: u32,
-    /// Provider / model that served the subagent. Currently always equal to
-    /// the parent's provider/model (SubagentTool clones the parent's provider),
-    /// but persisted separately so a future "cheaper model for sub-agents"
+    /// Provider / model that served the envoy. Currently always equal to
+    /// the parent's provider/model (EnvoyTool clones the parent's provider),
+    /// but persisted separately so a future "cheaper model for envoys"
     /// feature does not require a schema change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Whether the subagent finished by hitting an error path (32-round
+    /// Whether the envoy finished by hitting an error path (32-round
     /// limit, repeated-call guard, provider error). Mirrors
-    /// `ToolOutput::Subagent { summary.starts_with("Error") }` but stored
+    /// `ToolOutput::Envoy { summary.starts_with("Error") }` but stored
     /// explicitly so consumers do not have to string-sniff.
     #[serde(default)]
     pub failed: bool,
@@ -235,7 +235,7 @@ impl Message {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         }
     }
@@ -304,16 +304,16 @@ impl Message {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         }
     }
 
-    /// Attach a subagent's full internal transcript to a `Tool`-role result
+    /// Attach an envoy's full internal transcript to a `Tool`-role result
     /// message. Builder-style companion to [`Message::tool_result`]. Storing
     /// the nested transcript on the result message (rather than on the
     /// assistant `tool_calls` message) keeps the data close to where it was
-    /// produced and lets resume reconstruct the subagent view by reading a
+    /// produced and lets resume reconstruct the envoy view by reading a
     /// single message.
     pub fn with_children(mut self, children: Vec<Message>) -> Self {
         self.children = if children.is_empty() {
@@ -324,12 +324,12 @@ impl Message {
         self
     }
 
-    /// Attach subagent sidecar metadata to a `Tool`-role result message.
+    /// Attach envoy sidecar metadata to a `Tool`-role result message.
     /// Pair with [`Message::with_children`]; the two fields travel together
     /// but are kept separate for schema-backward-compat (see
-    /// [`Message::subagent_meta`] docs).
-    pub fn with_subagent_meta(mut self, meta: SubagentMeta) -> Self {
-        self.subagent_meta = Some(meta);
+    /// [`Message::envoy_meta`] docs).
+    pub fn with_envoy_meta(mut self, meta: EnvoyMeta) -> Self {
+        self.envoy_meta = Some(meta);
         self
     }
 }
@@ -369,12 +369,12 @@ mod tests {
 
     #[test]
     fn children_round_trip_through_json() {
-        // A tool result with a subagent transcript must survive a
+        // A tool result with an envoy transcript must survive a
         // serialise → deserialise round trip with the nested messages intact,
-        // including their own nested children (sub-sub-agents).
+        // including their own nested children (sub-envoys).
         let call = ToolCall {
             id: "call_root".to_string(),
-            name: "subagent".to_string(),
+            name: "envoy".to_string(),
             arguments: "{}".to_string(),
         };
         let nested_call = ToolCall {
@@ -384,9 +384,9 @@ mod tests {
         };
         let inner_child = Message::new(Role::Tool, "match at a.rs:1")
             .with_children(vec![Message::new(Role::Assistant, "deeply nested note")]);
-        let subagent_transcript = vec![
-            Message::new(Role::System, "subagent system"),
-            Message::new(Role::User, "subagent task"),
+        let envoy_transcript = vec![
+            Message::new(Role::System, "envoy system"),
+            Message::new(Role::User, "envoy task"),
             Message {
                 role: Role::Assistant,
                 content: String::new(),
@@ -400,13 +400,13 @@ mod tests {
                 model: None,
                 hidden: false,
                 children: None,
-                subagent_meta: None,
+                envoy_meta: None,
                 origin: None,
             },
             inner_child,
         ];
-        let parent = Message::tool_result(&call, "[task result]:\nfound it")
-            .with_children(subagent_transcript);
+        let parent =
+            Message::tool_result(&call, "[task result]:\nfound it").with_children(envoy_transcript);
 
         let json = serde_json::to_string_pretty(&parent).unwrap();
         let restored: Message = serde_json::from_str(&json).unwrap();
@@ -414,15 +414,12 @@ mod tests {
         assert_eq!(restored.tool_call_id.as_deref(), Some("call_root"));
         let children = restored.children.expect("children round-trip");
         assert_eq!(children.len(), 4);
-        // The grep call inside the subagent kept its tool_calls.
+        // The grep call inside the envoy kept its tool_calls.
         assert!(children[2].tool_calls.is_some());
-        // The inner Tool message kept its own nested children (sub-subagent).
+        // The inner Tool message kept its own nested children (sub-envoy).
         let inner = &children[3];
         assert_eq!(inner.role, Role::Tool);
-        assert!(
-            inner.children.is_some(),
-            "sub-subagent children must survive"
-        );
+        assert!(inner.children.is_some(), "sub-envoy children must survive");
         assert_eq!(inner.children.as_ref().unwrap().len(), 1);
     }
 
@@ -430,7 +427,7 @@ mod tests {
     fn with_children_empty_vec_is_none() {
         let call = ToolCall {
             id: "c".to_string(),
-            name: "subagent".to_string(),
+            name: "envoy".to_string(),
             arguments: "{}".to_string(),
         };
         let m = Message::tool_result(&call, "x").with_children(Vec::new());
@@ -513,7 +510,7 @@ mod tests {
             InjectionKind::PursuitContinuation,
             InjectionKind::PursuitObjectiveUpdated,
             InjectionKind::InterAgent,
-            InjectionKind::SubagentSteer,
+            InjectionKind::EnvoySteer,
             InjectionKind::ImplicitSkill,
             InjectionKind::SystemPrompt,
             InjectionKind::CompactionCheckpoint,

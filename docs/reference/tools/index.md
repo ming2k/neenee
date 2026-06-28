@@ -5,7 +5,7 @@ turn. MCP server tools are appended at runtime. This is the lookup
 surface — one page per tool category. For how tools are gated (access tiers,
 capability axes, the permission broker), see [Tool access](access.md).
 
-Most built-in tools live in the `neenee-tools` crate; `subagent` and `use_skill`
+Most built-in tools live in the `neenee-tools` crate; `envoy` and `use_skill`
 live in `neenee-agent`. The `Tool` trait is defined in
 `crates/neenee-core/src/capability.rs`.
 
@@ -14,7 +14,7 @@ live in `neenee-agent`. The `Tool` trait is defined in
 Registration order is the literal in `crates/neenee-code/src/main.rs`.
 `Agent::new` (`crates/neenee-agent/src/agent.rs`) appends the `todo` /
 `todo_update` tools so they share the agent's live task-list cell.
-`SubagentTool` is pushed last so it can capture a snapshot of the assembled
+`EnvoyTool` is pushed last so it can capture a snapshot of the assembled
 toolset.
 
 The pursuit lifecycle has no model-facing tools: `/pursue` (entry, user), the
@@ -37,7 +37,7 @@ own the three phases directly. See [pursuits](pursuits.md) and ADR-0031.
 | `todo_update` | `Read` | `*` | [interaction](interaction.md) |
 | `webfetch` | `Read` | `*` | [web](web.md) |
 | `websearch` | `Read` | `*` | [web](web.md) |
-| `subagent` | `Read` (spawns subagent) | `*` | [subagent](subagent.md) |
+| `envoy` | `Read` (spawns envoy) | `*` | [envoy](envoy.md) |
 | `search_history` | `Read` | `*` | [skills](skills.md) |
 | `use_skill` | `Read` | `*` | [skills](skills.md) |
 | `list_skills` | `Read` | `*` | [skills](skills.md) |

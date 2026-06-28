@@ -171,7 +171,7 @@ nudge (`InjectionKind::LoopReviewNudge`) naming the repeated read and demanding 
 different action. Detection is pure bookkeeping (no inference, no false positives
 on genuine paging, which reads distinct ranges); the nudge is **non-terminating**
 — `Esc`, `hard_stop_rounds`, and `abort` stay the hard backstops. Gated by
-`[agent] loop_review_enabled` (default on; off for sub-agents and `/review`).
+`[principal] loop_review_enabled` (default on; off for envoys and `/review`).
 
 ### Session review (ADR-0016)
 
@@ -183,7 +183,7 @@ made redundant:
 
 - After `[agent.review] review_start_round` (default **64**) tool rounds in a
   turn, and every `review_interval_rounds` (default **16**) thereafter, the
-  harness spawns a bounded read-only diagnostic sub-agent (the `REVIEW`
+  harness spawns a bounded read-only diagnostic envoy (the `REVIEW`
   profile) that reads a compact snapshot of the live transcript and returns a
   verdict per registered review dimension.
 - The worst verdict is surfaced as a visible activity-bar alert (empty verdict
@@ -195,8 +195,8 @@ made redundant:
 - "Is the agent looping?" is the first dimension (`LoopingReview`); adding more
   (context bloat, tool-error storms, …) is a `SessionReview` trait impl, no
   dispatch changes and no extra model call per dimension.
-- Sub-agents (`subagent`) run with review **disabled**, so a short-lived
-  read-only research sub-agent never pays for a diagnostic and review cannot
+- Envoys (`envoy`) run with review **disabled**, so a short-lived
+  read-only research envoy never pays for a diagnostic and review cannot
   recurse.
 
 Configure or inspect live via the `/review` slash command
@@ -207,12 +207,12 @@ a separate future layer.
 
 Write capability is enforced per-agent through a `WriteScope` boundary
 (ADR-0028): the main agent is unrestricted (the permission broker is still the
-interactive layer inside it); a subagent carries a scope resolved from its
+interactive layer inside it); an envoy carries a scope resolved from its
 profile, and a write tool whose target is outside that scope is blocked. All
-built-in subagent profiles carry a `Read` ceiling today, so this gate is
+built-in envoy profiles carry a `Read` ceiling today, so this gate is
 inactive in practice but available to future scoped-write roles. MCP servers
 with `read_only = false` declare `Write` and are subject to the same gate when
-run inside a scoped subagent.
+run inside a scoped envoy.
 
 ## Permission broker
 

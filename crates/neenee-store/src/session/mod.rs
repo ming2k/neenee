@@ -537,7 +537,7 @@ impl SessionStore {
     /// sibling session files (forks, archives) live in `path.parent()` — i.e.
     /// the parent directory plays the role of the project's `sessions/` dir.
     ///
-    /// This is the low-level constructor used by sub-agents / side
+    /// This is the low-level constructor used by envoys / side
     /// conversations (ADR-0017) and by tests that want a throwaway file
     /// without wiring up the global paths table. Production startup uses
     /// [`Self::load_for_project`].
@@ -1538,18 +1538,17 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
         if message.role == Role::Tool {
             body = truncate_utf8(body.trim(), SUMMARY_TOOL_OUTPUT_CAP).to_string();
         }
-        // Subagent transcripts: render a bounded view of the nested work so
+        // Envoy transcripts: render a bounded view of the nested work so
         // the summarizer can capture what each `task` call actually did
         // (otherwise the LLM only sees "[task result]:\n<final text>" and
-        // cannot decide whether the subagent's tool usage is worth mentioning
+        // cannot decide whether the envoy's tool usage is worth mentioning
         // in the anchored summary). The nested view is hard-capped to avoid
-        // blowing the budget on a single subagent that ran for 30 tool rounds.
+        // blowing the budget on a single envoy that ran for 30 tool rounds.
         if let Some(children) = &message.children {
             if !children.is_empty() {
-                let nested =
-                    serialize_subagent_transcript_for_summary(children, SUMMARY_SUBAGENT_CAP);
+                let nested = serialize_envoy_transcript_for_summary(children, SUMMARY_ENVOY_CAP);
                 if !nested.is_empty() {
-                    body.push_str("\n[subagent transcript]\n");
+                    body.push_str("\n[envoy transcript]\n");
                     body.push_str(&nested);
                 }
             }
@@ -1583,17 +1582,17 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
     )
 }
 
-/// Per-subagent character cap when rendering the nested transcript into the
-/// summarizer prompt. Large enough to surface the subagent's task, its key
+/// Per-envoy character cap when rendering the nested transcript into the
+/// summarizer prompt. Large enough to surface the envoy's task, its key
 /// tool calls, and its conclusion; small enough that a turn with five
-/// sub-agents cannot crowd out the rest of the conversation.
-const SUMMARY_SUBAGENT_CAP: usize = 2_000;
+/// envoys cannot crowd out the rest of the conversation.
+const SUMMARY_ENVOY_CAP: usize = 2_000;
 
-/// Render a subagent's nested transcript as a compact summarizer-facing view.
-/// Recursive: a subagent's own `task` results (sub-sub-agents) are rendered
+/// Render an envoy's nested transcript as a compact summarizer-facing view.
+/// Recursive: an envoy's own `task` results (sub-envoys) are rendered
 /// one level deeper with an even smaller cap. Depth is bounded in practice by
-/// the `SubagentTool` excluding itself from the sub-toolset.
-fn serialize_subagent_transcript_for_summary(children: &[Message], budget: usize) -> String {
+/// the `EnvoyTool` excluding itself from the sub-toolset.
+fn serialize_envoy_transcript_for_summary(children: &[Message], budget: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
     for message in children {
         let Some(label) = label_for(message.role) else {
@@ -1609,13 +1608,12 @@ fn serialize_subagent_transcript_for_summary(children: &[Message], budget: usize
             body = truncate_utf8(body.trim(), SUMMARY_TOOL_OUTPUT_CAP).to_string();
         }
         // One level deeper, with a much smaller cap, so we never spend more
-        // than ~25% of the parent subagent's budget on a single sub-subagent.
+        // than ~25% of the parent envoy's budget on a single sub-envoy.
         if let Some(nested) = &message.children {
             if !nested.is_empty() {
-                let inner =
-                    serialize_subagent_transcript_for_summary(nested, (budget / 4).max(500));
+                let inner = serialize_envoy_transcript_for_summary(nested, (budget / 4).max(500));
                 if !inner.is_empty() {
-                    body.push_str("\n[sub-subagent transcript]\n");
+                    body.push_str("\n[sub-envoy transcript]\n");
                     body.push_str(&inner);
                 }
             }
@@ -2184,21 +2182,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_persists_subagent_children_round_trip() {
+    async fn session_persists_envoy_children_round_trip() {
         // End-to-end persistence contract: a session that contains a `task`
-        // tool call must round-trip the subagent's nested transcript through
+        // tool call must round-trip the envoy's nested transcript through
         // session.json, so a subsequent `SessionStore::load_for_project` (the
         // production resume path) restores the children intact. Before Phase 3
         // children were silently dropped because `Message::children` did not
         // exist and the harness only persisted the textual summary.
         let directory =
-            std::env::temp_dir().join(format!("neenee-subagent-persist-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("neenee-envoy-persist-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
 
         let call = neenee_core::ToolCall {
             id: "call_sub1".to_string(),
-            name: "subagent".to_string(),
+            name: "envoy".to_string(),
             arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
         };
         let assistant = Message::new(neenee_core::Role::Assistant, "")
@@ -2207,13 +2205,13 @@ mod tests {
             tool_calls: Some(vec![call.clone()]),
             ..assistant
         };
-        let subagent_transcript = vec![
+        let envoy_transcript = vec![
             Message::new(neenee_core::Role::User, "find foo"),
             Message::new(neenee_core::Role::Assistant, "looking..."),
             Message::new(neenee_core::Role::Assistant, "foo is at src/foo.rs"),
         ];
         let tool = Message::tool_result(&call, "[task result]:\nfoo is at src/foo.rs")
-            .with_children(subagent_transcript);
+            .with_children(envoy_transcript);
         store
             .replace_messages(vec![
                 Message::new(neenee_core::Role::User, "where is foo?"),

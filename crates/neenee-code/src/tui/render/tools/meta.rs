@@ -1,5 +1,5 @@
 //! Presenters for orchestration / meta tools that act on session state rather
-//! than the filesystem: `todo`, `subagent`, `use_skill`, `create_project`.
+//! than the filesystem: `todo`, `envoy`, `use_skill`, `create_project`.
 
 use super::{ToolPresenter, ToolView, truncate};
 
@@ -11,16 +11,16 @@ impl ToolPresenter for TodoPresenter {
     }
 }
 
-pub struct SubagentPresenter;
+pub struct EnvoyPresenter;
 
-impl ToolPresenter for SubagentPresenter {
+impl ToolPresenter for EnvoyPresenter {
     fn summary(&self, view: &ToolView) -> String {
-        // Label by role when the subagent announced it (explore / plan /
-        // verify / …); fall back to the generic "Subagent" otherwise.
-        let role = view.profile.unwrap_or("Subagent");
+        // Label by role when the envoy announced it (explore / plan /
+        // verify / …); fall back to the generic "Envoy" otherwise.
+        let role = view.profile.unwrap_or("Envoy");
         view.str("description")
             .map(|desc| format!("{}: {}", role, truncate(desc, 56)))
-            .unwrap_or_else(|| format!("Run {} subagent", role))
+            .unwrap_or_else(|| format!("Run {} envoy", role))
     }
 }
 

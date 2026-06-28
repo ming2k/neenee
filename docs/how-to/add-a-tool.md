@@ -9,7 +9,7 @@ Most built-in tools live in the `neenee-tools` crate. Pick the module that
 matches the tool's domain: filesystem and web tools go in
 `crates/neenee-tools/src/lib.rs`, project scaffolding tools go in
 `crates/neenee-tools/src/project.rs`, MCP integration lives in
-`crates/neenee-tools/src/mcp.rs`. `use_skill` and `subagent` are the exceptions —
+`crates/neenee-tools/src/mcp.rs`. `use_skill` and `envoy` are the exceptions —
 they live in `crates/neenee-agent/src/` because they need orchestration state.
 
 ## Implement the `Tool` trait
@@ -166,9 +166,9 @@ override `call_with_events` (`crates/neenee-core/src/capability.rs`) instead
 of `call`. The default implementation delegates to `call`, so overriding
 `call` alone is enough for synchronous tools.
 
-`SubagentTool` (`crates/neenee-agent/src/subagent_tool.rs`) is currently the only
+`EnvoyTool` (`crates/neenee-agent/src/envoy_tool.rs`) is currently the only
 tool that overrides `call_with_events`. It forwards `SubTaskEvent`s from
-the sub-agent so the parent harness can render live progress. Read its
+the envoy so the parent harness can render live progress. Read its
 implementation before adopting the same pattern; the event surface is
 narrow.
 
@@ -188,17 +188,17 @@ let mut tools: Vec<Arc<dyn neenee_core::Tool>> = vec![
 ];
 ```
 
-Tools added before `tools.extend(mcp.tools)` are visible to the `subagent`
-sub-agent, which snapshots the assembled toolset at construction and then
+Tools added before `tools.extend(mcp.tools)` are visible to the `envoy`
+envoy, which snapshots the assembled toolset at construction and then
 admits tools via the bound `EXPLORE` profile
-(`crates/neenee-core/src/subagent.rs`). Admission is by capability axis, not
-position: a tool is sub-agent-callable when `ToolPolicy::admits` accepts it —
-`access() == Read`, not `requires_user()`, and not `spawns_subagent()`. Tools
+(`crates/neenee-core/src/envoy.rs`). Admission is by capability axis, not
+position: a tool is envoy-callable when `ToolPolicy::admits` accepts it —
+`access() == Read`, not `requires_user()`, and not `spawns_envoy()`. Tools
 added after that line (the dispatch tool itself, the history tool) are not in
 the snapshot at all. Place new read-only, non-interactive tools before the MCP
-extension to make them sub-agent-callable; write tools and `requires_user()`
+extension to make them envoy-callable; write tools and `requires_user()`
 tools are excluded by the profile regardless of where they sit. See
-[Sub-agents → Tool admission](../explanation/agent-design/subagents.md#tool-admission)
+[Envoys → Tool admission](../explanation/agent-design/envoys.md#tool-admission)
 and [ADR-0011](../adr/0011-subagent-profiles.md).
 
 ## Verify

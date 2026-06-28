@@ -5,7 +5,7 @@ their tools alongside the built-in ones, using the same execution path. A shared
 **MCP runtime** owns the live connections: it connects every configured server at
 startup, keeps the agent's tool list in sync, and recovers crashed servers. This
 page covers the runtime and its recovery model, the tool wrapper, the `/mcp`
-manager, and how MCP tools interact with [subagent admission](subagents.md) and
+manager, and how MCP tools interact with [envoy admission](envoys.md) and
 the permission broker. For the per-tool parameter surface, see
 [Built-in tools](../../reference/tools/index.md).
 
@@ -43,7 +43,7 @@ read_only = false
 | `command` | — | argv; first element is the program |
 | `environment` | empty | Env vars applied at spawn |
 | `enabled` | `true` | When `false`, the server is recorded as disabled and not spawned at startup (still enableable live from `/mcp`) |
-| `read_only` | `false` | Sets the tool's access tier; gates [subagent admission](#access-tier-and-subagent-admission) and the permission broker |
+| `read_only` | `false` | Sets the tool's access tier; gates [envoy admission](#access-tier-and-envoy-admission) and the permission broker |
 
 `command` is argv-style, not a shell string — users pre-split it
 (`["npx", "-y", "..."]`). The map key is the server name, which becomes the
@@ -79,7 +79,7 @@ blocks that one tool call indefinitely.
 
 Connecting never returns a single `Result`: neenee always starts, with whatever
 tools came up. MCP tools sit in the toolset after the built-ins and before the
-sub-agent tool, so they are visible to [sub-agents](subagents.md) when the
+envoy tool, so they are visible to [envoys](envoys.md) when the
 server is `read_only`.
 
 ## The tool wrapper
@@ -163,14 +163,14 @@ Two per-row actions drive the runtime live, without rewriting `config.toml`:
 The read-only session modal (`Ctrl+I`) shows the same per-server data inline as
 a glanceable summary; `/mcp` is the surface for acting on it.
 
-## Access tier and subagent admission
+## Access tier and envoy admission
 
-An MCP tool's `read_only` flag sets its `ToolAccess` tier, which a subagent
-profile admits by capability axis (ADR-0011). Every built-in subagent profile
+An MCP tool's `read_only` flag sets its `ToolAccess` tier, which an envoy
+profile admits by capability axis (ADR-0011). Every built-in envoy profile
 carries a `Read` ceiling, so only `read_only = true` MCP servers are usable
-inside a subagent; a server that needs to run inside one must declare
-`read_only = true`. Outside subagents the main agent is unrestricted, so an
-MCP tool's tier only gates its *subagent* admission and the permission broker
+inside an envoy; a server that needs to run inside one must declare
+`read_only = true`. Outside envoys the main agent is unrestricted, so an
+MCP tool's tier only gates its *envoy* admission and the permission broker
 (below), never the main agent.
 
 - `read_only = true` server → `Read` → admitted by every built-in profile.
@@ -202,7 +202,7 @@ is no graceful `shutdown` JSON-RPC exchange — the child is sent `SIGKILL`.
 
 - [Built-in tools](../../reference/tools/index.md) — `mcp__<server>__<tool>`
   parameter surface and the MCP tools subsection
-- [Sub-agents](subagents.md) — why `read_only` MCP servers are visible
-  to sub-agents and write servers are not
+- [Envoys](envoys.md) — why `read_only` MCP servers are visible
+  to envoys and write servers are not
 - [Harness architecture](harness.md) — the 8-second MCP init bound and the
   tool permission broker

@@ -10,12 +10,12 @@
 //! round cadence (every `review_interval_rounds` past `review_start_round`).
 //!
 //! ADR-0018 drops the automatic cadence entirely. The periodic trigger cost a
-//! diagnostic subagent call on *every* long turn — including legitimate ones
+//! diagnostic envoy call on *every* long turn — including legitimate ones
 //! — and, because ADR-0016 kept the turn uncapped by default, the auto-trigger's
 //! value during truly unattended runs was already muted: it could only nudge,
 //! never abort, and an alert no one is watching does no good. The user is the
 //! best judge of "this feels stuck", so review is now **on-demand**: the
-//! `/review` command spawns the same bounded, read-only diagnostic subagent
+//! `/review` command spawns the same bounded, read-only diagnostic envoy
 //! against the live transcript and reports the verdict. No automatic firing,
 //! no cadence knobs.
 //!
@@ -27,15 +27,15 @@
 //! ## Extensibility
 //!
 //! Each dimension is a [`SessionReview`] impl that contributes an instruction
-//! fragment. The runner runs a *single* diagnostic subagent per review and
+//! fragment. The runner runs a *single* diagnostic envoy per review and
 //! asks it to return one verdict per registered dimension, so adding a
 //! dimension costs no extra model calls — just a new impl registered on the
 //! agent. Dimensions stay in domain vocabulary (this module); the LLM-backed
-//! runner that spawns the subagent lives in `neenee-agent` next to `SubagentTool`.
+//! runner that spawns the envoy lives in `neenee-agent` next to `EnvoyTool`.
 
 use serde::{Deserialize, Serialize};
 
-/// Default hard stop for the diagnostic subagent's own turn, so a misbehaving
+/// Default hard stop for the diagnostic envoy's own turn, so a misbehaving
 /// reviewer cannot loop. Applied by the runner when it constructs the reviewer
 /// (see `neenee_agent::session_review`).
 pub const DEFAULT_REVIEWER_HARD_STOP: usize = 12;
@@ -95,11 +95,11 @@ impl ReviewStatus {
 }
 
 /// One dimension of session health, evaluated by the on-demand diagnostic
-/// subagent (ADR-0018).
+/// envoy (ADR-0018).
 ///
 /// A dimension is a *prompt fragment*: its [`instruction`](Self::instruction)
 /// is appended to the diagnostic's system prompt alongside every other
-/// registered dimension, and the runner asks the subagent to return one
+/// registered dimension, and the runner asks the envoy to return one
 /// JSON verdict per dimension. This keeps adding a dimension cheap (no extra
 /// model call) and keeps dimension logic out of the dispatch path.
 ///
@@ -112,7 +112,7 @@ pub trait SessionReview: Send + Sync + std::fmt::Debug {
     fn id(&self) -> &'static str;
     /// Short human-facing label for the TUI alert (e.g. `"Exploration loop"`).
     fn label(&self) -> &'static str;
-    /// The instruction the diagnostic subagent evaluates for this dimension.
+    /// The instruction the diagnostic envoy evaluates for this dimension.
     /// Phrased as a question the reviewer can answer with a verdict + detail.
     fn instruction(&self) -> &'static str;
 }

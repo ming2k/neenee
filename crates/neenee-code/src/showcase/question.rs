@@ -1,6 +1,7 @@
 //! Question (ask_user) modal showcase — two fixtures the user can Tab
-//! through: single-select (radio) and multi-select (checkbox). Both
-//! exercise the synthetic "Other" free-text row and option descriptions.
+//! through: single-select (live — no marker, the highlight is the selection)
+//! and multi-select (checkbox, Space toggle). Both exercise the synthetic
+//! "Other" free-text row and option descriptions.
 
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -99,9 +100,16 @@ pub fn run() -> io::Result<()> {
                 s.idx + 1,
                 s.fx.len(),
             );
-            let mut hint =
+            // Single-select is live (highlight is the selection, no Space
+            // step); only multi-select advertises the Space toggle. Mirror the
+            // production footer so the showcase matches real behavior.
+            let multi = s.model.active_multi_select();
+            let mut hint = if multi {
                 " ↑↓ navigate · wheel/Pg scroll · Space select · Enter submit · 1-9 jump · Esc cancel "
-                    .to_string();
+            } else {
+                " ↑↓ navigate · wheel/Pg scroll · Enter submit · 1-9 jump · Esc cancel "
+            }
+            .to_string();
             if let Some(r) = &s.last_result {
                 hint = format!("{r}     {hint}");
             }

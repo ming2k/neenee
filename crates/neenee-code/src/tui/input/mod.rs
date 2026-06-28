@@ -20,8 +20,8 @@ pub struct InputContext {
     /// whether ↑/↓ in the compose zone scroll the details body or the
     /// transcript behind it.
     pub permission_show_details: bool,
-    /// Whether the view is zoomed into a subagent task (focus stack non-empty).
-    pub in_subagent_view: bool,
+    /// Whether the view is zoomed into an envoy task (focus stack non-empty).
+    pub in_envoy_view: bool,
     /// Whether the view is inside a `/btw` side conversation (ADR-0017). Esc
     /// and Ctrl+C return to the primary transcript instead of interrupting.
     pub in_side_view: bool,
@@ -263,9 +263,14 @@ pub enum InputAction {
     QuestionUp,
     /// Move the selection down inside the question modal.
     QuestionDown,
-    /// Toggle/select the currently highlighted question option.
+    /// Toggle/select the currently highlighted question option. For
+    /// multi-select this flips the highlighted row on/off (Space); for
+    /// single-select it is a harmless no-op because the highlight already
+    /// *is* the live selection.
     QuestionToggle,
-    /// Submit the question modal answers.
+    /// Submit the question modal answers (Enter). For single-select this
+    /// submits the highlighted option; for multi-select it submits the
+    /// whole toggle set.
     QuestionSubmit,
     /// Cancel the question modal.
     QuestionCancel,
@@ -290,14 +295,14 @@ pub enum InputAction {
     /// drive hover affordances on clickable elements like reasoning-trace
     /// headers. Suppressed while an overlay modal is open.
     Hover { x: u16, y: u16 },
-    /// Leave the current subagent view and return to the parent.
-    ExitSubAgent,
+    /// Leave the current envoy view and return to the parent.
+    ExitEnvoy,
     /// Leave the `/btw` side conversation and return to the primary transcript
     /// (ADR-0017). Mapped from Esc / Ctrl+C while the side view is focused.
     ExitSideView,
-    /// Move to the previous sibling subagent task.
+    /// Move to the previous sibling envoy task.
     PrevSibling,
-    /// Move to the next sibling subagent task.
+    /// Move to the next sibling envoy task.
     NextSibling,
 }
 
@@ -654,12 +659,12 @@ pub fn process_event(
                         // transcript (ADR-0017). Takes priority over focus
                         // clearing and completion so one Esc always exits.
                         InputAction::ExitSideView
-                    } else if context.in_subagent_view {
-                        // Subagent zoom: Esc returns to the parent view.
+                    } else if context.in_envoy_view {
+                        // Envoy zoom: Esc returns to the parent view.
                         // Takes priority over focus clearing so one Esc
                         // always exits the zoom, even if a step inside the
-                        // subagent is keyboard-focused.
-                        InputAction::ExitSubAgent
+                        // envoy is keyboard-focused.
+                        InputAction::ExitEnvoy
                     } else if context.has_focused_target {
                         // A transcript step is focused: Esc clears the focus
                         // and hands every key back to the input box.
@@ -1045,11 +1050,11 @@ pub fn process_event(
                     InputAction::None
                 }
                 KeyCode::Char(c) => {
-                    // Sibling subagent navigation works in both zones (it is a
-                    // subagent view feature, not a typing-navigation thing)
+                    // Sibling envoy navigation works in both zones (it is a
+                    // envoy view feature, not a typing-navigation thing)
                     // but only when no text is being composed.
                     if context.active_modal == super::Modal::None
-                        && context.in_subagent_view
+                        && context.in_envoy_view
                         && input.is_empty()
                     {
                         match c {
@@ -1500,7 +1505,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1543,7 +1548,7 @@ mod tests {
                 suggestion_index,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1641,7 +1646,7 @@ mod tests {
     #[test]
     fn esc_closes_slash_completion_menu() {
         // When a slash completion popup is open, Esc dismisses it rather
-        // than falling through to subagent exit / interrupt / no-op.
+        // than falling through to envoy exit / interrupt / no-op.
         let mut input = "/mc".to_string();
         let mut cursor = 3;
         let mut drag = SelectionDrag::default();
@@ -1663,7 +1668,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1701,7 +1706,7 @@ mod tests {
                 suggestion_index: Some(1),
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1738,7 +1743,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1772,7 +1777,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1806,7 +1811,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1844,7 +1849,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1882,7 +1887,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1915,7 +1920,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -1989,7 +1994,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2023,7 +2028,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: true,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2053,7 +2058,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2083,7 +2088,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2116,7 +2121,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2145,7 +2150,7 @@ mod tests {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -2193,7 +2198,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2219,7 +2224,7 @@ mod tests {
             suggestion_index: None,
             permission_confirm_always: false,
             permission_show_details: false,
-            in_subagent_view: false,
+            in_envoy_view: false,
             in_side_view: false,
             has_focused_target: false,
             has_queued: false,
@@ -2256,7 +2261,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2268,7 +2273,7 @@ mod tests {
         assert_eq!(action, InputAction::None);
     }
 
-    fn key_in_view(code: KeyCode, in_subagent_view: bool, input: &mut String) -> InputAction {
+    fn key_in_view(code: KeyCode, in_envoy_view: bool, input: &mut String) -> InputAction {
         let mut cursor = input.chars().count();
         let mut drag = SelectionDrag::default();
         process_event(
@@ -2284,7 +2289,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view,
+                in_envoy_view,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -2312,7 +2317,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: true,
                 has_queued: false,
@@ -2454,13 +2459,13 @@ mod tests {
     }
 
     #[test]
-    fn escape_exits_subagent_view() {
+    fn escape_exits_envoy_view() {
         let mut input = String::new();
         assert_eq!(
             key_in_view(KeyCode::Esc, true, &mut input),
-            InputAction::ExitSubAgent
+            InputAction::ExitEnvoy
         );
-        // Outside a subagent view, Esc does nothing when idle (no modal).
+        // Outside an envoy view, Esc does nothing when idle (no modal).
         assert_eq!(
             key_in_view(KeyCode::Esc, false, &mut input),
             InputAction::None
@@ -2480,12 +2485,12 @@ mod tests {
         );
 
         // While typing (non-empty input), the brackets insert as characters,
-        // not navigation, even inside a subagent view.
+        // not navigation, even inside an envoy view.
         let mut typing = "x".to_string();
         key_in_view(KeyCode::Char('['), true, &mut typing);
         assert_eq!(typing, "x[");
 
-        // Outside a subagent view, brackets always insert.
+        // Outside an envoy view, brackets always insert.
         let mut other = String::new();
         key_in_view(KeyCode::Char(']'), false, &mut other);
         assert_eq!(other, "]");
@@ -2521,7 +2526,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: has_focus,
                 has_queued: false,
@@ -2679,7 +2684,7 @@ mod tests {
                     suggestion_index: None,
                     permission_confirm_always: false,
                     permission_show_details: false,
-                    in_subagent_view: false,
+                    in_envoy_view: false,
                     in_side_view: false,
                     has_focused_target: false,
                     has_queued: false,
@@ -3231,7 +3236,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -3312,7 +3317,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -3429,7 +3434,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -3458,7 +3463,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -3491,7 +3496,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued,
@@ -3543,7 +3548,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: true,
                 has_queued: true,
@@ -3578,7 +3583,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,
@@ -3704,7 +3709,7 @@ mod tests {
                 suggestion_index: None,
                 permission_confirm_always: false,
                 permission_show_details: false,
-                in_subagent_view: false,
+                in_envoy_view: false,
                 in_side_view: false,
                 has_focused_target: false,
                 has_queued: false,

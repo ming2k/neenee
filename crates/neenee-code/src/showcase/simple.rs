@@ -592,7 +592,7 @@ pub fn activity() -> io::Result<()> {
                         review_alert: "",
                         current_model: "claude-sonnet-4-5",
                         turn_started_at: Some(s.started),
-                        activity: "running subagent · exploring the codebase",
+                        activity: "running envoy · exploring the codebase",
                     },
                     &mut scroll,
                     &theme,

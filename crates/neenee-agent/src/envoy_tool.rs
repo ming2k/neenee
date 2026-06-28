@@ -1,11 +1,11 @@
-//! `SubagentTool` — spawns a read-only exploration subagent for research subtasks.
+//! `EnvoyTool` — spawns a read-only exploration envoy for research subtasks.
 //!
 //! Lives in `neenee-agent` (not `neenee-tools`) because it constructs an
-//! [`crate::Agent`] internally: spawning a subagent is an orchestration
+//! [`crate::Agent`] internally: spawning an envoy is an orchestration
 //! concern, not a domain-tool concern. The other tools (Bash/Read/Web/…)
 //! stay in `neenee-tools` and remain pure trait implementations.
 //!
-//! Admission of tools to the subagent is driven by [`neenee_core::EXPLORE`]
+//! Admission of tools to the envoy is driven by [`neenee_core::EXPLORE`]
 //! — the single source of truth for the read-only / non-interactive /
 //! non-recursive policy. See ADR-0011.
 
@@ -13,54 +13,54 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use neenee_core::{SubagentProfile, Tool};
+use neenee_core::{EnvoyProfile, Tool};
 use serde_json::json;
 
-use crate::agent::{Agent, SubagentHandle};
+use crate::agent::{Agent, EnvoyHandle};
 use crate::skills::SkillRegistry;
 
-/// Live subagent handles keyed by the parent tool-call id — the lookup table
+/// Live envoy handles keyed by the parent tool-call id — the lookup table
 /// that lets the harness route a down-direction reply (a permission decision
 /// or `ask_user` answer the user gave in the TUI) back into the specific
-/// running subagent that surfaced the request. Full-duplex (ADR-0029).
+/// running envoy that surfaced the request. Full-duplex (ADR-0029).
 ///
 /// The `task` tool populates this when it spawns a child (and clears the entry
 /// when the child finishes); the harness reads it when it needs to reply to a
-/// `SubagentEvent::PermissionRequest` / `UserQuestionRequest` that arrived
+/// `EnvoyEvent::PermissionRequest` / `UserQuestionRequest` that arrived
 /// nested under a given `parent_call_id`. Entries are best-effort: a late reply
 /// after the child already finished finds no entry (or a dead handle) and
 /// degrades to a no-op rather than erroring.
 #[derive(Default)]
-pub struct SubagentRegistry {
-    map: std::sync::Mutex<std::collections::HashMap<String, SubagentHandle>>,
+pub struct EnvoyRegistry {
+    map: std::sync::Mutex<std::collections::HashMap<String, EnvoyHandle>>,
 }
 
-impl SubagentRegistry {
-    /// Register a steering handle for the subagent spawned by the
+impl EnvoyRegistry {
+    /// Register a steering handle for the envoy spawned by the
     /// `parent_call_id` tool call. Replaces any prior entry for that id.
-    pub fn register(&self, parent_call_id: &str, handle: SubagentHandle) {
+    pub fn register(&self, parent_call_id: &str, handle: EnvoyHandle) {
         #[allow(clippy::expect_used)]
         // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
-            .expect("SubagentRegistry poisoned")
+            .expect("EnvoyRegistry poisoned")
             .insert(parent_call_id.to_string(), handle);
     }
 
-    /// Look up the handle for a live subagent by its parent tool-call id.
+    /// Look up the handle for a live envoy by its parent tool-call id.
     /// Returns a cloned handle (cheap) so the caller can reply without holding
     /// the lock.
-    pub fn get(&self, parent_call_id: &str) -> Option<SubagentHandle> {
+    pub fn get(&self, parent_call_id: &str) -> Option<EnvoyHandle> {
         #[allow(clippy::expect_used)]
         // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
-            .expect("SubagentRegistry poisoned")
+            .expect("EnvoyRegistry poisoned")
             .get(parent_call_id)
             .cloned()
     }
 
-    /// Remove the entry for a finished subagent. Called when the `task` tool
+    /// Remove the entry for a finished envoy. Called when the `task` tool
     /// returns, so the registry never accumulates dead handles for completed
     /// calls (a handle whose `Weak` already expired is harmless but useless).
     pub fn remove(&self, parent_call_id: &str) {
@@ -68,60 +68,60 @@ impl SubagentRegistry {
         // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
-            .expect("SubagentRegistry poisoned")
+            .expect("EnvoyRegistry poisoned")
             .remove(parent_call_id);
     }
 }
 
-/// Spawn a read-only exploration subagent to handle a research sub-task.
+/// Spawn a read-only exploration envoy to handle a research sub-task.
 ///
-/// The subagent runs the same provider with the tools admitted by the bound
-/// [`SubagentProfile`] (today always [`neenee_core::EXPLORE`]): read-only, non-interactive,
+/// The envoy runs the same provider with the tools admitted by the bound
+/// [`EnvoyProfile`] (today always [`neenee_core::EXPLORE`]): read-only, non-interactive,
 /// non-recursive. Its final answer is returned to the calling agent, which
 /// stays in control of any write operations and any questions for the user.
-pub struct SubagentTool {
+pub struct EnvoyTool {
     provider: Arc<dyn neenee_core::Provider>,
     toolset: neenee_core::ToolSet,
-    profile: &'static SubagentProfile,
+    profile: &'static EnvoyProfile,
     /// Shared handle to the parent agent's variant selection (the **override**
     /// axis). Bound after the parent agent is built (see
-    /// [`SubagentTool::bind_variant_selection`]). At spawn the child resolves
+    /// [`EnvoyTool::bind_variant_selection`]). At spawn the child resolves
     /// its scoped capabilities to the model's chosen variants by snapshotting
-    /// this, so a subagent — an agent on the same model — inherits the parent's
+    /// this, so an envoy — an agent on the same model — inherits the parent's
     /// overrides. `None` (the default, e.g. in tests) means default variants.
     parent_variants: std::sync::Mutex<Option<Arc<std::sync::Mutex<neenee_core::VariantSelection>>>>,
-    /// Full-duplex handle registry (ADR-0029): each spawned subagent's
-    /// [`SubagentHandle`] is lodged here keyed by the parent tool-call id, so
+    /// Full-duplex handle registry (ADR-0029): each spawned envoy's
+    /// [`EnvoyHandle`] is lodged here keyed by the parent tool-call id, so
     /// the harness can route a user's permission / `ask_user` reply back down
     /// into the exact child that surfaced the request. Owned by the tool and
-    /// exposed via [`SubagentTool::registry`] so the binary that constructs the
+    /// exposed via [`EnvoyTool::registry`] so the binary that constructs the
     /// tool (and drives the harness) can hand the same `Arc` to the harness.
-    registry: Arc<SubagentRegistry>,
+    registry: Arc<EnvoyRegistry>,
 }
 
-impl SubagentTool {
+impl EnvoyTool {
     /// `toolset` should be the parent agent's full capability set; `profile`
-    /// declares what the spawned subagent may actually use (admission + variant
+    /// declares what the spawned envoy may actually use (admission + variant
     /// pins + framing). The caller binds the role explicitly — `&EXPLORE` for
-    /// the `subagent` tool.
+    /// the `envoy` tool.
     pub fn new(
         provider: Arc<dyn neenee_core::Provider>,
         toolset: neenee_core::ToolSet,
-        profile: &'static SubagentProfile,
+        profile: &'static EnvoyProfile,
     ) -> Self {
         Self {
             provider,
             toolset,
             profile,
             parent_variants: std::sync::Mutex::new(None),
-            registry: Arc::new(SubagentRegistry::default()),
+            registry: Arc::new(EnvoyRegistry::default()),
         }
     }
 
     /// Bind the parent agent's variant-selection handle (the **override** axis)
-    /// so spawned subagents inherit the model's tool overrides. Called once,
+    /// so spawned envoys inherit the model's tool overrides. Called once,
     /// after the parent agent is constructed (the agent owns the handle). When
-    /// unbound, subagents use each capability's default variant.
+    /// unbound, envoys use each capability's default variant.
     pub fn bind_variant_selection(
         &self,
         handle: Arc<std::sync::Mutex<neenee_core::VariantSelection>>,
@@ -142,26 +142,26 @@ impl SubagentTool {
             .unwrap_or_default()
     }
 
-    /// The shared handle registry for sub-agents spawned by this tool. The
+    /// The shared handle registry for envoys spawned by this tool. The
     /// binary passes this `Arc` to the harness so a user reply in the TUI can
-    /// be routed back into the live child (ADR-0029). Each `SubagentTool` instance
+    /// be routed back into the live child (ADR-0029). Each `EnvoyTool` instance
     /// owns its own registry (children of different dispatch tools are
     /// disjoint), which is fine because the harness that needs to reply is the
     /// same one that constructed the tool.
-    pub fn registry(&self) -> Arc<SubagentRegistry> {
+    pub fn registry(&self) -> Arc<EnvoyRegistry> {
         self.registry.clone()
     }
 }
 
 #[async_trait]
-impl Tool for SubagentTool {
+impl Tool for EnvoyTool {
     fn name(&self) -> &str {
-        "subagent"
+        "envoy"
     }
     fn description(&self) -> &str {
-        "Launch a focused, read-only subagent to research or explore part of the codebase (or the \
+        "Launch a focused, read-only envoy to research or explore part of the codebase (or the \
          web) and return a concise written answer. Use it to parallelize investigation: finding \
-         where code lives, summarizing files, gathering context. The subagent cannot modify \
+         where code lives, summarizing files, gathering context. The envoy cannot modify \
          files — you perform any edits after reviewing its findings."
     }
     fn parameters(&self) -> serde_json::Value {
@@ -169,38 +169,38 @@ impl Tool for SubagentTool {
             "type": "object",
             "properties": {
                 "description": { "type": "string", "description": "Short label for the sub-task (<=60 chars)" },
-                "prompt": { "type": "string", "description": "The full, self-contained instructions for the subagent" }
+                "prompt": { "type": "string", "description": "The full, self-contained instructions for the envoy" }
             },
             "required": ["description", "prompt"]
         })
     }
 
-    /// `task` spawns a subagent; subagent profiles exclude it to prevent
+    /// `task` spawns an envoy; envoy profiles exclude it to prevent
     /// unbounded recursion.
-    fn spawns_subagent(&self) -> bool {
+    fn spawns_envoy(&self) -> bool {
         true
     }
     async fn call(&self, arguments: &str) -> Result<String, String> {
-        self.run_sub_agent(None, arguments, Box::new(|_| {})).await
+        self.run_envoy(None, arguments, Box::new(|_| {})).await
     }
 
     async fn call_with_events<'a>(
         &self,
         call_id: &str,
         arguments: &str,
-        on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
+        on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
     ) -> Result<String, String> {
-        self.run_sub_agent(Some(call_id), arguments, on_event).await
+        self.run_envoy(Some(call_id), arguments, on_event).await
     }
 
     async fn call_structured_with_events<'a>(
         &self,
         call_id: &str,
         arguments: &str,
-        on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
+        on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
         _on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
     ) -> Result<neenee_core::ToolOutput, String> {
-        // Run the subagent, streaming its lifecycle as SubAgentEvents to the
+        // Run the envoy, streaming its lifecycle as EnvoyEvents to the
         // parent harness (so the live TUI builds the nested view in real
         // time), then return a structured payload carrying the full transcript
         // + real token usage so the parent can persist children and account
@@ -210,8 +210,8 @@ impl Tool for SubagentTool {
         // handle in the registry (ADR-0029) so a user reply can flow back down
         // into this exact child while it runs.
         //
-        // Failure path: a subagent that hit the 32-round limit, repeated-call
-        // guard, or a provider error returns a Subagent payload too — the
+        // Failure path: an envoy that hit the 32-round limit, repeated-call
+        // guard, or a provider error returns an Envoy payload too — the
         // structured `failed` flag is set so the UI classifies it as Failed
         // without text-sniffing, and the partial transcript is preserved so
         // the user can resume into the half-finished work and the real token
@@ -220,18 +220,18 @@ impl Tool for SubagentTool {
         // input-validation errors (bad JSON, missing fields) propagate as
         // `Err`, because they have no partial transcript worth keeping.
         let outcome = self
-            .run_sub_agent_outcome(Some(call_id), arguments, on_event)
+            .run_envoy_outcome(Some(call_id), arguments, on_event)
             .await?;
         let summary = if outcome.final_content.trim().is_empty() {
             if outcome.failed {
-                "(subagent failed before producing an answer)".to_string()
+                "(envoy failed before producing an answer)".to_string()
             } else {
-                "(subagent returned no answer)".to_string()
+                "(envoy returned no answer)".to_string()
             }
         } else {
             outcome.final_content.trim().to_string()
         };
-        Ok(neenee_core::ToolOutput::Subagent {
+        Ok(neenee_core::ToolOutput::Envoy {
             summary,
             messages: outcome.messages,
             usage: outcome.token_usage,
@@ -240,28 +240,28 @@ impl Tool for SubagentTool {
     }
 }
 
-/// Internal result of running a subagent. Bundles everything the parent
+/// Internal result of running an envoy. Bundles everything the parent
 /// harness needs to persist the nested transcript and account for real cost.
-struct SubagentOutcome {
+struct EnvoyOutcome {
     messages: Vec<neenee_core::Message>,
     token_usage: neenee_core::TokenUsage,
     /// Final assistant content, mirrored for convenience so the parent doesn't
     /// have to scan `messages` for the last Assistant turn.
     final_content: String,
-    /// Whether the subagent terminated abnormally (hit the tool-round cap,
+    /// Whether the envoy terminated abnormally (hit the tool-round cap,
     /// repeated-call guard, or a provider error). Drives the structured
-    /// `failed` flag on the returned [`neenee_core::ToolOutput::Subagent`]
+    /// `failed` flag on the returned [`neenee_core::ToolOutput::Envoy`]
     /// instead of the old `summary.starts_with("Error")` text sniff.
     failed: bool,
 }
 
-impl SubagentTool {
-    async fn run_sub_agent_outcome<'a>(
+impl EnvoyTool {
+    async fn run_envoy_outcome<'a>(
         &self,
         call_id: Option<&str>,
         arguments: &str,
-        mut on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
-    ) -> Result<SubagentOutcome, String> {
+        mut on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
+    ) -> Result<EnvoyOutcome, String> {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let description = args["description"]
@@ -277,35 +277,35 @@ impl SubagentTool {
         }
 
         // Announce the bound profile name first so the parent harness / TUI
-        // can label this subagent by its role (explore / plan / verify / …)
-        // rather than a generic "Subagent". Emitted before the child runs.
-        on_event(neenee_core::SubagentEvent::Started {
+        // can label this envoy by its role (explore / plan / verify / …)
+        // rather than a generic "Envoy". Emitted before the child runs.
+        on_event(neenee_core::EnvoyEvent::Started {
             profile: self.profile.name.to_string(),
         });
 
         // Scope (profile) ∘ override (model). First resolve every capability to
-        // the model's chosen variant (inherited from the parent — a subagent is
+        // the model's chosen variant (inherited from the parent — an envoy is
         // an agent on the same model), then narrow to what the profile admits.
         // The profile owns *which* tools (scope, ADR-0011); the model owns
         // *which variant* of each (override).
         let resolved = self.toolset.resolve(&self.variant_snapshot());
         let sub_tools = self.profile.select_tools(&resolved);
 
-        // The subagent's identity *is* its profile's system prompt — that is the
+        // The envoy's identity *is* its profile's system prompt — that is the
         // persona/mission framing for this role (e.g. EXPLORE's research
         // framing). `from_persona` injects it verbatim as the preamble.
         let identity = crate::AgentIdentity::from_persona(self.profile.system_prompt);
-        let sub_agent = Arc::new(Agent::new(
+        let envoy = Arc::new(Agent::new(
             self.provider.clone(),
             sub_tools,
             SkillRegistry::empty(),
             identity,
         ));
-        // A `task` sub-agent runs unobstructed: disable the deterministic
+        // A `task` envoy runs unobstructed: disable the deterministic
         // read-loop guard's nudge (ADR-0034) so a short-lived, parent-supervised
-        // sub-agent is never steered by it. The parent and `abort` remain its
+        // envoy is never steered by it. The parent and `abort` remain its
         // backstops.
-        sub_agent.set_loop_review_enabled(false);
+        envoy.set_loop_review_enabled(false);
         // Full-duplex (ADR-0029): install the child's steering inbox and lodge
         // its handle in the registry keyed by the parent tool-call id. Now any
         // permission / `ask_user` request the child surfaces travels *up* via
@@ -314,19 +314,19 @@ impl SubagentTool {
         // resolving the child's parked oneshot. A `None` call_id (the bare
         // `call` path, no harness involvement) skips registration — there is no
         // one to reply, so the child must stay self-contained.
-        let _handle = sub_agent.install_inbox();
+        let _handle = envoy.install_inbox();
         if let Some(id) = call_id {
             self.registry.register(id, _handle.clone());
         }
         // Full-duplex (ADR-0029): the broker gate is now profile-driven. The
         // built-in profiles keep `unattended: true` to preserve the legacy
         // autonomous contract, but a profile with `unattended: false` lets a
-        // subagent's write/execute tool calls surface as
-        // `SubagentEvent::PermissionRequest` up to the parent, with the user's
+        // envoy's write/execute tool calls surface as
+        // `EnvoyEvent::PermissionRequest` up to the parent, with the user's
         // reply routed back down via the registry → handle →
         // `reply_permission` (the parked oneshot resolves directly, no inbox
         // drain needed).
-        sub_agent.set_unattended(self.profile.unattended);
+        envoy.set_unattended(self.profile.unattended);
         // Resolve the bound profile's write grant (ADR-0028) against the
         // process cwd and set it on the child. All built-in profiles
         // (EXPLORE/REVIEW/TITLE: empty `write_paths`) resolve to
@@ -334,13 +334,13 @@ impl SubagentTool {
         // admitted anyway). The `INTERACTIVE` role carries an unrestricted
         // scope via its `Write` ceiling.
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        sub_agent.set_operation_scope(self.profile.resolve_operation_scope(&cwd));
-        // Sub-agents are short-lived and read-only by profile, and session
+        envoy.set_operation_scope(self.profile.resolve_operation_scope(&cwd));
+        // Envoys are short-lived and read-only by profile, and session
         // review is on-demand (`/review`) with no automatic firing — so a
-        // research subagent never pays for a diagnostic and review can never
+        // research envoy never pays for a diagnostic and review can never
         // recurse. No setup needed here. ADR-0018.
 
-        // The subagent's transcript opens with just the task as the user
+        // The envoy's transcript opens with just the task as the user
         // message. The head system message is rebuilt every round by
         // `prepare_turn_messages` from the profile persona (carried via
         // `AgentIdentity`, set above) composed with the mission-neutral
@@ -357,20 +357,20 @@ impl SubagentTool {
             neenee_core::Role::User,
             prompt.to_string(),
         )];
-        // The subagent runs with its own (never-cancelled) token. When the
+        // The envoy runs with its own (never-cancelled) token. When the
         // parent turn is interrupted, the parent's dispatch drops this future
         // and emits a `ToolCancelled` for the `task` call id; the TUI then
-        // recursively cancels the nested tool steps, so the subagent does not
+        // recursively cancels the nested tool steps, so the envoy does not
         // need a token linked to the parent.
         //
         // On failure we surface the partial transcript anyway — both so the
-        // parent's tool-result message carries the subagent's work-in-progress
+        // parent's tool-result message carries the envoy's work-in-progress
         // `children` and so the real token cost (which can be substantial for a
         // 32-round burnout) reaches the parent pursuit accounting. The
         // `final_content` is prefixed `Error: …` so the existing failure
         // classifier (`starts_with("Error")`) and the TUI's red Failed badge
         // both trigger.
-        let result = sub_agent
+        let result = envoy
             .run_streaming_with_events(
                 &mut messages,
                 &tokio_util::sync::CancellationToken::new(),
@@ -387,7 +387,7 @@ impl SubagentTool {
         match result {
             Ok(result) => {
                 let final_content = result.message.content.clone();
-                Ok(SubagentOutcome {
+                Ok(EnvoyOutcome {
                     messages,
                     token_usage: result.token_usage,
                     final_content,
@@ -396,8 +396,8 @@ impl SubagentTool {
             }
             Err(error) => {
                 let error_string = error.to_string();
-                tracing::warn!(error = %error_string, "subagent failed; preserving partial transcript");
-                Ok(SubagentOutcome {
+                tracing::warn!(error = %error_string, "envoy failed; preserving partial transcript");
+                Ok(EnvoyOutcome {
                     messages,
                     token_usage: neenee_core::TokenUsage::default(),
                     final_content: format!("Error: {error_string}"),
@@ -407,18 +407,16 @@ impl SubagentTool {
         }
     }
 
-    async fn run_sub_agent<'a>(
+    async fn run_envoy<'a>(
         &self,
         call_id: Option<&str>,
         arguments: &str,
-        on_event: Box<dyn FnMut(neenee_core::SubagentEvent) + Send + 'a>,
+        on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
     ) -> Result<String, String> {
-        let outcome = self
-            .run_sub_agent_outcome(call_id, arguments, on_event)
-            .await?;
+        let outcome = self.run_envoy_outcome(call_id, arguments, on_event).await?;
         let content = outcome.final_content.trim().to_string();
         if content.is_empty() {
-            Ok("(subagent returned no answer)".to_string())
+            Ok("(envoy returned no answer)".to_string())
         } else {
             Ok(content)
         }
@@ -426,11 +424,11 @@ impl SubagentTool {
 
     fn forward_event(
         event: neenee_core::AgentEvent,
-        on_event: &mut dyn FnMut(neenee_core::SubagentEvent),
+        on_event: &mut dyn FnMut(neenee_core::EnvoyEvent),
     ) {
         match event {
             neenee_core::AgentEvent::Notice(notice) => {
-                on_event(neenee_core::SubagentEvent::Notice(notice));
+                on_event(neenee_core::EnvoyEvent::Notice(notice));
             }
             neenee_core::AgentEvent::ModelRequestStarted { tool_round } => {
                 let status = if tool_round == 0 {
@@ -438,23 +436,23 @@ impl SubagentTool {
                 } else {
                     format!("waiting for model · round {}", tool_round + 1)
                 };
-                on_event(neenee_core::SubagentEvent::Activity(status));
+                on_event(neenee_core::EnvoyEvent::Activity(status));
             }
             neenee_core::AgentEvent::AssistantDelta { delta, start } => {
                 if start {
-                    on_event(neenee_core::SubagentEvent::StreamStart);
+                    on_event(neenee_core::EnvoyEvent::StreamStart);
                 }
-                on_event(neenee_core::SubagentEvent::StreamDelta(delta));
+                on_event(neenee_core::EnvoyEvent::StreamDelta(delta));
             }
             neenee_core::AgentEvent::AssistantEnd(content) => {
-                on_event(neenee_core::SubagentEvent::StreamEnd(content));
+                on_event(neenee_core::EnvoyEvent::StreamEnd(content));
             }
             neenee_core::AgentEvent::ToolCall {
                 id,
                 name,
                 arguments,
             } => {
-                on_event(neenee_core::SubagentEvent::ToolCall {
+                on_event(neenee_core::EnvoyEvent::ToolCall {
                     id,
                     name,
                     arguments,
@@ -467,7 +465,7 @@ impl SubagentTool {
                 duration_ms,
                 ..
             } => {
-                on_event(neenee_core::SubagentEvent::ToolResult {
+                on_event(neenee_core::EnvoyEvent::ToolResult {
                     id,
                     name,
                     output,
@@ -475,7 +473,7 @@ impl SubagentTool {
                 });
             }
             // Full-duplex (ADR-0029): a permission broker request from the
-            // child now travels *up* as a SubagentEvent so the parent harness
+            // child now travels *up* as a EnvoyEvent so the parent harness
             // can surface it to the user. The reply travels back *down* via
             // the registry → handle → `reply_permission`, which resolves the
             // child's parked oneshot directly (no inbox drain needed). The
@@ -484,13 +482,13 @@ impl SubagentTool {
             // here means either a future interactive profile is in use, or a
             // policy leak — forwarding (not dropping) is correct in both cases.
             neenee_core::AgentEvent::PermissionRequest(request) => {
-                on_event(neenee_core::SubagentEvent::PermissionRequest(request));
+                on_event(neenee_core::EnvoyEvent::PermissionRequest(request));
             }
             // Same full-duplex contract as the permission arm above. Reaching
             // here means an `ask_user` tool was admitted (the profile allows
             // user interaction) and the child is parked awaiting answers.
             neenee_core::AgentEvent::UserQuestionRequest(request) => {
-                on_event(neenee_core::SubagentEvent::UserQuestionRequest(request));
+                on_event(neenee_core::EnvoyEvent::UserQuestionRequest(request));
             }
             _ => {}
         }
@@ -538,7 +536,7 @@ mod tests {
         }
     }
 
-    /// A terse `read_text` variant and a write tool, to prove a subagent
+    /// A terse `read_text` variant and a write tool, to prove an envoy
     /// resolves the *model's* variant (override axis) and then narrows to the
     /// *profile's* scope (scope axis) — the two are orthogonal.
     struct TerseReadTool;
@@ -561,7 +559,7 @@ mod tests {
         }
     }
     #[test]
-    fn subagent_inherits_model_variant_then_applies_profile_scope() {
+    fn envoy_inherits_model_variant_then_applies_profile_scope() {
         // `StubWriteTool` (name "stub_write") is not in EXPLORE's read-only
         // scope, so it is always excluded; `read_text` has two variants.
         let toolset = neenee_core::ToolSet::from_tools([
@@ -569,7 +567,7 @@ mod tests {
             std::sync::Arc::new(TerseReadTool) as std::sync::Arc<dyn Tool>,
             std::sync::Arc::new(StubWriteTool) as std::sync::Arc<dyn Tool>,
         ]);
-        let tool = SubagentTool::new(std::sync::Arc::new(CannedProvider), toolset, &EXPLORE);
+        let tool = EnvoyTool::new(std::sync::Arc::new(CannedProvider), toolset, &EXPLORE);
 
         // Unbound (no model override) → read_text resolves to its default
         // variant; the out-of-scope write tool is excluded regardless.
@@ -580,7 +578,7 @@ mod tests {
         assert_eq!(read.map(|t| t.variant()), Some("default"));
         assert!(scoped.iter().all(|t| t.name() != "stub_write"));
 
-        // Bind a model selection pinning read_text=terse: the subagent inherits
+        // Bind a model selection pinning read_text=terse: the envoy inherits
         // the override (terse), while scope is still profile-driven.
         let mut sel = neenee_core::VariantSelection::new();
         sel.insert("read_text".to_string(), "terse".to_string());
@@ -594,8 +592,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_tool_runs_read_only_subagent_and_returns_answer() {
-        let tool = SubagentTool::new(
+    async fn task_tool_runs_read_only_envoy_and_returns_answer() {
+        let tool = EnvoyTool::new(
             std::sync::Arc::new(CannedProvider),
             neenee_core::ToolSet::from_tools([
                 std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>
@@ -611,14 +609,14 @@ mod tests {
         assert_eq!(output, "found 3 relevant files");
     }
 
-    /// Regression for ADR-0039 stage 3: the subagent's head system message is
+    /// Regression for ADR-0039 stage 3: the envoy's head system message is
     /// the registry-composed persona + mission-neutral sections (tone, todo).
     /// The legacy `Task: {description}` system message was dead code —
     /// `ensure_system_prompt` clobbered index 0 on round 1 — and has been
     /// removed; the task lives in the user message alone.
     #[tokio::test]
-    async fn subagent_head_system_message_has_no_dead_task_line() {
-        let tool = SubagentTool::new(
+    async fn envoy_head_system_message_has_no_dead_task_line() {
+        let tool = EnvoyTool::new(
             std::sync::Arc::new(CannedProvider),
             neenee_core::ToolSet::from_tools([
                 std::sync::Arc::new(EchoReadTool) as std::sync::Arc<dyn Tool>
@@ -626,10 +624,10 @@ mod tests {
             &EXPLORE,
         );
         let outcome = tool
-            .run_sub_agent_outcome(
+            .run_envoy_outcome(
                 None,
                 r#"{"description":"find files","prompt":"where are the handlers?"}"#,
-                Box::new(|_event: neenee_core::SubagentEvent| {}),
+                Box::new(|_event: neenee_core::EnvoyEvent| {}),
             )
             .await
             .unwrap();
@@ -641,7 +639,7 @@ mod tests {
         assert!(
             system
                 .content
-                .starts_with("You are a focused research subagent"),
+                .starts_with("You are a focused research envoy"),
             "system message should open with the EXPLORE persona"
         );
         assert!(
@@ -660,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_tool_rejects_missing_fields() {
-        let tool = SubagentTool::new(
+        let tool = EnvoyTool::new(
             std::sync::Arc::new(CannedProvider),
             neenee_core::ToolSet::default(),
             &EXPLORE,
@@ -698,14 +696,14 @@ mod tests {
     #[test]
     fn explore_profile_excludes_user_write_and_recursion_using_real_tools() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
-        let subagent_tool =
-            SubagentTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
+        let envoy_tool =
+            EnvoyTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
             std::sync::Arc::new(EchoReadTool),
             std::sync::Arc::new(neenee_tools::AskUserTool),
             std::sync::Arc::new(StubWriteTool),
-            std::sync::Arc::new(subagent_tool),
+            std::sync::Arc::new(envoy_tool),
         ];
 
         let admitted = EXPLORE.select_tools(&tools);
@@ -721,15 +719,15 @@ mod tests {
     #[test]
     fn explore_profile_excludes_bash_writes_user_and_recursion() {
         let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(CannedProvider);
-        let subagent_tool =
-            SubagentTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
+        let envoy_tool =
+            EnvoyTool::new(provider.clone(), neenee_core::ToolSet::default(), &EXPLORE);
 
         let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
             std::sync::Arc::new(EchoReadTool),
             std::sync::Arc::new(neenee_tools::BashTool),
             std::sync::Arc::new(neenee_tools::AskUserTool),
             std::sync::Arc::new(StubWriteTool),
-            std::sync::Arc::new(subagent_tool),
+            std::sync::Arc::new(envoy_tool),
         ];
 
         // EXPLORE: only the whitelisted read tool survives (bash, ask_user,

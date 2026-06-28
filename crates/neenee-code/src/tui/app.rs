@@ -222,7 +222,7 @@ pub struct ScrollSnapshot {
     pub follow_bottom: bool,
 }
 
-/// One frame on the focus stack: the subagent task call-id plus the parent
+/// One frame on the focus stack: the envoy task call-id plus the parent
 /// view's scroll snapshot, restored verbatim when the frame is popped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZoomFrame {
@@ -276,7 +276,7 @@ pub struct App {
     pub sticky_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the activity bar for the current frame, so clicks inside
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
-    /// streaming, subagent view, or chrome hidden).
+    /// streaming, envoy view, or chrome hidden).
     pub activity_rect: Option<neenee_tui::Rect>,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
@@ -300,7 +300,7 @@ pub struct App {
     /// content below the collapsed step does not yank the header back down.
     /// Cleared on any manual scroll, view reset, or when auto-follow resumes.
     pub pin_summary_line: Option<usize>,
-    /// Stack of nested zoom frames (subagent tasks). Empty means the root
+    /// Stack of nested zoom frames (envoy tasks). Empty means the root
     /// conversation is shown; the top frame is the currently focused view.
     /// Each frame carries the parent's scroll snapshot, restored on exit.
     pub focus_stack: Vec<ZoomFrame>,
@@ -768,7 +768,7 @@ impl App {
             if let Some(message) = self.focused_messages().get(message_idx) {
                 let target = if message.is_thinking() {
                     InteractiveTarget::thinking(message_idx)
-                } else if message.is_tool_step() || message.is_subagent_task() {
+                } else if message.is_tool_step() || message.is_envoy_task() {
                     InteractiveTarget::tool_step(message_idx)
                 } else {
                     return targets;
@@ -816,13 +816,13 @@ impl App {
         self.drag.cancel();
     }
 
-    /// Whether the view is currently zoomed into a subagent task.
-    pub fn in_subagent_view(&self) -> bool {
+    /// Whether the view is currently zoomed into an envoy task.
+    pub fn in_envoy_view(&self) -> bool {
         !self.focus_stack.is_empty()
     }
 
     /// The message slice currently in view: the `/btw` side transcript when
-    /// the side view is active (ADR-0017), the focused subagent task's child
+    /// the side view is active (ADR-0017), the focused envoy task's child
     /// messages when zoomed, or the root conversation otherwise.
     pub fn focused_messages(&self) -> &[TranscriptMessage] {
         if self.in_side_view {
@@ -834,10 +834,10 @@ impl App {
         self.messages
             .iter()
             .find_map(|message| {
-                if message.is_subagent_task()
+                if message.is_envoy_task()
                     && message.tool_step_call_id() == Some(frame.call_id.as_str())
                 {
-                    message.subagent_children()
+                    message.envoy_children()
                 } else {
                     None
                 }
@@ -859,8 +859,8 @@ impl App {
         self.focused_target = None;
     }
 
-    /// Zoom into a subagent task's child messages.
-    pub fn enter_subagent(&mut self, call_id: String) {
+    /// Zoom into an envoy task's child messages.
+    pub fn enter_envoy(&mut self, call_id: String) {
         let saved_scroll = ScrollSnapshot {
             offset: self.scroll,
             follow_bottom: self.follow_bottom,
@@ -872,9 +872,9 @@ impl App {
         self.reset_view_state();
     }
 
-    /// Return from the current subagent view to its parent. Returns true if a
+    /// Return from the current envoy view to its parent. Returns true if a
     /// view was actually popped.
-    pub fn exit_subagent(&mut self) -> bool {
+    pub fn exit_envoy(&mut self) -> bool {
         if let Some(frame) = self.focus_stack.pop() {
             self.reset_view_state();
             self.scroll = frame.saved_scroll.offset;
@@ -887,7 +887,7 @@ impl App {
 
     /// Enter the `/btw` side conversation view (ADR-0017). The side transcript
     /// ([`App::side_messages`]) becomes the viewed stream and a top banner
-    /// reports the primary session's coarse status. Reuses the subagent
+    /// reports the primary session's coarse status. Reuses the envoy
     /// zoom's `reset_view_state` so the swap feels identical to focusing a
     /// task step.
     pub fn enter_side_view(&mut self, side_id: String) {
@@ -908,8 +908,8 @@ impl App {
         self.reset_view_state();
     }
 
-    /// Cycle to the previous (`dir < 0`) or next (`dir > 0`) sibling subagent
-    /// task at the current focus level. No-op when not in a subagent view or
+    /// Cycle to the previous (`dir < 0`) or next (`dir > 0`) sibling envoy
+    /// task at the current focus level. No-op when not in an envoy view or
     /// when there are no siblings.
     pub fn cycle_sibling(&mut self, dir: i8) {
         let Some(current) = self.focus_stack.last() else {
@@ -920,7 +920,7 @@ impl App {
             .messages
             .iter()
             .filter_map(|message| {
-                if message.is_subagent_task() {
+                if message.is_envoy_task() {
                     message.tool_step_call_id().map(String::from)
                 } else {
                     None

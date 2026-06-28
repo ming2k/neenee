@@ -4,7 +4,7 @@
 //! so that selection and copy operate on semantic units (blocks) rather than
 //! terminal grid characters.
 
-use neenee_core::{Role, SubagentEvent};
+use neenee_core::{EnvoyEvent, Role};
 
 /// Lifecycle of a tool step, stored explicitly (not inferred from `output`)
 /// so an aborted call has its own terminal state instead of being stuck in
@@ -39,10 +39,10 @@ pub enum MessageKind {
     ToolStep {
         id: String,
         name: String,
-        /// The bound subagent profile name (`explore` / `plan` / `verify` / …)
-        /// for a subagent-spawning tool step, populated from the first
-        /// `SubagentEvent::Started` and used to label the step by its role.
-        /// `None` for non-subagent steps, or until the `Started` event lands.
+        /// The bound envoy profile name (`explore` / `plan` / `verify` / …)
+        /// for an envoy-spawning tool step, populated from the first
+        /// `EnvoyEvent::Started` and used to label the step by its role.
+        /// `None` for non-envoy steps, or until the `Started` event lands.
         profile: Option<String>,
         arguments: String,
         output: Option<String>,
@@ -56,7 +56,7 @@ pub enum MessageKind {
         /// fallback for restored sessions that predate the typed payload.
         ///
         /// Boxed to keep this enum variant small: `ToolOutput` (and especially
-        /// its `Subagent`/`Patch` variants) is large enough that an unboxed
+        /// its `Envoy`/`Patch` variants) is large enough that an unboxed
         /// `Option<ToolOutput>` would dominate the `MessageKind` enum size
         /// (clippy::large_enum_variant). The indirection is transparent to
         /// callers — the surrounding accessors deref it as needed.
@@ -71,11 +71,11 @@ pub enum MessageKind {
         user_pinned: bool,
         duration_ms: Option<u64>,
         /// Wall-clock instant the step started, so the UI can show a live
-        /// elapsed time while the call (or subagent) is still running.
+        /// elapsed time while the call (or envoy) is still running.
         /// `Instant` is cheap to capture at construction time and is not
         /// serialized — session restore reconstructs finished steps without it.
         started_at: Option<std::time::Instant>,
-        /// Child events emitted by a subagent spawned from this tool step.
+        /// Child events emitted by an envoy spawned from this tool step.
         children: Vec<TranscriptMessage>,
     },
     Thinking {
@@ -455,9 +455,9 @@ impl TranscriptMessage {
         }
         let output = output.into();
         // Classify from the structured result (data-level: a non-zero shell
-        // exit, an explicit `ToolOutput::Error`, a `failed` subagent). The
+        // exit, an explicit `ToolOutput::Error`, a `failed` envoy). The
         // legacy `starts_with("Error")` text fallback was removed once tool
-        // error sites migrated to `ToolOutput::Error` and sub-agents carried
+        // error sites migrated to `ToolOutput::Error` and envoys carried
         // an explicit `failed` flag — classification is now fully data-driven.
         // Permission denial gets its own status so the UI shows it distinctly
         // from a runtime error.
@@ -520,9 +520,9 @@ impl TranscriptMessage {
 
     /// Mark a still-running tool step as cancelled. Idempotent: a step that
     /// already reached a terminal state (`Ok` / `Failed` / `Cancelled`) is left
-    /// untouched and returns `false`. When the step is a `task` (subagent),
+    /// untouched and returns `false`. When the step is a `task` (envoy),
     /// its still-running nested tool children are cancelled too, so an aborted
-    /// subagent never leaves a "running" child step behind.
+    /// envoy never leaves a "running" child step behind.
     pub fn cancel_tool_step(&mut self, id: &str) -> bool {
         let MessageKind::ToolStep {
             id: step_id,
@@ -542,7 +542,7 @@ impl TranscriptMessage {
     }
 
     /// Recursively cancel every still-running tool step within this message
-    /// (used for subagent children and as a defensive sweep). Returns `true`
+    /// (used for envoy children and as a defensive sweep). Returns `true`
     /// if anything transitioned.
     pub fn cancel_all_running(&mut self) -> bool {
         let (step_running, child_changed) = {
@@ -588,10 +588,10 @@ impl TranscriptMessage {
         }
     }
 
-    /// Append a subagent event as a nested child of this tool step.
+    /// Append an envoy event as a nested child of this tool step.
     ///
     /// Returns `true` if this message is a tool step and the event was stored.
-    pub fn push_subagent_event(&mut self, event: &SubagentEvent) -> bool {
+    pub fn push_envoy_event(&mut self, event: &EnvoyEvent) -> bool {
         let MessageKind::ToolStep {
             children, profile, ..
         } = &mut self.kind
@@ -599,16 +599,16 @@ impl TranscriptMessage {
             return false;
         };
         match event {
-            // The subagent announced its role — stamp it on the step so the
+            // The envoy announced its role — stamp it on the step so the
             // label can render "explore: …" / "plan: …" instead of a generic
-            // "Subagent". No child message is produced.
-            SubagentEvent::Started { profile: name } => {
+            // "Envoy". No child message is produced.
+            EnvoyEvent::Started { profile: name } => {
                 *profile = Some(name.clone());
             }
-            SubagentEvent::StreamStart => {
+            EnvoyEvent::StreamStart => {
                 children.push(TranscriptMessage::new(Role::Assistant, ""));
             }
-            SubagentEvent::StreamDelta(delta) => {
+            EnvoyEvent::StreamDelta(delta) => {
                 if let Some(last) = children
                     .last_mut()
                     .filter(|m| m.role == Role::Assistant && matches!(m.kind, MessageKind::Text))
@@ -620,7 +620,7 @@ impl TranscriptMessage {
                     children.push(msg);
                 }
             }
-            SubagentEvent::StreamEnd(content) => {
+            EnvoyEvent::StreamEnd(content) => {
                 if let Some(last) = children.last_mut().filter(|m| m.role == Role::Assistant) {
                     last.raw = content.clone();
                     last.reparse();
@@ -628,7 +628,7 @@ impl TranscriptMessage {
                     children.push(TranscriptMessage::new(Role::Assistant, content.clone()));
                 }
             }
-            SubagentEvent::ToolCall {
+            EnvoyEvent::ToolCall {
                 id,
                 name,
                 arguments,
@@ -639,7 +639,7 @@ impl TranscriptMessage {
                     arguments.clone(),
                 ));
             }
-            SubagentEvent::ToolResult {
+            EnvoyEvent::ToolResult {
                 id,
                 output,
                 duration_ms,
@@ -675,23 +675,23 @@ impl TranscriptMessage {
                     children.push(msg);
                 }
             }
-            SubagentEvent::Notice(notice) => {
+            EnvoyEvent::Notice(notice) => {
                 children.push(TranscriptMessage::notice(
                     notice_severity_from_core(notice.severity),
                     notice.render_text(),
                 ));
             }
-            SubagentEvent::Activity(_) => {}
-            // Full-duplex (ADR-0029): a subagent surfaced a permission /
-            // ask_user request up through the subagent tool. The down-direction
+            EnvoyEvent::Activity(_) => {}
+            // Full-duplex (ADR-0029): an envoy surfaced a permission /
+            // ask_user request up through the envoy tool. The down-direction
             // reply (registry → handle → reply_permission / reply_user_question)
             // is wired at the agent layer; rendering the nested prompt in the
             // TUI and routing the user's answer back down is the harness↔TUI
             // integration step that follows. Until then these are observed but
             // not rendered as a nested child step (the request still reaches
-            // the harness via the `TurnEvent::SubAgent` envelope, so a future
+            // the harness via the `TurnEvent::Envoy` envelope, so a future
             // handler can attach without changing the event shape).
-            SubagentEvent::PermissionRequest(_) | SubagentEvent::UserQuestionRequest(_) => {}
+            EnvoyEvent::PermissionRequest(_) | EnvoyEvent::UserQuestionRequest(_) => {}
         }
         true
     }
@@ -742,16 +742,16 @@ impl TranscriptMessage {
         }
     }
 
-    /// The `subagent` tool spawns a subagent. Such tool steps are rendered as a
-    /// compact, non-expandable step that navigates into a dedicated subagent
+    /// The `envoy` tool spawns an envoy. Such tool steps are rendered as a
+    /// compact, non-expandable step that navigates into a dedicated envoy
     /// view on activation (see the TUI focus stack) rather than expanding
     /// inline.
-    pub fn is_subagent_task(&self) -> bool {
-        matches!(&self.kind, MessageKind::ToolStep { name, .. } if name == "subagent")
+    pub fn is_envoy_task(&self) -> bool {
+        matches!(&self.kind, MessageKind::ToolStep { name, .. } if name == "envoy")
     }
 
     /// The call id of a tool step, used as the addressable identity of a
-    /// subagent task for the focus stack.
+    /// envoy task for the focus stack.
     pub fn tool_step_call_id(&self) -> Option<&str> {
         match &self.kind {
             MessageKind::ToolStep { id, .. } => Some(id),
@@ -759,9 +759,9 @@ impl TranscriptMessage {
         }
     }
 
-    /// The nested child messages emitted by a subagent task. Returns `None`
+    /// The nested child messages emitted by an envoy task. Returns `None`
     /// for non-tool-step messages.
-    pub fn subagent_children(&self) -> Option<&[TranscriptMessage]> {
+    pub fn envoy_children(&self) -> Option<&[TranscriptMessage]> {
         match &self.kind {
             MessageKind::ToolStep { children, .. } => Some(children),
             _ => None,
@@ -769,30 +769,30 @@ impl TranscriptMessage {
     }
 
     /// Mutable access to a tool step's child messages (used when the view is
-    /// zoomed into a subagent and its children are the active message stream).
-    pub fn subagent_children_mut(&mut self) -> Option<&mut Vec<TranscriptMessage>> {
+    /// zoomed into an envoy and its children are the active message stream).
+    pub fn envoy_children_mut(&mut self) -> Option<&mut Vec<TranscriptMessage>> {
         match &mut self.kind {
             MessageKind::ToolStep { children, .. } => Some(children),
             _ => None,
         }
     }
 
-    /// Short label for the subagent, shown in the subagent view's navigation
+    /// Short label for the envoy, shown in the envoy view's navigation
     /// bar. Prefixed with the role (`explore` / `plan` / `verify` / …) when
     /// the `Started` event has identified it, so the bar reads e.g.
     /// `plan · write the implementation plan` rather than a bare description.
-    pub fn subagent_label(&self) -> String {
+    pub fn envoy_label(&self) -> String {
         let MessageKind::ToolStep {
             arguments, profile, ..
         } = &self.kind
         else {
-            return "Subagent".to_string();
+            return "Envoy".to_string();
         };
         let label = parse_arguments_kv(arguments)
             .into_iter()
             .find(|(k, _)| k == "description")
             .map(|(_, v)| v)
-            .unwrap_or_else(|| "Subagent".to_string());
+            .unwrap_or_else(|| "Envoy".to_string());
         let label = truncate(&label, 48);
         match profile {
             Some(role) => format!("{} · {}", role, label),
@@ -800,14 +800,14 @@ impl TranscriptMessage {
         }
     }
 
-    /// One-line live status derived from the subagent's children and the
+    /// One-line live status derived from the envoy's children and the
     /// parent tool step's completion state, e.g. `↳ Running · 3 tool calls ·
     /// Grep "foo"` or `↳ Completed · 3 tool calls · 1.2s`. Returns
     /// `None` for non-task steps. Duration is only shown once the step reaches
     /// a terminal state; a running step surfaces progress instead of an
     /// accumulating timer.
-    pub fn subagent_status_line(&self) -> Option<String> {
-        if !self.is_subagent_task() {
+    pub fn envoy_status_line(&self) -> Option<String> {
+        if !self.is_envoy_task() {
             return None;
         }
         let MessageKind::ToolStep {
@@ -2149,40 +2149,38 @@ mod tests {
     }
 
     #[test]
-    fn subagent_task_is_detected_and_addressable() {
+    fn envoy_task_is_detected_and_addressable() {
         let task = TranscriptMessage::tool_step(
             "call_42",
-            "subagent",
+            "envoy",
             r#"{"description":"explore src","prompt":"..."}"#,
         );
-        assert!(task.is_subagent_task());
+        assert!(task.is_envoy_task());
         assert_eq!(task.tool_step_call_id(), Some("call_42"));
-        assert_eq!(task.subagent_children().map(|c| c.len()), Some(0));
-        assert_eq!(task.subagent_label(), "explore src");
+        assert_eq!(task.envoy_children().map(|c| c.len()), Some(0));
+        assert_eq!(task.envoy_label(), "explore src");
 
-        // A regular tool step is not a subagent task.
+        // A regular tool step is not an envoy task.
         let read = TranscriptMessage::tool_step("call_1", "read_text", r#"{"path":"a"}"#);
-        assert!(!read.is_subagent_task());
-        assert!(read.subagent_status_line().is_none());
+        assert!(!read.is_envoy_task());
+        assert!(read.envoy_status_line().is_none());
     }
 
     #[test]
-    fn subagent_started_event_labels_step_by_role() {
+    fn envoy_started_event_labels_step_by_role() {
         // A `Started` event stamps the bound profile name on the step so the
         // nav bar / collapsed summary read by role (`plan · …`) instead of a
-        // generic "Subagent".
+        // generic "Envoy".
         let mut task = TranscriptMessage::tool_step(
             "call_7",
-            "subagent",
+            "envoy",
             r#"{"description":"write the plan","prompt":"..."}"#,
         );
-        assert_eq!(task.subagent_label(), "write the plan");
-        assert!(
-            task.push_subagent_event(&neenee_core::SubagentEvent::Started {
-                profile: "explore".to_string()
-            })
-        );
-        assert_eq!(task.subagent_label(), "explore · write the plan");
+        assert_eq!(task.envoy_label(), "write the plan");
+        assert!(task.push_envoy_event(&neenee_core::EnvoyEvent::Started {
+            profile: "explore".to_string()
+        }));
+        assert_eq!(task.envoy_label(), "explore · write the plan");
         // The collapsed header picks the role up via `tool_step_summary` too.
         let header = task.tool_step_summary().expect("summary");
         assert!(
@@ -2192,31 +2190,28 @@ mod tests {
     }
 
     #[test]
-    fn subagent_status_reflects_children_and_completion() {
-        let mut task = TranscriptMessage::tool_step(
-            "call_9",
-            "subagent",
-            r#"{"description":"d","prompt":"p"}"#,
-        );
+    fn envoy_status_reflects_children_and_completion() {
+        let mut task =
+            TranscriptMessage::tool_step("call_9", "envoy", r#"{"description":"d","prompt":"p"}"#);
 
         // No children yet, still running.
-        let running = task.subagent_status_line().expect("running status");
+        let running = task.envoy_status_line().expect("running status");
         assert!(running.starts_with("↳ Running"), "got: {running}");
 
         // Streaming assistant text => a "thinking" suffix.
-        task.push_subagent_event(&SubagentEvent::StreamStart);
-        task.push_subagent_event(&SubagentEvent::StreamDelta("partial".into()));
-        let thinking = task.subagent_status_line().expect("thinking status");
+        task.push_envoy_event(&EnvoyEvent::StreamStart);
+        task.push_envoy_event(&EnvoyEvent::StreamDelta("partial".into()));
+        let thinking = task.envoy_status_line().expect("thinking status");
         assert!(thinking.starts_with("↳ Running"), "got: {thinking}");
         assert!(thinking.ends_with("thinking"), "got: {thinking}");
 
         // An in-flight child tool call surfaces the tool's header.
-        task.push_subagent_event(&SubagentEvent::ToolCall {
+        task.push_envoy_event(&EnvoyEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
         });
-        let running = task.subagent_status_line().expect("running status");
+        let running = task.envoy_status_line().expect("running status");
         assert!(running.starts_with("↳ Running"), "got: {running}");
         assert!(running.contains("Grep"), "got: {running}");
 
@@ -2227,34 +2222,34 @@ mod tests {
             neenee_core::ToolOutput::text("final answer"),
             1500
         ));
-        let done = task.subagent_status_line().expect("done status");
+        let done = task.envoy_status_line().expect("done status");
         assert!(done.starts_with("↳ Completed"), "got: {done}");
         assert!(done.contains("1 tool calls"), "got: {done}");
         assert!(done.contains("1.5s"), "got: {done}");
 
-        // Children are accessible for the dedicated subagent view.
-        assert_eq!(task.subagent_children().map(|c| c.len()), Some(2));
+        // Children are accessible for the dedicated envoy view.
+        assert_eq!(task.envoy_children().map(|c| c.len()), Some(2));
     }
 
     #[test]
-    fn subagent_failed_status_reports_failure() {
+    fn envoy_failed_status_reports_failure() {
         let mut task =
-            TranscriptMessage::tool_step("c", "subagent", r#"{"description":"d","prompt":"p"}"#);
-        task.push_subagent_event(&SubagentEvent::ToolCall {
+            TranscriptMessage::tool_step("c", "envoy", r#"{"description":"d","prompt":"p"}"#);
+        task.push_envoy_event(&EnvoyEvent::ToolCall {
             id: "i".into(),
             name: "bash".into(),
             arguments: "{}".into(),
         });
-        // The subagent failure is now signalled by the structured `failed`
-        // flag on `ToolOutput::Subagent`, not by an "Error:" text prefix.
-        let structured = neenee_core::ToolOutput::Subagent {
+        // The envoy failure is now signalled by the structured `failed`
+        // flag on `ToolOutput::Envoy`, not by an "Error:" text prefix.
+        let structured = neenee_core::ToolOutput::Envoy {
             summary: "Error: boom".into(),
             messages: Vec::new(),
             usage: neenee_core::TokenUsage::default(),
             failed: true,
         };
         assert!(task.finish_tool_step("c", structured.to_text(), structured, 100));
-        let status = task.subagent_status_line().unwrap();
+        let status = task.envoy_status_line().unwrap();
         assert!(status.starts_with("↳ Failed"), "got: {status}");
     }
 
@@ -2332,36 +2327,33 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_subagent_also_cancels_its_running_children() {
-        let mut task = TranscriptMessage::tool_step(
-            "task_1",
-            "subagent",
-            r#"{"description":"d","prompt":"p"}"#,
-        );
+    fn cancelling_a_envoy_also_cancels_its_running_children() {
+        let mut task =
+            TranscriptMessage::tool_step("task_1", "envoy", r#"{"description":"d","prompt":"p"}"#);
         // A nested tool call still in flight.
-        task.push_subagent_event(&SubagentEvent::ToolCall {
+        task.push_envoy_event(&EnvoyEvent::ToolCall {
             id: "inner".into(),
             name: "grep".into(),
             arguments: r#"{"pattern":"foo"}"#.into(),
         });
-        let children = task.subagent_children().expect("has children");
+        let children = task.envoy_children().expect("has children");
         assert_eq!(
             children[0].tool_step_status(),
             Some(ToolStepStatus::Running)
         );
 
         // Interrupting the parent task cancels it AND the nested running child,
-        // so the subagent view never shows a stuck "running" step.
+        // so the envoy view never shows a stuck "running" step.
         assert!(task.cancel_tool_step("task_1"));
         assert_eq!(task.tool_step_status(), Some(ToolStepStatus::Cancelled));
-        let children = task.subagent_children().expect("has children");
+        let children = task.envoy_children().expect("has children");
         assert_eq!(
             children[0].tool_step_status(),
             Some(ToolStepStatus::Cancelled),
             "nested child must converge with the parent"
         );
 
-        let status = task.subagent_status_line().expect("status line");
+        let status = task.envoy_status_line().expect("status line");
         assert!(status.starts_with("↳ Cancelled"), "got: {status}");
     }
 

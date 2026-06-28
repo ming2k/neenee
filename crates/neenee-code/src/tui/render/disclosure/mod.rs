@@ -1,9 +1,9 @@
 //! Disclosure state machine and presentation primitives.
 //!
 //! A **disclosure** is any collapsible block in the transcript — a tool step, a
-//! subagent task, or a reasoning trace — sharing one summary/body model and one
+//! envoy task, or a reasoning trace — sharing one summary/body model and one
 //! color contract. (The leaf renderers keep their kind-specific names —
-//! [`draw_tool_step`], [`draw_reasoning_trace`], [`draw_subagent_inline_step`] —
+//! [`draw_tool_step`], [`draw_reasoning_trace`], [`draw_envoy_inline_step`] —
 //! since only a tool call really reads as a "step"; this module is the umbrella
 //! abstraction over all three.) Historically each kind computed its
 //! summary-line color from a tangle of ad-hoc flags (`expanded`, `focused`,
@@ -57,7 +57,7 @@
 //!
 //! When an accent is present it supplies the hue and the weight channel
 //! modulates its brightness (see [`state::summary_text_color`]), so an accent
-//! step — e.g. a long-running subagent task — still shifts tone on hover (while
+//! step — e.g. a long-running envoy task — still shifts tone on hover (while
 //! collapsed) and leans to the foreground when open, instead of sitting at one
 //! flat color. Keeping the channels composable is what makes the behavior
 //! consistent across step kinds: a collapsed step lifts toward the hover tone
@@ -69,7 +69,7 @@ use super::Theme;
 mod renderers;
 mod state;
 pub use renderers::{
-    StickyStep, draw_reasoning_trace, draw_side_banner, draw_sticky_summary_if_needed,
-    draw_subagent_bar, draw_subagent_inline_step, draw_tool_step,
+    StickyStep, draw_envoy_bar, draw_envoy_inline_step, draw_reasoning_trace, draw_side_banner,
+    draw_sticky_summary_if_needed, draw_tool_step,
 };
 pub use state::{Disclosure, Interaction, summary_text_color};

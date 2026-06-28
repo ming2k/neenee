@@ -1,6 +1,6 @@
 //! Content-addressed blob store (C13 foundation).
 //!
-//! Large, repetitive payloads (long tool outputs, subagent transcripts) are
+//! Large, repetitive payloads (long tool outputs, envoy transcripts) are
 //! stored once under a SHA-256 hash and referenced by that hash. This reduces
 //! duplication across sessions/forks and gives future features (semantic
 //! search, sync) a stable content key.

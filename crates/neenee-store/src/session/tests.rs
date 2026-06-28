@@ -107,21 +107,21 @@ fn checksum_is_none_for_legacy_files() {
 }
 
 #[tokio::test]
-async fn session_persists_subagent_children_round_trip() {
+async fn session_persists_envoy_children_round_trip() {
     // End-to-end persistence contract: a session that contains a `task`
-    // tool call must round-trip the subagent's nested transcript through
+    // tool call must round-trip the envoy's nested transcript through
     // session.json, so a subsequent `SessionStore::load_for_project` (the
     // production resume path) restores the children intact. Before Phase 3
     // children were silently dropped because `Message::children` did not
     // exist and the harness only persisted the textual summary.
     let directory =
-        std::env::temp_dir().join(format!("neenee-subagent-persist-{}", uuid::Uuid::new_v4()));
+        std::env::temp_dir().join(format!("neenee-envoy-persist-{}", uuid::Uuid::new_v4()));
     let path = directory.join("session.json");
     let store = SessionStore::for_path(path.clone());
 
     let call = neenee_core::ToolCall {
         id: "call_sub1".to_string(),
-        name: "subagent".to_string(),
+        name: "envoy".to_string(),
         arguments: r#"{"description":"d","prompt":"p"}"#.to_string(),
     };
     let assistant = Message::new(neenee_core::Role::Assistant, "")
@@ -130,13 +130,13 @@ async fn session_persists_subagent_children_round_trip() {
         tool_calls: Some(vec![call.clone()]),
         ..assistant
     };
-    let subagent_transcript = vec![
+    let envoy_transcript = vec![
         Message::new(neenee_core::Role::User, "find foo"),
         Message::new(neenee_core::Role::Assistant, "looking..."),
         Message::new(neenee_core::Role::Assistant, "foo is at src/foo.rs"),
     ];
     let tool = Message::tool_result(&call, "[task result]:\nfoo is at src/foo.rs")
-        .with_children(subagent_transcript);
+        .with_children(envoy_transcript);
     store
         .replace_messages(vec![
             Message::new(neenee_core::Role::User, "where is foo?"),

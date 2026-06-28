@@ -29,8 +29,8 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
 use neenee_core::{
-    AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind,
-    NoticeSeverity, NoticeSource, NoticeSurface, Provider, Pursuit, Tool, TurnEvent,
+    AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind, NoticeSeverity,
+    NoticeSource, NoticeSurface, Provider, Pursuit, Tool, TurnEvent,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
 use neenee_tools::commands::{CustomCommand, expand_command};
@@ -153,7 +153,7 @@ pub async fn dispatch(
         Some(BuiltinCmd::Review) => {
             // /review — on-demand session review (ADR-0018,
             // superseding the periodic ADR-0016 design).
-            // Runs the bounded read-only REVIEW subagent
+            // Runs the bounded read-only REVIEW envoy
             // against the current transcript and reports the
             // verdict(s). Review no longer fires on a round
             // schedule; it only runs when asked. Takes no

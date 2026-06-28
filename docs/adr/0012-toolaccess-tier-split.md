@@ -158,5 +158,5 @@ Migration:
   prompt.
 - Predecessor: [ADR-0011](0011-subagent-profiles.md) — the profile primitive
   this extends.
-- [Sub-agents → Tool admission](../explanation/agent-design/subagents.md#tool-admission)
+- [Sub-agents → Tool admission](../explanation/agent-design/envoys.md#tool-admission)
   and [Built-in tools → Tool access](../reference/tools/access.md).

@@ -17,7 +17,7 @@
 use neenee_agent::catalog;
 use neenee_agent::orchestration::send_harness_state;
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::{Agent, SubagentRegistry};
+use neenee_agent::{Agent, EnvoyRegistry};
 use neenee_core::{AgentRequest, AgentResponse, Message, Provider, Tool};
 use neenee_store::{
     RepeatStore, config::Config, embedding, provider_usage::ProviderUsage, session::SessionStore,
@@ -69,10 +69,10 @@ pub struct Harness {
     pub provider_holder: Arc<RwLock<Arc<dyn Provider>>>,
     /// Shared skills registry.
     pub skills_registry: Arc<SkillRegistry>,
-    /// Full-duplex subagent registry (ADR-0029): maps the parent tool-call
+    /// Full-duplex envoy registry (ADR-0029): maps the parent tool-call
     /// id to the live child handle so a permission / ask_user reply can be
-    /// routed back down into the specific subagent that surfaced it.
-    pub subagent_registry: Arc<SubagentRegistry>,
+    /// routed back down into the specific envoy that surfaced it.
+    pub envoy_registry: Arc<EnvoyRegistry>,
     /// Live MCP runtime: the connected server set, their tools, and status.
     /// Mutated by the `/mcp` modal (toggle / reconnect) and the periodic
     /// catalog refresh; read for the session-context snapshot's MCP pane.
@@ -130,7 +130,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
         mut provider_usage,
         provider_holder: provider_for_task,
         skills_registry,
-        subagent_registry,
+        envoy_registry,
         mcp_runtime,
         commands: commands_for_task,
         embedding_store: embedding_store_for_commands,
@@ -196,7 +196,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
             } => {
                 crate::handlers_permission::reply(
                     &agent,
-                    &subagent_registry,
+                    &envoy_registry,
                     &resp_tx,
                     request_id,
                     decision,
@@ -211,7 +211,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
             } => {
                 crate::handlers_permission::reply_question(
                     &agent,
-                    &subagent_registry,
+                    &envoy_registry,
                     &side,
                     &resp_tx,
                     request_id,

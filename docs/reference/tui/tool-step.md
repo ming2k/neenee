@@ -88,7 +88,7 @@ show the full structured payload (not the transcript-truncated view). For
 `Shell` the expanded body renders `$ command`, the captured lines in
 **arrival order** (stdout and stderr interleaved as written, stderr in
 `error_fg`), and the exit/truncation footer directly from the
-`ToolOutput::Shell` fields. Sub-agent `subagent` steps navigate into the
+`ToolOutput::Shell` fields. Envoy `envoy` steps navigate into the
 child session on `Enter`/click instead of expanding. The bulk `Ctrl+T`
 toggle expands or collapses every step at once. See
 [ADR-0001](../../adr/0001-tool-rendering-redesign.md).
@@ -103,7 +103,7 @@ sticky-pin, and narrow-fallback behavior. Tool-step specifics:
 - `Ctrl+T` expands or collapses all tool steps.
 - `↑` / `↓` while a step is focused includes visible tool steps in the keyboard focus order.
 
-## Sub-agent children
+## Envoy children
 
 Nested sub-task tool calls render as indented child steps inside the parent's
 expanded body (6-space indent), flat on `app_bg`. Each child shows a compact

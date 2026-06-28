@@ -251,7 +251,7 @@ pub(crate) fn default_prompt_registry() -> PromptRegistry {
 // ---------------------------------------------------------------------------
 // Session-review system-channel sections (ADR-0039 stage 6).
 //
-// The `/review` diagnostic spawns a read-only reviewer subagent that used to
+// The `/review` diagnostic spawns a read-only reviewer envoy that used to
 // pre-seed its system message (`build_reviewer_system_prompt`) and then run
 // the streaming turn loop. But `ensure_system_prompt` replaces any leading
 // system message on round 1, so the seeded persona + dimensions + JSON
@@ -356,7 +356,7 @@ fn render_review_dimensions(dimensions: &[Arc<dyn SessionReview>]) -> String {
     body
 }
 
-/// Build the reviewer subagent's prompt registry: persona + dimensions + JSON
+/// Build the reviewer envoy's prompt registry: persona + dimensions + JSON
 /// contract. Installed on the reviewer via [`Agent::set_prompt_registry`] so
 /// its head system message — rebuilt every round — is the review composition.
 pub(crate) fn reviewer_prompt_registry(dimensions: &[Arc<dyn SessionReview>]) -> PromptRegistry {

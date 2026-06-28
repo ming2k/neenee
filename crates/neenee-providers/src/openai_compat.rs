@@ -596,7 +596,7 @@ impl Provider for OpenAiCompatProvider {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         })
     }
@@ -922,7 +922,7 @@ mod tests {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         };
         let good_result = Message {
@@ -938,7 +938,7 @@ mod tests {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         };
         let orphan_result = Message {

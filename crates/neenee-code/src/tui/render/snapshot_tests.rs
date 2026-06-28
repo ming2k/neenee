@@ -474,7 +474,7 @@ fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) 
                 input: "",
                 byte_cursor: 0,
                 chrome_hidden: false,
-                subagent_bar: None,
+                envoy_bar: None,
                 side_banner: None,
                 pursuit: None,
                 todos: None,

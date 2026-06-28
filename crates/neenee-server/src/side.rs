@@ -63,8 +63,8 @@ impl SideSession {
         // `ProxyProvider` holder as the primary, which clones the inner
         // `Arc<dyn Provider>` per call and is safe under concurrency
         // (ADR-0017 §2). Tools come from the cached base snapshot (built-in +
-        // MCP, no `SubagentTool`) so a side chat recurses no further than the
-        // primary — mirroring the subagent profile filter in `SubagentTool`.
+        // MCP, no `EnvoyTool`) so a side chat recurses no further than the
+        // primary — mirroring the envoy profile filter in `EnvoyTool`.
         let side_provider: Arc<dyn Provider> =
             Arc::new(ProxyProvider::new(provider_holder.clone()));
         let agent = Arc::new(Agent::new(
@@ -78,7 +78,7 @@ impl SideSession {
         // A side conversation is a quick aside; unattended its write tools so
         // it never raises a permission modal whose reply could not be routed
         // back to the side `Agent` through the shared permission channel. This
-        // mirrors the subagent policy (`subagent_tool.rs` sets `unattended`).
+        // mirrors the envoy policy (`envoy_tool.rs` sets `unattended`).
         agent.set_unattended(true);
 
         Ok(Self {
@@ -139,7 +139,7 @@ pub fn spawn_parent_status_watcher(
 pub async fn start_active_turn(
     active_view_side: &AtomicBool,
     side: &Arc<AsyncRwLock<Option<SideSession>>>,
-    primary_agent: &Arc<Agent>,
+    principal: &Arc<Agent>,
     primary_history: &Arc<tokio::sync::Mutex<Vec<Message>>>,
     primary_session: &Arc<SessionStore>,
     primary_token_slot: &Arc<AsyncRwLock<Option<CancellationToken>>>,
@@ -149,7 +149,7 @@ pub async fn start_active_turn(
     input: TurnInput,
 ) {
     let projection =
-        ContextProjectionSettings::from_config(config, active_context_window(primary_agent));
+        ContextProjectionSettings::from_config(config, active_context_window(principal));
     let retry_max_attempts = config.provider_retry_max_attempts;
     let retry_base_ms = config.provider_retry_base_ms;
     let retry_max_ms = config.provider_retry_max_ms;
@@ -171,7 +171,7 @@ pub async fn start_active_turn(
                 )
             } else {
                 (
-                    primary_agent.clone(),
+                    principal.clone(),
                     primary_history.clone(),
                     primary_session.clone(),
                     primary_token_slot.clone(),
@@ -181,7 +181,7 @@ pub async fn start_active_turn(
             }
         } else {
             (
-                primary_agent.clone(),
+                principal.clone(),
                 primary_history.clone(),
                 primary_session.clone(),
                 primary_token_slot.clone(),

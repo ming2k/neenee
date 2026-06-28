@@ -67,15 +67,15 @@ pub(super) struct UiRuntime {
     /// lost — the next `notified()` returns at once.
     pub dirty_notify: Arc<tokio::sync::Notify>,
     /// Full-duplex (ADR-0029): request_id → the parent tool-call id of the
-    /// subagent that surfaced a permission or `ask_user` request (carried up
-    /// as a `TurnEvent::SubAgent`). When the user answers in the modal, the
+    /// envoy that surfaced a permission or `ask_user` request (carried up
+    /// as a `TurnEvent::Envoy`). When the user answers in the modal, the
     /// loop looks the id up here to tag the reply with `parent_call_id` so the
-    /// harness routes it down into the live child via the subagent registry.
+    /// harness routes it down into the live child via the envoy registry.
     /// Top-level requests are absent here → `None` → legacy path. Kept as a
     /// side-table so the modal queue and rendering stay unchanged.
-    pub subagent_permission_parent: Arc<Mutex<HashMap<String, String>>>,
-    /// Companion to [`Self::subagent_permission_parent`] for `ask_user` replies.
-    pub subagent_question_parent: Arc<Mutex<HashMap<String, String>>>,
+    pub envoy_permission_parent: Arc<Mutex<HashMap<String, String>>>,
+    /// Companion to [`Self::envoy_permission_parent`] for `ask_user` replies.
+    pub envoy_question_parent: Arc<Mutex<HashMap<String, String>>>,
     pub messages: Arc<Versioned<Vec<TranscriptMessage>>>,
     /// Side-conversation transcript buffer (ADR-0017). The listener appends
     /// per-turn events tagged with the side `session_id` here; the loop
@@ -169,7 +169,7 @@ async fn handle_permission_submit(app: &mut App, runtime: &UiRuntime) {
         };
         let request_id = request.id;
         let parent_call_id = runtime
-            .subagent_permission_parent
+            .envoy_permission_parent
             .lock()
             .await
             .remove(&request_id);
@@ -184,7 +184,7 @@ async fn handle_permission_submit(app: &mut App, runtime: &UiRuntime) {
             // deadlocks.
             let queued: Vec<PermissionRequest> =
                 runtime.pending_permission.lock().await.drain(..).collect();
-            let mut parents = runtime.subagent_permission_parent.lock().await;
+            let mut parents = runtime.envoy_permission_parent.lock().await;
             for pending in queued {
                 let parent_call_id = parents.remove(&pending.id);
                 let _ = app.tx.send(AgentRequest::PermissionReply {
@@ -616,24 +616,24 @@ pub(super) async fn run_app_loop(
                 let recess = app.active_modal.recess();
                 let chrome_hidden = recess == Recess::Takeover;
 
-                // When zoomed into a subagent, render its child messages and show
+                // When zoomed into an envoy, render its child messages and show
                 // a navigation bar; otherwise render the root conversation.
                 let view_messages = app.focused_messages();
                 // `/btw` side banner (ADR-0017): shown only while the side view is
-                // active. The subagent zoom and the side view are mutually
+                // active. The envoy zoom and the side view are mutually
                 // exclusive, so the two banners never coexist.
                 let side_banner = app.in_side_view.then_some(app.parent_status);
-                let subagent_bar = app.focus_stack.last().and_then(|current| {
+                let envoy_bar = app.focus_stack.last().and_then(|current| {
                     let tasks: Vec<&TranscriptMessage> = app
                         .messages
                         .iter()
-                        .filter(|message| message.is_subagent_task())
+                        .filter(|message| message.is_envoy_task())
                         .collect();
                     let idx = tasks.iter().position(|message| {
                         message.tool_step_call_id() == Some(current.call_id.as_str())
                     })?;
-                    Some(render::SubagentBarInfo {
-                        label: tasks.get(idx)?.subagent_label(),
+                    Some(render::EnvoyBarInfo {
+                        label: tasks.get(idx)?.envoy_label(),
                         index: idx + 1,
                         total: tasks.len(),
                     })
@@ -660,7 +660,7 @@ pub(super) async fn run_app_loop(
                         input: &masked_input,
                         byte_cursor: app.byte_cursor(),
                         chrome_hidden,
-                        subagent_bar,
+                        envoy_bar,
                         side_banner,
                         pursuit: app.current_pursuit.as_ref(),
                         todos: app.todos.as_ref(),
@@ -752,7 +752,7 @@ pub(super) async fn run_app_loop(
                         // background. For the editor's key field the composer would
                         // also panic: the masked key's byte cursor is computed
                         // against the unmasked string.
-                    } else if !app.in_subagent_view() {
+                    } else if !app.in_envoy_view() {
                         // The composer stays mounted for the dim-recess modals
                         // (Help / Session /
                         // Activity) so the footer layout doesn't shift when the
@@ -1153,7 +1153,7 @@ pub(super) async fn run_app_loop(
             } else {
                 app.completion_kind()
             };
-            let in_subagent_view = app.in_subagent_view();
+            let in_envoy_view = app.in_envoy_view();
             let action = input::process_event(
                 event,
                 &mut app.input,
@@ -1167,7 +1167,7 @@ pub(super) async fn run_app_loop(
                     suggestion_index: app.suggestion_index,
                     permission_confirm_always: app.permission_confirm_always,
                     permission_show_details: app.permission_show_details,
-                    in_subagent_view,
+                    in_envoy_view,
                     in_side_view: app.in_side_view,
                     has_focused_target: app.focused_target.is_some(),
                     has_queued: !app.pending_dispatch.is_empty(),
@@ -1255,16 +1255,16 @@ pub(super) async fn run_app_loop(
                             });
                         }
                     } else if let Some((start, end)) = app.selection.active_normalized_range() {
-                        // Enter on a selected step: navigate into a subagent
+                        // Enter on a selected step: navigate into an envoy
                         // task, otherwise toggle that step's expansion.
                         if start.message_idx == end.message_idx {
                             let mi = start.message_idx;
                             let mut messages = runtime.messages.write().await;
-                            // A subagent task navigates into its view instead
+                            // An envoy task navigates into its view instead
                             // of expanding.
                             let enter_id = resolve_focused_mut(&mut messages, &app.focus_stack, mi)
                                 .and_then(|message| {
-                                    if message.is_subagent_task() {
+                                    if message.is_envoy_task() {
                                         message.tool_step_call_id().map(String::from)
                                     } else {
                                         None
@@ -1272,7 +1272,7 @@ pub(super) async fn run_app_loop(
                                 });
                             if let Some(id) = enter_id {
                                 drop(messages);
-                                app.enter_subagent(id);
+                                app.enter_envoy(id);
                             } else {
                                 let toggled = app.toggle_step_pinned(&mut messages, mi);
                                 drop(messages);
@@ -2125,14 +2125,14 @@ pub(super) async fn run_app_loop(
                     // Read the target state from the focused view (a snapshot
                     // clone), then apply to the live messages.
                     let expand = app.focused_messages().iter().any(|message| {
-                        !message.is_subagent_task() && message.tool_step_expanded() == Some(false)
+                        !message.is_envoy_task() && message.tool_step_expanded() == Some(false)
                     });
                     let mut messages = runtime.messages.write().await;
                     for message in focused_messages_mut(&mut messages, &app.focus_stack) {
-                        // Subagent task steps are navigated, not expanded.
+                        // Envoy task steps are navigated, not expanded.
                         // This is a user bulk action → pin each step so the
                         // choice survives later lifecycle transitions.
-                        if !message.is_subagent_task() {
+                        if !message.is_envoy_task() {
                             message.pin_tool_step_expanded(expand);
                         }
                     }
@@ -2168,7 +2168,7 @@ pub(super) async fn run_app_loop(
                                     target.message_idx,
                                 )
                                 .and_then(|message| {
-                                    if message.is_subagent_task() {
+                                    if message.is_envoy_task() {
                                         message.tool_step_call_id().map(String::from)
                                     } else {
                                         None
@@ -2176,7 +2176,7 @@ pub(super) async fn run_app_loop(
                                 });
                                 if let Some(id) = enter_id {
                                     drop(messages);
-                                    app.enter_subagent(id);
+                                    app.enter_envoy(id);
                                 } else {
                                     // Enter mirrors the mouse click on a tool
                                     // step's summary: toggle its inline
@@ -2218,8 +2218,8 @@ pub(super) async fn run_app_loop(
                     // chip-or-inline logic as Ctrl+V without an async hop.
                     clipboard_ops::apply_clipboard_paste(app, clipboard::ClipboardRead::Text(text));
                 }
-                input::InputAction::ExitSubAgent => {
-                    app.exit_subagent();
+                input::InputAction::ExitEnvoy => {
+                    app.exit_envoy();
                 }
                 input::InputAction::ExitSideView => {
                     // `/btw`: return to the primary transcript (ADR-0017).
@@ -2607,7 +2607,7 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                     app.permission_confirm_always = false;
                     app.permission_show_details = false;
-                    let mut parents = runtime.subagent_permission_parent.lock().await;
+                    let mut parents = runtime.envoy_permission_parent.lock().await;
                     for pending in queued {
                         let parent_call_id = parents.remove(&pending.id);
                         let _ = app.tx.send(AgentRequest::PermissionReply {
@@ -2717,7 +2717,7 @@ pub(super) async fn run_app_loop(
                                 app.focused_messages().get(mi).and_then(|message| {
                                     if message.is_thinking() {
                                         Some(InteractiveTarget::thinking(mi))
-                                    } else if message.is_tool_step() || message.is_subagent_task() {
+                                    } else if message.is_tool_step() || message.is_envoy_task() {
                                         Some(InteractiveTarget::tool_step(mi))
                                     } else {
                                         None
@@ -2745,7 +2745,7 @@ pub(super) async fn run_app_loop(
                                 app.drag.begin_range(&mut app.selection, cursor);
                             }
                             ClickTarget::StepSummary { message_idx, kind } => {
-                                // Clicked a step summary: navigate into a subagent
+                                // Clicked a step summary: navigate into an envoy
                                 // task, otherwise toggle that step's disclosure.
                                 let mi = message_idx;
                                 app.focused_target = Some(kind.focus_target(mi));
@@ -2758,7 +2758,7 @@ pub(super) async fn run_app_loop(
                                             mi,
                                         )
                                         .and_then(|message| {
-                                            if message.is_subagent_task() {
+                                            if message.is_envoy_task() {
                                                 message.tool_step_call_id().map(String::from)
                                             } else {
                                                 None
@@ -2766,7 +2766,7 @@ pub(super) async fn run_app_loop(
                                         });
                                         if let Some(id) = enter_id {
                                             drop(messages);
-                                            app.enter_subagent(id);
+                                            app.enter_envoy(id);
                                         } else {
                                             app.toggle_step_pinned(&mut messages, mi);
                                             drop(messages);
@@ -2864,7 +2864,7 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::Hover { x, y } => {
-                    // Every step summary (tool step, subagent task, reasoning
+                    // Every step summary (tool step, envoy task, reasoning
                     // trace) carries the same hover affordance. When the pointer
                     // rests on one — either the inline summary or the sticky
                     // pinned variant — record its message index so the next draw
@@ -2879,9 +2879,7 @@ pub(super) async fn run_app_loop(
                                 .read()
                                 .await
                                 .get(mi)
-                                .map(|m| {
-                                    m.is_thinking() || m.is_tool_step() || m.is_subagent_task()
-                                })
+                                .map(|m| m.is_thinking() || m.is_tool_step() || m.is_envoy_task())
                                 .unwrap_or(false);
                             app.hovered_step = is_step.then_some(mi);
                         }
@@ -2933,7 +2931,7 @@ pub(super) fn compact_retry_reason(message: &str) -> String {
 
 /// Resolve a mutable reference to the message at index `mi` within the
 /// currently focused view: the root conversation when the focus stack is empty,
-/// or the focused subagent task's child stream otherwise. Selection and layout
+/// or the focused envoy task's child stream otherwise. Selection and layout
 /// indices are recorded against whichever slice was rendered, so mutations must
 /// resolve through the same context.
 pub(super) fn resolve_focused_mut<'a>(
@@ -2945,13 +2943,13 @@ pub(super) fn resolve_focused_mut<'a>(
         return messages.get_mut(mi);
     };
     let task_idx = messages.iter().position(|message| {
-        message.is_subagent_task() && message.tool_step_call_id() == Some(current.call_id.as_str())
+        message.is_envoy_task() && message.tool_step_call_id() == Some(current.call_id.as_str())
     })?;
-    messages[task_idx].subagent_children_mut()?.get_mut(mi)
+    messages[task_idx].envoy_children_mut()?.get_mut(mi)
 }
 
 /// Iterate mutable messages in the currently focused view (the root
-/// conversation, or the focused subagent task's child stream) for bulk
+/// conversation, or the focused envoy task's child stream) for bulk
 /// expand/collapse operations. Callers filter by kind as needed.
 pub(super) fn focused_messages_mut<'a>(
     messages: &'a mut [TranscriptMessage],
@@ -2961,11 +2959,11 @@ pub(super) fn focused_messages_mut<'a>(
         None => Box::new(messages.iter_mut()),
         Some(current) => {
             let task_idx = messages.iter().position(|message| {
-                message.is_subagent_task()
+                message.is_envoy_task()
                     && message.tool_step_call_id() == Some(current.call_id.as_str())
             });
             match task_idx {
-                Some(idx) => match messages[idx].subagent_children_mut() {
+                Some(idx) => match messages[idx].envoy_children_mut() {
                     Some(children) => Box::new(children.iter_mut()),
                     None => Box::new(std::iter::empty()),
                 },
@@ -3094,7 +3092,7 @@ pub(super) fn display_status(
 ///
 /// This is the effect interpreter — the *only* place the question modal touches
 /// the agent channel, the pending-request queue, or the modal/queue sync. The
-/// `Reply` effect looks up the subagent parent routing key (so a subagent's
+/// `Reply` effect looks up the envoy parent routing key (so an envoy's
 /// answer routes back down to it), sends the reply, and removes the request
 /// from the queue; `Closed` does the same minus the reply (empty answers). In
 /// both cases the per-frame queue sync (above) picks up the new queue front on
@@ -3114,7 +3112,7 @@ mod question_effects {
                     answers,
                 } => {
                     let parent_call_id = runtime
-                        .subagent_question_parent
+                        .envoy_question_parent
                         .lock()
                         .await
                         .remove(request_id);

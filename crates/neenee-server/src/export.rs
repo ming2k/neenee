@@ -8,7 +8,7 @@
 //! tells the receiving agent how to use the document, then a chronological
 //! transcript of user prompts, assistant replies, tool calls, and tool
 //! results. Hidden and system messages are skipped (mirroring
-//! `crate::tui::transcript` rendering), and subagent transcripts nested
+//! `crate::tui::transcript` rendering), and envoy transcripts nested
 //! under `task` tool results are summarised inline rather than dumped in full
 //! so the export stays scannable.
 
@@ -200,18 +200,18 @@ fn render_tool_call<'a>(
             out.push_str("\n\n");
         }
         if let Some(children) = result.children.as_ref() {
-            render_subagent_summary(children, out);
+            render_envoy_summary(children, out);
         }
     } else {
         out.push_str("_(no result recorded — the call may have been interrupted.)_\n\n");
     }
 }
 
-/// Summarise a subagent transcript inlined on a `task` tool result. Dumping
+/// Summarise an envoy transcript inlined on a `task` tool result. Dumping
 /// the full nested transcript would balloon the export past what a receiving
 /// agent needs; instead we surface the task description, message count, and
 /// whether the run finished in an error state.
-fn render_subagent_summary(children: &[Message], out: &mut String) {
+fn render_envoy_summary(children: &[Message], out: &mut String) {
     if children.is_empty() {
         return;
     }
@@ -222,7 +222,7 @@ fn render_subagent_summary(children: &[Message], out: &mut String) {
         .count();
     let tool_count = children.iter().filter(|m| m.role == Role::Tool).count();
     out.push_str(&format!(
-        "_Sub-agent transcript: {} user / {} assistant / {} tool messages._\n\n",
+        "_Envoy transcript: {} user / {} assistant / {} tool messages._\n\n",
         user_count, assistant_count, tool_count
     ));
 }

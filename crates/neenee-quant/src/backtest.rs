@@ -102,7 +102,7 @@ mod tests {
         assert!(!tool().description().is_empty());
         // Simulation only: no account mutation, no user, no control flow.
         assert!(!tool().requires_user());
-        assert!(!tool().spawns_subagent());
+        assert!(!tool().spawns_envoy());
         assert!(!tool().affects_control_flow());
         // Read-only tools declare no locatable scope target.
         assert!(matches!(

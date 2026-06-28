@@ -122,7 +122,7 @@ mod tests {
         assert!(!tool().description().is_empty());
         // Read-only tool: no scope target, no user, no control flow.
         assert!(!tool().requires_user());
-        assert!(!tool().spawns_subagent());
+        assert!(!tool().spawns_envoy());
         assert!(!tool().affects_control_flow());
     }
 

@@ -1,7 +1,7 @@
 # Frame layout
 
 How the terminal rect is divided across the TUI's three viewing modes: the
-**root conversation**, the **sub-agent zoom view**, and the **modal overlay**
+**root conversation**, the **envoy zoom view**, and the **modal overlay**
 state. Component-by-component detail lives on each component's own page;
 this one owns the rect math, the chrome-hiding rules, and the measurements
 table.
@@ -68,8 +68,8 @@ is visible):
 
 | Row | Height | When present |
 |-----|--------|--------------|
-| Activity bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle`; not in sub-agent view; chrome visible. Unifies the prior pursuit bar, status bar, and todos/review segments into one click-to-open bar. |
-| Input box | `COMPOSER_VERTICAL_CHROME_ROWS + wrapped_lines`, capped at `terminal_height / 2`, min `COMPOSER_MIN_HEIGHT = 3` | Not in sub-agent view; chrome visible |
+| Activity bar | `STATUS_BAR_ROWS = 1` | Activity is non-empty and not `idle`; not in envoy view; chrome visible. Unifies the prior pursuit bar, status bar, and todos/review segments into one click-to-open bar. |
+| Input box | `COMPOSER_VERTICAL_CHROME_ROWS + wrapped_lines`, capped at `terminal_height / 2`, min `COMPOSER_MIN_HEIGHT = 3` | Not in envoy view; chrome visible |
 | Hint bar | `HINT_BAR_ROWS = 1` | Chrome visible (always, when no modal is open) |
 
 ```text
@@ -100,11 +100,11 @@ the user always see which step's body they are looking at, and click to
 collapse it, without forcing a scroll anchor. Rendered by
 `draw_sticky_summary_if_needed`; see [expandable step](expandable-step.md).
 
-## Sub-agent zoom view
+## Envoy zoom view
 
-When the user zooms into a `subagent` tool step, the footer is hidden entirely
+When the user zooms into an `envoy` tool step, the footer is hidden entirely
 and the transcript chunk is split to make room for a one-row navigation bar
-at the bottom. The message stream is the focused sub-agent's child messages,
+at the bottom. The message stream is the focused envoy's child messages,
 not the root conversation.
 
 ```text
@@ -117,7 +117,7 @@ not the root conversation.
 │   …user / assistant / tool steps / thinking steps…           │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│  Task  explore the codebase  (1 of 3)   Esc back  [ prev  ] next │  ← sub-agent bar
+│  Task  explore the codebase  (1 of 3)   Esc back  [ prev  ] next │  ← envoy bar
 ├──────────────────────────────────────────────────────────────┤
 │app_bg  (bottom viewport margin, 1 row)                       │
 └──────────────────────────────────────────────────────────────┘
@@ -126,11 +126,11 @@ not the root conversation.
 | Region | Constraint | Height |
 |--------|-----------|--------|
 | Transcript (children) | `Min(0)` | fills |
-| Sub-agent bar | `Length(SUBAGENT_BAR_ROWS = 1)` | 1 |
+| Envoy bar | `Length(ENVOY_BAR_ROWS = 1)` | 1 |
 
 Status bar, activity bar, input box, and hint bar all collapse to 0 —
 the zoomed view is read-only, with the navigation bar as its only chrome. See
-[Sub-agent view](subagent-view.md) for the focus stack that drives this
+[Envoy view](envoy-view.md) for the focus stack that drives this
 mode and the bar's contents.
 
 ## Modal overlay view
@@ -214,7 +214,7 @@ the transcript content above.
 | Footer side inset | 2 cols (matches `TRANSCRIPT_H_INSET`) | `FOOTER_H_INSET` |
 | Activity bar height | 1 row | `STATUS_BAR_ROWS` |
 | Hint bar height | 1 row | `HINT_BAR_ROWS` |
-| Sub-agent bar height | 1 row | `SUBAGENT_BAR_ROWS` |
+| Envoy bar height | 1 row | `ENVOY_BAR_ROWS` |
 | Input box min height | 3 rows (top transition + 1 text + bottom transition) | `COMPOSER_MIN_HEIGHT` |
 | Input box max height | `terminal_height / 2` | `COMPOSER_MAX_HEIGHT_DIVISOR` |
 | Input box vertical chrome | 2 rows (top + bottom transition) | `COMPOSER_VERTICAL_CHROME_ROWS` |
@@ -235,10 +235,10 @@ the transcript content above.
 
 | File | Responsibility |
 |------|----------------|
-| `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, sub-agent split, sticky summary overlay |
-| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `STATUS_BAR_ROWS`, `HINT_BAR_ROWS`, `SUBAGENT_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
+| `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, envoy split, sticky summary overlay |
+| `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `STATUS_BAR_ROWS`, `HINT_BAR_ROWS`, `ENVOY_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop` |
 | `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
-| `render/step/renderers.rs` | `draw_subagent_bar`, `draw_sticky_summary_if_needed` |
-| `app.rs` | `in_subagent_view`, `focus_stack`, `follow_bottom`, scroll clamping |
+| `render/step/renderers.rs` | `draw_envoy_bar`, `draw_sticky_summary_if_needed` |
+| `app.rs` | `in_envoy_view`, `focus_stack`, `follow_bottom`, scroll clamping |

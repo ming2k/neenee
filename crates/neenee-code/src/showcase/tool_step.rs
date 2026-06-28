@@ -87,7 +87,7 @@ pub fn run() -> io::Result<()> {
                     input: "",
                     byte_cursor: 0,
                     chrome_hidden: false,
-                    subagent_bar: None,
+                    envoy_bar: None,
                     side_banner: None,
                     pursuit: None,
                     todos: None,

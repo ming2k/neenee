@@ -58,7 +58,7 @@ pub(super) const HINT_BAR_GAP_MIN: usize = 2;
 pub(super) const HINT_BAR_SEGMENT_GAP: usize = 2;
 
 pub(super) const STATUS_BAR_ROWS: u16 = 1;
-pub(super) const SUBAGENT_BAR_ROWS: u16 = 1;
+pub(super) const ENVOY_BAR_ROWS: u16 = 1;
 /// Height of the `/btw` side banner (ADR-0017): a single line at the top of
 /// the transcript viewport.
 pub(super) const SIDE_BANNER_ROWS: u16 = 1;

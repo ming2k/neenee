@@ -2,7 +2,7 @@
 source: crates/neenee-code/src/tui/question_model.rs
 expression: film
 ---
-=== open (first selected by default) ===
+=== open (first row highlighted = selected) ===
 
 
 
@@ -12,11 +12,11 @@ expression: film
           Style
           Which error handling crate?
 
-            ● anyhow                                   ▼
+             anyhow                                    ▼
 
-          ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
+          ↑↓ · wheel/Pg · Enter · 1-9 · Esc
 
-=== down + space → select 'thiserror' ===
+=== down → highlight 'thiserror' (selected, no marker) ===
 
 
 
@@ -24,8 +24,22 @@ expression: film
           Question
 
                                                        ▲
-            ○ anyhow
+             anyhow
                Simple
-            ● thiserror                                ▼
+             thiserror                                 ▼
 
-          ↑↓ · wheel/Pg · Enter · Space · 1-9 · Esc
+          ↑↓ · wheel/Pg · Enter · 1-9 · Esc
+
+=== '3' → jump to 'Other' (now the live selection) ===
+
+
+
+
+          Question
+
+               Simple                                  ▲
+             thiserror
+               Structured
+             Other                                     ▼
+
+          ↑↓ · wheel/Pg · Enter · 1-9 · Esc

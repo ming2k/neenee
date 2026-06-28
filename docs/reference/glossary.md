@@ -22,6 +22,17 @@ symbol, the symbol is backticked and never abbreviated.
 | **uncapped agentic loop** | Distinct tool calls and autonomous iterations are uncapped; context compaction is the backstop. [ADR-0009](../adr/0009-uncapped-agentic-loop.md) |
 | **hidden user message** | A message that steers the model but is not rendered in the visible transcript (pursuit re-injection, implicit skill body, hook-injected context). [Pursuits](../explanation/agent-design/pursuits.md) |
 
+## Roles
+
+The runtime has one execution engine (`Agent`) that runs in one of two roles.
+`agent` is the umbrella term; `principal` and `envoy` name the concrete roles.
+
+| Term | Definition |
+|------|------------|
+| **agent** | Umbrella term for the execution engine (`Agent`, crate `neenee-agent`) and the engine-level protocol (`AgentRequest` / `AgentResponse` / `AgentEvent` / `AgentOp`). Every running role is an agent; use `principal` or `envoy` when the role matters. [Harness architecture](../explanation/agent-design/harness.md) |
+| **principal** | The top-level, human-facing agent a frontend drives. Owns the visible conversation and the user-tunable `[principal]` config table (`hard_stop_rounds`, `loop_review_enabled`). [Configuration](configuration.md) |
+| **envoy** | An isolated child agent the principal spawns via the `envoy` tool to serve a bounded sub-question; fresh history, profile-filtered tools, shares only the provider. See the [Envoys](#envoys) section. [Envoys](../explanation/agent-design/envoys.md) |
+
 ## Pursuits and scheduling
 
 | Term | Definition |
@@ -40,28 +51,28 @@ symbol, the symbol is backticked and never abbreviated.
 | **todo list** | The single source of truth for remaining work, shared with `todo`/`todo_update`, shown in the Activity modal, and persisted across restarts. The model populates it directly; there is no longer a plan tool that seeds it. [ADR-0020](../adr/0020-unified-task-list.md) |
 | **stop-gate** | The turn-exit forcing function: the `/pursue` stop-gate plus any `Stop` hooks. It is the only gate that can refuse a turn ending and force one more round. [Harness architecture](../explanation/agent-design/harness.md) |
 
-## Sub-agents
+## Envoys
 
 | Term | Definition |
 |------|------------|
-| **subagent** | An isolated child agent spawned by the `subagent` tool to investigate a sub-question; shares only the provider with the parent, runs with a fresh history and profile-filtered tools. [Sub-agents](../explanation/agent-design/subagents.md) |
-| **profile** | A declarative bundle (name, system-prompt fragment, and a `ToolPolicy`) that scopes a subagent's behavior; bound by reference by dispatch tools. [Sub-agents](../explanation/agent-design/subagents.md) |
-| **`EXPLORE` profile** | Research role: `Read` ceiling, no write grant; pure read tools. [Sub-agents](../explanation/agent-design/subagents.md) |
+| **envoy** | An isolated child agent spawned by the `envoy` tool to investigate a sub-question; shares only the provider with the parent, runs with a fresh history and profile-filtered tools. [Envoys](../explanation/agent-design/envoys.md) |
+| **profile** | A declarative bundle (name, system-prompt fragment, and a `ToolPolicy`) that scopes an envoy's behavior; bound by reference by dispatch tools. [Envoys](../explanation/agent-design/envoys.md) |
+| **`EXPLORE` profile** | Research role: `Read` ceiling, no write grant; pure read tools. [Envoys](../explanation/agent-design/envoys.md) |
 | **`REVIEW` profile** | Read-only transcript auditor role used by the session-review diagnostic. [ADR-0016](../adr/0016-session-review-over-round-counting.md) |
 | **`TITLE` profile** | Read-only role used to generate a session title in a single model call. [ADR-0022](../adr/0022-session-level-ai-title.md) |
-| **full-duplex** | A subagent is not fire-and-forget: requests travel up to the parent, replies travel down to the exact child. [ADR-0029](../adr/0029-full-duplex-subagent-communication.md) |
+| **full-duplex** | An envoy is not fire-and-forget: requests travel up to the parent, replies travel down to the exact child. [ADR-0029](../adr/0029-full-duplex-subagent-communication.md) |
 
 ## Tools and capabilities
 
 | Term | Definition |
 |------|------------|
 | **`ToolAccess`** | An ordered enum (`Read < Execute < Write`); variant order is load-bearing. Each consumer expresses its rule as a threshold. [Tool access](tools/access.md) |
-| **`Read` tier** | Inspects state, no side effects. Admitted by every subagent profile; bypasses the permission broker. [Tool access](tools/access.md) |
+| **`Read` tier** | Inspects state, no side effects. Admitted by every envoy profile; bypasses the permission broker. [Tool access](tools/access.md) |
 | **`Execute` tier** | Runs commands; may have external side effects but is not a file-mutation primitive. Broker-prompted. [Tool access](tools/access.md) |
 | **`Write` tier** | The tool's purpose is to mutate the workspace. Broker-prompted unless covered by a `write_paths` grant. Default when a tool does not override `access()`. [Tool access](tools/access.md) |
-| **capability axes** | Beyond `access()`, the `Tool` trait exposes `requires_user()` and `spawns_subagent()`, consulted for subagent admission. [Tool access](tools/access.md) |
-| **`ToolPolicy`** | A subagent profile's policy: an `access` ceiling, an `allow_user_interaction` flag, and a `write_paths` grant. [Tool access](tools/access.md) |
-| **ceiling** | The ordered `ToolAccess` threshold a profile admits tools at or below. [Sub-agents](../explanation/agent-design/subagents.md) |
+| **capability axes** | Beyond `access()`, the `Tool` trait exposes `requires_user()` and `spawns_envoy()`, consulted for envoy admission. [Tool access](tools/access.md) |
+| **`ToolPolicy`** | An envoy profile's policy: an `access` ceiling, an `allow_user_interaction` flag, and a `write_paths` grant. [Tool access](tools/access.md) |
+| **ceiling** | The ordered `ToolAccess` threshold a profile admits tools at or below. [Envoys](../explanation/agent-design/envoys.md) |
 | **`write_paths` grant** | A declarative relative-dir spec on `ToolPolicy`; admits a `Write` tool below the ceiling, then scoped at runtime. [ADR-0028](../adr/0028-capability-allocation-scoped-writes.md) |
 | **`WriteScope`** | A runtime, per-agent filesystem-write boundary (`None` / `Scoped` / `Unrestricted`); a hard boundary, not a prompt. [ADR-0028](../adr/0028-capability-allocation-scoped-writes.md) |
 | **write-scope gate** | The gating-stack step (after lookup, before the broker) that blocks write tools whose target is outside the agent's `WriteScope`. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
@@ -138,7 +149,7 @@ symbol, the symbol is backticked and never abbreviated.
 
 | Term | Definition |
 |------|------------|
-| **`neenee-core`** | Pure domain crate: `ToolAccess`, `Provider`/`Tool` traits, `SubagentProfile`/`ToolPolicy`, `WriteScope`, config-schema types, value types. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
+| **`neenee-core`** | Pure domain crate: `ToolAccess`, `Provider`/`Tool` traits, `EnvoyProfile`/`ToolPolicy`, `WriteScope`, config-schema types, value types. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`neenee-store`** | The local coding-agent persistence layer: event-sourced session, blob store, config, paths, embedding index, advisory locks, telemetry. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`neenee-providers`** | Provider implementations and the `build_provider_for_channel` factory; a peer of tools/store, depending only on core. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`neenee-tools`** | Built-in domain tools depending only on core; a peer of providers/store. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
@@ -147,7 +158,7 @@ symbol, the symbol is backticked and never abbreviated.
 | **`neenee-quant`** | The *quantitative-trading* application crate, a peer of `neenee-code` at the application layer; depends on `neenee-agent` and provides its own quant domain tools (and a future GUI). Application-layer: core ← {providers, tools, store} ← agent ← {code, quant}. [ADR-0035](../adr/0035-application-layer-split.md) |
 | **`Agent`** | The central type in `neenee-agent`; owns the turn/round loop, gates, pursuit cell, permission broker, and `WriteScope`. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **strict layering** | The dependency graph is strictly layered with zero reverse edges: core ← {providers, tools, store} ← agent ← {code, quant}. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
-| **`QUANT` profile** | A bounded subagent profile admitting read-only quant tools (`market_data`, `backtest`, `list_positions`) plus shared read-only inspection, while excluding live trading (`place_order`) and all coding write/edit/exec tools — domain isolation between the coding and quant applications. [ADR-0035](../adr/0035-application-layer-split.md) |
+| **`QUANT` profile** | A bounded envoy profile admitting read-only quant tools (`market_data`, `backtest`, `list_positions`) plus shared read-only inspection, while excluding live trading (`place_order`) and all coding write/edit/exec tools — domain isolation between the coding and quant applications. [ADR-0035](../adr/0035-application-layer-split.md) |
 | **MCP server** | A local stdio MCP server exposing dynamically discovered tools; surfaces as `mcp__<server>__<tool>`. [MCP servers](../explanation/agent-design/mcp.md) |
 
 ## Legacy terms
@@ -163,7 +174,7 @@ documentation and ADRs.
 | `neenee-harness` | `neenee-agent` | [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | `/goal` + `/loop` | `/pursue` + `/repeat` | [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
 | `[NEENEE_GOAL_COMPLETE]` | `[NEENEE_PURSUIT_COMPLETE]` | [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
-| Plan mode | plan-as-a-subagent | [ADR-0027](../adr/0027-plan-as-subagent.md) |
+| Plan mode | plan-as-an-envoy | [ADR-0027](../adr/0027-plan-as-subagent.md) |
 | per-plan progress panel | unified todo list | [ADR-0020](../adr/0020-unified-task-list.md) |
 | `plan` / `verify_plan_execution` tools | removed (planning is prompt-level) | [ADR-0033](../adr/0033-remove-plan-and-verify-workflow.md) |
 | `PLAN` / `VERIFY` profiles | removed | [ADR-0033](../adr/0033-remove-plan-and-verify-workflow.md) |

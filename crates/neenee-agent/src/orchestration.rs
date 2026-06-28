@@ -1024,12 +1024,12 @@ pub fn relay_agent_event(
         AgentEvent::UserQuestionRequest(request) => {
             turn(session_id, TurnEvent::UserQuestionRequest(request))
         }
-        AgentEvent::SubAgent {
+        AgentEvent::Envoy {
             parent_call_id,
             event,
         } => turn(
             session_id,
-            TurnEvent::SubAgent {
+            TurnEvent::Envoy {
                 parent_call_id,
                 event,
             },

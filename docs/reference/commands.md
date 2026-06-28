@@ -128,7 +128,7 @@ disturbing the main session context
 
 ### `/review`
 
-On-demand only — triggers a bounded read-only `REVIEW` subagent that
+On-demand only — triggers a bounded read-only `REVIEW` envoy that
 diagnoses the current turn and reports verdicts. `/review` takes no
 arguments; the periodic-cadence design was superseded (see
 [ADR-0018](../adr/0018-per-project-multi-instance-concurrency.md)
@@ -171,8 +171,8 @@ Returns the most relevant past messages for the query (see the
 
 The receiving agent gets the full chain of decisions and side effects: hidden
 and system messages are skipped (mirroring TUI rendering), reasoning traces
-are folded into collapsible `<details>` blocks, and sub-agent transcripts
-nested under `subagent` results are summarised by message counts instead of
+are folded into collapsible `<details>` blocks, and envoy transcripts
+nested under `envoy` results are summarised by message counts instead of
 dumped in full. If the system clipboard is unavailable, the export falls
 back to OSC52 or surfaces the underlying clipboard error.
 

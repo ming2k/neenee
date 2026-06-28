@@ -18,11 +18,11 @@ variation on these themes rather than a one-off mechanism.
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
 | **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: the per-agent `WriteScope` boundary and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Turns and rounds](turns-and-rounds.md), [MCP servers](mcp.md) |
-| **Isolation boundaries** | Failure in one component must not topple the rest. Sub-agents are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Sub-agents](subagents.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
-| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. The durable session preserves the recoverable scene; the model context is a request-scoped projection; sub-agent context is fresh per call. | [Session persistence](session-persistence.md), [Model context](model-context.md), [Sub-agents](subagents.md) |
-| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; sub-agents re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Sub-agents](subagents.md), [Harness architecture](harness.md) |
+| **Isolation boundaries** | Failure in one component must not topple the rest. Envoys are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Envoys](envoys.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Durable vs ephemeral state** | The harness decides per concern what survives a restart. The durable session preserves the recoverable scene; the model context is a request-scoped projection; envoy context is fresh per call. | [Session persistence](session-persistence.md), [Model context](model-context.md), [Envoys](envoys.md) |
+| **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; envoys re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Envoys](envoys.md), [Harness architecture](harness.md) |
 | **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Turns and rounds](turns-and-rounds.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
-| **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `SubagentTool` lives in the agent crate because spawning a sub-agent is steering, not a domain action. | [Harness architecture](harness.md), [Sub-agents](subagents.md) |
+| **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `EnvoyTool` lives in the agent crate because spawning an envoy is steering, not a domain action. | [Harness architecture](harness.md), [Envoys](envoys.md) |
 
 ## The canon, in reading order
 
@@ -57,7 +57,7 @@ model of one agent turn.
    `/pursue` stop-gate (within-turn continuation until the condition is met)
    and the `/repeat` cron scheduler. How the agent keeps working toward an
    objective across rounds and restarts.
-7. [Sub-agents](subagents.md) — the `subagent` tool's isolated child agent.
+7. [Envoys](envoys.md) — the `envoy` tool's isolated child agent.
    The reference for isolation: what is shared (the provider), what is fresh
    (history, pursuits, plan state), how events stream back through one
    pipeline, and how a profile admits tools by capability axis.
@@ -105,7 +105,7 @@ user message
        └─ per tool call:
             ├─ [Hooks] PreToolUse gate (matcher?) ── deny? → blocked
             ├─ [Harness] permission broker (Write tools only)
-            ├─ [Sub-agents] if call is `subagent`: spawn isolated child,
+            ├─ [Envoys] if call is `envoy`: spawn isolated child,
             │              stream SubTaskEvent back through the same pipeline
             ├─ [MCP]       if call is `mcp__*`: JSON-RPC over stdio
             └─ [User questions] if call is `ask_user`: block on oneshot
@@ -120,7 +120,7 @@ Every arrow is documented in one of the canon pages above.
 ## Decision history
 
 For the frozen rationale behind specific choices (why the progress panel, why
-the strict layering, why planning became a subagent and was later removed),
+the strict layering, why planning became an envoy and was later removed),
 see the [Architecture Decision Records](../../adr/). ADRs link back into this
 section for background; this section links to ADRs for the decision trail.
 

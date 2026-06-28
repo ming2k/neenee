@@ -102,7 +102,7 @@ fn restored_reasoning_is_not_shown_as_running() {
         model: None,
         hidden: false,
         children: None,
-        subagent_meta: None,
+        envoy_meta: None,
         origin: None,
     };
 
@@ -195,7 +195,7 @@ fn restored_native_tool_calls_are_visible() {
         model: None,
         hidden: false,
         children: None,
-        subagent_meta: None,
+        envoy_meta: None,
         origin: None,
     };
 
@@ -230,7 +230,7 @@ fn restored_tool_results_merge_into_steps_in_fifo_order() {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         },
         Message::tool_result(
@@ -288,23 +288,23 @@ fn tool_activity_is_semantic_and_loop_progress_is_preserved() {
     );
 }
 
-/// Build a small conversation with two sibling subagent tasks, each with a
+/// Build a small conversation with two sibling envoy tasks, each with a
 /// couple of child messages, for focus-navigation tests.
-fn conversation_with_subagents() -> Vec<TranscriptMessage> {
+fn conversation_with_envoys() -> Vec<TranscriptMessage> {
     let mut a = TranscriptMessage::tool_step(
         "task_a",
-        "subagent",
+        "envoy",
         r#"{"description":"explore a","prompt":"..."}"#,
     );
-    a.subagent_children_mut()
+    a.envoy_children_mut()
         .unwrap()
         .push(TranscriptMessage::new(Role::Assistant, "child A1"));
     let mut b = TranscriptMessage::tool_step(
         "task_b",
-        "subagent",
+        "envoy",
         r#"{"description":"explore b","prompt":"..."}"#,
     );
-    b.subagent_children_mut()
+    b.envoy_children_mut()
         .unwrap()
         .push(TranscriptMessage::new(Role::Assistant, "child B1"));
     vec![
@@ -317,7 +317,7 @@ fn conversation_with_subagents() -> Vec<TranscriptMessage> {
 
 #[test]
 fn resolve_focused_mut_indexes_root_when_unfocused() {
-    let mut messages = conversation_with_subagents();
+    let mut messages = conversation_with_envoys();
     let focus: Vec<crate::tui::app::ZoomFrame> = Vec::new();
     let resolved = event_loop::resolve_focused_mut(&mut messages, &focus, 2);
     assert_eq!(resolved.map(|m| m.raw.clone()).as_deref(), Some("ok"));
@@ -325,7 +325,7 @@ fn resolve_focused_mut_indexes_root_when_unfocused() {
 
 #[test]
 fn resolve_focused_mut_indexes_children_when_focused() {
-    let mut messages = conversation_with_subagents();
+    let mut messages = conversation_with_envoys();
     let focus = vec![crate::tui::app::ZoomFrame {
         call_id: "task_b".to_string(),
         saved_scroll: crate::tui::app::ScrollSnapshot::default(),
@@ -338,8 +338,8 @@ fn resolve_focused_mut_indexes_children_when_focused() {
 }
 
 #[test]
-fn focused_tool_steps_mut_only_touches_focused_subagent_children() {
-    let mut messages = conversation_with_subagents();
+fn focused_tool_steps_mut_only_touches_focused_envoy_children() {
+    let mut messages = conversation_with_envoys();
     // Focused on task_a: its single child is an assistant message (not a
     // tool step), so the focused stream has 1 message and 0 tool steps.
     let focus = vec![crate::tui::app::ZoomFrame {

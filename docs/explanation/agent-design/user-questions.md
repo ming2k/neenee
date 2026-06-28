@@ -80,10 +80,15 @@ rejection which aborts the whole turn.
 
 The question modal is a centered overlay. It shows one question at a time:
 
-- Single-select questions use radio buttons (`○` / `●`).
-- Multi-select questions use checkboxes (`[ ]` / `[x]`).
+- Single-select questions show **no marker** — they are *live*: the
+  highlighted row *is* the selection, so `↑`/`↓` (or a digit jump) immediately
+  commits the choice and `Enter` submits exactly the highlighted option. There
+  is no separate "mark then confirm" step.
+- Multi-select questions use checkboxes (`[ ]` / `[x]`) and a separate toggle
+  set: `↑`/`↓` only moves the highlight, and `Space` toggles a row on/off.
 - Options are numbered 1–9 for direct keyboard access.
-- The footer lists the available shortcuts.
+- The footer lists the available shortcuts (the `Space` hint is shown only for
+  multi-select, since it is a no-op for single-select).
 
 When the **Other** option is highlighted, the modal renders an underlined text
 field. Printable characters append to that field, and backspace removes the last
@@ -103,23 +108,23 @@ future then resolves to the cancelled result.
 ## Planning
 
 `ask_user` is `Read` access, so the main agent can use it freely to clarify
-requirements before or during a task. Inside a subagent it is gated by the
+requirements before or during a task. Inside an envoy it is gated by the
 profile's `allow_user_interaction` flag and the full-duplex channel
 ([ADR-0029](../../adr/0029-full-duplex-subagent-communication.md)): the default
-`EXPLORE` profile is non-interactive, so a read-only research subagent that
+`EXPLORE` profile is non-interactive, so a read-only research envoy that
 needs clarification surfaces the request up to the main agent rather than
 calling `ask_user` directly; the `INTERACTIVE` profile opts in and the
 round-trip works through the handle.
 
-## Sub-agents
+## Envoys
 
 `ask_user` also declares `requires_user`, so the built-in `EXPLORE` profile
-excludes it from sub-agents. A sub-agent has no user reachable — its
+excludes it from envoys. An envoy has no user reachable — its
 question-request events are dropped by the dispatch tool's forwarder — so
 admitting `ask_user` there would deadlock until the parent turn is cancelled.
 Keeping the question with the parent (which *can* ask) is the contract; a
-sub-agent that hits ambiguity returns it in its written answer instead. See
-[Sub-agents → Tool admission](subagents.md#tool-admission) and
+envoy that hits ambiguity returns it in its written answer instead. See
+[Envoys → Tool admission](envoys.md#tool-admission) and
 [ADR-0011](../../adr/0011-subagent-profiles.md).
 
 ## See also

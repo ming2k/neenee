@@ -20,7 +20,7 @@ and renders *into* the engine's grid via `Frame::render_widget`.
 └──────────────────────────────────────────────────────────┘
 ```
 
-See [layout.md](layout.md) for the footer stack, the sub-agent zoom view,
+See [layout.md](layout.md) for the footer stack, the envoy zoom view,
 the modal overlay mode, chrome hiding, and the full measurements table.
 
 ## Transcript focus
@@ -51,7 +51,7 @@ a slash/path suggestion when one is open); it is not a focus toggle.
 | [Tool step](tool-step.md) | Expandable step for tool calls |
 | [Thinking step](thinking-step.md) | Expandable step for reasoning text |
 | [Step state machine](step-state.md) | The three orthogonal axes (Lifecycle × Disclosure × Interaction) and the accent/weight color channels |
-| [Sub-agent view](subagent-view.md) | Inline sub-agent step + zoomed-in child stream + navigation bar + focus stack |
+| [Envoy view](envoy-view.md) | Inline envoy step + zoomed-in child stream + navigation bar + focus stack |
 | [Activity bar](status-bar.md) | Breathing-dot liveness anchor + live status label + pursuit objective + todos progress + elapsed; clickable to open the Activity modal |
 | [Hint bar](hint-line.md) | Optional `[ SHELL ]` pill + model/context cluster |
 | [Modals](modals.md) | Models, Model editor, Sessions, Session, History, Question, Permission, Tool-step detail, Help, Toasts |
@@ -73,7 +73,7 @@ a slash/path suggestion when one is open); it is not a focus toggle.
 | `render/text_layout.rs` | `wrap_text`, `WrappedLine`, `line_spans`, `code_gutter_line` |
 | `render/message_body.rs` | `draw_message_body` (markdown text, user panels, code blocks) |
 | `render/step/mod.rs` | Step module: draw orchestration, shared header rendering, sticky-pin tracking |
-| `render/step/renderers.rs` | Tool-step, thinking (`draw_reasoning_trace`), and sub-agent step renderers |
+| `render/step/renderers.rs` | Tool-step, thinking (`draw_reasoning_trace`), and envoy step renderers |
 | `render/step/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
 | `render/tools/` | Per-tool-step renderers (one file per tool: `bash`, `edit`, `read`, `grep`, `web`, `ask_user`, `read_image`, `diff`, `meta`, `fallback`) |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |

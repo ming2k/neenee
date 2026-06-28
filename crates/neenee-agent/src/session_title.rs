@@ -4,7 +4,7 @@
 //! Mirrors the split established by [`crate::session_review`]: the domain
 //! vocabulary and the pure post-processing ([`clean_title`]) live in
 //! `neenee-core`, while the provider call lives here next to the `Agent`.
-//! Like `session_review` this runs a bounded subagent of the primary agent,
+//! Like `session_review` this runs a bounded envoy of the primary agent,
 //! but the title task is pure text-in/text-out — it needs no tools and no
 //! ReAct loop — so the runner is a single `Provider::chat` call framed by
 //! the [`TITLE`] profile's system prompt, not a full
@@ -30,7 +30,7 @@ use neenee_core::{Message, Role, TITLE, clean_title};
 
 use crate::agent::Agent;
 
-/// Character budget for the transcript excerpt handed to the title subagent.
+/// Character budget for the transcript excerpt handed to the title envoy.
 /// Generous enough to show the opening request and the recent arc (so an
 /// on-demand regen after a topic shift sees the new direction), bounded enough
 /// that the call stays cheap. The opening user message is always included in
@@ -80,13 +80,13 @@ impl Agent {
             match tokio::time::timeout(TITLE_CALL_TIMEOUT, self.provider.chat(messages)).await {
                 Ok(Ok(message)) => message,
                 Ok(Err(error)) => {
-                    tracing::warn!(error = %error, "title subagent provider call failed");
+                    tracing::warn!(error = %error, "title envoy provider call failed");
                     return None;
                 }
                 Err(_elapsed) => {
                     tracing::warn!(
                         timeout_secs = TITLE_CALL_TIMEOUT.as_secs(),
-                        "title subagent call timed out"
+                        "title envoy call timed out"
                     );
                     return None;
                 }

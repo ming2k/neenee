@@ -39,10 +39,10 @@ its precondition holds:
    one opening sentence. The engine itself is identity-agnostic: it does not
    hardcode a persona or a purpose. The embedding (the CLI, a future frontend)
    supplies them, so the same engine can serve as a coding assistant, a research
-   agent, or an operations agent by passing different values. A sub-agent takes
+   agent, or an operations agent by passing different values. An envoy takes
    a third form: its identity *is* its role's full system prompt, injected
    verbatim as the preamble, ignoring name and mission. See
-   [Sub-agents](subagents.md).
+   [Envoys](envoys.md).
 2. **Neutral behavior.** Mission-independent guidance that applies regardless of
    identity: output tone (concise, direct, no unsolicited recaps), task tracking
    via the todo tools, and how to use `ask_user`. These lines never change with
@@ -70,7 +70,7 @@ carries a stable id, a rank that fixes its reading order, an `is_active`
 precondition, and a `render`; the registry composes the active sections in
 rank order and stamps the channel's canonical origin. That makes each
 section individually unit-testable and individually re-orderable or
-disable-able without editing the others. The same engine serves a sub-agent:
+disable-able without editing the others. The same engine serves an envoy:
 its registry is seeded from its profile so the composed system message is the
 role's persona plus the neutral sections. See
 [ADR-0039](../../adr/0039-unified-prompt-registry.md).
@@ -90,7 +90,7 @@ a defined trigger, and each is recorded so the transcript remains faithful.
 | **Compaction checkpoint** | Context pressure triggers compaction | Wrap a model-written summary of archived turns under a stable header that flags it as durable context, not a new request. See [Context compaction](context-compaction.md) |
 | **Implicit skill** | The latest user message mentions a skill name | Load the skill body so the model behaves as if it had explicitly invoked it. See [Skills](skills.md) |
 | **Hook output** | A configured lifecycle hook returns injected context | Let user practice (lint failures, CI gates, reminders) re-enter the conversation. See [Lifecycle hooks](hooks.md) |
-| **Sub-agent steering** | A parent agent steers a running child | Land a visible user message directing the sub-agent, or a hidden inter-agent note. See [Sub-agents](subagents.md) |
+| **Envoy steering** | A parent agent steers a running child | Land a visible user message directing the envoy, or a hidden inter-agent note. See [Envoys](envoys.md) |
 
 A defining property is that none of these are semantic guesses. The read-loop
 nudge, in particular, fires on *provable* waste — an identical read returns
@@ -175,7 +175,7 @@ and composition stay in lockstep rather than drifting into two vocabularies.
 - [ADR-0039](../../adr/0039-unified-prompt-registry.md) — the system-prompt
   sections become declarative `PromptRegistry` entries keyed by
   `InjectionKind`, replacing the ad-hoc `format!`/`push_str` assembly. The
-  same change fixed a latent defect where a sub-agent system message
+  same change fixed a latent defect where an envoy system message
   pre-seeded before the turn loop was clobbered on round 1.
 - [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md)
   — the deterministic read-loop guard and why a frequency window replaces a
@@ -192,6 +192,6 @@ Each injection mechanism has a deep-dive of its own: [Pursuits](pursuits.md)
 for the continuation and objective-update prompts, [Context
 compaction](context-compaction.md) for the checkpoint, [Skills](skills.md) for
 implicit loading, [Lifecycle hooks](hooks.md) for hook-driven context, and
-[Sub-agents](subagents.md) for inter-agent steering. The protocol contract that
+[Envoys](envoys.md) for inter-agent steering. The protocol contract that
 carries these messages to the provider is covered in [Chat API
 primitives](../chat-api-primitives.md) and [Request flow](../request-flow.md).

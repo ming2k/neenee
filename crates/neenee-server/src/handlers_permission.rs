@@ -3,11 +3,11 @@
 //!
 //! Each handler is one match arm, lifted unchanged. Parameters are named to
 //! match the original loop locals (`agent`, `session`, `resp_tx`,
-//! `ctt_clone`, `side`, `subagent_registry`, …) so the body reads exactly as
+//! `ctt_clone`, `side`, `envoy_registry`, …) so the body reads exactly as
 //! it did inline.
 
 use neenee_agent::orchestration::send_harness_state;
-use neenee_agent::{Agent, SubagentRegistry};
+use neenee_agent::{Agent, EnvoyRegistry};
 use neenee_core::{AgentResponse, PermissionDecision};
 use neenee_store::session::SessionStore;
 use std::sync::Arc;
@@ -56,20 +56,20 @@ pub async fn interrupt(
 }
 
 /// `AgentRequest::PermissionReply` — full-duplex routing (ADR-0029): a reply
-/// tagged with a `parent_call_id` targets a subagent's parked oneshot via the
+/// tagged with a `parent_call_id` targets an envoy's parked oneshot via the
 /// registry handle; `None` keeps the legacy top-level (/btw side) path. A late
 /// reply after the child finished finds no handle and falls through to the
 /// "no longer pending" error.
 pub async fn reply(
     agent: &Agent,
-    subagent_registry: &Arc<SubagentRegistry>,
+    envoy_registry: &Arc<EnvoyRegistry>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     request_id: String,
     decision: PermissionDecision,
     parent_call_id: Option<String>,
 ) {
     let resolved = if let Some(parent) = &parent_call_id {
-        subagent_registry
+        envoy_registry
             .get(parent)
             .is_some_and(|handle| handle.reply_permission(&request_id, decision))
     } else {
@@ -83,11 +83,11 @@ pub async fn reply(
 }
 
 /// `AgentRequest::UserQuestionReply` — mirror the permission arm: a
-/// `parent_call_id` targets the subagent; otherwise try the primary, then a
+/// `parent_call_id` targets the envoy; otherwise try the primary, then a
 /// `/btw` side agent (ADR-0017).
 pub async fn reply_question(
     agent: &Agent,
-    subagent_registry: &Arc<SubagentRegistry>,
+    envoy_registry: &Arc<EnvoyRegistry>,
     side: &Arc<AsyncRwLock<Option<SideSession>>>,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
     request_id: String,
@@ -95,7 +95,7 @@ pub async fn reply_question(
     parent_call_id: Option<String>,
 ) {
     let resolved = if let Some(parent) = &parent_call_id {
-        subagent_registry
+        envoy_registry
             .get(parent)
             .is_some_and(|handle| handle.reply_user_question(&request_id, answers.clone()))
     } else if agent.reply_user_question(&request_id, answers.clone()) {

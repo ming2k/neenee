@@ -48,7 +48,7 @@ impl Provider for PermissionTestProvider {
                 model: None,
                 hidden: false,
                 children: None,
-                subagent_meta: None,
+                envoy_meta: None,
                 origin: None,
             })
         } else {
@@ -180,7 +180,7 @@ fn pursuit_is_injected_into_system_prompt() {
     assert!(prompt.contains("ship the harness"));
 }
 
-/// Regression for ADR-0039 stage 6: the `/review` reviewer subagent's head
+/// Regression for ADR-0039 stage 6: the `/review` reviewer envoy's head
 /// system message must actually carry the review composition (REVIEW persona +
 /// registered dimensions + JSON contract). Previously the reviewer pre-seeded
 /// a system message that `ensure_system_prompt` clobbered on round 1, so none
@@ -1017,7 +1017,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
             AgentEvent::UserQuestionRequest(request) => {
                 format!("user-question {}", request.questions.len())
             }
-            AgentEvent::SubAgent { .. } => "subtask".to_string(),
+            AgentEvent::Envoy { .. } => "subtask".to_string(),
             AgentEvent::TodosUpdated(list) => {
                 format!("todos {} items", list.len())
             }
@@ -1181,7 +1181,7 @@ async fn read_loop_guard_injects_one_nudge_after_repeated_reads() {
 }
 
 /// The guard is gated by `set_loop_review_enabled`: disabled, the same looping
-/// transcript injects no nudge (sub-agents and the review diagnostic rely on
+/// transcript injects no nudge (envoys and the review diagnostic rely on
 /// this).
 #[tokio::test]
 async fn read_loop_guard_suppressed_when_disabled() {
@@ -1326,7 +1326,7 @@ async fn ask_user_tool_blocks_and_returns_selected_answers() {
 // Verifies the per-project `Always` allowlist round-trips through disk:
 // approving `Always` on one agent is visible to a fresh agent constructed
 // against the same project root, and revoking is mirrored to disk too.
-// Sub-agents (no project root) stay ephemeral and never touch the file.
+// Envoys (no project root) stay ephemeral and never touch the file.
 
 #[tokio::test]
 async fn always_permission_persists_across_agents_for_same_project() {
@@ -1439,7 +1439,7 @@ async fn agent_without_project_root_never_writes_permissions_file() {
     let perms_path = neenee_store::paths::get().project_permissions(&project_root);
 
     // No set_project_root call: the agent stays ephemeral, so an Always
-    // approval must not write any file (sub-agents behave the same way).
+    // approval must not write any file (envoys behave the same way).
     let agent = Arc::new(Agent::new(
         Arc::new(TestProvider),
         vec![Arc::new(WriteTestTool)],
@@ -1630,7 +1630,7 @@ async fn hard_stop_aborts_when_budget_configured() {
 #[tokio::test]
 async fn review_now_runs_diagnostic_and_returns_verdict() {
     // On-demand review (`/review` → `Agent::review_now`) feeds the transcript
-    // to the REVIEW subagent, which shares the scripted provider. The next
+    // to the REVIEW envoy, which shares the scripted provider. The next
     // scripted round is the reviewer's verdict JSON; `review_now` parses it
     // back into a `ReviewVerdict` keyed to the `looping` dimension.
     let verdict_json =
@@ -1672,8 +1672,8 @@ fn agent_config_defaults_match_runtime_constants() {
     // The config struct's defaults must match the seeds the agent uses when
     // no config is loaded, so a missing `[agent]` table is indistinguishable
     // from one that explicitly sets the defaults (ADR-0018).
-    use neenee_store::config::AgentConfig;
-    let cfg = AgentConfig::default();
+    use neenee_store::config::PrincipalConfig;
+    let cfg = PrincipalConfig::default();
     assert_eq!(cfg.hard_stop_rounds, 0);
     // The agent seeds the same hard-stop budget by default (uncapped).
     let agent = agent();

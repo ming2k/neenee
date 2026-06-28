@@ -8,18 +8,18 @@
 //! These run as a standalone integration binary (`cargo test --test duplex`)
 //! so they compile against the crate's public API only and do not depend on
 //! the in-`lib` unit-test module. They prove the two directions of the
-//! parent↔subagent channel at the agent layer:
+//! parent↔envoy channel at the agent layer:
 //!
 //! 1. **Down (steering):** an `AgentOp::InjectUserMessage` submitted through a
-//!    `SubagentHandle` lands in the live transcript before the next model
+//!    `EnvoyHandle` lands in the live transcript before the next model
 //!    round.
 //! 2. **Down (reply) + Up (request):** a write tool's permission broker
 //!    surfaces `AgentEvent::PermissionRequest` up through `run_with_events`,
 //!    and a `reply_permission` submitted through the handle resolves the
 //!    parked oneshot so the tool actually runs.
 //!
-//! The end-to-end path through `SubagentTool` (registry lookup keyed by
-//! `parent_call_id`, nested `SubagentEvent::PermissionRequest` rendered in the
+//! The end-to-end path through `EnvoyTool` (registry lookup keyed by
+//! `parent_call_id`, nested `EnvoyEvent::PermissionRequest` rendered in the
 //! TUI) is the harness↔TUI integration step that follows; these tests cover
 //! the substrate it will be built on.
 
@@ -33,10 +33,10 @@ use tokio_util::sync::CancellationToken;
 
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{
-    Agent, AgentEvent, AgentOp, Message, Provider, ProviderStreamEvent, Role, SubagentEvent,
-    SubagentTool, ToolCall,
+    Agent, AgentEvent, AgentOp, EnvoyEvent, EnvoyTool, Message, Provider, ProviderStreamEvent,
+    Role, ToolCall,
 };
-use neenee_core::{PermissionDecision, SubagentProfile, Tool, ToolOutput, ToolPolicy};
+use neenee_core::{EnvoyProfile, PermissionDecision, Tool, ToolOutput, ToolPolicy};
 
 /// `chat()` returns "done" with no tool calls. Used by the inject test, where
 /// only the transcript mutation matters.
@@ -178,7 +178,7 @@ async fn handle_reply_permission_unblocks_parked_write_tool() {
         .await
         .expect("permission request must surface up via on_event")
         .expect("channel not closed before a request arrived");
-    // The subagent is parked on the broker oneshot at this point.
+    // The envoy is parked on the broker oneshot at this point.
     assert!(!task.is_finished(), "child must be parked awaiting reply");
     assert_eq!(request.tool, "gated_write");
 
@@ -204,7 +204,7 @@ async fn handle_reply_permission_unblocks_parked_write_tool() {
 async fn handle_reply_is_noop_after_agent_dropped() {
     // When the child's dispatcher has ended and dropped its `Arc`, every handle
     // method degrades to a no-op rather than erroring — so a late UI reply
-    // after the subagent already finished can never panic or wedgelock state.
+    // after the envoy already finished can never panic or wedgelock state.
     let agent = Arc::new(Agent::new(
         Arc::new(IdleProvider),
         Vec::new(),
@@ -225,7 +225,7 @@ async fn handle_reply_is_noop_after_agent_dropped() {
 }
 
 /// Streaming provider: round 0 emits a tool-call for `gated_write`; round 1
-/// emits plain text "done". Drives the SubagentTool end-to-end path (which runs
+/// emits plain text "done". Drives the EnvoyTool end-to-end path (which runs
 /// the child via `run_streaming_with_events`).
 struct StreamWriteCallProvider(AtomicUsize);
 
@@ -262,9 +262,9 @@ impl Provider for StreamWriteCallProvider {
 /// A test-only profile that admits write tools *and* leaves the permission
 /// broker on (`unattended: false`), so the child's write call surfaces a
 /// `PermissionRequest` — the shape needed to exercise the full up→down
-/// round-trip through `SubagentTool` + the registry. Declared `const` because
-/// `SubagentTool::new` borrows the profile for `'static`.
-const INTERACTIVE: SubagentProfile = SubagentProfile {
+/// round-trip through `EnvoyTool` + the registry. Declared `const` because
+/// `EnvoyTool::new` borrows the profile for `'static`.
+const INTERACTIVE: EnvoyProfile = EnvoyProfile {
     name: "test_interactive",
     system_prompt: "test",
     tool_policy: ToolPolicy {
@@ -280,7 +280,7 @@ const INTERACTIVE: SubagentProfile = SubagentProfile {
 async fn streaming_loop_fires_permission_broker_direct() {
     // Isolation: does run_streaming_with_events itself surface a permission
     // request for a write tool when unattended is false? Decouples the
-    // streaming driver from the SubagentTool wrapping.
+    // streaming driver from the EnvoyTool wrapping.
     let ran = Arc::new(AtomicUsize::new(0));
     let agent = Arc::new(Agent::new(
         Arc::new(StreamWriteCallProvider(AtomicUsize::new(0))),
@@ -318,25 +318,25 @@ async fn streaming_loop_fires_permission_broker_direct() {
 }
 
 #[tokio::test]
-async fn subagent_tool_registry_routes_reply_into_live_subagent() {
-    // End-to-end through SubagentTool with an interactive profile
+async fn envoy_tool_registry_routes_reply_into_live_envoy() {
+    // End-to-end through EnvoyTool with an interactive profile
     // (`unattended: false`): the child's execute-tier tool surfaces a
-    // permission request UP as `SubagentEvent::PermissionRequest`, the tool
+    // permission request UP as `EnvoyEvent::PermissionRequest`, the tool
     // registers the child's handle by the parent `call_id`, and a reply pulled
     // from the registry resolves the parked oneshot so the tool runs. This is
     // the agent-layer contract the harness (agent_loop.rs) and TUI rely on.
     let ran = Arc::new(AtomicUsize::new(0));
-    let subagent_tool = Arc::new(SubagentTool::new(
+    let envoy_tool = Arc::new(EnvoyTool::new(
         Arc::new(StreamWriteCallProvider(AtomicUsize::new(0))),
         neenee_core::ToolSet::from_tools([
             Arc::new(BrokerGatedTool(Arc::clone(&ran))) as Arc<dyn Tool>
         ]),
         &INTERACTIVE,
     ));
-    let registry = subagent_tool.registry();
+    let registry = envoy_tool.registry();
 
-    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<SubagentEvent>();
-    let tool = Arc::clone(&subagent_tool);
+    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<EnvoyEvent>();
+    let tool = Arc::clone(&envoy_tool);
     let task = tokio::spawn(async move {
         let mut on_stream = |_: neenee_agent::ToolStream| ();
         tool.call_structured_with_events(
@@ -350,17 +350,17 @@ async fn subagent_tool_registry_routes_reply_into_live_subagent() {
         .await
     });
 
-    // Drain SubagentEvents until the permission request surfaces.
+    // Drain EnvoyEvents until the permission request surfaces.
     let mut request = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while request.is_none() && std::time::Instant::now() < deadline {
-        if let Ok(Some(SubagentEvent::PermissionRequest(r))) =
+        if let Ok(Some(EnvoyEvent::PermissionRequest(r))) =
             tokio::time::timeout(std::time::Duration::from_millis(200), evt_rx.recv()).await
         {
             request = Some(r);
         }
     }
-    let request = request.expect("subagent permission request must surface up via SubagentEvent");
+    let request = request.expect("envoy permission request must surface up via EnvoyEvent");
     assert_eq!(request.tool, "gated_write");
     assert!(!task.is_finished(), "child parked awaiting reply");
 

@@ -132,7 +132,7 @@ user a permission prompt for a call it intends to block:
 ```text
 tool call declared
   ├─ [Hooks]        PreToolUse (matcher?)  ── deny? → blocked, reason to model
-  ├─ [WriteScope]   per-agent write boundary (subagents only)
+  ├─ [WriteScope]   per-agent write boundary (envoys only)
   ├─ [Harness]      permission broker (Write / Execute tools)
   ├─              tool executes
   └─ [Hooks]      PostToolUse (success) | PostToolUseFailure (error)

@@ -67,7 +67,7 @@ pub struct HookContext {
 
 /// The payload for one fire. Tool events carry a name + a reduced view of the
 /// input/output — commands read JSON on stdin, not live Rust values, so the
-/// full [`crate::ToolOutput`] (which may embed a subagent transcript) is not
+/// full [`crate::ToolOutput`] (which may embed an envoy transcript) is not
 /// forwarded wholesale; its `to_text()` summary is.
 #[derive(Debug, Clone)]
 pub enum HookEvent {

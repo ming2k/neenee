@@ -302,20 +302,24 @@ descriptions all word-wrap to fit the modal body width.
 │                                                        │
 │  Which framework?                                      │
 │                                                        │
-│ ❯ 1.  ● React                                          │  ← highlighted
+│   1.  React                                            │  ← highlighted (single-select: no marker — the highlight is the selection)
 │       component-based                                  │  ← description (dim)
 │                                                        │
-│   2.  ○ Vue                                            │
+│   2.  Vue                                              │
 │       progressive                                      │
 │                                                        │
-│   3.  ○ Other                                          │
+│   3.  Other                                            │
 │                                                        │
-│ ↑↓ navigate · Space toggle · 1-9 jump · Enter submit · │
-│ Esc cancel                                             │
+│ ↑↓ navigate · 1-9 jump · Enter submit · Esc cancel     │
 ╰────────────────────────────────────────────────────────╯
 ```
 
-`[x]` / `[ ]` mark multi-select; `●` / `○` mark single-select. The leading
+`[x]` / `[ ]` mark **multi-select** options — selection there is a separate
+toggle set from the highlight, so the checkbox is the only way to tell a
+*selected* row from a merely *hovered* one. **Single-select** shows **no
+marker**: it is *live* — the highlighted row *is* the selection, so moving
+`↑`/`↓` or jumping with a digit immediately commits the choice and `Enter`
+submits exactly what is highlighted (no "Space to confirm" step). The leading
 digit prefix (`1.`–`8.`) advertises the 1-9 jump shortcut. Each option's
 description (when present) is rendered on its own indented line in the dim
 foreground color.
@@ -324,7 +328,7 @@ foreground color.
 |-----|--------|
 | `↑` / `↓` | Move highlight (last row is always **Other**) |
 | `1`–`9` | Jump to the Nth option |
-| `Space` | Toggle the highlighted option |
+| `Space` | Toggle the highlighted option *(multi-select only; no-op for single-select)* |
 | `Enter` | Submit the answer(s) |
 | `Esc` | Cancel the question |
 

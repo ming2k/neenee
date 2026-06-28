@@ -1,6 +1,6 @@
 //! Pure domain vocabulary for the coding-agent stack: the `Provider` and
 //! `Tool` capability traits, conversation and tool-output types, the
-//! context-pressure model, pursuit/repeat/todo domain types, subagent
+//! context-pressure model, pursuit/repeat/todo domain types, envoy
 //! profiles, skills/MCP config schemas, and the wire events the harness and
 //! frontends exchange.
 //!
@@ -47,12 +47,12 @@ pub mod mcp;
 pub mod model;
 pub mod todos;
 pub use todos::{MAX_TODOS, TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext};
+pub mod envoy;
 pub mod pressure;
 pub mod prompt;
 pub mod session_review;
 pub mod session_title;
 pub mod skillsconfig;
-pub mod subagent;
 pub mod tool_call;
 pub mod tool_registry;
 pub mod webconfig;
@@ -62,12 +62,13 @@ pub use capability::{
 };
 pub use catalog::{Channel, ProviderEntry, Transport};
 pub use dynamic::DynamicCatalog;
+pub use envoy::{EXPLORE, EnvoyProfile, INTERACTIVE, QUANT, REVIEW, TITLE, ToolPolicy};
 pub use events::{
-    AgentEvent, AgentNotice, AgentOp, AgentRequest, AgentResponse, HarnessSnapshot, McpServerInfo,
-    ModelInfo, NoticeKind, NoticeSeverity, NoticeSource, NoticeSurface, ParentStatus,
-    PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
-    ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, SubagentEvent,
-    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    AgentEvent, AgentNotice, AgentOp, AgentRequest, AgentResponse, EnvoyEvent, HarnessSnapshot,
+    McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource, NoticeSurface,
+    ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
+    ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, ToolInfo,
+    TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
@@ -80,7 +81,6 @@ pub use prompt::{PromptChannel, PromptContext, PromptRegistry, PromptSection};
 pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};
 pub use session_title::{TITLE_MAX_LEN, clean_title};
 pub use skillsconfig::SkillsConfig;
-pub use subagent::{EXPLORE, INTERACTIVE, QUANT, REVIEW, SubagentProfile, TITLE, ToolPolicy};
 pub use tool_output::truncate_utf8;
 pub use tool_registry::{
     Capability, ToolContext, ToolContextBuilder, ToolFactory, ToolSet, collect_toolset,

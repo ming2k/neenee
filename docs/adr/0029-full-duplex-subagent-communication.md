@@ -134,4 +134,4 @@ interactive profile (e.g. `PLAN` with `allow_user_interaction: true`) can drop
   round-trip) is superseded by this ADR's live channel.
 - [ADR-0028](0028-capability-allocation-scoped-writes.md) — orthogonal; the
   `WriteScope` grant this builds on.
-- [Subagents](../explanation/agent-design/subagents.md) — the duplex model.
+- [Subagents](../explanation/agent-design/envoys.md) — the duplex model.

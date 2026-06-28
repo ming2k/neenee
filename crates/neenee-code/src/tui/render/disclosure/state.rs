@@ -117,7 +117,7 @@ pub fn summary_weight(disclosure: Disclosure, interaction: Interaction, theme: &
 /// The two channels compose: when an accent is present it supplies the **hue**
 /// while the disclosure × interaction weight channel still modulates the
 /// **brightness**. Without that composition a long-lived accent — like the
-/// `info` hue on a running subagent task — would pin the summary to one flat
+/// `info` hue on a running envoy task — would pin the summary to one flat
 /// color for its whole lifetime and the hover/focus affordance would never
 /// show, which is exactly the bug where hovering an `explore` step did
 /// nothing. The accent is nudged toward the weight-ladder color by a per-rung
@@ -334,7 +334,7 @@ mod tests {
     }
 
     /// Regression: an accent step must shift on hover. Before the fix a running
-    /// subagent (`explore`) pinned the summary to a flat accent for its whole
+    /// envoy (`explore`) pinned the summary to a flat accent for its whole
     /// lifetime and hovering did nothing. The composed result must differ
     /// between idle and hover.
     #[test]

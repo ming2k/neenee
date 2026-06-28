@@ -159,13 +159,13 @@ pub async fn run_tui(
     let pending_permission_clone = pending_permission.clone();
     let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
     let pending_question_clone = pending_question.clone();
-    // Full-duplex (ADR-0029): side-tables recording which subagent (by parent
+    // Full-duplex (ADR-0029): side-tables recording which envoy (by parent
     // tool-call id) surfaced a given permission / ask_user request, so the
     // modal's reply can be tagged with `parent_call_id` for down-routing.
-    let subagent_permission_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-    let subtask_permission_parent_clone = subagent_permission_parent.clone();
-    let subagent_question_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-    let subtask_question_parent_clone = subagent_question_parent.clone();
+    let envoy_permission_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let subtask_permission_parent_clone = envoy_permission_parent.clone();
+    let envoy_question_parent = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let subtask_question_parent_clone = envoy_question_parent.clone();
     let key_status = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
     let key_status_clone = key_status.clone();
     let provider_picker = Arc::new(Mutex::new(ProviderPickerSnapshot::default()));
@@ -481,7 +481,7 @@ pub async fn run_tui(
                         }
                         TurnEvent::ToolCancelled { id, .. } => {
                             // Convergence: an in-flight call was aborted by an
-                            // interrupt. Flip its step (and any nested subagent
+                            // interrupt. Flip its step (and any nested envoy
                             // children) to Cancelled so it never stays "running".
                             let mut msgs = buf.write().await;
                             let mut cancelled = false;
@@ -518,11 +518,11 @@ pub async fn run_tui(
                                 // have been dropped with an aborted turn.
                             }
                         }
-                        TurnEvent::SubAgent {
+                        TurnEvent::Envoy {
                             parent_call_id,
                             event,
                         } => {
-                            // Full-duplex (ADR-0029): a subagent's permission broker
+                            // Full-duplex (ADR-0029): an envoy's permission broker
                             // or `ask_user` request bubbles up nested under this
                             // `parent_call_id`. Surface it in the SAME modal the
                             // top-level path uses (so the user answers it inline) and
@@ -531,7 +531,7 @@ pub async fn run_tui(
                             // transcript rendering below for the ordinary
                             // stream/tool-call events.
                             match &event {
-                                neenee_core::SubagentEvent::PermissionRequest(req) => {
+                                neenee_core::EnvoyEvent::PermissionRequest(req) => {
                                     subtask_permission_parent_clone
                                         .lock()
                                         .await
@@ -543,7 +543,7 @@ pub async fn run_tui(
                                         ir_clone.store(true, Ordering::SeqCst);
                                     }
                                 }
-                                neenee_core::SubagentEvent::UserQuestionRequest(req) => {
+                                neenee_core::EnvoyEvent::UserQuestionRequest(req) => {
                                     subtask_question_parent_clone
                                         .lock()
                                         .await
@@ -562,7 +562,7 @@ pub async fn run_tui(
                         .iter_mut()
                         .find(|m| m.is_tool_step() && matches!(&m.kind, crate::tui::document::MessageKind::ToolStep { id, .. } if id == &parent_call_id))
                     {
-                        message.push_subagent_event(&event);
+                        message.push_envoy_event(&event);
                     }
                         }
                         TurnEvent::PermissionRequest(request) => {
@@ -909,8 +909,8 @@ pub async fn run_tui(
             is_responding,
             dirty,
             dirty_notify,
-            subagent_permission_parent,
-            subagent_question_parent,
+            envoy_permission_parent,
+            envoy_question_parent,
             messages: messages_for_loop,
             side_messages,
             parent_status,

@@ -58,15 +58,15 @@ compaction_prune_protect_tokens = 6000
 
 ## Agent behavior
 
-The optional `[agent]` table.
+The optional `[principal]` table.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `agent.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
-| `agent.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on sub-agents and the `/review` diagnostic |
+| `principal.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
+| `principal.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on envoys and the `/review` diagnostic |
 
 ```toml
-[agent]
+[principal]
 hard_stop_rounds = 0
 ```
 

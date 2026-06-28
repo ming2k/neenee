@@ -417,7 +417,7 @@ impl Provider for AnthropicMessagesProvider {
             model: None,
             hidden: false,
             children: None,
-            subagent_meta: None,
+            envoy_meta: None,
             origin: None,
         })
     }

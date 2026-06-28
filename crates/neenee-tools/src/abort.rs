@@ -25,7 +25,7 @@
 //! [`Tool::affects_control_flow`] = `true`, which is an orthogonal axis to
 //! `Tool::access` (the filesystem-damage ladder). That flag, not `access()`,
 //! is what gates it: the permission broker is bypassed (an escape hatch that
-//! waits for approval is useless), and subagent profiles exclude it
+//! waits for approval is useless), and envoy profiles exclude it
 //! unconditionally — a spawned agent must never be able to tear down the whole
 //! program. `access()` is left at the `Write` default but is meaningless here.
 //!
@@ -73,9 +73,9 @@ impl Tool for AbortTool {
     }
     // Meaningless for a control tool, but kept out of the Write-mutation
     // broker ceiling so an EXPLORE-profile agent could in principle reach it
-    // (the subagent exclusion is enforced via affects_control_flow, below).
+    // (the envoy exclusion is enforced via affects_control_flow, below).
     // The orthogonal control-flow axis — this is the flag that actually gates
-    // the tool (subagents are excluded by it; the broker is bypassed).
+    // the tool (envoys are excluded by it; the broker is bypassed).
     fn affects_control_flow(&self) -> bool {
         true
     }
@@ -146,7 +146,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel::<AgentRequest>();
         let tool = AbortTool::new(tx);
         // The orthogonal control-flow axis — the flag that actually gates this
-        // tool (subagent exclusion + broker bypass), not filesystem access.
+        // tool (envoy exclusion + broker bypass), not filesystem access.
         assert!(tool.affects_control_flow());
     }
 }

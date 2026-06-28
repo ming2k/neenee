@@ -1,36 +1,36 @@
-//! Subagent profiles: declarative tool-permission roles for autonomous
-//! sub-agents spawned by the `task` tool (and wrappers like
+//! Envoy profiles: declarative tool-permission roles for autonomous
+//! envoys spawned by the `task` tool (and wrappers like
 //! `verify_plan_execution`).
 //!
 //! ## Why this exists
 //!
-//! Before ADR-0011 the subagent's toolset was a hardcoded filter inside
+//! Before ADR-0011 the envoy's toolset was a hardcoded filter inside
 //! the dispatch tool (`access() == Read` plus a name exclusion for itself).
 //! That had two problems:
 //!
 //! 1. **It was name-driven, not semantic.** `ask_user` is `Read`, so it
-//!    passed the filter and reached the subagent. But a subagent is
+//!    passed the filter and reached the envoy. But an envoy is
 //!    autonomous and non-interactive — its `UserQuestionRequest` events are
-//!    dropped by the subagent tool's event forwarder, so the request deadlocks
+//!    dropped by the envoy tool's event forwarder, so the request deadlocks
 //!    until the parent turn is cancelled. The user could see the call but
 //!    could not answer it.
 //! 2. **The policy was buried in orchestration code.** Adding a second
-//!    subagent role (or tightening the existing one) meant editing the
+//!    envoy role (or tightening the existing one) meant editing the
 //!    dispatch tool rather than declaring intent.
 //!
 //! The fix is a profile primitive that expresses the tool policy in terms of
 //! [`Tool`] capability axes — [`Tool::scope_target`], [`Tool::requires_user`],
-//! [`Tool::spawns_subagent`] — so admission is data-driven and generalizes to
+//! [`Tool::spawns_envoy`] — so admission is data-driven and generalizes to
 //! future tools without touching the dispatch path.
 //!
 //! ## The capability axes
 //!
 //! - [`Tool::scope_target`] — what the call touches (`Read` vs `Write` path). Existing.
 //! - [`Tool::requires_user`] — may block on a live human (e.g. `ask_user`).
-//! - [`Tool::spawns_subagent`] — dispatches a nested agent (e.g. `task`).
+//! - [`Tool::spawns_envoy`] — dispatches a nested agent (e.g. `task`).
 //!
-//! Recursion is unconditionally forbidden in any subagent: a tool that
-//! `spawns_subagent` is never admitted, regardless of profile. User
+//! Recursion is unconditionally forbidden in any envoy: a tool that
+//! `spawns_envoy` is never admitted, regardless of profile. User
 //! interaction is a per-profile knob ([`ToolPolicy::allow_user_interaction`])
 //! so a future interactive role could opt in once the plumbing surfaces the
 //! request; the built-in [`EXPLORE`] profile leaves it off.
@@ -40,45 +40,45 @@ use std::sync::Arc;
 
 use crate::{CommandScope, OperationScope, Tool};
 
-/// Ceiling on what a subagent may do. There is no capability ladder — a tool is
-/// admitted purely by name. [`Tool::spawns_subagent`] and
+/// Ceiling on what an envoy may do. There is no capability ladder — a tool is
+/// admitted purely by name. [`Tool::spawns_envoy`] and
 /// [`Tool::affects_control_flow`] tools are always excluded (recursion and
 /// program teardown are absolute, not per-profile toggles). See ADR-0011/0028.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolPolicy {
-    /// Which tools a subagent under this policy may use, by name. `None` admits
+    /// Which tools an envoy under this policy may use, by name. `None` admits
     /// the full parent toolset (the main agent's shape); `Some(set)` admits only
     /// tools whose `name()` is in the set. This is the sole admission axis —
     /// there is no capability ladder, so adding a new side-effecting tool to the
-    /// parent does *not* silently widen a subagent unless its name is listed.
+    /// parent does *not* silently widen an envoy unless its name is listed.
     pub allowed_tools: Option<&'static [&'static str]>,
     /// Whether tools that block on a human ([`Tool::requires_user`]) may run.
     pub allow_user_interaction: bool,
     /// Declarative write grant: directory specs (relative or absolute) a
-    /// subagent under this policy may write to. Empty (the default) leaves write
+    /// envoy under this policy may write to. Empty (the default) leaves write
     /// paths unconstrained; set to e.g. `&["./src"]` to confine writes there. At
-    /// spawn, [`SubagentProfile::resolve_operation_scope`] canonicalizes these
+    /// spawn, [`EnvoyProfile::resolve_operation_scope`] canonicalizes these
     /// against the cwd into a runtime path constraint the agent enforces. See
     /// ADR-0028.
     pub write_paths: &'static [&'static str],
-    /// Declarative command grant: program-name prefixes a subagent under this
+    /// Declarative command grant: program-name prefixes an envoy under this
     /// policy may run via `bash`. Empty (the default) means "no command
     /// constraint" — any command is allowed up to the broker. Set to e.g.
-    /// `&["git", "cargo"]` to restrict the subagent to those programs. Resolved
-    /// at spawn by [`SubagentProfile::resolve_operation_scope`] into a
+    /// `&["git", "cargo"]` to restrict the envoy to those programs. Resolved
+    /// at spawn by [`EnvoyProfile::resolve_operation_scope`] into a
     /// [`CommandScope`].
     pub command_allowlist: &'static [&'static str],
 }
 
 impl ToolPolicy {
-    /// Returns `true` if a tool may be handed to a subagent under this policy.
+    /// Returns `true` if a tool may be handed to an envoy under this policy.
     pub fn admits(&self, tool: &dyn Tool) -> bool {
-        // Recursion is unconditionally forbidden in sub-agents.
-        if tool.spawns_subagent() {
+        // Recursion is unconditionally forbidden in envoys.
+        if tool.spawns_envoy() {
             return false;
         }
         // Control-flow tools (e.g. the abort/exit escape hatch) are
-        // unconditionally forbidden in sub-agents — a spawned agent must never
+        // unconditionally forbidden in envoys — a spawned agent must never
         // be able to tear down the whole program.
         if tool.affects_control_flow() {
             return false;
@@ -96,38 +96,38 @@ impl ToolPolicy {
     }
 }
 
-/// A declarative subagent role: a name, the system-prompt fragment that
+/// A declarative envoy role: a name, the system-prompt fragment that
 /// frames the role, and the [`ToolPolicy`] that scopes what it may touch.
 ///
 /// Profiles live in `neenee-core` (domain vocabulary) so dispatch tools in
 /// `neenee-agent` resolve them without re-implementing admission logic. The
 /// built-in [`EXPLORE`] profile is what `task` binds to today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubagentProfile {
+pub struct EnvoyProfile {
     pub name: &'static str,
     pub system_prompt: &'static str,
     pub tool_policy: ToolPolicy,
-    /// Whether the spawned subagent runs its admitted write/execute tools
+    /// Whether the spawned envoy runs its admitted write/execute tools
     /// unattended, bypassing the permission broker. Full-duplex (ADR-0029): the
     /// built-in profiles keep this `true` to preserve the legacy autonomous
     /// contract (the broker's `PermissionRequest` would otherwise surface up
     /// to the parent, which historically had no path to answer it). Now that
     /// the up-direction (forwarding) and down-direction (registry → handle →
     /// `reply_permission`) are wired, a future interactive profile can set
-    /// this `false` so a subagent's tool calls prompt the user through the
+    /// this `false` so an envoy's tool calls prompt the user through the
     /// same modal a top-level call uses, and the reply routes back down.
     pub unattended: bool,
 }
 
-impl SubagentProfile {
+impl EnvoyProfile {
     /// Filter a parent toolset down to what this profile admits, by
     /// [`ToolPolicy`]. This is the **scope** axis and the profile's whole job:
-    /// *which* capabilities the subagent may use. It is deliberately blind to
+    /// *which* capabilities the envoy may use. It is deliberately blind to
     /// *which variant* of each capability is used — that is the **override**
     /// axis, owned by the model ([`crate::VariantSelection`]), not the profile.
     ///
     /// Callers pass an already variant-resolved list (one tool per capability,
-    /// at the model's chosen variant), so the subagent inherits the model's
+    /// at the model's chosen variant), so the envoy inherits the model's
     /// overrides while the profile only narrows the scope.
     pub fn select_tools(&self, tools: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
         tools
@@ -184,7 +184,7 @@ impl SubagentProfile {
     }
 }
 
-/// Tools a read-only subagent (EXPLORE / REVIEW / TITLE) may use: pure
+/// Tools a read-only envoy (EXPLORE / REVIEW / TITLE) may use: pure
 /// inspection with no side effects. Listed by name so adding a new
 /// side-effecting tool to the parent never silently widens these profiles.
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -202,10 +202,10 @@ const READ_ONLY_TOOLS: &[&str] = &[
 /// Read-only, non-interactive, non-recursive. This is the profile the `task`
 /// tool binds to; declaring additional profiles (and exposing a role selector
 /// on `task`) is a future extension that needs no changes here.
-pub const EXPLORE: SubagentProfile = SubagentProfile {
+pub const EXPLORE: EnvoyProfile = EnvoyProfile {
     name: "explore",
     system_prompt: "\
-You are a focused research subagent. Your single job is to answer the assigned \
+You are a focused research envoy. Your single job is to answer the assigned \
 task accurately and concisely using read-only tools. Explore the workspace or \
 the web as needed, then write a clear, complete final answer with the key \
 findings (file paths, signatures, relevant snippets, conclusions). \
@@ -226,12 +226,12 @@ handful of tool rounds, then answer.",
 /// non-interactive, non-recursive — like [`EXPLORE`] in capability, but framed
 /// as a health auditor that reasons over a handed-off transcript snapshot and
 /// returns structured verdicts rather than free-form research findings. Bound
-/// by `SubagentTool`-style machinery in `neenee-agent` (`Agent::run_session_review`),
+/// by `EnvoyTool`-style machinery in `neenee-agent` (`Agent::run_session_review`),
 /// never by a model tool call.
-pub const REVIEW: SubagentProfile = SubagentProfile {
+pub const REVIEW: EnvoyProfile = EnvoyProfile {
     name: "review",
     system_prompt: "\
-You are a session-health diagnostic subagent. You are handed a snapshot of \
+You are a session-health diagnostic envoy. You are handed a snapshot of \
 another agent's live transcript and asked whether it is making progress or \
 stuck. Judge from what you see — the sequence of tool calls, whether the same \
 ground is being revisited, whether edits or commands are actually landing. \
@@ -252,11 +252,11 @@ the requested structured verdict only, no preamble.",
 /// all. The runner (`Agent::generate_title`) makes a single `provider.chat()`
 /// framed by this prompt and normalizes the reply via `clean_title`. Declared as
 /// a profile (not an ad-hoc call) so the capability-axis vocabulary stays the
-/// single source of truth for what a bounded subagent may do, per ADR-0011.
-pub const TITLE: SubagentProfile = SubagentProfile {
+/// single source of truth for what a bounded envoy may do, per ADR-0011.
+pub const TITLE: EnvoyProfile = EnvoyProfile {
     name: "title",
     system_prompt: "\
-You are a session-titling subagent. You are shown an excerpt of a conversation \
+You are a session-titling envoy. You are shown an excerpt of a conversation \
 and asked for a short title that captures what the session is about. Reply with \
 only the title — 3 to 7 words, plain text, no quotes, no markdown, no trailing \
 punctuation, no preamble. Name the concrete subject of the work (a feature, \
@@ -271,26 +271,26 @@ the title in the same language as the conversation.",
     unattended: true,
 };
 
-/// The interactive subagent role (ADR-0029). The built-in roles
+/// The interactive envoy role (ADR-0029). The built-in roles
 /// ([`EXPLORE`]) are autonomous: `unattended: true` and
 /// no `requires_user` tools, so they never block on a human. This role is the
 /// opposite shape — it is meant to run **under user supervision**: a `Write`
 /// ceiling admits the full tool ladder (read + execute + write),
 /// `allow_user_interaction` admits `ask_user`, and `unattended: false` leaves
 /// the permission broker on, so every execute/write surfaces as a
-/// `SubagentEvent::PermissionRequest` that round-trips through the parent
+/// `EnvoyEvent::PermissionRequest` that round-trips through the parent
 /// harness ↔ TUI ↔ registry handle.
 ///
 /// It is the "turn the duplex on" role: bind it to a dispatch tool to get a
-/// subagent whose tool calls and questions reach the user in real time and
-/// whose replies route back down. Left unbound by the built-in `subagent`
-/// tool (which stays `EXPLORE`) because forcing every research subagent to
+/// envoy whose tool calls and questions reach the user in real time and
+/// whose replies route back down. Left unbound by the built-in `envoy`
+/// tool (which stays `EXPLORE`) because forcing every research envoy to
 /// prompt would defeat the point of autonomous exploration — opting a
 /// specific dispatch tool into `INTERACTIVE` is a product-level decision.
-pub const INTERACTIVE: SubagentProfile = SubagentProfile {
+pub const INTERACTIVE: EnvoyProfile = EnvoyProfile {
     name: "interactive",
     system_prompt: "\
-You are an interactive subagent operating under user supervision. You may read \
+You are an interactive envoy operating under user supervision. You may read \
 files, run commands, write files, and ask the user questions. Every command and \
 write you attempt is presented to the user for approval before it executes — \
 treat that as a real gate, not a rubber stamp: prefer the narrowest action that \
@@ -307,7 +307,7 @@ turns short and report concrete findings, then stop.",
     unattended: false,
 };
 
-/// Tools a quant-analysis subagent may use: the read-only quant domain tools
+/// Tools a quant-analysis envoy may use: the read-only quant domain tools
 /// (market data, backtest, position review) plus the generic read-only
 /// inspection tools (so it can read strategy code, configs, logs). Crucially,
 /// this list excludes live-trading tools (`place_order`) and all coding
@@ -329,7 +329,7 @@ const QUANT_ANALYSIS_TOOLS: &[&str] = &[
     "list_positions",
 ];
 
-/// The quant-analysis subagent role. Read-only and non-interactive like
+/// The quant-analysis envoy role. Read-only and non-interactive like
 /// [`EXPLORE`], but scoped to a quantitative-trading domain: it may pull
 /// market data, run backtests, and review open positions, but it cannot place
 /// live orders or modify any file. A quant agent that *should* trade binds a
@@ -341,11 +341,11 @@ const QUANT_ANALYSIS_TOOLS: &[&str] = &[
 /// a quant analyst never sees coding tools (`write_file`, `edit_file`, `bash`),
 /// and a coding agent never sees quant tools (`market_data`, `place_order`).
 /// The two domains are isolated by name at the profile layer, which is the
-/// single source of truth for what a bounded subagent may touch (ADR-0011).
-pub const QUANT: SubagentProfile = SubagentProfile {
+/// single source of truth for what a bounded envoy may touch (ADR-0011).
+pub const QUANT: EnvoyProfile = EnvoyProfile {
     name: "quant",
     system_prompt: "\
-You are a quantitative-trading analysis subagent. Your job is to research and \
+You are a quantitative-trading analysis envoy. Your job is to research and \
 evaluate trading strategies using read-only tools: pull market data, run \
 backtests, and review open positions. Report findings concisely with concrete \
 numbers (returns, Sharpe, drawdown, exposure). You are non-interactive: never ask a question; if data is missing, say \
@@ -370,7 +370,7 @@ mod tests {
     struct Stub {
         name: &'static str,
         requires_user: bool,
-        spawns_subagent: bool,
+        spawns_envoy: bool,
         affects_control_flow: bool,
     }
 
@@ -388,8 +388,8 @@ mod tests {
         fn requires_user(&self) -> bool {
             self.requires_user
         }
-        fn spawns_subagent(&self) -> bool {
-            self.spawns_subagent
+        fn spawns_envoy(&self) -> bool {
+            self.spawns_envoy
         }
         fn affects_control_flow(&self) -> bool {
             self.affects_control_flow
@@ -405,7 +405,7 @@ mod tests {
         Stub {
             name,
             requires_user: false,
-            spawns_subagent: false,
+            spawns_envoy: false,
             affects_control_flow: false,
         }
     }
@@ -416,7 +416,7 @@ mod tests {
     }
 
     fn with_spawn(mut t: Stub) -> Stub {
-        t.spawns_subagent = true;
+        t.spawns_envoy = true;
         t
     }
 
@@ -427,7 +427,7 @@ mod tests {
         Stub {
             name: "abort",
             requires_user: false,
-            spawns_subagent: false,
+            spawns_envoy: false,
             affects_control_flow: true,
         }
     }
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn explore_rejects_dispatch_tool_even_if_named_like_a_read() {
         // Recursion is absolute: even a whitelisted name is excluded when it
-        // spawns a subagent.
+        // spawns an envoy.
         assert!(!EXPLORE.tool_policy.admits(&with_spawn(make("read_text"))));
     }
 

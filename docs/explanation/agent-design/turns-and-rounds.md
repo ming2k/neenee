@@ -188,7 +188,7 @@ paths — and any future tool source — pass through identical checks:
    turn-ending failure.
 2. **Write-scope gate.** A per-agent `WriteScope` boundary blocks write tools
    whose target is outside the agent's granted paths — the main agent is
-   unrestricted, a subagent is scoped by its profile. See
+   unrestricted, an envoy is scoped by its profile. See
    [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md).
 3. **Permission broker.** Write-capable calls are authorized against a
    scoped rule set. A cached *always* rule skips the prompt; otherwise
@@ -260,9 +260,9 @@ a sequence of turns; pursuit accounting, plan progress, and the persisted
 session all advance at turn boundaries. A resumed session restores whole
 turns, never partial rounds.
 
-A sub-agent runs its own turn with its own independent round budget — the
+An envoy runs its own turn with its own independent round budget — the
 parent's round counter does not move while the child works. See
-[Sub-agents](subagents.md).
+[Envoys](envoys.md).
 
 ## A turn of several rounds
 
@@ -299,6 +299,6 @@ of all four rounds, and the plan's staleness counter advances by one turn.
 - [Guided decoding](../guided-decoding.md) — the constrained-decoding
   layer that produces valid native calls
 - [Pursuits](pursuits.md) — turn-scoped token and time accounting
-- [Sub-agents](subagents.md) — independent turns and round budgets
+- [Envoys](envoys.md) — independent turns and round budgets
   for child agents
 - [How to add a tool](../../how-to/add-a-tool.md) — adding a new tool

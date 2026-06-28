@@ -1,4 +1,4 @@
-//! Session-level AI title: domain vocabulary for the titling subagent
+//! Session-level AI title: domain vocabulary for the titling envoy
 //! (ADR-0022).
 //!
 //! Mirrors the split established by `session_review` (ADR-0016 / ADR-0018):

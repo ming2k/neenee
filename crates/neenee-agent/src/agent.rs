@@ -28,7 +28,7 @@ pub(crate) type RoundPersistFn =
 ///   assistant…" for this CLI; swap for research/ops/etc.).
 /// - [`AgentIdentity::persona`] — optional full-text override of the opening.
 ///   When set, [`AgentIdentity::preamble`] returns it verbatim and ignores
-///   `name`/`mission`. Subagents use this to inject their role's full system
+///   `name`/`mission`. Envoys use this to inject their role's full system
 ///   prompt as the identity.
 ///
 /// [`AgentIdentity::default`] yields empty fields (no preamble — the system
@@ -41,7 +41,7 @@ pub struct AgentIdentity {
     /// access"`. Empty means "no mission framing".
     pub mission: String,
     /// Optional full-text identity override. When non-empty, `preamble`
-    /// returns this verbatim (used by subagents whose identity *is* their
+    /// returns this verbatim (used by envoys whose identity *is* their
     /// role's full system prompt). None/empty → compose from name + mission.
     pub persona: Option<String>,
 }
@@ -57,7 +57,7 @@ impl AgentIdentity {
     }
 
     /// Build an identity whose preamble is a full persona string, ignoring
-    /// name/mission composition. Used by subagents: their identity is the
+    /// name/mission composition. Used by envoys: their identity is the
     /// role's complete system prompt.
     pub fn from_persona(persona: impl Into<String>) -> Self {
         Self {
@@ -146,16 +146,16 @@ pub struct Agent {
     hard_stop_rounds: Arc<std::sync::Mutex<usize>>,
     /// Whether the deterministic read-loop guard ([`crate::loop_guard`]) may
     /// inject its anti-anchoring nudge. Default `true`; seeded from
-    /// `[agent] loop_review_enabled` and flipped off for sub-agents and the
+    /// `[agent] loop_review_enabled` and flipped off for envoys and the
     /// review diagnostic via `set_loop_review_enabled`. Lock-free so the round
     /// boundary reads it without contention.
     loop_guard_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Registered review dimensions evaluated by the on-demand diagnostic
-    /// subagent (`/review`). Defaults to [`crate::default_reviews`] (looping);
-    /// empty on sub-agents (which have no `/review` path).
+    /// envoy (`/review`). Defaults to [`crate::default_reviews`] (looping);
+    /// empty on envoys (which have no `/review` path).
     reviews: Vec<Arc<dyn SessionReview>>,
     /// Runtime operation boundary for this agent (ADR-0028). The main agent is
-    /// unrestricted ([`neenee_core::OperationScope::unrestricted`]); a subagent
+    /// unrestricted ([`neenee_core::OperationScope::unrestricted`]); an envoy
     /// carries the scope resolved from its profile's `write_paths` and
     /// `command_allowlist` grants. Enforced at the `execute_tool` funnel for
     /// every admitted tool whose [`neenee_core::ScopeTarget`] falls outside the
@@ -163,7 +163,7 @@ pub struct Agent {
     /// prompt.
     operation_scope: std::sync::Mutex<neenee_core::OperationScope>,
     /// Lifecycle event hooks (ADR-0025). Installed once at startup from the
-    /// `[hooks]` config by the CLI; empty by default (sub-agents, tests). Read
+    /// `[hooks]` config by the CLI; empty by default (envoys, tests). Read
     /// at the PreToolUse / PostToolUse / Stop insertion points. Held as a
     /// swappable `Arc` behind a `Mutex` so [`Agent::set_hooks`] can replace the
     /// whole registry without the insertion points holding the lock across the
@@ -172,8 +172,8 @@ pub struct Agent {
     /// Inbound steering inbox — the down-direction of full-duplex (ADR-0029).
     /// `None` for agents that were never given a handle (the top-level agent
     /// driven directly by the harness, legacy tests); lazily created by
-    /// [`Agent::install_inbox`], which a spawned subagent's dispatcher
-    /// (`SubagentTool`) calls so the parent can steer it mid-turn. The driver loop
+    /// [`Agent::install_inbox`], which a spawned envoy's dispatcher
+    /// (`EnvoyTool`) calls so the parent can steer it mid-turn. The driver loop
     /// `take`s the receiver at turn entry and drains it at every tool-round
     /// boundary (see [`Agent::drain_inbox`]). Carries only the
     /// "new-input / control" class ([`AgentOp`]); the request/reply class
@@ -192,7 +192,7 @@ pub struct Agent {
     /// durably appends the round's new messages to the session log so a crash
     /// after a side-effecting tool call leaves the transcript in sync with the
     /// filesystem instead of rewinding to the previous turn. `None` for
-    /// sub-agents, the review diagnostic, and tests — they have no session of
+    /// envoys, the review diagnostic, and tests — they have no session of
     /// their own to persist, so the round boundary is a plain no-op there.
     round_persist: std::sync::Mutex<Option<RoundPersistFn>>,
     /// Declarative prompt registry (ADR-0039). Holds one [`PromptSection`] per
@@ -207,7 +207,7 @@ pub struct Agent {
     /// `[tool_variants."<model-id>"]` config via
     /// [`Agent::set_variant_selection`] and re-seeded on model switch so the
     /// resolved toolset always tracks the live model. Held behind an `Arc` so a
-    /// spawned subagent — which is an agent on the *same* model — can inherit
+    /// spawned envoy — which is an agent on the *same* model — can inherit
     /// the same overrides by sharing this handle (see
     /// [`Agent::variant_selection_handle`]); the profile decides scope, the
     /// model decides variant.
@@ -217,43 +217,43 @@ pub struct Agent {
 /// Capability handle for steering a running agent from the outside — the
 /// parent's down-direction of full-duplex (ADR-0029). Cheap to clone (one
 /// `Weak` + one `mpsc::Sender`); obtained from [`Agent::install_inbox`] on an
-/// `Arc<Agent>` (a spawned subagent) and typically lodged in a
-/// [`crate::subagent_tool::SubagentRegistry`] keyed by the parent tool-call id so
+/// `Arc<Agent>` (a spawned envoy) and typically lodged in a
+/// [`crate::envoy_tool::EnvoyRegistry`] keyed by the parent tool-call id so
 /// the harness can look it up when a request surfaces.
 ///
 /// Two classes of operation, deliberately split:
 ///
-/// - **Steering** ([`AgentOp`], via [`SubagentHandle::submit`]): inject a new
+/// - **Steering** ([`AgentOp`], via [`EnvoyHandle::submit`]): inject a new
 ///   user message, a hidden inter-agent note, or interrupt/shutdown. Routed
 ///   through the agent's inbox and applied at the next tool-round boundary —
 ///   safe to defer because nothing is blocked on it.
-/// - **Request/reply** ([`SubagentHandle::reply_permission`] /
-///   [`SubagentHandle::reply_user_question`]): resolve a permission broker or
-///   `ask_user` oneshot the subagent is parked on **right now**, mid-tool.
+/// - **Request/reply** ([`EnvoyHandle::reply_permission`] /
+///   [`EnvoyHandle::reply_user_question`]): resolve a permission broker or
+///   `ask_user` oneshot the envoy is parked on **right now**, mid-tool.
 ///   These bypass the inbox and call the agent's shared-state resolvers
 ///   directly — a queued reply would deadlock the parked tool.
 ///
 /// The `Weak<Agent>` means the handle observes the agent's lifetime: once the
-/// subagent's turn ends and the dispatcher drops its `Arc`, every method
+/// envoy's turn ends and the dispatcher drops its `Arc`, every method
 /// returns `false` / `None` instead of erroring, so a late reply from the UI
-/// after the subagent finished degrades gracefully.
+/// after the envoy finished degrades gracefully.
 #[derive(Clone)]
-pub struct SubagentHandle {
+pub struct EnvoyHandle {
     weak: std::sync::Weak<Agent>,
     ops: mpsc::UnboundedSender<AgentOp>,
 }
 
-impl SubagentHandle {
+impl EnvoyHandle {
     /// Submit a steering [`AgentOp`] into the agent's inbox. Returns `false`
     /// if the agent has been dropped (receiver gone) — the op is discarded.
     pub fn submit(&self, op: AgentOp) -> bool {
         self.ops.send(op).is_ok()
     }
 
-    /// Resolve a permission broker request the subagent is parked on. Returns
+    /// Resolve a permission broker request the envoy is parked on. Returns
     /// `false` if the agent was dropped or no matching pending request exists.
     /// This is the down-direction counterpart to an up-going
-    /// [`AgentEvent::PermissionRequest`] / [`SubagentEvent::PermissionRequest`].
+    /// [`AgentEvent::PermissionRequest`] / [`EnvoyEvent::PermissionRequest`].
     pub fn reply_permission(&self, request_id: &str, decision: PermissionDecision) -> bool {
         if let Some(agent) = self.weak.upgrade() {
             agent.reply_permission(request_id, decision)
@@ -262,10 +262,10 @@ impl SubagentHandle {
         }
     }
 
-    /// Resolve an `ask_user` request the subagent is parked on. Returns
+    /// Resolve an `ask_user` request the envoy is parked on. Returns
     /// `false` if the agent was dropped or no matching pending request exists.
     /// Down-direction counterpart to an up-going
-    /// [`AgentEvent::UserQuestionRequest`] / [`SubagentEvent::UserQuestionRequest`].
+    /// [`AgentEvent::UserQuestionRequest`] / [`EnvoyEvent::UserQuestionRequest`].
     pub fn reply_user_question(&self, request_id: &str, answers: Vec<Vec<String>>) -> bool {
         if let Some(agent) = self.weak.upgrade() {
             agent.reply_user_question(request_id, answers)
@@ -313,7 +313,7 @@ impl Agent {
     /// Construct an agent from a flat tool list. The tools are grouped into a
     /// [`neenee_core::ToolSet`] (one capability per [`Tool::name`], one variant
     /// per [`Tool::variant`]) — the common case for a single-variant toolset or
-    /// an already-resolved subagent toolset. Use [`Agent::from_toolset`] to
+    /// an already-resolved envoy toolset. Use [`Agent::from_toolset`] to
     /// preserve a multi-variant set so per-model variant selection can switch
     /// between variants at runtime.
     pub fn new(
@@ -354,7 +354,9 @@ impl Agent {
         toolset.insert(Arc::new(crate::todo_tools::TodoWriteTool::new(
             todo_context.clone(),
         )));
-        toolset.insert(Arc::new(crate::todo_tools::TodoUpdateTool::new(todo_context)));
+        toolset.insert(Arc::new(crate::todo_tools::TodoUpdateTool::new(
+            todo_context,
+        )));
 
         // Seed the model-visible view with the default variant of every
         // capability; re-seeded by `set_variant_selection` once the model's
@@ -386,7 +388,9 @@ impl Agent {
             identity,
             round_persist: std::sync::Mutex::new(None),
             prompt_registry: crate::prompt::default_prompt_registry(),
-            variant_selection: Arc::new(std::sync::Mutex::new(neenee_core::VariantSelection::new())),
+            variant_selection: Arc::new(
+                std::sync::Mutex::new(neenee_core::VariantSelection::new()),
+            ),
         }
     }
 
@@ -419,7 +423,7 @@ impl Agent {
 
     /// The current model-visible toolset: exactly one variant per capability for
     /// the active selection. A snapshot clone for external readers (e.g. a
-    /// subagent dispatch that scopes this resolved list down to its profile).
+    /// envoy dispatch that scopes this resolved list down to its profile).
     pub fn installed_tools(&self) -> Vec<Arc<dyn Tool>> {
         self.resolved_tools
             .read()
@@ -428,7 +432,7 @@ impl Agent {
     }
 
     /// A shared handle to this agent's live variant selection (the **override**
-    /// axis). Handed to a spawned subagent's dispatch tool so the subagent — an
+    /// axis). Handed to a spawned envoy's dispatch tool so the envoy — an
     /// agent on the same model — resolves its admitted capabilities to the same
     /// variants the parent uses, tracking model switches live. The profile still
     /// owns the orthogonal **scope** axis.
@@ -438,7 +442,7 @@ impl Agent {
 
     /// Replace the prompt registry wholesale. Used by sub-callers that need a
     /// different system-message composition than the default mission-neutral
-    /// set — currently the `/review` diagnostic, whose reviewer subagent gets
+    /// set — currently the `/review` diagnostic, whose reviewer envoy gets
     /// a persona + dimensions + JSON-contract registry (ADR-0039 stage 6) so
     /// `ensure_system_prompt` rebuilds the review prompt correctly each round
     /// instead of clobbering a pre-seeded system message.
@@ -448,7 +452,7 @@ impl Agent {
 
     /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_rounds`
     /// in `config.toml` but can be flipped at runtime. `0` (the default) leaves
-    /// the turn uncapped, matching ADR-0009. The reviewer subagent gets a
+    /// the turn uncapped, matching ADR-0009. The reviewer envoy gets a
     /// tight non-zero bound so a runaway diagnostic cannot loop.
     pub fn set_hard_stop_rounds(&self, rounds: usize) {
         *self
@@ -480,7 +484,7 @@ impl Agent {
 
     /// Enable or disable the deterministic read-loop guard's anti-anchoring
     /// nudge ([`crate::loop_guard`]). Mirrors `[agent] loop_review_enabled` in
-    /// `config.toml`; flipped to `false` on sub-agents and the review diagnostic
+    /// `config.toml`; flipped to `false` on envoys and the review diagnostic
     /// so they run unobstructed. Detection is pure bookkeeping with no model
     /// call, so unlike the removed ADR-0030 review this carries no recursion
     /// risk — the flag is an off-switch, not a safety requirement.
@@ -499,7 +503,7 @@ impl Agent {
 
     /// Install the lifecycle hook registry (ADR-0025). Replaces any prior
     /// registry; intended to be called once at startup after the `[hooks]`
-    /// config is parsed. Sub-agents and tests leave the default empty registry.
+    /// config is parsed. Envoys and tests leave the default empty registry.
     pub fn set_hooks(&self, registry: crate::hooks::HookRegistry) {
         self.hooks.set(registry);
     }
@@ -508,7 +512,7 @@ impl Agent {
     /// (ADR-0035). The closure receives the *current full* turn history and
     /// should durably append only the new tail (see
     /// `SessionStore::append_round`). Called once by orchestration after the
-    /// agent is built and the session is open; sub-agents and the review
+    /// agent is built and the session is open; envoys and the review
     /// diagnostic never call this, so the default `None` keeps their round
     /// boundaries no-ops.
     pub fn set_round_persist(&self, f: RoundPersistFn) {
@@ -516,7 +520,7 @@ impl Agent {
     }
 
     /// Fire the mid-turn save point if installed. Returns `Ok(())` when no
-    /// closure is set (the sub-agent / review / test path) so the call site
+    /// closure is set (the envoy / review / test path) so the call site
     /// stays unconditional. Invoked at the round boundary — after a round's
     /// tool results are in `messages` and before the next model request.
     async fn fire_round_persist(&self, messages: &[Message]) -> Result<(), HarnessError> {
@@ -694,8 +698,8 @@ impl Agent {
     }
 
     /// Set this agent's operation boundary (ADR-0028). The main agent leaves it
-    /// unrestricted; `SubagentTool` sets the scope resolved from the bound
-    /// subagent profile on the child before it runs.
+    /// unrestricted; `EnvoyTool` sets the scope resolved from the bound
+    /// envoy profile on the child before it runs.
     pub fn set_operation_scope(&self, scope: neenee_core::OperationScope) {
         *self
             .operation_scope
@@ -851,7 +855,7 @@ impl Agent {
         self.permissions.revoke_allowed(tool, scope)
     }
 
-    /// Install (or reuse) the steering inbox and return a [`SubagentHandle`]
+    /// Install (or reuse) the steering inbox and return a [`EnvoyHandle`]
     /// the caller can steer the agent with mid-turn — the entry point of
     /// full-duplex (ADR-0029). Requires `Arc<Self>` because the handle holds a
     /// `Weak<Agent>` so it can observe the agent's lifetime without keeping it
@@ -863,7 +867,7 @@ impl Agent {
     /// directly by the harness never calls this and stays non-steerable by an
     /// inbox — its interrupt path is the `CancellationToken` passed to the run,
     /// and its permission/ask_user replies go through the harness directly.
-    pub fn install_inbox(self: &Arc<Self>) -> SubagentHandle {
+    pub fn install_inbox(self: &Arc<Self>) -> EnvoyHandle {
         let mut tx_guard = self.inbox_tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = match tx_guard.clone() {
             Some(existing) => existing,
@@ -875,14 +879,14 @@ impl Agent {
                 tx
             }
         };
-        SubagentHandle {
+        EnvoyHandle {
             weak: Arc::downgrade(self),
             ops: tx,
         }
     }
 
     /// Submit a steering [`AgentOp`] without going through a handle. Equivalent
-    /// to [`SubagentHandle::submit`] but usable when the caller already holds a
+    /// to [`EnvoyHandle::submit`] but usable when the caller already holds a
     /// reference to the agent rather than a handle (e.g. the top-level harness
     /// steering the primary session). Returns `false` if no inbox was ever
     /// installed ([`Agent::install_inbox`] was not called) or the receiver was
@@ -918,7 +922,7 @@ impl Agent {
                 AgentOp::InjectUserMessage(text) => {
                     messages.push(
                         Message::new(Role::User, text)
-                            .with_origin(InjectionOrigin::new(InjectionKind::SubagentSteer)),
+                            .with_origin(InjectionOrigin::new(InjectionKind::EnvoySteer)),
                     );
                 }
                 AgentOp::InterAgentMessage { msg } => {
@@ -946,7 +950,7 @@ impl Agent {
 
     /// Designate the project whose bucket backs the persistent "always"
     /// allowlist, and load any rules already on disk into the in-memory set.
-    /// Pass `None` to disable persistence (sub-agents and most tests do this).
+    /// Pass `None` to disable persistence (envoys and most tests do this).
     ///
     /// Loading is best-effort: a missing, unreadable, or unsupported file is
     /// silently ignored — the agent simply starts with an empty allowlist and
@@ -1048,7 +1052,7 @@ impl Agent {
             .disabled_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let subagent = ["subagent"];
+        let envoy = ["envoy"];
         // Merge the resolved built-in view and dynamically-refreshable MCP
         // tools into one owned list (one variant per capability).
         let mut all_tools: Vec<Arc<dyn Tool>> = self
@@ -1066,8 +1070,8 @@ impl Agent {
                 let source = if let Some(rest) = name.strip_prefix("mcp__") {
                     let server = rest.split("__").next().unwrap_or(rest);
                     format!("mcp:{}", server)
-                } else if subagent.contains(&name) {
-                    "subagent".to_string()
+                } else if envoy.contains(&name) {
+                    "envoy".to_string()
                 } else {
                     "builtin".to_string()
                 };
@@ -1141,7 +1145,7 @@ impl Agent {
         // a non-steerable agent (no `install_inbox` call) → `drain_inbox` is a
         // no-op. Taken once per agent: a re-run after the first returns `None`
         // too, which is fine for the top-level harness (driven directly) and
-        // for sub-agents (single run).
+        // for envoys (single run).
         let mut inbox_rx = self
             .inbox_rx
             .lock()
@@ -1421,7 +1425,7 @@ impl Agent {
                 model: Some(self.provider.model()),
                 hidden: false,
                 children: None,
-                subagent_meta: None,
+                envoy_meta: None,
                 origin: None,
             };
             if !valid_assistant_response(&response) {
@@ -1633,11 +1637,11 @@ impl Agent {
         F: FnMut(AgentEvent) + Send,
     {
         let text = result.to_text();
-        // Cost attribution: a subagent's true token consumption can be 100x
+        // Cost attribution: an envoy's true token consumption can be 100x
         // the byte-estimate of its final summary, so accumulate the real
         // `TokenUsage` it reported. For every other tool the byte-estimate
         // remains the only signal we have.
-        match result.subagent_payload() {
+        match result.envoy_payload() {
             Some((_sub_messages, sub_usage)) => {
                 state.token_usage.total_tokens += sub_usage.total_tokens;
                 state.token_usage.prompt_tokens += sub_usage.prompt_tokens;
@@ -1661,24 +1665,24 @@ impl Agent {
                 duration_ms,
             });
         }
-        // For subagent results, attach the nested transcript as `children` on
-        // the persisted Tool-role message so resume can rebuild the subagent
+        // For envoy results, attach the nested transcript as `children` on
+        // the persisted Tool-role message so resume can rebuild the envoy
         // view without a live event stream. The nested `Message`s already
         // self-contain their own tool_calls / tool_call_id / children, so
-        // arbitrarily deep subagent trees round-trip through session.json.
-        // Sidecar `subagent_meta` captures what the live event stream knew but
+        // arbitrarily deep envoy trees round-trip through session.json.
+        // Sidecar `envoy_meta` captures what the live event stream knew but
         // the bare transcript cannot reconstruct on resume: duration, the
         // task description, the toolset size, and an explicit failure flag.
-        let tool_message = match result.subagent_payload() {
+        let tool_message = match result.envoy_payload() {
             Some((sub_messages, _)) => {
-                let meta = crate::message::SubagentMeta {
+                let meta = crate::message::EnvoyMeta {
                     duration_ms: Some(duration_ms),
                     failed: result.is_error(),
                     ..Default::default()
                 };
                 Message::tool_result(call, format!("[{} result]:\n{}", call.name, text))
                     .with_children(sub_messages.to_vec())
-                    .with_subagent_meta(meta)
+                    .with_envoy_meta(meta)
             }
             None => Message::tool_result(call, format!("[{} result]:\n{}", call.name, text)),
         };
@@ -1703,7 +1707,7 @@ impl Agent {
 
     /// Fire PostToolUse (success) or PostToolUseFailure (error) hooks and append
     /// any injected context as hidden user messages (ADR-0025). No-op when the
-    /// registry is empty, which is the common case (sub-agents, tests, no
+    /// registry is empty, which is the common case (envoys, tests, no
     /// `[hooks]` config).
     async fn run_post_tool_hooks(
         &self,
@@ -1803,7 +1807,7 @@ impl Agent {
     /// Consult the turn-guard registry for the round just dispatched and apply
     /// the resulting action. `Inject` appends a steering nudge as a hidden user
     /// message (non-terminating); `Abort` would terminate the turn. Gated by
-    /// `loop_guard_enabled` so sub-agents and the review diagnostic run
+    /// `loop_guard_enabled` so envoys and the review diagnostic run
     /// unobstructed. Mirrored at both loop boundaries.
     fn apply_guard_actions<F>(
         &self,
@@ -1867,7 +1871,7 @@ impl Agent {
     /// budget (`0`) keeps the turn uncapped, exactly matching ADR-0009.
     ///
     /// Session review no longer fires from the turn loop: it is on-demand via
-    /// `/review` ([`Self::review_now`]), which runs the diagnostic subagent
+    /// `/review` ([`Self::review_now`]), which runs the diagnostic envoy
     /// against the live transcript and reports a verdict without aborting.
     fn check_hard_stop(&self, rounds: usize) -> std::ops::ControlFlow<()> {
         let budget = self.get_hard_stop_rounds();
@@ -1921,7 +1925,7 @@ impl Agent {
     }
 
     /// On-demand session review (ADR-0018): run the bounded read-only
-    /// diagnostic subagent against `messages` and return one verdict per
+    /// diagnostic envoy against `messages` and return one verdict per
     /// registered dimension. Driven by the `/review` command — the harness no
     /// longer fires review on a round cadence. Safe to call while a turn is
     /// running: the reviewer is an independent child agent that only reads a
@@ -2079,7 +2083,7 @@ impl Agent {
         }
 
         // Operation-scope gate (ADR-0028). The main agent's scope is
-        // unrestricted (no-op here); a subagent carries a scope resolved from
+        // unrestricted (no-op here); an envoy carries a scope resolved from
         // its profile's `write_paths` / `command_allowlist` grants. Any tool
         // whose [`ScopeTarget`] is a real target (Path/Command) and falls
         // outside the granted scope is blocked outright — a hard capability
@@ -2147,11 +2151,11 @@ impl Agent {
             }
         }
 
-        // The SubAgent / ToolStream events must carry the same id as the
+        // The Envoy / ToolStream events must carry the same id as the
         // up-front ToolCall event (the dispatch-generated `call_id`), not the
         // model's `call.id` — the UI keys its step off the ToolCall event id,
-        // so using `call.id` here would orphan every subagent child stream and
-        // every live tool stream, leaving the subagent view empty.
+        // so using `call.id` here would orphan every envoy child stream and
+        // every live tool stream, leaving the envoy view empty.
         let parent_call_id = call_id.to_string();
         let stream_call_id = call_id.to_string();
         let stream_tx = event_tx.clone();
@@ -2166,7 +2170,7 @@ impl Agent {
                 call_id,
                 &call.arguments,
                 Box::new(|event| {
-                    let _ = event_tx.send(AgentEvent::SubAgent {
+                    let _ = event_tx.send(AgentEvent::Envoy {
                         parent_call_id: parent_call_id.clone(),
                         event,
                     });
@@ -2265,7 +2269,7 @@ impl Agent {
                     // Emit ToolResult immediately through the channel so the TUI
                     // transitions this step from Running to Completed without
                     // waiting for sibling tools to finish. Without this, a
-                    // finished subagent task stays "Running" until the slowest
+                    // finished envoy task stays "Running" until the slowest
                     // sibling in the batch completes.
                     let output = result.to_text();
                     let _ = tx.send(AgentEvent::ToolResult {
