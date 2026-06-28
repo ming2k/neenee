@@ -44,10 +44,10 @@ pub async fn switch(
             _ => {}
         }
     }
-    if let Some(url) = base_url {
-        if provider_type.as_str() == "llama" {
-            config.llama_base_url = Some(url);
-        }
+    if let Some(url) = base_url
+        && provider_type.as_str() == "llama"
+    {
+        config.llama_base_url = Some(url);
     }
     // Persist the chosen model and default-provider pointer before
     // building so the catalog reads them back. The key/url writes

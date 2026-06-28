@@ -78,13 +78,13 @@ pub fn format_export_markdown(ctx: ExportContext<'_>, messages: &[Message]) -> S
             }
             Role::Assistant => {
                 let mut wrote_header = false;
-                if let Some(reasoning) = message.reasoning_content.as_deref() {
-                    if !reasoning.trim().is_empty() {
-                        emitted_any = true;
-                        out.push_str("<details>\n<summary>Reasoning</summary>\n\n");
-                        out.push_str(reasoning.trim());
-                        out.push_str("\n\n</details>\n\n");
-                    }
+                if let Some(reasoning) = message.reasoning_content.as_deref()
+                    && !reasoning.trim().is_empty()
+                {
+                    emitted_any = true;
+                    out.push_str("<details>\n<summary>Reasoning</summary>\n\n");
+                    out.push_str(reasoning.trim());
+                    out.push_str("\n\n</details>\n\n");
                 }
                 let content = pick_content(message);
                 if !content.trim().is_empty() {

@@ -135,7 +135,6 @@ pub(super) const MODAL_TITLE_META_GAP: usize = 2;
 /// Per-side horizontal inset of `panel_block` content: the thick left `┃`
 /// bar occupies 1 column, and a matching 1-column gutter is reserved on the
 /// right so the panel's content is symmetric and a long line never runs
-/// into either edge. Applied as a symmetric margin by `panel_inner`. The
-/// permission sheet deliberately layers its own `PERMISSION_H_PADDING` on
-/// top for button breathing room, so it computes its own content rect.
+/// into either edge.
+#[cfg(test)]
 pub(super) const PANEL_BAR_INSET: u16 = 1;

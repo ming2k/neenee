@@ -54,7 +54,7 @@ edges, so the relocation pattern does not apply.
 
 After the move the graph is strictly layered with zero reverse edges:
 
-```
+```text
 neenee-core        (no workspace deps)
        ^
        │

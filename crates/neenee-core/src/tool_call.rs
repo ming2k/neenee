@@ -93,10 +93,11 @@ pub fn parse_text_tool_call(text: &str) -> Option<ToolCall> {
 /// providers simply ignore the `tool_calls` field and keep using the message
 /// `content`.
 pub fn attach_fallback_tool_call(messages: &mut [Message], call: &ToolCall) {
-    if let Some(last) = messages.last_mut() {
-        if last.role == Role::Assistant && last.tool_calls.is_none() {
-            last.tool_calls = Some(vec![call.clone()]);
-        }
+    if let Some(last) = messages.last_mut()
+        && last.role == Role::Assistant
+        && last.tool_calls.is_none()
+    {
+        last.tool_calls = Some(vec![call.clone()]);
     }
 }
 

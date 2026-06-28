@@ -89,10 +89,10 @@ fn empty_state_height(logo: &[&str]) -> usize {
 /// Resolve the effective logo lines: user-supplied lines when present,
 /// otherwise the built-in wordmark.
 fn effective_logo(user_logo: Option<&[String]>) -> Vec<&str> {
-    if let Some(lines) = user_logo {
-        if !lines.is_empty() {
-            return lines.iter().map(String::as_str).collect();
-        }
+    if let Some(lines) = user_logo
+        && !lines.is_empty()
+    {
+        return lines.iter().map(String::as_str).collect();
     }
     BUILTIN_LOGO.to_vec()
 }

@@ -175,15 +175,15 @@ fn flush_run(
     run_cells: &mut Vec<(String, u8)>,
     y: u16,
 ) {
-    if let Some(x) = run_x.take() {
-        if !run_cells.is_empty() {
-            draws.push(Draw::Cells {
-                x,
-                y,
-                style: *run_style,
-                cells: std::mem::take(run_cells),
-            });
-        }
+    if let Some(x) = run_x.take()
+        && !run_cells.is_empty()
+    {
+        draws.push(Draw::Cells {
+            x,
+            y,
+            style: *run_style,
+            cells: std::mem::take(run_cells),
+        });
     }
     *run_style = Style::RESET;
 }

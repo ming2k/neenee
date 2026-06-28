@@ -132,10 +132,10 @@ pub(super) async fn mcp_tools_call(
         )
         .json(&body);
     for (name, value) in extra_headers {
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(value) {
-            if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
-                request = request.header(n, v);
-            }
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(value)
+            && let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        {
+            request = request.header(n, v);
         }
     }
     let response = request
@@ -164,10 +164,10 @@ fn extract_mcp_text(body: &str) -> Option<String> {
         return Some(text);
     }
     for line in body.lines() {
-        if let Some(rest) = line.trim().strip_prefix("data:") {
-            if let Some(text) = parse_mcp_payload(rest.trim()) {
-                return Some(text);
-            }
+        if let Some(rest) = line.trim().strip_prefix("data:")
+            && let Some(text) = parse_mcp_payload(rest.trim())
+        {
+            return Some(text);
         }
     }
     None
@@ -184,10 +184,8 @@ fn parse_mcp_payload(payload: &str) -> Option<String> {
             .get("type")
             .and_then(|t| t.as_str())
             .is_some_and(|t| t == "text");
-        if is_text {
-            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                return Some(text.to_string());
-            }
+        if is_text && let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+            return Some(text.to_string());
         }
     }
     None

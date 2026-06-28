@@ -291,8 +291,8 @@ impl EnvoyTool {
         // capability limits. `resolve_tools` composes both and applies the envoy
         // runtime hard rules (no recursion / control-flow / blocking-on-user).
         let model = neenee_core::resolve_model(&self.provider.model());
-        let model_sel = neenee_core::ToolSelection::unrestricted()
-            .with_variants(self.variant_snapshot());
+        let model_sel =
+            neenee_core::ToolSelection::unrestricted().with_variants(self.variant_snapshot());
         let sub_tools = self
             .profile
             .resolve_tools(&self.toolset, &model, &model_sel);
@@ -577,9 +577,10 @@ mod tests {
 
         let resolve = |tool: &EnvoyTool| {
             let model = neenee_core::resolve_model(&CannedProvider.model());
-            let model_sel = neenee_core::ToolSelection::unrestricted()
-                .with_variants(tool.variant_snapshot());
-            tool.profile.resolve_tools(&tool.toolset, &model, &model_sel)
+            let model_sel =
+                neenee_core::ToolSelection::unrestricted().with_variants(tool.variant_snapshot());
+            tool.profile
+                .resolve_tools(&tool.toolset, &model, &model_sel)
         };
 
         // Unbound (no model override) → read_text resolves to its default

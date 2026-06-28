@@ -82,12 +82,12 @@ pub enum AgentRequest {
         enabled: bool,
     },
     /// Enable or disable a configured MCP server for the live session. Unlike
-    /// [`ToggleTool`] (which only flips a session flag on an already-installed
-    /// tool), this connects/disconnects the server: disabling drops its tools
-    /// from the live tool list and closes the connection; enabling reconnects
-    /// it from `[mcp.<name>]` config and re-discovers its tools. Session-scoped
-    /// — config.toml is not rewritten, so a restart restores the configured
-    /// state. The harness replies with an updated
+    /// [`AgentRequest::ToggleTool`] (which only flips a session flag on an
+    /// already-installed tool), this connects/disconnects the server: disabling
+    /// drops its tools from the live tool list and closes the connection;
+    /// enabling reconnects it from `[mcp.<name>]` config and re-discovers its
+    /// tools. Session-scoped — config.toml is not rewritten, so a restart
+    /// restores the configured state. The harness replies with an updated
     /// [`AgentResponse::SessionContext`].
     ToggleMcpServer {
         name: String,

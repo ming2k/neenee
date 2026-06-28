@@ -157,10 +157,10 @@ pub fn endpoint_suffix(format: WireFormat) -> &'static str {
 /// Resolve the wire format for a specific model under a provider: the model's
 /// own `provider.npm` override wins, otherwise the provider's `npm`.
 pub fn model_wire_format(provider: &ModelsDevProvider, model: &ModelsDevModel) -> WireFormat {
-    if let Some(mp) = &model.provider {
-        if !mp.npm.is_empty() {
-            return wire_format_from_npm(&mp.npm);
-        }
+    if let Some(mp) = &model.provider
+        && !mp.npm.is_empty()
+    {
+        return wire_format_from_npm(&mp.npm);
     }
     wire_format_from_npm(&provider.npm)
 }

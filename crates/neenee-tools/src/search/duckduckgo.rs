@@ -32,16 +32,16 @@ impl SearchProvider for DdgProvider {
 
     async fn search(&self, client: &reqwest::Client, query: &str) -> Result<String, String> {
         let lite = search_ddg_lite(client, query).await;
-        if let Ok(a) = &lite {
-            if !a.results.is_empty() {
-                return Ok(format_results(query, a.source, a.results.clone()));
-            }
+        if let Ok(a) = &lite
+            && !a.results.is_empty()
+        {
+            return Ok(format_results(query, a.source, a.results.clone()));
         }
         let html = search_ddg_html(client, query).await;
-        if let Ok(a) = &html {
-            if !a.results.is_empty() {
-                return Ok(format_results(query, a.source, a.results.clone()));
-            }
+        if let Ok(a) = &html
+            && !a.results.is_empty()
+        {
+            return Ok(format_results(query, a.source, a.results.clone()));
         }
         Err(compose_ddg_failure(query, &lite, &html))
     }

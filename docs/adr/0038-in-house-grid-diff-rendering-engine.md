@@ -45,7 +45,7 @@ its own grid layer above).
 
 ### Crate topology
 
-```
+```text
 crates/neenee-tui/        # new: grid + diff engine, zero app vocabulary
   src/
     lib.rs                # public API: Cell, Color, Style, Grid, diff, promote, Backend

@@ -3,7 +3,7 @@
 Scaffold new projects and initialise neenee config. Both are `Write`. Source:
 `crates/neenee-tools/src/project.rs`.
 
-### `create_project`
+## `create_project`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
@@ -15,7 +15,7 @@ Scaffold new projects and initialise neenee config. Both are `Write`. Source:
 
 Permission scope is `{path}/{name}` or `*`.
 
-### `init_config`
+## `init_config`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|

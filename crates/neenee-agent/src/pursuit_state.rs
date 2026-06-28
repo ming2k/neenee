@@ -131,16 +131,14 @@ impl PursuitState {
 
     /// Append a hidden user message that asks the model to continue the active pursuit.
     pub fn inject_continuation(&self, messages: &mut Vec<neenee_core::Message>) {
-        if let Some(pursuit) = self.get() {
-            if !pursuit.is_complete {
-                messages.push(neenee_core::Message::injected(
-                    neenee_core::Role::User,
-                    pursuits::prompts::continuation_prompt(&pursuit),
-                    neenee_core::InjectionOrigin::new(
-                        neenee_core::InjectionKind::PursuitContinuation,
-                    ),
-                ));
-            }
+        if let Some(pursuit) = self.get()
+            && !pursuit.is_complete
+        {
+            messages.push(neenee_core::Message::injected(
+                neenee_core::Role::User,
+                pursuits::prompts::continuation_prompt(&pursuit),
+                neenee_core::InjectionOrigin::new(neenee_core::InjectionKind::PursuitContinuation),
+            ));
         }
     }
 

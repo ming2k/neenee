@@ -50,7 +50,7 @@ The forces:
 
 A new crate sits between `neenee-agent` and the frontends:
 
-```
+```text
 neenee-core        (no workspace deps)
        ^
        │

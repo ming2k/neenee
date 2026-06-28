@@ -50,7 +50,11 @@ pub fn draw_mcp_modal(
     if session_context.is_none() {
         body.push(placeholder("Loading MCP servers…", false, theme.muted()));
     } else if servers.is_empty() {
-        body.push(placeholder("No MCP servers configured.", true, theme.muted()));
+        body.push(placeholder(
+            "No MCP servers configured.",
+            true,
+            theme.muted(),
+        ));
     } else {
         const GUTTER_W: usize = 2;
         const PREFIX_W: usize = GUTTER_W + 2; // gutter + "glyph "
@@ -92,7 +96,11 @@ pub fn draw_mcp_modal(
                     format!(
                         "{} tool{}",
                         server.tool_names.len(),
-                        if server.tool_names.len() == 1 { "" } else { "s" }
+                        if server.tool_names.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
                     ),
                 )
             } else {

@@ -4,7 +4,7 @@ Read and mutate files and directory listings. `read_file` / `read_image` /
 `grep` / `glob` / `list_dir` are `Read`; `write_file` / `edit_file` are
 `Write`. Source: `crates/neenee-tools/src/lib.rs`.
 
-### `read_file`
+## `read_file`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
@@ -12,7 +12,7 @@ Read and mutate files and directory listings. `read_file` / `read_image` /
 | `offset` | integer | no | — | 1-based start line |
 | `limit` | integer | no | — | Max lines |
 
-### `read_image`
+## `read_image`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
@@ -29,14 +29,14 @@ This mirrors how opencode lowers images out of tool results for OpenAI Chat
 Completions providers (whose tool messages only accept string content), so it
 works across kimi / GLM / OpenAI / Gemini.
 
-### `write_file`
+## `write_file`
 
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
 | `path` | string | yes | File path |
 | `content` | string | yes | Full content; overwrites |
 
-### `edit_file`
+## `edit_file`
 
 | Parameter | Type | Required | Notes |
 |-----------|------|----------|-------|
@@ -44,7 +44,7 @@ works across kimi / GLM / OpenAI / Gemini.
 | `old_string` | string | yes | Must exist verbatim |
 | `new_string` | string | yes | Replacement text |
 
-### `grep`
+## `grep`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
@@ -54,7 +54,7 @@ works across kimi / GLM / OpenAI / Gemini.
 
 Backed by ripgrep.
 
-### `glob`
+## `glob`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
@@ -63,7 +63,7 @@ Backed by ripgrep.
 
 Capped at `GLOB_MAX_RESULTS = 200` (`crates/neenee-tools/src/lib.rs`).
 
-### `list_dir`
+## `list_dir`
 
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|

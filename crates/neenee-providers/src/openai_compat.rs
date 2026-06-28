@@ -627,10 +627,10 @@ impl Provider for OpenAiCompatProvider {
         let stream = crate::sse::data_payloads(response, "OpenAI").map(|item| {
             let data = item?;
             let mut content = String::new();
-            if let Ok(v) = serde_json::from_str::<Value>(&data) {
-                if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                    content.push_str(delta);
-                }
+            if let Ok(v) = serde_json::from_str::<Value>(&data)
+                && let Some(delta) = v["choices"][0]["delta"]["content"].as_str()
+            {
+                content.push_str(delta);
             }
             Ok(content)
         });

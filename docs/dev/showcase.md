@@ -47,7 +47,7 @@ Each showcase is a thin glue layer: it owns a **state struct**, pumps real
 crossterm keypresses through a **key handler**, and redraws via the
 **production renderer** — the exact same `draw_*` function the real app uses.
 
-```
+```text
                   ┌─────────────────────────────────┐
    real keypress  │  State struct (fixture data)     │  render closure
    ──────────────▶│  + on_key closure (state machine)│──────────────▶ draw_*_modal()
@@ -68,7 +68,7 @@ individual showcases only handle their own keys.
 
 ## File layout
 
-```
+```text
 crates/neenee-code/src/showcase/
 ├── mod.rs        # dispatcher: parses `showcase <component>`, routes
 ├── common.rs     # shared: terminal setup/teardown + run_showcase() + chrome

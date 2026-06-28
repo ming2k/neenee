@@ -41,7 +41,7 @@ the plan path, the section completion ratio, and one row of per-section
 status glyphs. Sections that do not fit are elided with `…` so the input
 box height never jumps.
 
-```
+```text
 ╭── Plan: rewrite-auth.md · 1/4 done ───────────────╮
 │ ✓ Summary  ● Key Changes  ○ Test Plan  ○ Assump… │
 ╰───────────────────────────────────────────────────╯
@@ -73,7 +73,7 @@ substring so the model does not have to echo the exact heading.
 
 ### State flow
 
-```
+```text
 Agent ──(Arc<Mutex<Option<PlanProgress>>>)── PlanToolContext
    │
    ├── plan_exit (approved) ── parses plan markdown, seeds progress

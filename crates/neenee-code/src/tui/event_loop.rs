@@ -414,10 +414,10 @@ pub(super) async fn run_app_loop(
         }
 
         // Decrement toast timers
-        if let Some(until) = app.copy_toast_until {
-            if std::time::Instant::now() >= until {
-                app.copy_toast_until = None;
-            }
+        if let Some(until) = app.copy_toast_until
+            && std::time::Instant::now() >= until
+        {
+            app.copy_toast_until = None;
         }
         // While images are staged for the next message, keep a persistent
         // indicator visible so the user knows Enter will send them. Skipped
@@ -1524,38 +1524,38 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::SubmitModelEditor => {
-                    if app.active_modal == Modal::ModelEditor {
-                        if let Some(idx) = app.editor_target {
-                            // Commit the focused field's input to its buffer first.
-                            if app.editor_field == 0 {
-                                app.editor_key = app.input.clone();
-                            } else {
-                                app.editor_model = app.input.clone();
-                            }
-                            if let Some(solution) = PROVIDERS.get(idx) {
-                                let key = app.editor_key.trim();
-                                let model = if app.editor_model.trim().is_empty() {
-                                    solution.model.to_string()
-                                } else {
-                                    app.editor_model.trim().to_string()
-                                };
-                                let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                    provider_type: solution.id.to_string(),
-                                    model,
-                                    api_key: if key.is_empty() {
-                                        None
-                                    } else {
-                                        Some(key.to_string())
-                                    },
-                                    base_url: None,
-                                });
-                            }
-                            // Close to chat: restore the original draft.
-                            app.input = std::mem::take(&mut app.stashed_input);
-                            app.cursor_position = app.input.chars().count();
-                            app.editor_target = None;
-                            app.active_modal = Modal::None;
+                    if app.active_modal == Modal::ModelEditor
+                        && let Some(idx) = app.editor_target
+                    {
+                        // Commit the focused field's input to its buffer first.
+                        if app.editor_field == 0 {
+                            app.editor_key = app.input.clone();
+                        } else {
+                            app.editor_model = app.input.clone();
                         }
+                        if let Some(solution) = PROVIDERS.get(idx) {
+                            let key = app.editor_key.trim();
+                            let model = if app.editor_model.trim().is_empty() {
+                                solution.model.to_string()
+                            } else {
+                                app.editor_model.trim().to_string()
+                            };
+                            let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                provider_type: solution.id.to_string(),
+                                model,
+                                api_key: if key.is_empty() {
+                                    None
+                                } else {
+                                    Some(key.to_string())
+                                },
+                                base_url: None,
+                            });
+                        }
+                        // Close to chat: restore the original draft.
+                        app.input = std::mem::take(&mut app.stashed_input);
+                        app.cursor_position = app.input.chars().count();
+                        app.editor_target = None;
+                        app.active_modal = Modal::None;
                     }
                 }
                 input::InputAction::Interrupt => {
@@ -1767,13 +1767,13 @@ pub(super) async fn run_app_loop(
                 input::InputAction::PermissionsActivate => {
                     // Revoke the selected "always allow" rule. The harness
                     // replies with a fresh snapshot so the list re-renders.
-                    if let Some(snapshot) = app.session_context.as_ref() {
-                        if let Some(rule) = snapshot.permissions.get(app.modal_index) {
-                            let _ = app.tx.send(AgentRequest::RevokePermission {
-                                tool: rule.tool.clone(),
-                                scope: rule.scope.clone(),
-                            });
-                        }
+                    if let Some(snapshot) = app.session_context.as_ref()
+                        && let Some(rule) = snapshot.permissions.get(app.modal_index)
+                    {
+                        let _ = app.tx.send(AgentRequest::RevokePermission {
+                            tool: rule.tool.clone(),
+                            scope: rule.scope.clone(),
+                        });
                     }
                 }
                 input::InputAction::PermissionsClearAll => {
@@ -2506,92 +2506,90 @@ pub(super) async fn run_app_loop(
                     | Modal::None => {}
                 },
                 input::InputAction::QuestionUp => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question =
-                                Some(qm.update(crate::tui::question_model::QuestionAction::Up).0);
-                            // Moving the highlight re-enables follow so the body
-                            // scrolls to keep the cursor visible.
-                            app.question_modal_follow = true;
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question =
+                            Some(qm.update(crate::tui::question_model::QuestionAction::Up).0);
+                        // Moving the highlight re-enables follow so the body
+                        // scrolls to keep the cursor visible.
+                        app.question_modal_follow = true;
                     }
                 }
                 input::InputAction::QuestionDown => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question = Some(
-                                qm.update(crate::tui::question_model::QuestionAction::Down)
-                                    .0,
-                            );
-                            app.question_modal_follow = true;
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question = Some(
+                            qm.update(crate::tui::question_model::QuestionAction::Down)
+                                .0,
+                        );
+                        app.question_modal_follow = true;
                     }
                 }
                 input::InputAction::QuestionToggle => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question = Some(
-                                qm.update(crate::tui::question_model::QuestionAction::Toggle)
-                                    .0,
-                            );
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question = Some(
+                            qm.update(crate::tui::question_model::QuestionAction::Toggle)
+                                .0,
+                        );
                     }
                 }
                 input::InputAction::QuestionSelect(n) => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question = Some(
-                                qm.update(crate::tui::question_model::QuestionAction::Select(n))
-                                    .0,
-                            );
-                            // A digit jump moves the highlight, so follow it.
-                            app.question_modal_follow = true;
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question = Some(
+                            qm.update(crate::tui::question_model::QuestionAction::Select(n))
+                                .0,
+                        );
+                        // A digit jump moves the highlight, so follow it.
+                        app.question_modal_follow = true;
                     }
                 }
                 input::InputAction::QuestionSubmit => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            let (qm, effects) =
-                                qm.update(crate::tui::question_model::QuestionAction::Submit);
-                            // Keep the model until the per-frame queue sync clears
-                            // it; the Closed effect drives the channel reply + drain.
-                            app.question = Some(qm);
-                            question_effects::apply(&effects, app, &runtime).await;
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        let (qm, effects) =
+                            qm.update(crate::tui::question_model::QuestionAction::Submit);
+                        // Keep the model until the per-frame queue sync clears
+                        // it; the Closed effect drives the channel reply + drain.
+                        app.question = Some(qm);
+                        question_effects::apply(&effects, app, &runtime).await;
                     }
                 }
                 input::InputAction::QuestionCancel => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            let (_qm, effects) =
-                                qm.update(crate::tui::question_model::QuestionAction::Cancel);
-                            // Cancel discards the model immediately; the Closed
-                            // effect drives the (empty-answers) reply + drain.
-                            question_effects::apply(&effects, app, &runtime).await;
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        let (_qm, effects) =
+                            qm.update(crate::tui::question_model::QuestionAction::Cancel);
+                        // Cancel discards the model immediately; the Closed
+                        // effect drives the (empty-answers) reply + drain.
+                        question_effects::apply(&effects, app, &runtime).await;
                     }
                 }
                 input::InputAction::QuestionInsertChar(c) => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question = Some(
-                                qm.update(crate::tui::question_model::QuestionAction::InsertChar(
-                                    c,
-                                ))
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question = Some(
+                            qm.update(crate::tui::question_model::QuestionAction::InsertChar(c))
                                 .0,
-                            );
-                        }
+                        );
                     }
                 }
                 input::InputAction::QuestionBackspace => {
-                    if app.active_modal == Modal::Question {
-                        if let Some(qm) = app.question.take() {
-                            app.question = Some(
-                                qm.update(crate::tui::question_model::QuestionAction::Backspace)
-                                    .0,
-                            );
-                        }
+                    if app.active_modal == Modal::Question
+                        && let Some(qm) = app.question.take()
+                    {
+                        app.question = Some(
+                            qm.update(crate::tui::question_model::QuestionAction::Backspace)
+                                .0,
+                        );
                     }
                 }
                 input::InputAction::PermissionSubmit => {
@@ -2623,16 +2621,16 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::SelectionStart { x, y } => {
                     if app.active_modal == Modal::Question {
-                        if let Some(hit) = app.modal_hit_map.question_option_at(x, y) {
-                            if let Some(qm) = app.question.take() {
-                                app.question = Some(
-                                    qm.update(crate::tui::question_model::QuestionAction::Select(
-                                        hit.option_index + 1,
-                                    ))
-                                    .0,
-                                );
-                                app.question_modal_follow = true;
-                            }
+                        if let Some(hit) = app.modal_hit_map.question_option_at(x, y)
+                            && let Some(qm) = app.question.take()
+                        {
+                            app.question = Some(
+                                qm.update(crate::tui::question_model::QuestionAction::Select(
+                                    hit.option_index + 1,
+                                ))
+                                .0,
+                            );
+                            app.question_modal_follow = true;
                         }
                         app.selection = SelectionState::None;
                         app.focused_target = None;

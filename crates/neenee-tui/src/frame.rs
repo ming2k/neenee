@@ -151,21 +151,21 @@ impl<W: io::Write> Terminal<W> {
         F: FnOnce(&mut Frame<'_>),
     {
         // Sync grid size with terminal.
-        if let Ok((w, h)) = crossterm::terminal::size() {
-            if self.back.size() != (w, h) {
-                self.back.resize(w, h);
-                self.front = Grid::new(w, h);
-                self.back.mark_all_dirty();
-                // Reconcile the SGR tracker with the real terminal on resize.
-                // `invalidate` emits a real `\x1b[0m`; a failure here only
-                // risks a transient style glitch on the next frame, so we
-                // swallow it rather than aborting the draw.
-                let _ = self.backend.invalidate();
-                use crossterm::QueueableCommand;
-                let _ = self.backend.writer().queue(crossterm::terminal::Clear(
-                    crossterm::terminal::ClearType::All,
-                ));
-            }
+        if let Ok((w, h)) = crossterm::terminal::size()
+            && self.back.size() != (w, h)
+        {
+            self.back.resize(w, h);
+            self.front = Grid::new(w, h);
+            self.back.mark_all_dirty();
+            // Reconcile the SGR tracker with the real terminal on resize.
+            // `invalidate` emits a real `\x1b[0m`; a failure here only
+            // risks a transient style glitch on the next frame, so we
+            // swallow it rather than aborting the draw.
+            let _ = self.backend.invalidate();
+            use crossterm::QueueableCommand;
+            let _ = self.backend.writer().queue(crossterm::terminal::Clear(
+                crossterm::terminal::ClearType::All,
+            ));
         }
         {
             let mut frame = Frame::new(&mut self.back);

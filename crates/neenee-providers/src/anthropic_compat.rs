@@ -445,14 +445,12 @@ impl Provider for AnthropicMessagesProvider {
         let stream = crate::sse::data_payloads(response, "Anthropic").map(|item| {
             let data = item?;
             let mut text = String::new();
-            if let Ok(v) = serde_json::from_str::<Value>(&data) {
-                if v["type"].as_str() == Some("content_block_delta")
-                    && v["delta"]["type"].as_str() == Some("text_delta")
-                {
-                    if let Some(t) = v["delta"]["text"].as_str() {
-                        text.push_str(t);
-                    }
-                }
+            if let Ok(v) = serde_json::from_str::<Value>(&data)
+                && v["type"].as_str() == Some("content_block_delta")
+                && v["delta"]["type"].as_str() == Some("text_delta")
+                && let Some(t) = v["delta"]["text"].as_str()
+            {
+                text.push_str(t);
             }
             Ok(text)
         });

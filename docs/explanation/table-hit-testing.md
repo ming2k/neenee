@@ -22,7 +22,7 @@ grid line as one region.
 [`document.rs`](../../crates/neenee-code/src/tui/document.rs) detects a
 table when it sees `| ... |` followed by a separator row (`|---|---|`):
 
-```
+```text
 | Name  | Count |
 |-------|-------|
 | read  | 1     |
@@ -66,7 +66,7 @@ byte span of every cell's padded content within that line.
 
 The function builds lines like:
 
-```
+```text
 ┌───────┬───────┐      ← top border
 │ Name  │ Count │      ← header data row
 ├───────┼───────┤      ← separator
@@ -187,7 +187,7 @@ When a mouse click arrives at `(x, y)`, the event loop runs a priority
 chain in
 [`event_loop.rs`](../../crates/neenee-code/src/tui/event_loop.rs):
 
-```
+```text
 ┌─ Input box?            → focus Compose, start text selection
 ├─ Step summary?         → navigate envoy / toggle step
 └─ Content region?       → resolve cursor, then:

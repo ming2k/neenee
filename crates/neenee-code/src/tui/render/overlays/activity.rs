@@ -84,16 +84,16 @@ pub fn draw_activity_modal(
                 .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
         )];
-        if let crate::tui::ActivityTab::Todos = active_tab {
-            if let Some(list) = todos.filter(|l| !l.items.is_empty()) {
-                use neenee_core::TodoStatus;
-                let done = list.count(TodoStatus::Completed);
-                let total = list.items.len();
-                header_spans.push(Span::styled(
-                    format!("{}{done}/{total}", " ".repeat(MODAL_TITLE_META_GAP)),
-                    Style::default().fg(muted),
-                ));
-            }
+        if let crate::tui::ActivityTab::Todos = active_tab
+            && let Some(list) = todos.filter(|l| !l.items.is_empty())
+        {
+            use neenee_core::TodoStatus;
+            let done = list.count(TodoStatus::Completed);
+            let total = list.items.len();
+            header_spans.push(Span::styled(
+                format!("{}{done}/{total}", " ".repeat(MODAL_TITLE_META_GAP)),
+                Style::default().fg(muted),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(header_spans)), h);
     }

@@ -113,28 +113,26 @@ pub(super) fn transcript_messages_from_core(
                 }
             }
         }
-        if message.role == Role::Tool {
-            if let Some((name, output)) = parse_tool_result(&message.content) {
-                let mut finished = false;
-                for item in restored.iter_mut() {
-                    if item.finish_tool_step(name, output, neenee_core::ToolOutput::text(output), 0)
-                    {
-                        // Apply the lifecycle-aware default disclosure so
-                        // restored steps match live (Failed/Denied expand,
-                        // Ok follows per-tool config).
-                        if let Some(status) = item.tool_step_status() {
-                            let default = step_interaction::default_tool_expanded(
-                                status, name, config, false,
-                            );
-                            item.set_tool_step_expanded(default);
-                        }
-                        finished = true;
-                        break;
+        if message.role == Role::Tool
+            && let Some((name, output)) = parse_tool_result(&message.content)
+        {
+            let mut finished = false;
+            for item in restored.iter_mut() {
+                if item.finish_tool_step(name, output, neenee_core::ToolOutput::text(output), 0) {
+                    // Apply the lifecycle-aware default disclosure so
+                    // restored steps match live (Failed/Denied expand,
+                    // Ok follows per-tool config).
+                    if let Some(status) = item.tool_step_status() {
+                        let default =
+                            step_interaction::default_tool_expanded(status, name, config, false);
+                        item.set_tool_step_expanded(default);
                     }
+                    finished = true;
+                    break;
                 }
-                if finished {
-                    continue;
-                }
+            }
+            if finished {
+                continue;
             }
         }
         if let Some(message) = transcript_message_from_core(message) {

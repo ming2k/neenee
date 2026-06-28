@@ -27,10 +27,10 @@ impl ToolPresenter for BashPresenter {
 /// meaningful command instead of the long directory-change boilerplate.
 fn strip_cd_prefix(cmd: &str) -> &str {
     let cmd = cmd.trim();
-    if let Some(rest) = cmd.strip_prefix("cd ") {
-        if let Some(pos) = rest.find(" && ") {
-            return rest[pos + 4..].trim();
-        }
+    if let Some(rest) = cmd.strip_prefix("cd ")
+        && let Some(pos) = rest.find(" && ")
+    {
+        return rest[pos + 4..].trim();
     }
     cmd
 }

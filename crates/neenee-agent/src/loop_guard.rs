@@ -333,10 +333,10 @@ impl ReadLoopGuard {
         // Only check path axis if the exact axis didn't fire (avoid double-fire
         // for identical reads, which the exact axis already catches with a
         // better-targeted message).
-        if exact != path {
-            if let Some(nudge) = self.observe_path(path) {
-                return GuardAction::Inject(nudge);
-            }
+        if exact != path
+            && let Some(nudge) = self.observe_path(path)
+        {
+            return GuardAction::Inject(nudge);
         }
         GuardAction::Continue
     }

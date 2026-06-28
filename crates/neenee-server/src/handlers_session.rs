@@ -45,8 +45,12 @@ pub fn query_context(
     config: &Config,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
 ) {
-    let snapshot =
-        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let snapshot = build_session_context(
+        agent,
+        skills_registry,
+        &mcp_runtime.statuses_snapshot(),
+        config,
+    );
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -63,8 +67,12 @@ pub fn revoke_permission(
 ) {
     let removed = agent.revoke_allowed_tool(&tool, &scope);
     if removed {
-        let snapshot =
-            build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+        let snapshot = build_session_context(
+            agent,
+            skills_registry,
+            &mcp_runtime.statuses_snapshot(),
+            config,
+        );
         let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
     } else {
         let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -85,8 +93,12 @@ pub fn clear_all_permissions(
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
 ) {
     agent.clear_allowed_tools();
-    let snapshot =
-        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let snapshot = build_session_context(
+        agent,
+        skills_registry,
+        &mcp_runtime.statuses_snapshot(),
+        config,
+    );
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -104,8 +116,12 @@ pub fn toggle_tool(
     enabled: bool,
 ) {
     let changed = agent.set_tool_enabled(&name, enabled);
-    let snapshot =
-        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let snapshot = build_session_context(
+        agent,
+        skills_registry,
+        &mcp_runtime.statuses_snapshot(),
+        config,
+    );
     if !changed {
         let _ = resp_tx.send(AgentResponse::Error(format!(
             "Tool '{}' is unknown or already {}.",
@@ -133,8 +149,12 @@ pub async fn toggle_mcp_server(
     if let Err(error) = mcp_runtime.set_enabled(&name, enabled).await {
         let _ = resp_tx.send(AgentResponse::Error(error));
     }
-    let snapshot =
-        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let snapshot = build_session_context(
+        agent,
+        skills_registry,
+        &mcp_runtime.statuses_snapshot(),
+        config,
+    );
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -151,8 +171,12 @@ pub async fn reconnect_mcp_server(
     if let Err(error) = mcp_runtime.reconnect(&name).await {
         let _ = resp_tx.send(AgentResponse::Error(error));
     }
-    let snapshot =
-        build_session_context(agent, skills_registry, &mcp_runtime.statuses_snapshot(), config);
+    let snapshot = build_session_context(
+        agent,
+        skills_registry,
+        &mcp_runtime.statuses_snapshot(),
+        config,
+    );
     let _ = resp_tx.send(AgentResponse::SessionContext(snapshot));
 }
 
@@ -165,11 +189,11 @@ pub async fn exit_side_view(
     active_view_side: &AtomicBool,
     resp_tx: &mpsc::UnboundedSender<AgentResponse>,
 ) {
-    if let Some(s) = side.write().await.take() {
-        if let Some(token) = s.token_slot.write().await.take() {
-            s.agent.reject_pending_permissions();
-            token.cancel();
-        }
+    if let Some(s) = side.write().await.take()
+        && let Some(token) = s.token_slot.write().await.take()
+    {
+        s.agent.reject_pending_permissions();
+        token.cancel();
     }
     active_view_side.store(false, Ordering::SeqCst);
     let _ = resp_tx.send(AgentResponse::SideViewClosed);

@@ -67,13 +67,12 @@ pub(crate) fn gemini_request_body(messages: Vec<Message>) -> Value {
             }
         }
 
-        if let Some(previous) = contents.last_mut() {
-            if previous.get("role").and_then(Value::as_str) == Some(role) {
-                if let Some(parts) = previous.get_mut("parts").and_then(Value::as_array_mut) {
-                    parts.extend(new_parts);
-                    continue;
-                }
-            }
+        if let Some(previous) = contents.last_mut()
+            && previous.get("role").and_then(Value::as_str) == Some(role)
+            && let Some(parts) = previous.get_mut("parts").and_then(Value::as_array_mut)
+        {
+            parts.extend(new_parts);
+            continue;
         }
         contents.push(json!({
             "role": role,

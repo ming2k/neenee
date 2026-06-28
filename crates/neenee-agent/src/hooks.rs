@@ -74,10 +74,10 @@ impl HookRegistry {
             if hook.kind() != kind {
                 continue;
             }
-            if let (Some(tool), Some(matcher)) = (tool_name, hook.matcher()) {
-                if !matcher_matches(matcher, tool) {
-                    continue;
-                }
+            if let (Some(tool), Some(matcher)) = (tool_name, hook.matcher())
+                && !matcher_matches(matcher, tool)
+            {
+                continue;
             }
             outcomes.push(hook.fire(ctx).await);
         }

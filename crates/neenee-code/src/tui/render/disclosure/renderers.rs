@@ -955,10 +955,10 @@ fn draw_tool_result(
 /// parsing the JSON arguments for legacy / restored sessions without a
 /// structured payload.
 fn bash_command_for(structured: Option<&neenee_core::ToolOutput>, arguments: &str) -> String {
-    if let Some(neenee_core::ToolOutput::Shell { command, .. }) = structured {
-        if !command.is_empty() {
-            return command.clone();
-        }
+    if let Some(neenee_core::ToolOutput::Shell { command, .. }) = structured
+        && !command.is_empty()
+    {
+        return command.clone();
     }
     crate::tui::document::parse_arguments_kv(arguments)
         .iter()

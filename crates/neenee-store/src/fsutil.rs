@@ -76,13 +76,13 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)?;
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = File::open(parent) {
-                // Best-effort: fsync the directory so the rename entry reaches
-                // disk. Errors here (filesystems that reject syncing a dir fd)
-                // are non-fatal — the data file is already durable.
-                let _ = dir.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = File::open(parent)
+        {
+            // Best-effort: fsync the directory so the rename entry reaches
+            // disk. Errors here (filesystems that reject syncing a dir fd)
+            // are non-fatal — the data file is already durable.
+            let _ = dir.sync_all();
         }
         Ok(())
     })();

@@ -250,26 +250,22 @@ pub fn reconcile(
             ChipKind::Image => {
                 let slot = chip.number.saturating_sub(1);
                 let taken = consumed_image_slots.get(slot).copied().unwrap_or(true);
-                if !taken {
-                    if let Some(image) = pending_images.get(slot) {
-                        new_images.push(image.clone());
-                        consumed_image_slots[slot] = true;
-                        chip_payload.push(Some((ChipKind::Image, new_images.len())));
-                        continue;
-                    }
+                if !taken && let Some(image) = pending_images.get(slot) {
+                    new_images.push(image.clone());
+                    consumed_image_slots[slot] = true;
+                    chip_payload.push(Some((ChipKind::Image, new_images.len())));
+                    continue;
                 }
                 chip_payload.push(None);
             }
             ChipKind::Paste => {
                 let slot = chip.number.saturating_sub(1);
                 let taken = consumed_paste_slots.get(slot).copied().unwrap_or(true);
-                if !taken {
-                    if let Some(text) = pending_text_pastes.get(slot) {
-                        new_pastes.push(text.clone());
-                        consumed_paste_slots[slot] = true;
-                        chip_payload.push(Some((ChipKind::Paste, new_pastes.len())));
-                        continue;
-                    }
+                if !taken && let Some(text) = pending_text_pastes.get(slot) {
+                    new_pastes.push(text.clone());
+                    consumed_paste_slots[slot] = true;
+                    chip_payload.push(Some((ChipKind::Paste, new_pastes.len())));
+                    continue;
                 }
                 chip_payload.push(None);
             }

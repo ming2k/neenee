@@ -1474,10 +1474,10 @@ fn parse_list_item(s: &str) -> Option<(Option<u64>, &str, Option<bool>)> {
                 Some(' ') => Some(false),
                 _ => None,
             };
-            if checked.is_some() {
-                if let Some(content) = rest[1..].strip_prefix("]") {
-                    return Some((None, content.trim_start(), checked));
-                }
+            if checked.is_some()
+                && let Some(content) = rest[1..].strip_prefix("]")
+            {
+                return Some((None, content.trim_start(), checked));
             }
         }
         return Some((None, after, None));
@@ -1492,10 +1492,10 @@ fn parse_list_item(s: &str) -> Option<(Option<u64>, &str, Option<bool>)> {
                 Some(' ') => Some(false),
                 _ => None,
             };
-            if checked.is_some() {
-                if let Some(content) = r[1..].strip_prefix("]") {
-                    return Some((Some(num), content.trim_start(), checked));
-                }
+            if checked.is_some()
+                && let Some(content) = r[1..].strip_prefix("]")
+            {
+                return Some((Some(num), content.trim_start(), checked));
             }
         }
         return Some((Some(num), rest, None));
@@ -1611,13 +1611,15 @@ pub(crate) fn scan_inline(content: &str) -> (Vec<CodeRange>, Vec<CodeRange>) {
             }
         }
         // Bold: `**…**`.
-        if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            if let Some(rel) = content[i + 2..].find("**") {
-                let end = i + 2 + rel + 2;
-                bold_ranges.push((i, end));
-                i = end;
-                continue;
-            }
+        if bytes[i] == b'*'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'*'
+            && let Some(rel) = content[i + 2..].find("**")
+        {
+            let end = i + 2 + rel + 2;
+            bold_ranges.push((i, end));
+            i = end;
+            continue;
         }
         i += 1;
     }

@@ -37,7 +37,7 @@ hypothetical.
 
 Split the workspace into six crates with a strict acyclic dependency graph:
 
-```
+```text
 neenee-core        Pure domain vocabulary (types & traits only)
     ^
 neenee-providers   impl Provider (HTTP: OpenAI/Gemini/DeepSeek/Qwen/GLM/Kimi/Llama/Mock)

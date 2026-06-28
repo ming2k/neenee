@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MSRV is now Rust 1.95.** The locked dependency graph now includes crates
+  that require newer compiler features, so crate manifests and CI's MSRV job
+  were raised in lockstep.
+
 - **BREAKING — agent vocabulary is now Principal / Envoy.** "Agent" is kept only
   as the umbrella term for the execution engine (the `Agent` struct, the
   `neenee-agent` crate, and the `AgentRequest`/`AgentResponse`/`AgentEvent`/

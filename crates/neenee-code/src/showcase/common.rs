@@ -136,10 +136,10 @@ where
                     MouseEventKind::ScrollDown => Some(ShowEvent::ScrollDown),
                     _ => None,
                 };
-                if let Some(event) = event {
-                    if matches!(on_event(state, event), ShowAction::Exit) {
-                        break;
-                    }
+                if let Some(event) = event
+                    && matches!(on_event(state, event), ShowAction::Exit)
+                {
+                    break;
                 }
             }
             Event::Resize(width, height) => {

@@ -772,12 +772,11 @@ pub fn process_event(
                         // stronger signal than the raw text in the box, so
                         // this wins over the exact-match slash fast path
                         // below.
-                        if let Some(i) = context.suggestion_index {
-                            if context.completion_kind != super::CompletionKind::None
-                                && context.suggestion_count > 0
-                            {
-                                return InputAction::CommitSuggestion(i.to_string());
-                            }
+                        if let Some(i) = context.suggestion_index
+                            && context.completion_kind != super::CompletionKind::None
+                            && context.suggestion_count > 0
+                        {
+                            return InputAction::CommitSuggestion(i.to_string());
                         }
                         let text = std::mem::take(input);
                         *cursor_position = 0;
@@ -1086,12 +1085,11 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permissions && c == ' ' {
                         return InputAction::PermissionsActivate;
                     }
-                    if context.active_modal == super::Modal::Question {
-                        if let Some(d) = c.to_digit(10) {
-                            if (1..=9).contains(&d) {
-                                return InputAction::QuestionSelect(d as usize);
-                            }
-                        }
+                    if context.active_modal == super::Modal::Question
+                        && let Some(d) = c.to_digit(10)
+                        && (1..=9).contains(&d)
+                    {
+                        return InputAction::QuestionSelect(d as usize);
                     }
                     // A focused transcript step does not capture typing: with
                     // no separate browse mode, printable characters always fall

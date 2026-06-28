@@ -434,21 +434,20 @@ pub fn draw_transcript(
             // transcript clean while remaining fully traceable.
             let is_assistant_side =
                 msg.role == neenee_core::Role::Assistant || msg.is_thinking() || msg.is_tool_step();
-            if is_assistant_side {
-                if let Some(attribution) = msg.attribution_label() {
-                    if last_shown_attribution.as_ref() != Some(&attribution) {
-                        draw_attribution_badge(
-                            frame,
-                            band,
-                            &attribution,
-                            &mut skip_rows,
-                            &mut current_y,
-                            &mut content_lines,
-                            theme,
-                        );
-                        last_shown_attribution = Some(attribution);
-                    }
-                }
+            if is_assistant_side
+                && let Some(attribution) = msg.attribution_label()
+                && last_shown_attribution.as_ref() != Some(&attribution)
+            {
+                draw_attribution_badge(
+                    frame,
+                    band,
+                    &attribution,
+                    &mut skip_rows,
+                    &mut current_y,
+                    &mut content_lines,
+                    theme,
+                );
+                last_shown_attribution = Some(attribution);
             }
 
             // Render blocks.

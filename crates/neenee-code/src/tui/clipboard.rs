@@ -190,20 +190,19 @@ pub fn base64_image(bytes: &[u8]) -> String {
 async fn read_image_bytes() -> Option<Vec<u8>> {
     #[cfg(target_os = "linux")]
     {
-        if let Some(bytes) = read_command_output("wl-paste", &["-t", "image/png"]).await {
-            if !bytes.is_empty() {
-                return Some(bytes);
-            }
+        if let Some(bytes) = read_command_output("wl-paste", &["-t", "image/png"]).await
+            && !bytes.is_empty()
+        {
+            return Some(bytes);
         }
         if let Some(bytes) = read_command_output(
             "xclip",
             &["-selection", "clipboard", "-t", "image/png", "-o"],
         )
         .await
+            && !bytes.is_empty()
         {
-            if !bytes.is_empty() {
-                return Some(bytes);
-            }
+            return Some(bytes);
         }
     }
     #[cfg(target_os = "macos")]
@@ -274,22 +273,18 @@ async fn read_macos_png() -> Option<Vec<u8>> {
 async fn read_text() -> Result<Option<String>, ()> {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Some(bytes) = read_command_output("wl-paste", &[]).await {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    if !text.is_empty() {
-                        return Ok(Some(text));
-                    }
-                }
-            }
+        if std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && let Some(bytes) = read_command_output("wl-paste", &[]).await
+            && let Ok(text) = String::from_utf8(bytes)
+            && !text.is_empty()
+        {
+            return Ok(Some(text));
         }
         if let Some(bytes) = read_command_output("xclip", &["-selection", "clipboard", "-o"]).await
+            && let Ok(text) = String::from_utf8(bytes)
+            && !text.is_empty()
         {
-            if let Ok(text) = String::from_utf8(bytes) {
-                if !text.is_empty() {
-                    return Ok(Some(text));
-                }
-            }
+            return Ok(Some(text));
         }
     }
     #[cfg(not(target_os = "linux"))]

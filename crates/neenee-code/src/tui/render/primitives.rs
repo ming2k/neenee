@@ -10,7 +10,9 @@ use neenee_tui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::Theme;
-use super::design::{MODAL_INNER_H_PADDING, MODAL_INNER_V_PADDING, PANEL_BAR_INSET, SCROLLBAR_GAP};
+#[cfg(test)]
+use super::design::PANEL_BAR_INSET;
+use super::design::{MODAL_INNER_H_PADDING, MODAL_INNER_V_PADDING, SCROLLBAR_GAP};
 
 /// Global viewport margin. Only vertical breathing room (1 cell top and
 /// bottom) is reserved; horizontally every component spans the full terminal
@@ -277,6 +279,7 @@ pub(super) fn panel_block(bar_color: Color, bg: Color) -> RtBlock<'static> {
 /// render content into this rect — the left-bar-panel counterpart to how
 /// [`modal_frame`] insets the borderless modal family via
 /// `MODAL_INNER_H_PADDING`.
+#[cfg(test)]
 pub(super) fn panel_inner(area: Rect) -> Rect {
     area.inner(Margin {
         horizontal: PANEL_BAR_INSET,
@@ -538,13 +541,13 @@ pub(super) fn render_body(
     let visible = body_rect.height as usize;
     let max_scroll = lines.len().saturating_sub(visible);
     *scroll = (*scroll).min(max_scroll);
-    if let Some(idx) = follow {
-        if visible > 0 {
-            if idx < *scroll {
-                *scroll = idx;
-            } else if idx >= *scroll + visible {
-                *scroll = idx.saturating_sub(visible.saturating_sub(1));
-            }
+    if let Some(idx) = follow
+        && visible > 0
+    {
+        if idx < *scroll {
+            *scroll = idx;
+        } else if idx >= *scroll + visible {
+            *scroll = idx.saturating_sub(visible.saturating_sub(1));
         }
     }
 

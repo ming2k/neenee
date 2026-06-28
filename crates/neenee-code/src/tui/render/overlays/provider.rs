@@ -128,13 +128,11 @@ pub(crate) fn draw_models_modal(
 
     // The real terminal caret only exists in search mode — browse mode has no
     // editable field. Place it in the header filter field after `Models  › `.
-    if search {
-        if let Some(h) = header_rect {
-            let prefix = "Models  › ".width() as u16;
-            let cursor_x = h.x + prefix + caret_column(query, cursor_position);
-            let cursor_y = h.y;
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
+    if search && let Some(h) = header_rect {
+        let prefix = "Models  › ".width() as u16;
+        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+        let cursor_y = h.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
     area
 }

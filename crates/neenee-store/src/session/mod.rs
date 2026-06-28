@@ -1163,18 +1163,18 @@ fn load_or_seed(
     project_root: &Path,
 ) -> SessionData {
     let event_log = EventLog::new(event_log_path.to_path_buf());
-    if let Ok(envelopes) = event_log.load() {
-        if !envelopes.is_empty() {
-            let mut data = SessionData::default();
-            apply_events(&mut data, &envelopes);
-            if let Err(error) = load_session_blobs(&mut data, blob_store) {
-                tracing::warn!(error = %error, "could not load session blobs from event log");
-            }
-            if let Err(error) = verify_checksum(&data) {
-                tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
-            }
-            return data;
+    if let Ok(envelopes) = event_log.load()
+        && !envelopes.is_empty()
+    {
+        let mut data = SessionData::default();
+        apply_events(&mut data, &envelopes);
+        if let Err(error) = load_session_blobs(&mut data, blob_store) {
+            tracing::warn!(error = %error, "could not load session blobs from event log");
         }
+        if let Err(error) = verify_checksum(&data) {
+            tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
+        }
+        return data;
     }
     // No event log: import from the snapshot, or start fresh.
     let mut data = fs::read_to_string(path)
@@ -1544,13 +1544,13 @@ pub fn serialize_for_summary(archived: &[Message], budget: usize) -> String {
         // cannot decide whether the envoy's tool usage is worth mentioning
         // in the anchored summary). The nested view is hard-capped to avoid
         // blowing the budget on a single envoy that ran for 30 tool rounds.
-        if let Some(children) = &message.children {
-            if !children.is_empty() {
-                let nested = serialize_envoy_transcript_for_summary(children, SUMMARY_ENVOY_CAP);
-                if !nested.is_empty() {
-                    body.push_str("\n[envoy transcript]\n");
-                    body.push_str(&nested);
-                }
+        if let Some(children) = &message.children
+            && !children.is_empty()
+        {
+            let nested = serialize_envoy_transcript_for_summary(children, SUMMARY_ENVOY_CAP);
+            if !nested.is_empty() {
+                body.push_str("\n[envoy transcript]\n");
+                body.push_str(&nested);
             }
         }
         if body.trim().is_empty() {
@@ -1609,13 +1609,13 @@ fn serialize_envoy_transcript_for_summary(children: &[Message], budget: usize) -
         }
         // One level deeper, with a much smaller cap, so we never spend more
         // than ~25% of the parent envoy's budget on a single sub-envoy.
-        if let Some(nested) = &message.children {
-            if !nested.is_empty() {
-                let inner = serialize_envoy_transcript_for_summary(nested, (budget / 4).max(500));
-                if !inner.is_empty() {
-                    body.push_str("\n[sub-envoy transcript]\n");
-                    body.push_str(&inner);
-                }
+        if let Some(nested) = &message.children
+            && !nested.is_empty()
+        {
+            let inner = serialize_envoy_transcript_for_summary(nested, (budget / 4).max(500));
+            if !inner.is_empty() {
+                body.push_str("\n[sub-envoy transcript]\n");
+                body.push_str(&inner);
             }
         }
         if body.trim().is_empty() {
@@ -2052,16 +2052,16 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
                 }
             }
         }
-        if dirs.legacy_sessions_dir().is_dir() {
-            if let Ok(entries) = fs::read_dir(dirs.legacy_sessions_dir()) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                        continue;
-                    }
-                    report.legacy += 1;
-                    inspect(&path, &mut report);
+        if dirs.legacy_sessions_dir().is_dir()
+            && let Ok(entries) = fs::read_dir(dirs.legacy_sessions_dir())
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
                 }
+                report.legacy += 1;
+                inspect(&path, &mut report);
             }
         }
     }

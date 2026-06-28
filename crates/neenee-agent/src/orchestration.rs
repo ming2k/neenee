@@ -874,10 +874,10 @@ pub async fn execute_turn(
         }
     } else {
         let stored_todos = session.todos().await;
-        if agent_todos != stored_todos {
-            if let Err(err) = session.set_todos(agent_todos).await {
-                tracing::warn!(error = %err, "could not persist todos");
-            }
+        if agent_todos != stored_todos
+            && let Err(err) = session.set_todos(agent_todos).await
+        {
+            tracing::warn!(error = %err, "could not persist todos");
         }
     }
 

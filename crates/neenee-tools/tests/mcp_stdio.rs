@@ -46,19 +46,22 @@ async fn discovers_and_calls_tools_over_stdio() {
     // Two tools advertised, each namespaced under the server.
     assert_eq!(
         result.statuses,
-        vec![("mock".to_string(), McpConnectionStatus::Connected { tools: 2 })],
+        vec![(
+            "mock".to_string(),
+            McpConnectionStatus::Connected { tools: 2 }
+        )],
     );
     let mut names: Vec<_> = result.tools.iter().map(|t| t.name().to_string()).collect();
     names.sort();
     assert_eq!(names, vec!["mcp__mock__add", "mcp__mock__echo"]);
 
     // A real tool call round-trips through the subprocess.
-    let add = result
-        .tools
-        .iter()
-        .find(|t| t.name() == "mcp__mock__add")
-        .expect("add tool present");
-    let sum = add.call(r#"{"a": 2, "b": 40}"#).await.expect("call ok");
+    let Some(add) = result.tools.iter().find(|t| t.name() == "mcp__mock__add") else {
+        panic!("add tool present");
+    };
+    let Ok(sum) = add.call(r#"{"a": 2, "b": 40}"#).await else {
+        panic!("call ok");
+    };
     assert_eq!(sum, "42");
 }
 

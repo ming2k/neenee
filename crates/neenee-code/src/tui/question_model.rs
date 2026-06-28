@@ -299,19 +299,19 @@ impl QuestionModel {
             }
             QuestionAction::InsertChar(c) => {
                 let other_idx = self.other_index_of(q);
-                if self.highlight == other_idx {
-                    if let Some(text) = self.other_text.get_mut(q) {
-                        text.push(c);
-                    }
+                if self.highlight == other_idx
+                    && let Some(text) = self.other_text.get_mut(q)
+                {
+                    text.push(c);
                 }
                 Vec::new()
             }
             QuestionAction::Backspace => {
                 let other_idx = self.other_index_of(q);
-                if self.highlight == other_idx {
-                    if let Some(text) = self.other_text.get_mut(q) {
-                        text.pop();
-                    }
+                if self.highlight == other_idx
+                    && let Some(text) = self.other_text.get_mut(q)
+                {
+                    text.pop();
                 }
                 Vec::new()
             }

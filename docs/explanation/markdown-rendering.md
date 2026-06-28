@@ -136,7 +136,7 @@ viewport width.
 
 ### The render pipeline
 
-```
+```text
 parse_blocks()
   └─ markdown text → Vec<Block>
 
@@ -189,7 +189,7 @@ The layout algorithm:
 The column-shrink algorithm distributes the available budget in proportion
 to how far each column is above the minimum:
 
-```
+```text
 above_min[i] = intrinsic[i] - min_col
 shrunk[i]   = min_col + above_min[i] * available / sum(above_min)
 ```
@@ -216,7 +216,7 @@ It is Unicode-width-aware (via `unicode_width`) and handles:
 During rendering, every block and table cell registers its screen position
 in the `LayoutMap`:
 
-```
+```text
 LayoutMap
   ├─ blocks: Vec<BlockRegion>     # (message_idx, block_idx, byte_range, screen_rect)
   └─ table_cells: Vec<TableCellHit>  # (message_idx, block_idx, row, col, screen_rect)

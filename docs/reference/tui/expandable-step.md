@@ -54,7 +54,7 @@ the header text column 4 onward.
 |---------|--------|
 | `↑` / `↓` (while a step is focused) | Move keyboard focus to the previous / next visible step |
 | `Enter` / `Space` on a focused **thinking** step | Toggle that step |
-| `Enter` on a focused **tool** step | Open the [full-output detail overlay](tool-step.md#detail-overlay) (ADR-0001); click a tool-step header to toggle it inline instead |
+| `Enter` on a focused **tool** step | Toggle the tool's [inline disclosure](tool-step.md#inline-disclosure) (ADR-0001); click a tool-step header to toggle it inline as well |
 | Click header | Focus and toggle that step |
 | `Ctrl+T` | Expand or collapse all tool steps (bulk density toggle) |
 | Sticky pin | When an expanded step's body scrolls past the top of the viewport, its header pins to the top row of the transcript area (rendered with `-`) |

@@ -188,14 +188,14 @@ pub fn wrap(text: &str, max_width: usize) -> Vec<Line> {
             let move_previous = prohibited_line_start(first_char) || prohibited_line_end(last_char);
 
             let mut moved_grapheme = None;
-            if move_previous {
-                if let Some((offset, last_g)) = current.grapheme_indices(true).next_back() {
-                    // Only move if there is more than 1 grapheme in current,
-                    // so we don't strand an empty line.
-                    if offset > 0 {
-                        moved_grapheme = Some(last_g.to_string());
-                        current.truncate(offset);
-                    }
+            if move_previous
+                && let Some((offset, last_g)) = current.grapheme_indices(true).next_back()
+            {
+                // Only move if there is more than 1 grapheme in current,
+                // so we don't strand an empty line.
+                if offset > 0 {
+                    moved_grapheme = Some(last_g.to_string());
+                    current.truncate(offset);
                 }
             }
 

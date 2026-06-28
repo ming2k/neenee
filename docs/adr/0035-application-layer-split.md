@@ -46,7 +46,7 @@ made that assumption no longer hold:
 
 The application layer now has two sinks, both depending on `neenee-agent` only:
 
-```
+```text
 neenee-core        (no workspace deps)
        ^
        │
@@ -82,7 +82,7 @@ Each quant tool is therefore a plain struct with a constructor, and the quant
 application instantiates exactly the set it wants before handing them to
 `Agent::new`. Tool/role isolation is enforced at **assembly time**, not by
 runtime filtering. The matching admission policy for bounded quant sub-agents
-is the [`QUANT`](../../crates/neenee-core/src/subagent.rs) profile (read-only
+is the `QUANT` profile (read-only
 quant tools + shared read-only inspection; excludes `place_order`, coding
 write/edit, and `bash`).
 

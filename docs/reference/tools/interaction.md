@@ -4,7 +4,7 @@ Tools for the agent to manage its own state and to query the user mid-task.
 All are `Read` and bypass the permission broker. `ask_user` lives in
 `neenee-tools`; `todo` and `todo_update` live in `neenee-agent`.
 
-### `ask_user`
+## `ask_user`
 
 `AskUserTool` overrides `requires_user() = true`, so it is excluded from every
 envoy profile — an envoy has no user reachable to answer it. See
@@ -18,7 +18,7 @@ and [User questions](../../explanation/agent-design/user-questions.md).
 Each question: `{ "header"?: string, "question": string, "options": Option[], "multi_select"?: boolean }`.
 Each option: `{ "label": string, "description"?: string }`. The model should put the recommended option first and suffix its label with `(Recommended)`. The TUI always appends an "Other" free-text option so the user is not forced into the model's choices.
 
-### `todo`
+## `todo`
 
 Full-replace the unified task list — the single source of truth for "what is
 left to do," shown in the [Activity](../tui/modals.md) modal and persisted
@@ -33,7 +33,7 @@ steps does not reset their timestamps. See
 
 Each item: `{ "content": string, "status": "pending" | "in_progress" | "completed" | "cancelled" }`.
 
-### `todo_update`
+## `todo_update`
 
 Surgically update the status of one or more existing items without re-sending
 the whole list. Prefer this over `todo` when marking progress on a single step.

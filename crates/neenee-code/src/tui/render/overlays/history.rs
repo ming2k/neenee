@@ -133,13 +133,11 @@ pub fn draw_history_modal(
     // the `Input History  › ` prefix). Only in search mode — browse mode has no
     // editable field, so it shows no caret. The composer underneath is skipped
     // for this modal, so without this the caret would be absent.
-    if search {
-        if let Some(h) = header_rect {
-            let prefix = "Input History  › ".width() as u16;
-            let cursor_x = h.x + prefix + caret_column(query, cursor_position);
-            let cursor_y = h.y;
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
+    if search && let Some(h) = header_rect {
+        let prefix = "Input History  › ".width() as u16;
+        let cursor_x = h.x + prefix + caret_column(query, cursor_position);
+        let cursor_y = h.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
     area
 }

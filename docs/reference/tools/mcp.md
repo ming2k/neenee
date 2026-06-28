@@ -8,7 +8,7 @@ stdio to the server child process. The wrapper inherits the server's
 `Write`. Connect and `tools/list` are bounded by `MCP_CONNECT_TIMEOUT = 8s`.
 Configuration lives in `config.toml` under `[mcp.<server>]`.
 
-### `mcp__<server>__<tool>`
+## `mcp__<server>__<tool>`
 
 Parameters come from the MCP server's `inputSchema`, falling back to
 `{"type":"object"}` when absent (`crates/neenee-tools/src/mcp.rs`). The public

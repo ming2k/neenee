@@ -62,10 +62,10 @@ pub(super) fn line_selection(
     wl: &WrappedLine,
 ) -> Option<(usize, usize)> {
     let (s, e) = range?;
-    if let Some(e) = e {
-        if e < wl.start_byte {
-            return None;
-        }
+    if let Some(e) = e
+        && e < wl.start_byte
+    {
+        return None;
     }
     if s >= wl.end_byte && !(s == wl.start_byte && wl.text.is_empty()) {
         return None;
@@ -589,14 +589,14 @@ fn wrap_impl(text: &str, max_width: usize, hidden_ranges: &[(usize, usize)]) -> 
             let move_previous = prohibited_line_start(first_char) || prohibited_line_end(last_char);
 
             let mut moved_grapheme = None;
-            if move_previous {
-                if let Some((offset, last_g)) = current_line.grapheme_indices(true).next_back() {
-                    // Only pop when we know a character will move down with the wrap
-                    // leaving at least one on the current line.
-                    if offset > 0 {
-                        moved_grapheme = Some(last_g.to_string());
-                        current_line.truncate(offset);
-                    }
+            if move_previous
+                && let Some((offset, last_g)) = current_line.grapheme_indices(true).next_back()
+            {
+                // Only pop when we know a character will move down with the wrap
+                // leaving at least one on the current line.
+                if offset > 0 {
+                    moved_grapheme = Some(last_g.to_string());
+                    current_line.truncate(offset);
                 }
             }
 

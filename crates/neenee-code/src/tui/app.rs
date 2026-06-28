@@ -764,18 +764,18 @@ impl App {
 
     pub(crate) fn visible_interactive_targets(&self) -> Vec<InteractiveTarget> {
         let mut targets = self.layout_map.interactive_targets();
-        if let Some(message_idx) = self.sticky_step {
-            if let Some(message) = self.focused_messages().get(message_idx) {
-                let target = if message.is_thinking() {
-                    InteractiveTarget::thinking(message_idx)
-                } else if message.is_tool_step() || message.is_envoy_task() {
-                    InteractiveTarget::tool_step(message_idx)
-                } else {
-                    return targets;
-                };
-                if !targets.contains(&target) {
-                    targets.insert(0, target);
-                }
+        if let Some(message_idx) = self.sticky_step
+            && let Some(message) = self.focused_messages().get(message_idx)
+        {
+            let target = if message.is_thinking() {
+                InteractiveTarget::thinking(message_idx)
+            } else if message.is_tool_step() || message.is_envoy_task() {
+                InteractiveTarget::tool_step(message_idx)
+            } else {
+                return targets;
+            };
+            if !targets.contains(&target) {
+                targets.insert(0, target);
             }
         }
         targets
@@ -786,10 +786,10 @@ impl App {
             self.focused_target = None;
             return;
         }
-        if let Some(target) = self.focused_target {
-            if !self.visible_interactive_targets().contains(&target) {
-                self.focused_target = None;
-            }
+        if let Some(target) = self.focused_target
+            && !self.visible_interactive_targets().contains(&target)
+        {
+            self.focused_target = None;
         }
     }
 

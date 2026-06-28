@@ -45,11 +45,7 @@ impl DynamicCatalog for McpCatalog {
             .iter()
             .filter(|(_, s)| matches!(s, neenee_core::mcp::McpConnectionStatus::Connected { .. }))
             .count();
-        tracing::info!(
-            servers = statuses.len(),
-            connected,
-            "MCP refresh complete"
-        );
+        tracing::info!(servers = statuses.len(), connected, "MCP refresh complete");
         Ok(())
     }
 

@@ -72,10 +72,10 @@ impl AgentIdentity {
     /// `"You are {name}."` / `"You are {mission}."` when one is set, and the
     /// empty string when neither is (tests / identity-less agents).
     pub fn preamble(&self) -> String {
-        if let Some(persona) = &self.persona {
-            if !persona.is_empty() {
-                return persona.clone();
-            }
+        if let Some(persona) = &self.persona
+            && !persona.is_empty()
+        {
+            return persona.clone();
         }
         match (self.name.is_empty(), self.mission.is_empty()) {
             (true, true) => String::new(),
@@ -99,7 +99,7 @@ pub struct Agent {
     /// [`variant_selection`](Self::variant_selection).
     pub(crate) toolset: neenee_core::ToolSet,
     /// The active resolved view: exactly one variant per capability, for the
-    /// current model's [`variant_selection`]. Both advertising
+    /// current model's [`variant_selection`](Self::variant_selection). Both advertising
     /// (`visible_tools` → `prepare_tools`) and dispatch (`find` by name) read
     /// this, so re-resolving it on a model/selection switch makes *both* the
     /// schema and the executed implementation track the chosen variant. Held
@@ -690,10 +690,10 @@ impl Agent {
             _ = cancel.cancelled() => return Err(HarnessError::Interrupted),
             replacement = gate.project_context(messages.clone()) => replacement,
         };
-        if let Some(replacement) = replacement {
-            if !replacement.is_empty() {
-                *messages = replacement;
-            }
+        if let Some(replacement) = replacement
+            && !replacement.is_empty()
+        {
+            *messages = replacement;
         }
         Ok(())
     }

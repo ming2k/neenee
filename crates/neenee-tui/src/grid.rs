@@ -215,10 +215,10 @@ impl Grid {
             // text writes: preserve the surface already painted under this
             // cell instead of punching through to the terminal default.
             let mut cell_style = style;
-            if cell_style.bg == crate::Color::Reset {
-                if let Some(existing) = self.get(cx, cy) {
-                    cell_style.bg = existing.bg;
-                }
+            if cell_style.bg == crate::Color::Reset
+                && let Some(existing) = self.get(cx, cy)
+            {
+                cell_style.bg = existing.bg;
             }
             let head = Cell {
                 symbol: grapheme.to_string(),
