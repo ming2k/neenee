@@ -33,7 +33,7 @@
 curl -fsSL https://raw.githubusercontent.com/ming2k/neenee/main/install.sh | bash
 ```
 
-> 可用 `NEENEE_VERSION=0.9.1` 指定版本，或用 `INSTALL_DIR=/usr/local/bin` 自定义安装目录。
+> 可用 `NEENEE_VERSION=0.10.0` 指定版本，或用 `INSTALL_DIR=/usr/local/bin` 自定义安装目录。
 
 **或从源码编译**：
 
