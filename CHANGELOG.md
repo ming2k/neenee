@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nothing yet.
+
+## [0.11.0] - 2026-01-09
+
+### Added
+
 - **Bash stdin execution contract: non-interactive by construction (ADR-0043).**
   The `bash` tool now provisions a child's stdin explicitly via a first-class
   `StdinPolicy` parameter on `Tool::call_structured_with_events`, decided before
@@ -720,7 +726,9 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/ming2k/neenee/releases/tag/v0.11.0
+[0.10.1]: https://github.com/ming2k/neenee/releases/tag/v0.10.1
 [0.10.0]: https://github.com/ming2k/neenee/releases/tag/v0.10.0
 [0.9.1]: https://github.com/ming2k/neenee/releases/tag/v0.9.1
 [0.9.0]: https://github.com/ming2k/neenee/releases/tag/v0.9.0
