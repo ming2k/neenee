@@ -60,7 +60,7 @@ pub struct InputContext {
 /// user isn't editing.
 fn edits_input_field(modal: super::Modal, history_searching: bool, model_searching: bool) -> bool {
     match modal {
-        super::Modal::None | super::Modal::ModelEditor => true,
+        super::Modal::None | super::Modal::ModelEditor | super::Modal::InputInjection => true,
         super::Modal::Provider => model_searching,
         super::Modal::HistorySearch => history_searching,
         _ => false,
@@ -274,6 +274,10 @@ pub enum InputAction {
     QuestionSubmit,
     /// Cancel the question modal.
     QuestionCancel,
+    /// Submit the input-injection panel's typed text (L3.5 β).
+    InputSubmit,
+    /// Cancel the input-injection panel (run the command non-interactively).
+    InputCancel,
     /// Select a question option by its 1-based index.
     QuestionSelect(usize),
     /// Insert a character into the question modal's "Other" free-text field.
@@ -639,6 +643,8 @@ pub fn process_event(
                         }
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionCancel
+                    } else if context.active_modal == super::Modal::InputInjection {
+                        InputAction::InputCancel
                     } else if context.active_modal == super::Modal::HistorySearch
                         && context.history_searching
                     {
@@ -743,6 +749,7 @@ pub fn process_event(
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
                     super::Modal::Permission => InputAction::PermissionSubmit,
                     super::Modal::Question => InputAction::QuestionSubmit,
+                    super::Modal::InputInjection => InputAction::InputSubmit,
                     super::Modal::Help => InputAction::CloseModal,
                     super::Modal::Session => InputAction::CloseModal,
                     super::Modal::Tools => InputAction::CloseModal,
@@ -1326,7 +1333,7 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: false },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
-                    super::Modal::ModelEditor => InputAction::None,
+                    super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::None => {
                         if context.has_focused_target {
@@ -1372,7 +1379,7 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: true },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
-                    super::Modal::ModelEditor => InputAction::None,
+                    super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::None => {
                         if context.has_focused_target {

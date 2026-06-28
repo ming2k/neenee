@@ -271,6 +271,7 @@ fn bash_expanded_renders_structured_shell() {
             lines: Vec::new(),
             exit: Some(1),
             truncated: false,
+            termination: neenee_core::tool_output::ShellTermination::Exited,
         },
         true,
     );
@@ -308,6 +309,7 @@ fn bash_expanded_preserves_stdout_stderr_interleaving() {
             ],
             exit: Some(0),
             truncated: false,
+            termination: neenee_core::tool_output::ShellTermination::Exited,
         },
         true,
     );
@@ -412,6 +414,7 @@ fn bash_running_streams_live_preview() {
             lines: Vec::new(),
             exit: None,
             truncated: false,
+            termination: neenee_core::tool_output::ShellTermination::Exited,
         },
         false,
     );

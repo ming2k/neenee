@@ -493,6 +493,7 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     let generation = context.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(previous) = context.token_slot.write().await.replace(token.clone()) {
         context.agent.reject_pending_permissions();
+        context.agent.reject_pending_inputs();
         let _ = context.tx.send(AgentResponse::PermissionsCleared);
         previous.cancel();
     }
@@ -1024,6 +1025,9 @@ pub fn relay_agent_event(
         AgentEvent::UserQuestionRequest(request) => {
             turn(session_id, TurnEvent::UserQuestionRequest(request))
         }
+        AgentEvent::InputRequest(request) => {
+            turn(session_id, TurnEvent::InputRequest(request))
+        }
         AgentEvent::Envoy {
             parent_call_id,
             event,
@@ -1156,6 +1160,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
     let generation = context.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(previous) = context.token_slot.write().await.replace(token.clone()) {
         context.agent.reject_pending_permissions();
+        context.agent.reject_pending_inputs();
         let _ = context.tx.send(AgentResponse::PermissionsCleared);
         previous.cancel();
     }

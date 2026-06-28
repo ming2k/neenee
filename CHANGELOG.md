@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bash stdin execution contract: non-interactive by construction (ADR-0043).**
+  The `bash` tool now provisions a child's stdin explicitly via a first-class
+  `StdinPolicy` parameter on `Tool::call_structured_with_events`, decided before
+  spawn. The default (`Closed` → `/dev/null`) is a **hard floor**: an
+  interactive command (`gpg`/`sudo`/`passwd`/editors/pagers) gets instant EOF
+  and fails fast with a real exit code instead of hanging silently for 30s. An
+  **idle watchdog** (no output for ~10s → `IdleBlocked`) and a wall-clock
+  ceiling (`Timeout`) replace the single coarse timeout, and an advisory
+  `is_interactive_command()` classifier speeds failure and sharpens the error.
+  A themed termination footer (`ShellTermination`: Exited/IdleBlocked/
+  InteractiveBlocked/Timeout/Cancelled) explains *why* a command ended. The one
+  legitimate interactive case (sudo/gpg passwords) has a human-input escape
+  hatch: the classifier pauses the turn, surfaces an inline `Modal::
+  InputInjection` panel (masked for secrets), and pipes the operator's reply in
+  — mirroring `ask_user`'s oneshot round-trip, with no PTY. An opt-in
+  `[principal] allow_model_stdin` (default `false`) lets an unattended flow let
+  the model supply `stdin` directly; otherwise stdin is structurally unreachable
+  from the model's arguments. `ToolOutput::Shell` gains a `termination` field
+  (`#[serde(default)]`, back-compatible). See ADR-0043.
+
+- **Block-level surfaces unified on one design contract.** The `edit`/`write`
+  diff's four banding colors are now first-class theme tokens
+  (`diff_add_bg`/`del_bg`/`add_hl`/`del_hl`) instead of inline `Color::Rgb`
+  literals, and every tool-step code/text block (read/listing/grep/bash/diff)
+  resolves its surface through `code_surface()` and shares `CODE_BAND_*`
+  geometry tokens with the markdown code block. The tool-step code block now
+  renders a language tag (matching markdown), so a code block reads identically
+  in prose and inside a tool step.
+
 - **Tools are a pool; the agent and the model each select from it.** The toolset
   is now resolved through a single entry point, `ToolSet::resolve_for(model,
   agent_selection, model_selection)`, that composes two independent selectors
@@ -82,6 +111,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than accumulated silently.
 
 ### Fixed
+
+- **Carriage-return / control-byte corruption of shell output.** A `\r`-refreshed
+  progress bar or spinner (which lands as one line with embedded `\r`s under
+  line-buffered capture) is now normalized to its final frame: `normalize_
+  carriage_returns` resolves `\r` as caret-return-overwrite and `\b` as a
+  column-step-back (CI-log-viewer semantics), drops stray control bytes
+  (BEL/FF/VT), and preserves `\t`. The renderer no longer collapses multi-`\r`
+  lines to only their last segment. Applied once at capture, shared with the
+  renderer.
+
+- **Streaming shell view lost stderr colour and interleaving.** The live
+  streaming seed now builds real `ShellLine` records (each tagged with its
+  source stream), so the streaming view matches the final result: stderr stays
+  red-tinted and stdout/stderr keep their true arrival interleaving, instead of
+  the all-stdout-then-all-stderr degraded band.
 
 - **ANSI escape sequences in shell output.** Colour codes (`\x1b[...]m`, cursor
   moves, OSC sequences) emitted even under a non-tty (`--color=always`,

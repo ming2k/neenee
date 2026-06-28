@@ -220,6 +220,22 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 )
                 .await;
             }
+            AgentRequest::InputReply {
+                request_id,
+                text,
+                parent_call_id,
+            } => {
+                crate::handlers_permission::reply_input(
+                    &agent,
+                    &envoy_registry,
+                    &side,
+                    &resp_tx,
+                    request_id,
+                    text,
+                    parent_call_id,
+                )
+                .await;
+            }
             AgentRequest::SwitchProvider {
                 provider_type,
                 model,

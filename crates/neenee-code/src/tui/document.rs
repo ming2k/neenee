@@ -504,11 +504,45 @@ impl TranscriptMessage {
                 lines: Vec::new(),
                 exit: None,
                 truncated: false,
+                // Still-streaming seed: the real termination lands with the
+                // final result (`finish_tool_step`). Default until then.
+                termination: neenee_core::tool_output::ShellTermination::default(),
             }));
         }
-        if let Some(neenee_core::ToolOutput::Shell { stdout, stderr, .. }) =
-            structured.as_deref_mut()
+        if let Some(neenee_core::ToolOutput::Shell {
+            stdout, stderr, lines, ..
+        }) = structured.as_deref_mut()
         {
+            // Build the TUI-authoritative `lines` view alongside the flat
+            // strings so the streaming view matches the final result: stderr
+            // stays red-tinted and stdout/stderr keep their true arrival
+            // interleaving, instead of the all-stdout-then-all-stderr
+            // degraded band the empty-`lines` fallback used to force.
+            //
+            // Each stream chunk is one complete `\n`-terminated line (bash's
+            // capture is line-buffered and emits `format!("{text}\n")`), so
+            // split on `\n` and tag each non-empty piece with its source
+            // stream. Trailing empties (from the terminal `\n`) are dropped so
+            // they don't paint phantom blank rows.
+            let stream_tag = match stream {
+                neenee_core::ToolStream::Stdout(_) => {
+                    neenee_core::tool_output::ShellStream::Out
+                }
+                neenee_core::ToolStream::Stderr(_) => {
+                    neenee_core::tool_output::ShellStream::Err
+                }
+            };
+            let text = match stream {
+                neenee_core::ToolStream::Stdout(s) | neenee_core::ToolStream::Stderr(s) => s,
+            };
+            for piece in text.split('\n') {
+                if !piece.is_empty() {
+                    lines.push(neenee_core::tool_output::ShellLine {
+                        stream: stream_tag,
+                        text: piece.to_string(),
+                    });
+                }
+            }
             match stream {
                 neenee_core::ToolStream::Stdout(s) => stdout.push_str(s),
                 neenee_core::ToolStream::Stderr(s) => stderr.push_str(s),
@@ -691,7 +725,9 @@ impl TranscriptMessage {
             // not rendered as a nested child step (the request still reaches
             // the harness via the `TurnEvent::Envoy` envelope, so a future
             // handler can attach without changing the event shape).
-            EnvoyEvent::PermissionRequest(_) | EnvoyEvent::UserQuestionRequest(_) => {}
+            EnvoyEvent::PermissionRequest(_)
+            | EnvoyEvent::UserQuestionRequest(_)
+            | EnvoyEvent::InputRequest(_) => {}
         }
         true
     }
@@ -2269,6 +2305,7 @@ mod tests {
             lines: Vec::new(),
             exit: Some(1),
             truncated: false,
+            termination: neenee_core::tool_output::ShellTermination::Exited,
         };
         let text = structured.to_text();
         assert!(
@@ -2289,10 +2326,59 @@ mod tests {
             lines: Vec::new(),
             exit: Some(0),
             truncated: false,
+            termination: neenee_core::tool_output::ShellTermination::Exited,
         };
         let text = structured.to_text();
         assert!(step.finish_tool_step("c", text, structured, 5));
         assert_eq!(step.tool_step_status(), Some(ToolStepStatus::Ok));
+    }
+
+    #[test]
+    fn push_tool_stream_builds_interleaved_lines_for_live_view() {
+        // L5: the streaming seed must populate `lines` (with the right stream
+        // tag each) so the live view renders arrival-ordered, stderr-tinted,
+        // interleaved output — not the all-stdout-then-all-stderr degraded
+        // band the empty-`lines` fallback forced.
+        use neenee_core::{ToolStream, tool_output::ShellStream};
+        let mut step = TranscriptMessage::tool_step("c", "bash", r#"{"command":"x"}"#);
+        assert!(step.push_tool_stream("c", &ToolStream::Stdout("Compiling a\n".into())));
+        assert!(step.push_tool_stream("c", &ToolStream::Stderr("warning: b\n".into())));
+        assert!(step.push_tool_stream("c", &ToolStream::Stdout("Compiling c\n".into())));
+
+        let lines = match &step.kind {
+            MessageKind::ToolStep {
+                structured: Some(b),
+                ..
+            } => match b.as_ref() {
+                neenee_core::ToolOutput::Shell { lines, .. } => lines,
+                _ => panic!("expected Shell"),
+            },
+            _ => panic!("expected ToolStep"),
+        };
+        assert_eq!(
+            lines.iter().map(|l| (l.stream, l.text.as_str())).collect::<Vec<_>>(),
+            vec![
+                (ShellStream::Out, "Compiling a"),
+                (ShellStream::Err, "warning: b"),
+                (ShellStream::Out, "Compiling c"),
+            ],
+            "streaming seed must preserve arrival order + stream tags"
+        );
+        // The flat strings stay populated too (model-facing path).
+        match step.kind {
+            MessageKind::ToolStep {
+                structured: Some(b),
+                ..
+            } => match b.as_ref() {
+                neenee_core::ToolOutput::Shell { stdout, stderr, .. } => {
+                    assert!(stdout.contains("Compiling a"));
+                    assert!(stdout.contains("Compiling c"));
+                    assert!(stderr.contains("warning: b"));
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
     }
 
     #[test]

@@ -159,6 +159,8 @@ pub async fn run_tui(
     let pending_permission_clone = pending_permission.clone();
     let pending_question = Arc::new(Mutex::new(VecDeque::<UserQuestionRequest>::new()));
     let pending_question_clone = pending_question.clone();
+    let pending_input = Arc::new(Mutex::new(VecDeque::<neenee_core::InputRequest>::new()));
+    let pending_input_clone = pending_input.clone();
     // Full-duplex (ADR-0029): side-tables recording which envoy (by parent
     // tool-call id) surfaced a given permission / ask_user request, so the
     // modal's reply can be tagged with `parent_call_id` for down-routing.
@@ -586,6 +588,13 @@ pub async fn run_tui(
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
+                        TurnEvent::InputRequest(request) => {
+                            pending_input_clone.lock().await.push_back(request);
+                            if !routes_to_side {
+                                *activity_clone.lock().await = "awaiting command input".to_string();
+                                ir_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
                         TurnEvent::Compacted {
                             archived_messages,
                             before_chars,
@@ -852,6 +861,7 @@ pub async fn run_tui(
         activity_scroll: 0,
         help_scroll: 0,
         pending_permission: None,
+        pending_input: None,
         question: None,
         question_scroll: 0,
         question_modal_follow: true,
@@ -906,6 +916,7 @@ pub async fn run_tui(
             activity_status,
             pending_permission,
             pending_question,
+            pending_input,
             is_responding,
             dirty,
             dirty_notify,

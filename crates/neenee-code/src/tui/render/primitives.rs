@@ -141,7 +141,7 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
             header: true,
             footer: true,
         },
-        Modal::None | Modal::Permission => return None,
+        Modal::None | Modal::Permission | Modal::InputInjection => return None,
     })
 }
 

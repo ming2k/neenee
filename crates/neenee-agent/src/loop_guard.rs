@@ -30,15 +30,26 @@
 //!
 //! ## What firing does
 //!
-//! It returns a nudge string. The caller appends it as a hidden user message
-//! ([`neenee_core::InjectionKind::LoopReviewNudge`]) before the next model
-//! request, injecting information the self-reinforcing context lacked: *you have
-//! repeated this exact read, it is unchanged, change course.* The turn keeps
-//! running — `Esc`, the opt-in `hard_stop_rounds`, and `abort` remain the hard
-//! backstops. A one-shot-per-signature latch keeps it from spamming; it escalates
-//! to a sterner wording once if the loop persists to [`ESCALATE_AT`].
+//! It returns a [`GuardAction`]. The escalation ladder is:
+//! 1. **[`GuardAction::Inject`]** — the first time a signature reaches
+//!    [`THRESHOLD`] (3) we inject a hidden user message ([`neenee_core::InjectionKind::LoopReviewNudge`])
+//!    before the next model request: *you repeated this read, it is unchanged,
+//!    change course.* This is a soft nudge; the model is free to ignore it.
+//! 2. **[`GuardAction::Block`]** — if the model ignores the nudge and keeps
+//!    repeating until [`ESCALATE_AT`] (6), we escalate from *asking* to
+//!    *blocking*: the exact read signature is masked for the rest of the turn,
+//!    so dispatch short-circuits any matching read and returns an explanatory
+//!    error instead of executing it. The model physically cannot re-issue the
+//!    looped read — it can only read something *different*. This is the rung
+//!    that breaks a loop a nudge failed to. Surgical: it leaves all other
+//!    reads, writes, and tools untouched.
+//! 3. **`Esc` / `abort` / `hard_stop_rounds`** — the hard backstops remain for
+//!    a turn that loops even past a block.
+//!
+//! A one-shot-per-signature latch keeps each rung from spamming. Block state is
+//! per-turn (dropped with the `TurnState`), so it never leaks across turns.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
@@ -63,32 +74,110 @@ pub enum GuardAction {
     /// Inject `message` as a hidden user message before the next model request.
     /// Non-terminating: the turn keeps running.
     Inject(String),
+    /// Hard-block one or more read-call `signatures` for the remainder of this
+    /// turn. The agent records them in a per-turn mask and short-circuits any
+    /// subsequent read whose canonical signature matches, returning an
+    /// explanatory `ToolOutput` instead of executing the read — so the model
+    /// *cannot* re-issue the looped read, only read something *different*.
+    /// Non-terminating and surgical: it leaves all other reads, writes, and
+    /// tools untouched.
+    ///
+    /// `message` is a steering note injected alongside the block (same vehicle
+    /// as [`Inject`](Self::Inject)) so the model learns *why* the read is now
+    /// refused and what to do instead. Severity sits between `Inject` (a soft
+    /// nudge the model is free to ignore — it often does, which is the whole
+    /// problem this variant exists to solve) and `Abort` (which kills the whole
+    /// turn). Escalation ladder: `Inject` first, `Block` if the loop persists,
+    /// `Abort` as a last resort.
+    Block {
+        signatures: Vec<String>,
+        message: String,
+    },
     /// Abort the turn with `reason` as a terminal error. Hard-terminating.
     Abort(String),
 }
 
 impl GuardAction {
-    /// Severity rank for merging: Abort > Inject > Continue.
+    /// Severity rank for merging: Abort > Block > Inject > Continue.
     fn severity(&self) -> u8 {
         match self {
             GuardAction::Continue => 0,
             GuardAction::Inject(_) => 1,
-            GuardAction::Abort(_) => 2,
+            GuardAction::Block { .. } => 2,
+            GuardAction::Abort(_) => 3,
         }
     }
 
-    /// Merge two actions, keeping the more severe. For two `Inject`s of equal
-    /// severity, concatenate so both nudges reach the model.
+    /// Merge two actions, keeping the more severe. Two `Inject`s of equal
+    /// severity concatenate so both nudges reach the model; two `Block`s merge
+    /// their signature sets; a `Block` absorbs a weaker `Inject` by folding the
+    /// inject's message into the block's. A more severe action always wins
+    /// outright.
     pub fn merge(self, other: GuardAction) -> GuardAction {
         match (self.severity(), other.severity()) {
-            (a, b) if a >= b => match (self, other) {
-                (GuardAction::Inject(mut s), GuardAction::Inject(t)) => {
-                    s.push_str("\n\n");
-                    s.push_str(&t);
-                    GuardAction::Inject(s)
+            // Equal severity: combine payloads.
+            (1, 1) => {
+                let GuardAction::Inject(mut s) = self else {
+                    unreachable!("severity 1 is Inject")
+                };
+                let GuardAction::Inject(t) = other else {
+                    unreachable!("severity 1 is Inject")
+                };
+                s.push_str("\n\n");
+                s.push_str(&t);
+                GuardAction::Inject(s)
+            }
+            (2, 2) => {
+                let GuardAction::Block {
+                    mut signatures,
+                    mut message,
+                } = self
+                else {
+                    unreachable!("severity 2 is Block")
+                };
+                let GuardAction::Block {
+                    signatures: other_sigs,
+                    message: other_msg,
+                } = other
+                else {
+                    unreachable!("severity 2 is Block")
+                };
+                for sig in other_sigs {
+                    if !signatures.contains(&sig) {
+                        signatures.push(sig);
+                    }
                 }
-                (winner, _) => winner,
-            },
+                if !other_msg.is_empty() {
+                    message.push_str("\n\n");
+                    message.push_str(&other_msg);
+                }
+                GuardAction::Block {
+                    signatures,
+                    message,
+                }
+            }
+            // Block absorbs a weaker Inject's message.
+            (2, 1) => {
+                let GuardAction::Block {
+                    signatures,
+                    mut message,
+                } = self
+                else {
+                    unreachable!("severity 2 is Block")
+                };
+                if let GuardAction::Inject(t) = other
+                    && !t.is_empty()
+                {
+                    message.push_str("\n\n");
+                    message.push_str(&t);
+                }
+                GuardAction::Block {
+                    signatures,
+                    message,
+                }
+            }
+            // Winner is whichever side is more severe.
+            (a, b) if a >= b => self,
             _ => other,
         }
     }
@@ -180,6 +269,14 @@ pub struct RoundGuardState {
     /// Whether `pending_calls` was classified as all-read. `true` by default so
     /// an empty round (no calls) doesn't spuriously reset guards.
     pending_all_read: bool,
+    /// Read-call signatures hard-blocked by a guard this turn
+    /// ([`GuardAction::Block`]). The dispatch layer consults
+    /// [`Self::is_blocked`] before executing a read and short-circuits any
+    /// match. Per-turn: cleared when the turn ends (the `TurnState` owning it
+    /// is dropped), so a block never leaks across turns. A progress round does
+    /// *not* clear it — blocking a proven-looping read for the remainder of the
+    /// turn is the point, even if the model makes other progress in between.
+    blocked_signatures: HashSet<String>,
 }
 
 impl RoundGuardState {
@@ -189,6 +286,7 @@ impl RoundGuardState {
             registry,
             pending_calls: Vec::new(),
             pending_all_read: true,
+            blocked_signatures: HashSet::new(),
         }
     }
 
@@ -205,7 +303,11 @@ impl RoundGuardState {
 
     /// Consume the pending round: dispatch it to every guard and return the
     /// merged [`GuardAction`]. Called once at the round boundary. After this,
-    /// the pending state is cleared until the next `set_round`.
+    /// the pending state is cleared until the next `set_round`. A
+    /// [`GuardAction::Block`] returned by a guard is applied here as a side
+    /// effect — its signatures are added to [`blocked_signatures`](Self::blocked_signatures)
+    /// — *before* the action is returned, so the caller only needs to handle
+    /// the message/inject surface.
     pub fn take_action(&mut self) -> GuardAction {
         if !self.pending_all_read {
             self.pending_calls.clear();
@@ -223,7 +325,48 @@ impl RoundGuardState {
         };
         let action = self.registry.observe(round);
         self.pending_calls.clear();
+        // Apply any hard block: record the signatures so subsequent reads of
+        // exactly this shape are short-circuited at dispatch.
+        if let GuardAction::Block { ref signatures, .. } = action {
+            for sig in signatures {
+                self.blocked_signatures.insert(sig.clone());
+            }
+        }
         action
+    }
+
+    /// Whether a single read call (name + raw args) is hard-blocked this turn.
+    /// Checks **both** axes the guard keys on: the exact signature
+    /// (`name|path|offset|limit`) and the path bucket (`name|path`). A call is
+    /// blocked if *either* matches a masked entry — this mirrors how the guard
+    /// detects, so blocking an exact read blocks that exact call, and blocking
+    /// a path bucket blocks every read of that file regardless of offset.
+    pub fn is_blocked(&self, name: &str, args: &str) -> bool {
+        if self.blocked_signatures.is_empty() {
+            return false;
+        }
+        let exact = read_signature([(name, args)]);
+        if self.blocked_signatures.contains(&exact) {
+            return true;
+        }
+        // A block keyed on the path bucket (`name|path`) must catch reads of
+        // that file at any offset. The exact signature of such a read is
+        // `name|path|offset|limit`, which won't string-equal `name|path`, so we
+        // check the path bucket too.
+        let path = path_signature([(name, args)]);
+        self.blocked_signatures.contains(&path)
+    }
+
+    /// A compact, log-friendly summary of what is currently blocked. Returns
+    /// `None` when nothing is masked so callers can cheaply skip logging.
+    pub fn blocked_summary(&self) -> Option<Vec<String>> {
+        if self.blocked_signatures.is_empty() {
+            None
+        } else {
+            let mut v: Vec<String> = self.blocked_signatures.iter().cloned().collect();
+            v.sort();
+            Some(v)
+        }
     }
 }
 
@@ -238,17 +381,30 @@ pub const WINDOW: usize = 8;
 pub const THRESHOLD: u32 = 3;
 
 /// If a signature reaches this many occurrences after the first nudge was already
-/// sent, escalate to a sterner, final nudge. Beyond this we stay silent and let
-/// the hard backstops (`hard_stop_rounds`, `abort`, `Esc`) take over rather than
+/// sent, escalate from a soft [`GuardAction::Inject`] to a hard
+/// [`GuardAction::Block`]: the read signature is masked for the rest of the
+/// turn so it physically cannot recur. Beyond this we stay silent and let the
+/// hard backstops (`hard_stop_rounds`, `abort`, `Esc`) take over rather than
 /// nag every round.
 pub const ESCALATE_AT: u32 = 6;
 
 /// Occurrences of the same *path bucket* (`name|path`) within the window that
 /// constitute a similar-parameter loop. Higher than [`THRESHOLD`] (which targets
 /// exact duplicates): re-reading the same file at a few different offsets is
-/// sometimes legitimate exploration, but 5+ reads of one file without touching
-/// any other is not plausibly productive.
-pub const PATH_THRESHOLD: u32 = 5;
+/// often legitimate exploration, so this axis is deliberately more permissive.
+///
+/// Set at [`WINDOW`] (8) rather than 5 so that genuine forward-paging of a
+/// large file — reading offset 1, 101, 201, … — is not mistaken for a loop.
+/// A whole window filled with reads of *one* file and nothing else is a strong
+/// "stuck on this file" signal; a bare majority (5/8) is not. The trade-off:
+/// this delays detection of a many-offset loop by ~3 rounds vs. a threshold of
+/// 5. That is acceptable because the exact-signature axis still catches an
+/// identical-repeat loop at [`THRESHOLD`] (3), and the cost of a *missed*
+/// many-offset loop (a few extra wasted reads) is far lower than the cost of a
+/// *false* nudge on legitimate paging (noise that erodes trust in the guard).
+///
+/// Calibrate against real session traces before treating this value as settled.
+pub const PATH_THRESHOLD: u32 = 8;
 
 /// How a completed tool round looks to a guard. Computed by the caller (which
 /// owns tool-access classification) and fed to `ReadLoopGuard::observe_round`.
@@ -301,83 +457,148 @@ impl ReadLoopGuard {
     /// admits firing. `None` the rest of the time — including every non-read
     /// round, which also resets the window.
     ///
-    /// This is the legacy entry point (kept for tests). The [`RoundGuard`]
-    /// implementation routes through `Self::observe_round` which also checks
-    /// the path-bucket axis.
+    /// This is the legacy entry point (kept for tests). It reports only the
+    /// *inject* level: an escalation to [`GuardAction::Block`] is represented
+    /// here as `None` (the level-2 nudge text is not a plain string the legacy
+    /// caller consumes). The production path is the [`RoundGuard`] trait via
+    /// `observe_round`, which returns the full [`GuardAction`].
     pub fn observe(&mut self, round: RoundClass) -> Option<String> {
         match round {
             RoundClass::Progress => {
                 self.reset();
                 None
             }
-            RoundClass::Read(signature) => self.observe_exact(signature),
+            RoundClass::Read(signature) => match self.observe_exact(signature)? {
+                GuardAction::Inject(nudge) => Some(nudge),
+                // Block/Abort carry structured payloads the legacy string API
+                // cannot represent; tests that need them use the trait path.
+                _ => None,
+            },
         }
     }
 
     /// Observe a round via the trait's [`GuardRound`] context. This is the
     /// primary entry point from the agent loop — it computes both the exact
     /// signature and the path bucket, then checks both axes.
+    ///
+    /// The two axes are **mutually exclusive per round** to avoid double-nudging
+    /// an identical read, and this exclusion extends to window bookkeeping: a
+    /// round that the exact-signature axis handles (fires or simply counts
+    /// toward its window) is *not* also recorded against the path-bucket axis.
+    /// This is deliberate — without it, the path axis would build up a parallel
+    /// count for a file the exact axis already covers and fire a redundant,
+    /// late nudge. The path axis therefore only ever sees rounds whose exact
+    /// signature was inert, which is precisely the "same file, many different
+    /// offsets" escape it exists to catch (every exact signature is distinct
+    /// there, so the exact axis never claims the round).
     fn observe_round(&mut self, round: GuardRound<'_>) -> GuardAction {
         if !round.all_read {
             self.reset();
             return GuardAction::Continue;
         }
         let exact = read_signature(round.calls.iter().copied());
-        let path = path_signature(round.calls.iter().copied());
 
-        // Check both axes; the path-bucket axis catches the similar-parameter
-        // escape, the exact-signature axis catches identical/thrash loops.
-        if let Some(nudge) = self.observe_exact(exact.clone()) {
-            return GuardAction::Inject(nudge);
+        // Exact axis claims the round: advance its window and, if it fires,
+        // return its action without touching the path axis.
+        let exact_action = self.observe_exact(exact.clone());
+        if let Some(action) = exact_action {
+            return action;
         }
-        // Only check path axis if the exact axis didn't fire (avoid double-fire
-        // for identical reads, which the exact axis already catches with a
-        // better-targeted message).
+        // The exact axis did not *fire* this round, but it may still *own* this
+        // signature: once a nudge (or block) has been latched for it, the exact
+        // axis is tracking the loop and the path axis must not also record
+        // these rounds — otherwise the path bucket builds a parallel count and
+        // fires a redundant, late nudge while the exact axis sits in its
+        // post-nudge wait window (between THRESHOLD and ESCALATE_AT). So skip
+        // the path axis whenever the exact signature is already latched.
+        if self.nudges_sent.contains_key(&exact) {
+            return GuardAction::Continue;
+        }
+        // Exact axis was inert and unowned this round. Offer it to the
+        // path-bucket axis (which advances the path window and may fire). This
+        // is the "same file, many different offsets" escape: every exact
+        // signature is distinct so the exact axis never latches one, and the
+        // collapsed path signature is what repeats. Guarded by `exact != path`
+        // so a path-less/query-shaped read isn't double-counted against itself.
+        let path = path_signature(round.calls.iter().copied());
         if exact != path
-            && let Some(nudge) = self.observe_path(path)
+            && let Some(action) = self.observe_path(path)
         {
-            return GuardAction::Inject(nudge);
+            return action;
         }
         GuardAction::Continue
     }
 
-    /// Exact-signature axis: observe a canonical signature, return a nudge if it
-    /// reaches threshold. Non-read rounds are the caller's responsibility (call
-    /// `reset` first).
-    fn observe_exact(&mut self, signature: String) -> Option<String> {
+    /// Exact-signature axis: push the signature to the window and return an
+    /// action if it reaches threshold. Called by [`observe_round`](Self::observe_round)
+    /// (which owns the round→axis routing) and by the legacy `observe()`.
+    fn observe_exact(&mut self, signature: String) -> Option<GuardAction> {
         self.push(signature.clone());
-        let count = self.count(&signature);
+        self.check_exact(&signature)
+    }
+
+    /// Path-bucket axis: push the path signature to the path window and return
+    /// an action if the same file is read at many different offsets. Called by
+    /// [`observe_round`](Self::observe_round) and the legacy `observe()`.
+    fn observe_path(&mut self, path_sig: String) -> Option<GuardAction> {
+        self.push_path(path_sig.clone());
+        self.check_path(&path_sig)
+    }
+
+    /// Judge the exact signature (already in the window) for threshold. Returns
+    /// the escalation action: a level-1 [`GuardAction::Inject`] nudge at
+    /// [`THRESHOLD`], escalating to a level-2 [`GuardAction::Block`] at
+    /// [`ESCALATE_AT`] when the loop persists past the nudge — masking the read
+    /// so it physically cannot recur.
+    fn check_exact(&mut self, signature: &str) -> Option<GuardAction> {
+        let count = self.count(signature);
         if count < THRESHOLD {
             return None;
         }
 
-        let already_sent = self.nudges_sent.get(&signature).copied().unwrap_or(0);
+        let already_sent = self.nudges_sent.get(signature).copied().unwrap_or(0);
         let level = match already_sent {
             0 => 1,
             1 if count >= ESCALATE_AT => 2,
             _ => return None,
         };
-        self.nudges_sent.insert(signature.clone(), level);
-        Some(build_nudge(&signature, count, level))
+        self.nudges_sent.insert(signature.to_string(), level);
+        if level == 1 {
+            Some(GuardAction::Inject(build_nudge(signature, count, level)))
+        } else {
+            let message = build_block_nudge(&humanize(signature), count);
+            Some(GuardAction::Block {
+                signatures: vec![signature.to_string()],
+                message,
+            })
+        }
     }
 
-    /// Path-bucket axis: observe a path signature, return a nudge if the same
-    /// file is being read at many different offsets.
-    fn observe_path(&mut self, path_sig: String) -> Option<String> {
-        self.push_path(path_sig.clone());
-        let count = self.count_path(&path_sig);
+    /// Judge the path signature (already in the path window) for threshold.
+    /// Same escalation ladder as [`check_exact`](Self::check_exact): nudge at
+    /// [`PATH_THRESHOLD`], hard-block the path bucket at [`ESCALATE_AT`].
+    fn check_path(&mut self, path_sig: &str) -> Option<GuardAction> {
+        let count = self.count_path(path_sig);
         if count < PATH_THRESHOLD {
             return None;
         }
 
-        let already_sent = self.path_nudges_sent.get(&path_sig).copied().unwrap_or(0);
+        let already_sent = self.path_nudges_sent.get(path_sig).copied().unwrap_or(0);
         let level = match already_sent {
             0 => 1,
             1 if count >= ESCALATE_AT => 2,
             _ => return None,
         };
-        self.path_nudges_sent.insert(path_sig.clone(), level);
-        Some(build_path_nudge(&path_sig, count, level))
+        self.path_nudges_sent.insert(path_sig.to_string(), level);
+        if level == 1 {
+            Some(GuardAction::Inject(build_path_nudge(path_sig, count, level)))
+        } else {
+            let message = build_path_block_nudge(&humanize(path_sig), count);
+            Some(GuardAction::Block {
+                signatures: vec![path_sig.to_string()],
+                message,
+            })
+        }
     }
 
     fn push(&mut self, signature: String) {
@@ -502,9 +723,10 @@ fn has_query_arg(value: &Value) -> bool {
         .any(|key| value.get(*key).is_some())
 }
 
-/// Build the nudge text. Level 1 is the first, informative break; level 2 is the
-/// sterner escalation when the loop persists. The wording is a fixed template —
-/// the *information* (you repeated this, it is unchanged, change course) is what
+/// Build the level-1 nudge text — the first, informative break. Called only
+/// for level 1: level-2 escalation now produces a [`GuardAction::Block`] with
+/// [`build_block_nudge`] instead. The wording is a fixed template — the
+/// *information* (you repeated this, it is unchanged, change course) is what
 /// breaks the anchor, not eloquence, so it needs no model call to compose.
 fn build_nudge(signature: &str, count: u32, level: u8) -> String {
     let target = humanize(signature);
@@ -562,6 +784,39 @@ fn build_path_nudge(signature: &str, count: u32, level: u8) -> String {
              or call `abort`."
         )
     }
+}
+
+/// Message paired with a [`GuardAction::Block`] on the exact-signature axis.
+/// Distinct from [`build_nudge`]: this one *announces* the hard block the
+/// engine is now enforcing, so the model understands why its read will be
+/// refused and what to do instead. It is injected as a hidden user message at
+/// the same time the signature is masked, so the block and its rationale
+/// arrive together.
+fn build_block_nudge(target: &str, count: u32) -> String {
+    format!(
+        "You have repeated the same read ({target}) {count} times this turn \
+         despite a prior warning. This exact read is now **blocked** for the \
+         rest of the turn — calling it again will return an error, not the \
+         content. You already have this content in context. Act on it now: use \
+         `edit_file`/`write_file` to make the change you keep re-reading for, \
+         or read a *different* file or line range. If you genuinely cannot \
+         proceed, say so explicitly or call `abort`."
+    )
+}
+
+/// Message paired with a [`GuardAction::Block`] on the path-bucket axis: the
+/// model re-read the same file at too many different offsets after a warning,
+/// so the whole file is now read-blocked for the turn.
+fn build_path_block_nudge(target: &str, count: u32) -> String {
+    format!(
+        "You have read {target} {count} times this turn at different offsets \
+         despite a prior warning, and are not making progress. This file is now \
+         **read-blocked** for the rest of the turn — reading it again (at any \
+         offset) will return an error. You already have enough from this file \
+         in context. Act on it now: make the change you keep reading for, or \
+         move to a different file or a concrete next step toward the goal. If \
+         you genuinely cannot proceed, say so explicitly or call `abort`."
+    )
 }
 
 #[cfg(test)]
@@ -626,20 +881,53 @@ mod tests {
     }
 
     #[test]
-    fn escalates_once_then_stays_silent() {
+    fn nudge_then_hard_block_on_persistent_loop() {
+        // The escalation ladder the production path exercises: a level-1
+        // `Inject` nudge at count THRESHOLD (3), then a level-2 `Block` at
+        // ESCALATE_AT (6) when the loop persists, then silence. We drive it
+        // through the `RoundGuard` trait — the real dispatch path — because the
+        // legacy `observe()` string API cannot represent a `Block`.
         let mut guard = ReadLoopGuard::new();
-        let mut nudges = 0;
-        // Ten identical reads: one level-1 nudge at count 3, one level-2 at 6,
-        // nothing after.
+        let args = |offset, limit| {
+            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
+        };
+        let mut actions = Vec::new();
         for _ in 0..10 {
-            if let Some(text) = guard.observe(read("a.rs", 1, 50)) {
-                nudges += 1;
-                if nudges == 2 {
-                    assert!(text.contains("still repeating"), "2nd nudge escalates");
-                }
-            }
+            let args = args(1, 50);
+            let call = ("read_text", args.as_str());
+            actions.push(trait_observe(&mut guard, guard_round(&[call])));
         }
-        assert_eq!(nudges, 2, "fires exactly twice (confirm + escalate)");
+        // Exactly two non-Continue actions across ten identical reads.
+        let fired: Vec<_> = actions
+            .iter()
+            .filter(|a| !matches!(a, GuardAction::Continue))
+            .collect();
+        assert_eq!(fired.len(), 2, "fires exactly twice (nudge + block)");
+        // First is the soft nudge.
+        match &fired[0] {
+            GuardAction::Inject(msg) => assert!(
+                msg.contains("read_text a.rs"),
+                "level-1 nudge names the read"
+            ),
+            other => panic!("first action should be Inject, got {other:?}"),
+        }
+        // Second is the hard block, carrying the exact signature.
+        match &fired[1] {
+            GuardAction::Block {
+                signatures,
+                message,
+            } => {
+                assert!(
+                    signatures.iter().any(|s| s.contains("a.rs")),
+                    "block carries the a.rs signature: {signatures:?}"
+                );
+                assert!(
+                    message.contains("blocked"),
+                    "block message announces the hard block"
+                );
+            }
+            other => panic!("second action should be Block, got {other:?}"),
+        }
     }
 
     #[test]
@@ -696,20 +984,23 @@ mod tests {
 
     #[test]
     fn path_bucket_catches_same_file_many_offsets() {
-        // The bug this fixes: read a.rs at offset 1, 50, 100, 150, 200 — five
-        // distinct exact signatures, so the exact axis never trips. But the
+        // The case this fixes: read a.rs at many distinct offsets — each is a
+        // distinct exact signature so the exact axis never trips, but the
         // path-bucket axis collapses them all to "read_text|a.rs" and trips at
-        // PATH_THRESHOLD=5.
+        // PATH_THRESHOLD (8). We use 8 offsets (filling the window); the first
+        // 7 are inert and the 8th trips.
         let mut guard = ReadLoopGuard::new();
-        for offset in [1, 50, 100, 150, 200] {
+        let offsets = [1, 50, 100, 150, 200, 250, 300, 350];
+        for (i, &offset) in offsets.iter().enumerate() {
             let args = format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#);
             let call = ("read_text", args.as_str());
             let action = trait_observe(&mut guard, guard_round(&[call]));
-            if offset < 200 {
+            if i < offsets.len() - 1 {
                 assert_eq!(
                     action,
                     GuardAction::Continue,
-                    "offset {offset} should not trip"
+                    "offset {offset} (read #{}) should not trip",
+                    i + 1
                 );
             } else {
                 match action {
@@ -717,7 +1008,7 @@ mod tests {
                         msg.contains("a.rs") && msg.contains("same file"),
                         "path nudge should name the file and mention the issue, got: {msg}"
                     ),
-                    other => panic!("offset 200 should trip path axis, got {other:?}"),
+                    other => panic!("offset {offset} should trip path axis, got {other:?}"),
                 }
             }
         }
@@ -725,8 +1016,9 @@ mod tests {
 
     #[test]
     fn path_bucket_does_not_fire_on_distinct_files() {
-        // Reading 5 different files is legitimate exploration — the path axis
-        // must not trip.
+        // Reading several different files is legitimate exploration — each
+        // lands in its own path bucket, so the path axis never accumulates a
+        // repeat. Must not trip regardless of how many files are read.
         let mut guard = ReadLoopGuard::new();
         for file in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] {
             let args = format!(r#"{{"path":"{file}","offset":1,"limit":50}}"#);
@@ -804,5 +1096,211 @@ mod tests {
             }
             other => panic!("expected Inject, got {other:?}"),
         }
+    }
+
+    // ── GuardAction::Block merge semantics ──────────────────────────────────
+
+    #[test]
+    fn block_is_more_severe_than_inject() {
+        // A Block (hard mask) outranks an Inject (soft nudge) of the same round.
+        let merged = GuardAction::Block {
+            signatures: vec!["read_text|a.rs".into()],
+            message: "blocked".into(),
+        }
+        .merge(GuardAction::Inject("nudge".into()));
+        assert!(
+            matches!(merged, GuardAction::Block { .. }),
+            "Block should win over Inject, got {merged:?}"
+        );
+        // And the block absorbs the inject's message into its own.
+        if let GuardAction::Block { message, .. } = merged {
+            assert!(message.contains("blocked"), "block message kept: {message}");
+            assert!(message.contains("nudge"), "inject folded in: {message}");
+        }
+    }
+
+    #[test]
+    fn two_blocks_merge_their_signature_sets() {
+        let merged = GuardAction::Block {
+            signatures: vec!["read_text|a.rs".into()],
+            message: "first".into(),
+        }
+        .merge(GuardAction::Block {
+            signatures: vec!["read_text|b.rs".into()],
+            message: "second".into(),
+        });
+        match merged {
+            GuardAction::Block { signatures, message } => {
+                assert_eq!(signatures.len(), 2, "signature sets union: {signatures:?}");
+                assert!(signatures.contains(&"read_text|a.rs".to_string()));
+                assert!(signatures.contains(&"read_text|b.rs".to_string()));
+                assert!(message.contains("first") && message.contains("second"));
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abort_outranks_block() {
+        let merged = GuardAction::Abort("boom".into()).merge(GuardAction::Block {
+            signatures: vec!["x".into()],
+            message: "blocked".into(),
+        });
+        assert!(
+            matches!(merged, GuardAction::Abort(_)),
+            "Abort should win over Block, got {merged:?}"
+        );
+    }
+
+    // ── RoundGuardState::is_blocked surgical precision ──────────────────────
+    // These test the mask the dispatch layer consults. The whole point of the
+    // signature-level (not tool-level) block is precision: it must catch the
+    // exact looping read while leaving everything else runnable.
+
+    #[test]
+    fn blocked_mask_catches_exact_repeat_after_block_action() {
+        // Drive the guard to a Block, then feed the action through
+        // RoundGuardState (as the agent loop does) and assert the mask catches
+        // the same read but spares other reads.
+        let mut state = RoundGuardState::new({
+            let mut reg = GuardRegistry::new();
+            reg.register(Box::new(ReadLoopGuard::new()));
+            reg
+        });
+        let args = |offset, limit| {
+            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
+        };
+        // Six identical reads → nudge at 3, Block at 6.
+        let mut last_action = GuardAction::Continue;
+        for _ in 0..6 {
+            let call = ("read_text", args(1, 50));
+            state.set_round(vec![(call.0.into(), call.1.into())], true);
+            last_action = state.take_action();
+        }
+        assert!(
+            matches!(last_action, GuardAction::Block { .. }),
+            "6th read should escalate to Block, got {last_action:?}"
+        );
+        // The mask (populated by take_action) now blocks the identical read.
+        assert!(
+            state.is_blocked("read_text", &args(1, 50)),
+            "the exact repeated read should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocked_mask_spares_different_offset_of_same_file_for_exact_block() {
+        // When the exact axis blocks `a.rs@1,50`, a read of `a.rs` at a
+        // *different* offset is NOT caught — that is a different signature and
+        // may be legitimate (the model pivoting to a new line range is exactly
+        // what we want to encourage). The path-bucket block is the one that
+        // covers all offsets; the exact block does not.
+        let mut state = RoundGuardState::new({
+            let mut reg = GuardRegistry::new();
+            reg.register(Box::new(ReadLoopGuard::new()));
+            reg
+        });
+        let args = |offset, limit| {
+            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
+        };
+        for _ in 0..6 {
+            let call = ("read_text", args(1, 50));
+            state.set_round(vec![(call.0.into(), call.1.into())], true);
+            let _ = state.take_action();
+        }
+        // Same file, different offset — not blocked (exact block is surgical).
+        assert!(
+            !state.is_blocked("read_text", &args(200, 50)),
+            "a different offset of the same file should NOT be blocked by an exact-axis block"
+        );
+    }
+
+    #[test]
+    fn blocked_mask_spares_different_file_entirely() {
+        // A block on `a.rs` must not touch reads of `b.rs`.
+        let mut state = RoundGuardState::new({
+            let mut reg = GuardRegistry::new();
+            reg.register(Box::new(ReadLoopGuard::new()));
+            reg
+        });
+        let args = |path, offset, limit| {
+            format!(r#"{{"path":"{path}","offset":{offset},"limit":{limit}}}"#)
+        };
+        for _ in 0..6 {
+            let call = ("read_text", args("a.rs", 1, 50));
+            state.set_round(vec![(call.0.into(), call.1.into())], true);
+            let _ = state.take_action();
+        }
+        assert!(
+            !state.is_blocked("read_text", &args("b.rs", 1, 50)),
+            "a different file should never be blocked by an a.rs block"
+        );
+    }
+
+    #[test]
+    fn blocked_mask_spares_different_tool() {
+        // A block on `read_text` must not touch `grep` — the mask is keyed on
+        // the full signature, which includes the tool name.
+        let mut state = RoundGuardState::new({
+            let mut reg = GuardRegistry::new();
+            reg.register(Box::new(ReadLoopGuard::new()));
+            reg
+        });
+        let read_args = r#"{"path":"a.rs","offset":1,"limit":50}"#;
+        for _ in 0..6 {
+            state.set_round(vec![("read_text".into(), read_args.into())], true);
+            let _ = state.take_action();
+        }
+        assert!(
+            !state.is_blocked("grep", r#"{"pattern":"foo","path":"a.rs"}"#),
+            "grep should never be blocked by a read_text block"
+        );
+    }
+
+    #[test]
+    fn path_bucket_block_catches_all_offsets_of_that_file() {
+        // When the *path-bucket* axis blocks a file (the many-offset escape), a
+        // read of that file at ANY offset is caught — unlike the exact-axis
+        // block above. We trigger it by reading one file at many distinct
+        // offsets until the path axis escalates to a Block.
+        let mut state = RoundGuardState::new({
+            let mut reg = GuardRegistry::new();
+            reg.register(Box::new(ReadLoopGuard::new()));
+            reg
+        });
+        let args = |offset| {
+            format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#)
+        };
+        // Push past PATH_THRESHOLD (8) then past ESCALATE_AT (6 more) to
+        // escalate. Each round is a distinct exact signature (different
+        // offset), so the exact axis never latches; the path axis accumulates
+        // `read_text|a.rs`.
+        let offsets = [1, 50, 100, 150, 200, 250, 300, 400, 500, 600];
+        let mut saw_block = false;
+        for off in offsets {
+            let call = ("read_text", args(off));
+            state.set_round(vec![(call.0.into(), call.1.into())], true);
+            match state.take_action() {
+                GuardAction::Block { .. } => saw_block = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_block,
+            "should escalate to a path-bucket Block at some point"
+        );
+        // Any offset of a.rs is now blocked.
+        assert!(
+            state.is_blocked("read_text", &args(999)),
+            "a path-bucket block should catch any offset of the file"
+        );
+        // But a different file is still fine.
+        assert!(
+            !state.is_blocked(
+                "read_text",
+                r#"{"path":"b.rs","offset":1,"limit":50}"#
+            ),
+            "path-bucket block on a.rs should spare b.rs"
+        );
     }
 }

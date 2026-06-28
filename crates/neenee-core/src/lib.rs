@@ -36,7 +36,10 @@ pub mod message;
 pub use message::{ImagePart, InjectionKind, InjectionOrigin, Message, Role, ToolCall, ToolResult};
 
 pub mod tool_output;
-pub use tool_output::{PatchOp, ToolOutput, ToolStream};
+pub use tool_output::{
+    PatchOp, ShellTermination, StdinPolicy, ToolOutput, ToolStream,
+    is_interactive_command,
+};
 
 pub mod capability;
 pub mod catalog;
@@ -65,7 +68,8 @@ pub use dynamic::DynamicCatalog;
 pub use envoy::{EXPLORE, EnvoyProfile, INTERACTIVE, QUANT, REVIEW, TITLE, ToolPolicy};
 pub use events::{
     AgentEvent, AgentNotice, AgentOp, AgentRequest, AgentResponse, EnvoyEvent, HarnessSnapshot,
-    McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource, NoticeSurface,
+    InputReply, InputRequest, McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource,
+    NoticeSurface,
     ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo, ProviderPickerRow,
     ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo, ToolInfo,
     TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,

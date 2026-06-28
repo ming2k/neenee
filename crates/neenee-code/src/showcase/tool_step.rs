@@ -278,6 +278,7 @@ fn bash_failed(id: &str) -> TranscriptMessage {
         lines: Vec::new(),
         exit: Some(1),
         truncated: false,
+        termination: neenee_core::tool_output::ShellTermination::Exited,
     };
     let mut m = TranscriptMessage::tool_step(id, "bash", args);
     m.finish_tool_step(id, structured.to_text(), structured, 1200);

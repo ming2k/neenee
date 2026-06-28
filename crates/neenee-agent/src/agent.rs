@@ -91,6 +91,14 @@ struct AskUserState {
     pending: HashMap<String, oneshot::Sender<Option<UserQuestionReply>>>,
 }
 
+/// Parked oneshots for in-flight interactive-input requests (L3.5 β): a
+/// `bash` command classified interactive blocks here until the operator's
+/// [`InputReply`] arrives (or `None` on cancel/turn-end).
+#[derive(Default)]
+struct InputState {
+    pending: HashMap<String, oneshot::Sender<Option<InputReply>>>,
+}
+
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
     /// The full capability set: every tool keyed by capability, with all its
@@ -129,6 +137,8 @@ pub struct Agent {
     pursuit_state: crate::pursuit_state::PursuitState,
     permissions: crate::permission_store::PermissionStore,
     ask_user: std::sync::Mutex<AskUserState>,
+    /// Parked interactive-input requests (L3.5 β). Mirrors `ask_user`.
+    input: std::sync::Mutex<InputState>,
     pub(crate) skills_registry: skills::SkillRegistry,
     thread_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Context-pressure threshold (in tokens) above which the harness asks the
@@ -150,6 +160,14 @@ pub struct Agent {
     /// review diagnostic via `set_loop_review_enabled`. Lock-free so the round
     /// boundary reads it without contention.
     loop_guard_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the model may supply stdin bytes for a `bash` call it emits
+    /// (the opt-in automatic-flow path, L3.5 α). Default `false`; seeded from
+    /// `[principal] allow_model_stdin`. Lock-free so the dispatch site reads
+    /// it without contention. When `false` the bash schema exposes no `stdin`
+    /// parameter (structurally unreachable from the model); when `true` it
+    /// does, and a model-supplied `stdin` is threaded as
+    /// [`StdinPolicy::Prefilled`].
+    allow_model_stdin: Arc<std::sync::atomic::AtomicBool>,
     /// Registered review dimensions evaluated by the on-demand diagnostic
     /// envoy (`/review`). Defaults to [`crate::default_reviews`] (looping);
     /// empty on envoys (which have no `/review` path).
@@ -284,6 +302,17 @@ impl EnvoyHandle {
         }
     }
 
+    /// Resolve an interactive-input request the envoy's `bash` is parked on
+    /// (L3.5 β). Down-direction counterpart to an up-going
+    /// [`AgentEvent::InputRequest`] / [`EnvoyEvent::InputRequest`].
+    pub fn reply_input(&self, request_id: &str, text: String) -> bool {
+        if let Some(agent) = self.weak.upgrade() {
+            agent.reply_input(request_id, text)
+        } else {
+            false
+        }
+    }
+
     /// Whether the underlying agent is still alive (its dispatcher still holds
     /// the `Arc`). Lets a caller drop a stale handle instead of no-op-ing.
     pub fn is_alive(&self) -> bool {
@@ -392,12 +421,14 @@ impl Agent {
             pursuit_state,
             permissions: crate::permission_store::PermissionStore::new(),
             ask_user: std::sync::Mutex::new(AskUserState::default()),
+            input: std::sync::Mutex::new(InputState::default()),
             skills_registry,
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_projection_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
             loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            allow_model_stdin: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reviews: crate::default_reviews(),
             operation_scope: std::sync::Mutex::new(neenee_core::OperationScope::unrestricted()),
             hooks: crate::hook_runner::HookRunner::new(),
@@ -548,6 +579,25 @@ impl Agent {
     pub fn set_loop_review_enabled(&self, enabled: bool) {
         self.loop_guard_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Enable or disable the model-supplied-stdin path for `bash` (L3.5 α).
+    /// Mirrors `[principal] allow_model_stdin` in `config.toml`. When off
+    /// (the default), the bash schema exposes no `stdin` parameter and a
+    /// command needing input either gets it from a human (interactive
+    /// classifier → input panel) or fails fast. When on, the model may feed
+    /// a command's stdin directly — for unattended/automatic flows.
+    pub fn set_allow_model_stdin(&self, enabled: bool) {
+        self.allow_model_stdin
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the model may supply stdin for a `bash` call. Read at the
+    /// dispatch site to decide the [`StdinPolicy`] and whether the bash schema
+    /// exposes a `stdin` parameter.
+    pub fn allow_model_stdin(&self) -> bool {
+        self.allow_model_stdin
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Install (or clear with `None`) the mid-turn model-context projection gate.
@@ -888,6 +938,44 @@ impl Agent {
         let pending = std::mem::take(
             &mut self
                 .ask_user
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending,
+        );
+        for (_, sender) in pending {
+            let _ = sender.send(None);
+        }
+    }
+
+    /// Resolve a parked interactive-input request (L3.5 β) with the operator's
+    /// text, unblocking the `bash` dispatch that issued it. Returns `false` if
+    /// no matching request is parked (e.g. already resolved or cancelled).
+    /// An empty `text` is a valid "cancel" — the command then runs with
+    /// closed stdin and fails fast.
+    pub fn reply_input(&self, request_id: &str, text: String) -> bool {
+        let sender = self
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(request_id);
+        sender.is_some_and(|sender| {
+            sender
+                .send(Some(InputReply {
+                    request_id: request_id.to_string(),
+                    text,
+                }))
+                .is_ok()
+        })
+    }
+
+    /// Cancel every parked input request (e.g. on turn end / interrupt),
+    /// resolving each with `None` so the awaiting dispatch returns a
+    /// cancelled result.
+    pub fn reject_pending_inputs(&self) {
+        let pending = std::mem::take(
+            &mut self
+                .input
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pending,
@@ -1609,13 +1697,92 @@ impl Agent {
                     arguments: call.arguments.clone(),
                 });
             }
-            // Execute all tool calls concurrently; results arrive in input order.
-            // An interrupt converts the whole batch into per-id `ToolCancelled`
-            // events — the turn is being aborted, so partial side effects are
-            // neither recorded nor replayed (the caller drops the turn history).
-            let results = self
-                .execute_tools_concurrent(tool_calls, &call_ids, cancel, on_event)
-                .await?;
+            // Signature-level loop guard (ADR-0036): a read call whose canonical
+            // signature is in the per-turn block mask — set by a guard that saw
+            // the model repeat it past a nudge — is short-circuited here, before
+            // execution. The model gets an explanatory error instead of the
+            // content, so it is physically unable to re-enter the loop. Only
+            // read-tier calls can be masked; writes/commands are never blocked
+            // by the read-loop guard. Blocked calls are split out so the rest
+            // run concurrently exactly as before. Each blocked call is given the
+            // same ToolResult event an executed call would get, so the UI never
+            // sees an orphaned running step.
+            let blocked_output = |name: &str| {
+                ToolOutput::Text(format!(
+                    "[loop guard] This read ({name}) is blocked for the rest of the turn \
+                     because it was repeated past a steering warning. Re-reading it \
+                     cannot help: the content is already in context above. Act on it \
+                     now (e.g. use edit_file/write_file with the text you already \
+                     captured), read a *different* file or line range, or, if you \
+                     cannot proceed, say so explicitly or call `abort`."
+                ))
+            };
+            let mut results: Vec<Option<(ToolOutput, u64)>> =
+                (0..tool_calls.len()).map(|_| None).collect();
+            let exec_indices: Vec<usize> = tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(idx, c)| {
+                    if self.tool_target_is_unspecified(&c.name, &c.arguments)
+                        && state.guards.is_blocked(&c.name, &c.arguments)
+                    {
+                        tracing::warn!(
+                            tool = %c.name,
+                            args = %c.arguments,
+                            "read blocked by turn-loop guard signature mask"
+                        );
+                        let output = blocked_output(&c.name);
+                        let id = &call_ids[*idx];
+                        // Emit the ToolResult the executed path would have, so
+                        // the UI pairs this call's ToolCall with a terminal
+                        // result instead of leaving it "running".
+                        on_event(AgentEvent::Notice(
+                            AgentNotice::new(
+                                NoticeKind::NudgeInjected,
+                                NoticeSeverity::Warning,
+                                "Blocked repeating read",
+                                NoticeSource::TurnGuard,
+                            )
+                            .with_body(format!(
+                                "A read ({}) was blocked by the loop guard — it is the same \
+                                 read the agent has repeated past a warning. Use the content \
+                                 already in context, or read something different.",
+                                c.name,
+                            ))
+                            .with_surface(NoticeSurface::Toast),
+                        ));
+                        on_event(AgentEvent::ToolResult {
+                            id: id.clone(),
+                            name: c.name.clone(),
+                            output: output.to_text(),
+                            structured: output.clone(),
+                            duration_ms: 0,
+                        });
+                        results[*idx] = Some((output, 0));
+                        false // do not execute
+                    } else {
+                        true // execute
+                    }
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+            if !exec_indices.is_empty() {
+                let exec_calls: Vec<ToolCall> =
+                    exec_indices.iter().map(|&i| tool_calls[i].clone()).collect();
+                let exec_ids: Vec<String> =
+                    exec_indices.iter().map(|&i| call_ids[i].clone()).collect();
+                let exec_results = self
+                    .execute_tools_concurrent(&exec_calls, &exec_ids, cancel, on_event)
+                    .await?;
+                for (pos, &idx) in exec_indices.iter().enumerate() {
+                    results[idx] = exec_results.get(pos).cloned();
+                }
+            }
+            // Flatten back to a positional Vec, matching tool_calls order.
+            let results: Vec<(ToolOutput, u64)> = results
+                .into_iter()
+                .map(|r| r.unwrap_or_else(|| (ToolOutput::Text("[loop guard] blocked".to_string()), 0)))
+                .collect();
             let denied = results
                 .iter()
                 .any(|(result, _)| matches!(result, ToolOutput::PermissionDenied { .. }));
@@ -1647,15 +1814,73 @@ impl Agent {
             }
             tracing::debug!(tool = %call.name, "tool call (text fallback)");
             tool_call::attach_fallback_tool_call(messages, &call);
+            // Classify + feed this round to the guard, mirroring the native
+            // path. The text-fallback emits one call per round, so a read-only
+            // round is exactly "this single call is read-tier". Without this the
+            // guard would never see text-fallback rounds and a model on such a
+            // provider could loop with zero coverage.
+            let all_read = self.tool_target_is_unspecified(&call.name, &call.arguments);
+            if all_read {
+                state.consecutive_readonly_rounds =
+                    state.consecutive_readonly_rounds.saturating_add(1);
+            } else {
+                state.consecutive_readonly_rounds = 0;
+            }
+            state.guards.set_round(
+                vec![(call.name.clone(), call.arguments.clone())],
+                all_read,
+            );
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
             on_event(AgentEvent::ToolCall {
                 id: call_id.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             });
-            let result = self
-                .execute_tool_evented(&call, &call_id, cancel, on_event)
-                .await?;
+            // Signature-level loop guard: short-circuit a blocked read before it
+            // executes (ADR-0036). Same contract as the native path — the model
+            // gets an explanatory error instead of the content.
+            let result = if all_read && state.guards.is_blocked(&call.name, &call.arguments) {
+                tracing::warn!(
+                    tool = %call.name,
+                    args = %call.arguments,
+                    "text-fallback read blocked by turn-loop guard signature mask"
+                );
+                on_event(AgentEvent::Notice(
+                    AgentNotice::new(
+                        NoticeKind::NudgeInjected,
+                        NoticeSeverity::Warning,
+                        "Blocked repeating read",
+                        NoticeSource::TurnGuard,
+                    )
+                    .with_body(format!(
+                        "A read ({}) was blocked by the loop guard — it is the same \
+                         read the agent has repeated past a warning. Use the content \
+                         already in context, or read something different.",
+                        call.name,
+                    ))
+                    .with_surface(NoticeSurface::Toast),
+                ));
+                let output = ToolOutput::Text(format!(
+                    "[loop guard] This read ({}) is blocked for the rest of the turn \
+                     because it was repeated past a steering warning. Re-reading it \
+                     cannot help: the content is already in context above. Act on it \
+                     now (e.g. use edit_file/write_file with the text you already \
+                     captured), read a *different* file or line range, or, if you \
+                     cannot proceed, say so explicitly or call `abort`.",
+                    call.name,
+                ));
+                on_event(AgentEvent::ToolResult {
+                    id: call_id.clone(),
+                    name: call.name.clone(),
+                    output: output.to_text(),
+                    structured: output.clone(),
+                    duration_ms: 0,
+                });
+                output
+            } else {
+                self.execute_tool_evented(&call, &call_id, cancel, on_event)
+                    .await?
+            };
             let denied = matches!(result, ToolOutput::PermissionDenied { .. });
             let duration_ms = std::time::Instant::now().elapsed().as_millis() as u64;
             self.record_tool_result(
@@ -1902,6 +2127,36 @@ impl Agent {
                     InjectionOrigin::new(InjectionKind::LoopReviewNudge),
                 ));
             }
+            crate::loop_guard::GuardAction::Block { message, .. } => {
+                // `take_action` already recorded the blocked signatures in the
+                // per-turn mask, so dispatch will short-circuit any matching
+                // read from now on. Here we just surface the rationale to the
+                // model (same hidden-message vehicle as a nudge) and notify the
+                // UI that the looped read is now hard-blocked.
+                tracing::warn!(
+                    blocked = ?state.guards.blocked_summary(),
+                    "turn guard hard-blocked a looping read signature for the turn"
+                );
+                on_event(AgentEvent::Notice(
+                    AgentNotice::new(
+                        NoticeKind::NudgeInjected,
+                        NoticeSeverity::Warning,
+                        "Looping read blocked",
+                        NoticeSource::TurnGuard,
+                    )
+                    .with_body(
+                        "The agent ignored a steering nudge and kept repeating a read, so \
+                         that read is now hard-blocked for the rest of the turn. It must \
+                         act on what it has, read something different, or call `abort`.",
+                    )
+                    .with_surface(NoticeSurface::Toast),
+                ));
+                messages.push(Message::injected(
+                    Role::User,
+                    message,
+                    InjectionOrigin::new(InjectionKind::LoopReviewNudge),
+                ));
+            }
             crate::loop_guard::GuardAction::Abort(reason) => {
                 tracing::warn!("turn guard aborted turn: {reason}");
                 on_event(AgentEvent::Notice(
@@ -2077,6 +2332,91 @@ impl Agent {
         }
     }
 
+    /// Park an interactive-input request for a `bash` command (L3.5 β) and
+    /// await the operator's reply. Called from `execute_tool` when the
+    /// interactive classifier matches and no model-supplied stdin is
+    /// authorized. Emits [`AgentEvent::InputRequest`]; the TUI shows an inline
+    /// input panel and the reply travels back via [`Self::reply_input`].
+    ///
+    /// Returns `Some(StdinPolicy::Prefilled)` with the operator's input, or
+    /// `None` if the operator cancelled (the caller then runs the command with
+    /// closed stdin → fast failure + non-interactive remedy footer).
+    async fn collect_input_injection(
+        &self,
+        command: &str,
+        prompt: &str,
+        secret: bool,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> Option<StdinPolicy> {
+        let request = InputRequest {
+            id: format!("input_{}", uuid::Uuid::new_v4()),
+            command: command.to_string(),
+            prompt: prompt.to_string(),
+            secret,
+        };
+        let (sender, receiver) = oneshot::channel();
+        self.input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .insert(request.id.clone(), sender);
+        tracing::info!(%secret, "requesting operator input for interactive command");
+        let _ = event_tx.send(AgentEvent::InputRequest(request.clone()));
+        match receiver.await.unwrap_or(None) {
+            Some(reply) if !reply.text.is_empty() => {
+                Some(StdinPolicy::Prefilled { data: reply.text })
+            }
+            _ => None,
+        }
+    }
+
+    /// Three-way stdin policy for a `bash` call (L3 + L3.5). See the decision
+    /// block in [`Self::execute_tool`] for the contract. `arguments` is the
+    /// raw JSON tool arguments.
+    async fn decide_bash_stdin(
+        &self,
+        arguments: &str,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> StdinPolicy {
+        // (α) opt-in model stdin: only when the flag is on, which is what
+        // dynamically exposes the `stdin` schema field. Read it defensively
+        // (absent/invalid → not a model-supplied stdin).
+        if self.allow_model_stdin()
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(arguments)
+            && let Some(data) = v.get("stdin").and_then(|s| s.as_str())
+            && !data.is_empty()
+        {
+            return StdinPolicy::Prefilled {
+                data: data.to_string(),
+            };
+        }
+        // (β) human input: classify the command; if interactive, ask the
+        // operator. `command` is read from the args (bash's scope_target
+        // already extracts it, but re-reading here keeps this self-contained).
+        let command = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        if is_interactive_command(&command) {
+            let secret = command.split_whitespace().next().map(|t| {
+                let prog = t.rsplit('/').next().unwrap_or(t);
+                matches!(prog, "sudo" | "su" | "passwd" | "gpg" | "visudo")
+                    || prog.starts_with("pinentry")
+            }) == Some(true);
+            let prompt = if secret {
+                "Enter the secret this command is waiting for:".to_string()
+            } else {
+                format!("This command needs input ({command}):")
+            };
+            return self
+                .collect_input_injection(&command, &prompt, secret, event_tx)
+                .await
+                .unwrap_or_default();
+        }
+        // (default) closed hard floor.
+        StdinPolicy::default()
+    }
+
     async fn execute_tool(
         &self,
         call: &ToolCall,
@@ -2208,6 +2548,21 @@ impl Agent {
             }
         }
 
+        // ── Stdin policy decision (L3 + L3.5) ──
+        // Decided here, before spawn, for bash only. The three-way decision:
+        //   1. opt-in model stdin (α): `allow_model_stdin` on AND the model
+        //      supplied a `stdin` arg → Prefilled{model}. Structurally
+        //      unreachable unless the flag exposed the schema field.
+        //   2. human input (β, default): the interactive classifier matched →
+        //      ask the operator; Prefilled{human} or Closed (if cancelled).
+        //   3. closed (default hard floor): everything else.
+        // For non-bash tools, Closed is always correct (they ignore stdin).
+        let stdin_policy = if call.name == "bash" {
+            self.decide_bash_stdin(&call.arguments, event_tx).await
+        } else {
+            StdinPolicy::default()
+        };
+
         // The Envoy / ToolStream events must carry the same id as the
         // up-front ToolCall event (the dispatch-generated `call_id`), not the
         // model's `call.id` — the UI keys its step off the ToolCall event id,
@@ -2233,6 +2588,7 @@ impl Agent {
                     });
                 }),
                 &mut on_stream,
+                stdin_policy,
             )
             .await
         {

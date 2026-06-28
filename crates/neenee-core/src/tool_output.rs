@@ -60,6 +60,12 @@ pub enum ToolOutput {
         lines: Vec<ShellLine>,
         exit: Option<i32>,
         truncated: bool,
+        /// Why the step ended. Back-compat: restored sessions without this
+        /// field deserialize as [`ShellTermination::Exited`] (via
+        /// `#[serde(default)]`), so a live step whose cause wasn't persisted
+        /// reads as a normal exit rather than failing to load.
+        #[serde(default)]
+        termination: ShellTermination,
     },
     /// Source code / file contents, with an optional language hint (file
     /// extension) so a future renderer can syntax-highlight. `text` is the
@@ -141,6 +147,116 @@ pub enum PatchOp {
     Edit,
     /// A file was deleted (`new` is empty).
     Delete,
+}
+
+/// How a child process's stdin should be provisioned. This is the
+/// **execution contract** for the bash tool: an autonomous agent can never
+/// "type" into a running process, so stdin is decided **before** spawn and
+/// provisioned once. The decision happens in the agent dispatch layer
+/// (see `StdinPolicy::decide`), which consults the command's interactive
+/// classifier and the active authorization (human input vs. an opt-in
+/// model-supplied buffer) — see the disclosure/bash design doc.
+///
+/// Keeping stdin out of the model's writable JSON arguments (it lives on the
+/// tool trait's signature instead) makes the "input only ever comes from a
+/// declared source" contract structural rather than conventional: in a
+/// default session the model cannot supply stdin at all, mirroring how mature
+/// agent harnesses (e.g. Claude Code) deliberately omit a `stdin` parameter
+/// from their bash tool's schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StdinPolicy {
+    /// Connect stdin to `/dev/null` (EOF immediately). The default hard floor:
+    /// a child that blocks on `read(stdin)` gets instant EOF and fails fast
+    /// with a real exit code, instead of hanging silently until the wall-clock
+    /// timeout. This is the only policy that is *correct by default* for an
+    #[default]
+    /// unattended agent.
+    Closed,
+    /// Provide `data` bytes via a pipe. Used in exactly two declared-source
+    /// situations, decided before spawn by the agent dispatch layer:
+    ///
+    /// 1. **Human input** (default authorization): the interactive classifier
+    ///    matched a known interactive binary (sudo/gpg/passwd/…), and the
+    ///    operator supplied the response (e.g. a password) through an inline
+    ///    TUI panel. The bytes are written into the stdin pipe before the
+    ///    child has a chance to block.
+    /// 2. **Model-supplied** (opt-in): an envoy profile or main config set
+    ///    `allow_model_stdin`, which dynamically exposed a `stdin` parameter
+    ///    in the bash tool schema and the model filled it. For autonomous /
+    ///    unattended flows where no human is reachable.
+    ///
+    /// In both cases the bytes are buffered in the pipe ahead of the child's
+    /// first read, so ordering relative to stdout is irrelevant.
+    Prefilled { data: String },
+}
+
+/// Classify a shell `command` string as likely-interactive (would block
+/// waiting for stdin the agent cannot supply). This is the **advisory** L3
+/// layer: it speeds up failure and improves the error message for known
+/// interactive binaries, but correctness does **not** depend on it — the L1
+/// `stdin=/dev/null` hard floor (instant EOF) and the L2 idle watchdog catch
+/// anything the classifier misses, just slower and with a less specific
+/// message. So the classifier stays a small, conservative match on the
+/// leading program token: false negatives are merely slow, never wrong.
+///
+/// Matched unambiguously: privilege/password tools (`sudo`/`su`/`passwd`/
+/// `visudo`/`pinentry*`), `gpg` (unless a non-interactive flag like
+/// `--passphrase-file`/`--batch` is present), editors, pagers, and live
+/// monitors (`vim`/`nano`/`emacs`/`less`/`more`/`man`/`top`/`htop`/`watch`).
+pub fn is_interactive_command(command: &str) -> bool {
+    // The leading token is the program: skip leading whitespace, then read
+    // up to the first whitespace. Shell builtins/punctuation (`if`, `for`,
+    // `(`, …) and absolute paths (`/usr/bin/sudo`) are handled by taking the
+    // basename-ish tail after the last `/`.
+    let trimmed = command.trim_start();
+    let first = match trimmed.split_whitespace().next() {
+        Some(s) => s,
+        None => return false,
+    };
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    // `sudo`/`su` etc. with a non-interactive arg still match — the operator
+    // is offered input regardless; declining just yields Closed. The one
+    // refinement worth the complexity: `gpg` with `--batch` /
+    // `--passphrase-*` is genuinely non-interactive.
+    if prog.eq_ignore_ascii_case("gpg") {
+        return !trimmed.contains("--batch") && !trimmed.contains("--passphrase");
+    }
+    matches!(
+        prog,
+        "sudo" | "su" | "passwd" | "chpasswd" | "visudo" | "adduser" | "useradd"
+    ) || prog.starts_with("pinentry")
+        || matches!(
+            prog,
+            "vim" | "vi" | "nano" | "emacs" | "less" | "more" | "man" | "top" | "htop" | "watch"
+        )
+}
+
+/// Why a shell step stopped. Drives the themed termination footer (L6) so the
+/// user and the model can tell *why* a command ended — not just that it did.
+/// A healthy `Exited` run is silent; every other variant renders a coloured
+/// marker. Back-compat: restored sessions without this field deserialize as
+/// [`ShellTermination::Exited`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellTermination {
+    /// The child exited on its own (with whatever `exit` code). The normal
+    /// case; the footer reads only `exit N` when non-zero.
+    #[default]
+    Exited,
+    /// No output for longer than the idle budget — the child was almost
+    /// certainly blocked waiting for stdin (a prompt the agent cannot answer).
+    /// Rendered as a `warn()`-coloured footer with a non-interactive remedy
+    /// hint. The child was killed.
+    IdleBlocked,
+    /// The interactive classifier matched the command (sudo/gpg/passwd/…) and
+    /// the operator declined to supply input (or none was reachable). The
+    /// command was *not* executed. Rendered as a `warn()`-coloured footer
+    /// with the suggested non-interactive flags.
+    InteractiveBlocked,
+    /// The wall-clock timeout ceiling was reached (the command was producing
+    /// output but running too long). The child was killed.
+    Timeout,
+    /// The turn was cancelled (operator interrupt). The child was killed.
+    Cancelled,
 }
 
 /// Which pipe a captured shell line came from. Lets the renderer colour
@@ -274,6 +390,83 @@ fn skip_csi_params(bytes: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i - start
+}
+
+/// Resolve carriage-return / backspace terminal semantics on a single captured
+/// line, the way a CI log viewer or `less` would render it. Capture is
+/// line-buffered on `\n`, so a program that refreshes in place with `\r`
+/// (progress bars, spinners, login prompts) lands as one logical line with
+/// embedded `\r`s — e.g. `"downloading… 50%\rdownloading… 100%"`. Without
+/// this pass the renderer would either keep only the last `\r` segment
+/// (losing a short prefix that the first segment wrote past the later one's
+/// length) or, worse, drop the whole line when it never carries a trailing
+/// `\n`.
+///
+/// The model: a `\r` returns the caret to column 0 *without* erasing, so text
+/// after it **overwrites** the existing buffer from the start. `\b` steps one
+/// column back. This reproduces what the user saw on their terminal for the
+/// common cases (single-segment overwrite, progress percentage replacing its
+/// own prefix) without committing to a full VT100 state machine — which would
+/// be terminal-emulator scope and would re-introduce the alt-screen /
+/// cursor-positioning complexity the capture layer exists to avoid.
+///
+/// `lines()` already split on `\n`, so `s` contains no embedded newlines.
+pub fn normalize_carriage_returns(s: &str) -> String {
+    // Fast path: nothing to transform (no `\r`/`\b`, and no stray control
+    // bytes to scrub). `needs_normalization` is the single condition so the
+    // slow path's guarantees hold regardless of which trigger is present.
+    if !needs_normalization(s) {
+        return s.to_string();
+    }
+    // Build the line buffer column-by-column. A `\r` returns the caret to
+    // column 0 *without* erasing, so text after it overwrites the existing
+    // buffer from the start; `\b` steps one column back. This reproduces what
+    // the user saw on their terminal for the common cases (single-segment
+    // overwrite, progress percentage replacing its own prefix) without
+    // committing to a full VT100 state machine — which would be
+    // terminal-emulator scope and would re-introduce the alt-screen /
+    // cursor-positioning complexity the capture layer exists to avoid.
+    //
+    // `lines()` already split on `\n`, so `s` contains no embedded newlines.
+    let mut cells: Vec<char> = Vec::new();
+    let mut col = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '\r' => col = 0,
+            '\u{8}' => {
+                // Backspace: step one column left, but never below 0.
+                col = col.saturating_sub(1);
+            }
+            // Drop stray control bytes (BEL/FF/VT/…): no single-line rendering,
+            // and they'd corrupt width math. `\t` is excluded (kept as a
+            // normal cell) since tabs are meaningful indentation the
+            // downstream wrapper measures.
+            c if c.is_control() && c != '\t' => continue,
+            c => {
+                if col < cells.len() {
+                    cells[col] = c;
+                } else {
+                    // Pad up to `col` with spaces (a `\r` with no prior text,
+                    // or after a shorter segment), then place the char.
+                    while cells.len() < col {
+                        cells.push(' ');
+                    }
+                    cells.push(c);
+                }
+                col += 1;
+            }
+        }
+    }
+    cells.into_iter().collect()
+}
+
+/// Whether `s` needs [`normalize_carriage_returns`] to run. True when it
+/// contains a `\r`, a `\b`, or any control byte other than `\t` (which is
+/// preserved as meaningful whitespace). Kept separate so the fast path and
+/// any caller-side pre-check share one definition of "needs work".
+fn needs_normalization(s: &str) -> bool {
+    s.chars()
+        .any(|c| c == '\r' || c == '\u{8}' || (c.is_control() && c != '\t'))
 }
 
 /// Prefix each line of `text` with its 1-based file line number, derived from
@@ -482,6 +675,108 @@ mod tests {
     }
 
     #[test]
+    fn carriage_return_overwrites_prefix_in_place() {
+        // Progress-bar shape: `downloading… 50%` then `\r` then the final
+        // frame. The caret returns to column 0, so the longer final segment
+        // overwrites the prefix cell-by-cell. CI-log normalization.
+        use super::normalize_carriage_returns;
+        assert_eq!(
+            normalize_carriage_returns("downloading… 50%\rdownloading… 100%"),
+            "downloading… 100%"
+        );
+    }
+
+    #[test]
+    fn carriage_return_shorter_final_keeps_prefix_tail() {
+        // `foo\rbar`: `bar` overwrites only the first 3 columns, so the
+        // surviving tail of `foo` (none here) is replaced — result `bar`.
+        // With `longer\rx`: `x` overwrites col 0, the rest of `longer`
+        // survives as `xonger`.
+        use super::normalize_carriage_returns;
+        assert_eq!(normalize_carriage_returns("foo\rbar"), "bar");
+        assert_eq!(normalize_carriage_returns("longer\rx"), "xonger");
+    }
+
+    #[test]
+    fn carriage_return_leading_only_padding() {
+        // A `\r` with no preceding text pads up to the caret with spaces.
+        use super::normalize_carriage_returns;
+        assert_eq!(normalize_carriage_returns("\r  hi"), "  hi");
+    }
+
+    #[test]
+    fn backspace_steps_one_column() {
+        use super::normalize_carriage_returns;
+        // `ab\u{8}c`: backspace after `ab` steps to col 1, `c` overwrites `b`
+        // → `ac`.
+        assert_eq!(normalize_carriage_returns("ab\u{8}c"), "ac");
+    }
+
+    #[test]
+    fn stray_control_bytes_dropped() {
+        // BEL / FF / VT have no single-line rendering; they're stripped so
+        // they can't corrupt width math. (ANSI escapes were already removed
+        // upstream by `strip_ansi`.)
+        use super::normalize_carriage_returns;
+        assert_eq!(normalize_carriage_returns("a\u{7}b\u{c}c"), "abc");
+    }
+
+    #[test]
+    fn carriage_return_passthrough_when_none_present() {
+        use super::normalize_carriage_returns;
+        assert_eq!(normalize_carriage_returns("plain text"), "plain text");
+        // No copy: the fast path returns the input unchanged.
+    }
+
+    #[test]
+    fn tabs_preserved_as_meaningful_whitespace() {
+        // `\t` is a control byte but means indentation here; it must survive
+        // the stray-byte scrub (only BEL/FF/VT/… are dropped).
+        use super::normalize_carriage_returns;
+        assert_eq!(normalize_carriage_returns("a\tb"), "a\tb");
+    }
+
+    #[test]
+    fn interactive_classifier_flags_known_binaries() {
+        use super::is_interactive_command;
+        // Privilege / password tools.
+        assert!(is_interactive_command("sudo apt update"));
+        assert!(is_interactive_command("su -"));
+        assert!(is_interactive_command("passwd user"));
+        assert!(is_interactive_command("visudo"));
+        // Editors, pagers, monitors.
+        assert!(is_interactive_command("vim file.txt"));
+        assert!(is_interactive_command("less README.md"));
+        assert!(is_interactive_command("man grep"));
+        assert!(is_interactive_command("top"));
+        // Absolute paths resolve to the basename.
+        assert!(is_interactive_command("/usr/bin/sudo ls"));
+        // pinentry* prefix match.
+        assert!(is_interactive_command("pinentry-curses"));
+    }
+
+    #[test]
+    fn interactive_classifier_leaves_safe_commands_alone() {
+        use super::is_interactive_command;
+        // Common non-interactive commands are NOT flagged.
+        assert!(!is_interactive_command("git status"));
+        assert!(!is_interactive_command("cargo build"));
+        assert!(!is_interactive_command("ls -la"));
+        assert!(!is_interactive_command("echo hello"));
+        assert!(!is_interactive_command(""));
+    }
+
+    #[test]
+    fn interactive_classifier_treats_gpg_batch_as_noninteractive() {
+        use super::is_interactive_command;
+        // Bare gpg is interactive (would prompt for a passphrase).
+        assert!(is_interactive_command("gpg --list-keys"));
+        // With --batch / --passphrase it is non-interactive.
+        assert!(!is_interactive_command("gpg --batch --sign file"));
+        assert!(!is_interactive_command("gpg --passphrase-file /tmp/pw --decrypt f"));
+    }
+
+    #[test]
     fn text_round_trips() {
         assert_eq!(ToolOutput::text("hi").to_text(), "hi");
         let v = ToolOutput::from("x".to_string());
@@ -518,6 +813,7 @@ mod tests {
             lines: Vec::new(),
             exit: Some(0),
             truncated: false,
+            termination: ShellTermination::Exited,
         };
         assert_eq!(o.to_text(), "hi\n");
         assert!(!o.is_error());
@@ -532,6 +828,7 @@ mod tests {
             lines: Vec::new(),
             exit: Some(0),
             truncated: false,
+            termination: ShellTermination::Exited,
         };
         assert_eq!(o.to_text(), "(success, stderr):\nwarn");
     }
@@ -545,6 +842,7 @@ mod tests {
             lines: Vec::new(),
             exit: Some(1),
             truncated: false,
+            termination: ShellTermination::Exited,
         };
         assert_eq!(o.to_text(), "Exit 1\nSTDOUT:\nout\nSTDERR:\nerr");
         assert!(o.is_error());
@@ -559,6 +857,7 @@ mod tests {
             lines: Vec::new(),
             exit: None,
             truncated: false,
+            termination: ShellTermination::Exited,
         };
         assert_eq!(o.to_text(), "Exit -1\nSTDOUT:\n\nSTDERR:\nkilled");
         assert!(o.is_error());
@@ -574,6 +873,7 @@ mod tests {
             lines: Vec::new(),
             exit: Some(0),
             truncated: true,
+            termination: ShellTermination::Exited,
         };
         let text = o.to_text();
         assert!(text.starts_with("[Output truncated: 9000 chars total]\n"));

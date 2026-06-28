@@ -111,3 +111,33 @@ pub async fn reply_question(
         ));
     }
 }
+
+/// `AgentRequest::InputReply` (L3.5 β) — mirrors [`reply_question`]: a
+/// `parent_call_id` targets the envoy; otherwise try the primary, then a
+/// `/btw` side agent.
+pub async fn reply_input(
+    agent: &Agent,
+    envoy_registry: &Arc<EnvoyRegistry>,
+    side: &Arc<AsyncRwLock<Option<SideSession>>>,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    request_id: String,
+    text: String,
+    parent_call_id: Option<String>,
+) {
+    let resolved = if let Some(parent) = &parent_call_id {
+        envoy_registry
+            .get(parent)
+            .is_some_and(|handle| handle.reply_input(&request_id, text.clone()))
+    } else if agent.reply_input(&request_id, text.clone()) {
+        true
+    } else if let Some(s) = side.read().await.as_ref() {
+        s.agent.reply_input(&request_id, text)
+    } else {
+        false
+    };
+    if !resolved {
+        let _ = resp_tx.send(AgentResponse::Error(
+            "Input request is no longer pending.".to_string(),
+        ));
+    }
+}

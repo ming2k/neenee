@@ -610,6 +610,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         activity_scroll: 0,
         help_scroll: 0,
         pending_permission: None,
+        pending_input: None,
         question: None,
         question_scroll: 0,
         question_modal_follow: true,

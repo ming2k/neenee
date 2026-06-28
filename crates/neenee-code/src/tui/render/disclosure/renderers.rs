@@ -637,6 +637,54 @@ fn draw_grep_content(
     }
 }
 
+/// Resolve a shell step's [`ShellTermination`] into a themed footer
+/// `(text, style)`, or `None` for a healthy `Exited` run (which carries no
+/// extra marker beyond its optional `exit N` line). The footer explains *why*
+/// the command ended and — for the blocked variants — how to retry
+/// non-interactively, closing the loop the agent can't close itself. Colors
+/// reuse the block-level design contract: `warn()` for the blocked/timeout
+/// family, `err()` for cancellation, all on the code surface.
+fn termination_footer(
+    term: neenee_core::tool_output::ShellTermination,
+    theme: &Theme,
+) -> Option<(String, Style)> {
+    use neenee_core::tool_output::ShellTermination as T;
+    let bg = theme.code_surface();
+    let warn_style = Style::default()
+        .bg(bg)
+        .fg(theme.warn())
+        .add_modifier(Modifier::BOLD);
+    let err_style = Style::default()
+        .bg(bg)
+        .fg(theme.err())
+        .add_modifier(Modifier::BOLD);
+    match term {
+        T::Exited => None,
+        T::IdleBlocked => Some((
+            "⏸ no output for a while — likely waiting for input (e.g. a password prompt). \
+             Use a non-interactive flag (--passphrase-file / SUDO_ASKPASS / `y | …`) instead."
+                .to_string(),
+            warn_style,
+        )),
+        T::InteractiveBlocked => Some((
+            "⛔ interactive command not executed in autonomous mode — \
+             pass the credential via a flag or env var and retry."
+                .to_string(),
+            warn_style,
+        )),
+        T::Timeout => Some((
+            "⏱ timed out — the command was still running. Retry with a larger `timeout` \
+             if it is legitimately long."
+                .to_string(),
+            warn_style,
+        )),
+        T::Cancelled => Some((
+            "✗ command cancelled (interrupted).".to_string(),
+            err_style,
+        )),
+    }
+}
+
 /// Render a `bash` step as a terminal-like `code_bg` block: a `$ command`
 /// prompt line first, then stdout / stderr (in `error_fg`) / an exit or
 /// truncation footer. Output rows have no line-number gutter. Legacy section
@@ -702,6 +750,7 @@ fn draw_bash_content(
         lines,
         exit,
         truncated,
+        termination,
         ..
     }) = structured
     {
@@ -796,6 +845,30 @@ fn draw_bash_content(
                 byte_offset,
             );
         }
+
+        // ── Themed termination footer (L6) ──
+        // Every non-trivial termination renders a themed footer so the user
+        // and the model see *why* the command ended, not just that it did.
+        // A healthy `Exited` run is silent (its exit code is above, if
+        // non-zero); every other variant paints a coloured marker + a
+        // remediation hint. All colors flow through the shared theme tokens,
+        // reusing the block-level design contract (diff tokens, warn/err)
+        // so the footer reads as part of the same surface language.
+        if let Some(footer) = termination_footer(*termination, ctx.theme) {
+            let (text, style) = footer;
+            let _ = emit_bash_lines(
+                ctx,
+                mi,
+                block_idx,
+                indent,
+                wrap_w,
+                pad,
+                sel_range,
+                &text,
+                style,
+                byte_offset,
+            );
+        }
         return;
     }
 
@@ -861,12 +934,14 @@ fn emit_bash_lines(
     // whose strings never carry a trailing newline.
     let text = text.trim_end_matches(&['\r', '\n'][..]);
     for logical_line in text.split('\n') {
-        // Honour carriage returns: a `\r` moves the terminal cursor to column 0,
-        // so the text after the *last* `\r` on a line is what survives on
-        // screen (progress bars / spinners refresh this way). Without this, a
-        // `\r` would be drawn raw and the two halves would visually overlap.
-        let logical_line = logical_line.rsplit('\r').next().unwrap_or(logical_line);
-        let wrapped = nonempty_wrapped(wrap_text(logical_line, wrap_w));
+        // Carriage-return / backspace normalization: capture already resolves
+        // these (a `\r`-refreshed progress bar collapses to its final frame),
+        // but the legacy / restored-session flat-string path can still carry
+        // raw `\r`s, so resolve them here too — with the *same* function the
+        // capture layer uses, so both paths agree instead of the renderer
+        // doing a cruder "keep only the last segment" approximation.
+        let logical_line = neenee_core::tool_output::normalize_carriage_returns(logical_line);
+        let wrapped = nonempty_wrapped(wrap_text(&logical_line, wrap_w));
         for wl in &wrapped {
             let block_wl = WrappedLine {
                 text: wl.text.clone(),

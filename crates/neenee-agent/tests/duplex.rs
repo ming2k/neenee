@@ -275,6 +275,7 @@ const INTERACTIVE: EnvoyProfile = EnvoyProfile {
     },
     variant_pins: &[],
     unattended: false,
+    allow_model_stdin: false,
 };
 
 #[tokio::test]
@@ -347,6 +348,7 @@ async fn envoy_tool_registry_routes_reply_into_live_envoy() {
                 let _ = evt_tx.send(e);
             }),
             &mut on_stream,
+            neenee_core::StdinPolicy::default(),
         )
         .await
     });

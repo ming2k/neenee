@@ -4,6 +4,7 @@
 //! ([`ContextProjectionGate`]).
 
 use crate::{EnvoyEvent, Message, ToolOutput, ToolStream};
+use crate::tool_output::StdinPolicy;
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
@@ -254,13 +255,24 @@ pub trait Tool: Send + Sync {
     /// [`call_structured`](Self::call_structured) and emits no events. Tools
     /// that spawn envoys (e.g. `task`) override this to forward child
     /// events while still returning a [`ToolOutput`] (typically [`ToolOutput::Text`]).
+    ///
+    /// `stdin` is the **execution contract** for the child process's stdin
+    /// ([`StdinPolicy`]). It is decided *before* spawn by the agent dispatch
+    /// layer (never from the model's arguments) and threaded in here, so a
+    /// tool like `bash` can provision `/dev/null`, a pre-filled pipe of human
+    /// or model-supplied bytes, etc. The default [`StdinPolicy::Closed`]
+    /// keeps tools that ignore stdin correct: a child that blocks on
+    /// `read(stdin)` gets instant EOF instead of hanging silently until the
+    /// wall-clock timeout.
     async fn call_structured_with_events<'a>(
         &self,
         _call_id: &str,
         arguments: &str,
         _on_event: Box<dyn FnMut(EnvoyEvent) + Send + 'a>,
         _on_stream: &mut (dyn FnMut(ToolStream) + Send + 'a),
+        _stdin: StdinPolicy,
     ) -> Result<ToolOutput, String> {
+        let _ = _stdin;
         self.call_structured(arguments).await
     }
 

@@ -715,3 +715,79 @@ mod tests {
         })
     }
 }
+
+/// Inline input-injection panel (L3.5 β): rendered over the composer rect when
+/// an interactive `bash` command needs operator input. A one-line prompt
+/// (the command + what to enter) above an input line that mirrors the
+/// composer. When `secret` is set the typed text is masked as `•` so a
+/// password/passphrase isn't shown in the clear. The panel is a left-bar
+/// panel (`panel_block`) so it reads as the same surface language as the
+/// permission sheet. Returns the rect it drew into.
+pub fn draw_input_injection(
+    frame: &mut Frame,
+    request: &neenee_core::InputRequest,
+    input: &str,
+    _cursor: usize,
+    input_rect: Rect,
+    theme: &Theme,
+) -> Rect {
+    use neenee_tui::Layout;
+    // Split the composer rect into a prompt row + the input row(s).
+    let chunks = Layout::default()
+        .direction(neenee_tui::Direction::Vertical)
+        .constraints([
+            neenee_tui::Constraint::Length(1),
+            neenee_tui::Constraint::Min(0),
+        ])
+        .split(input_rect);
+
+    let prompt_rect = chunks[0];
+    let entry_rect = chunks[1];
+
+    // Prompt line: the command for context, then what to enter.
+    let secret_label = if request.secret { " (input hidden)" } else { "" };
+    let prompt_text = format!("{}  —  {}{}", request.command, request.prompt, secret_label);
+    let prompt_line = Line::from(vec![
+        Span::styled("┃ ", Style::default().fg(theme.warn())),
+        Span::styled(
+            request.command.clone(),
+            Style::default().fg(theme.warn()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  —  {}{}", request.prompt, secret_label),
+            Style::default().fg(theme.muted()),
+        ),
+    ]);
+    let _ = prompt_text;
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(theme.user_surface())),
+        prompt_rect,
+    );
+    frame.render_widget(Paragraph::new(prompt_line), prompt_rect);
+
+    // Entry line: mask the typed input when secret, else show it verbatim.
+    let display: String = if request.secret {
+        "•".repeat(input.chars().count())
+    } else {
+        input.to_string()
+    };
+    let entry_prefix = "> ";
+    let entry_line = Line::from(vec![
+        Span::styled(
+            entry_prefix,
+            Style::default().fg(theme.brand()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(display, Style::default().fg(theme.fg())),
+        Span::styled(
+            "  Enter=submit · Esc=skip (runs non-interactively)",
+            Style::default().fg(theme.dim()),
+        ),
+    ]);
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(theme.input_surface())),
+        entry_rect,
+    );
+    frame.render_widget(Paragraph::new(entry_line), entry_rect);
+
+    input_rect
+}

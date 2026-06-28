@@ -147,6 +147,15 @@ pub struct EnvoyProfile {
     /// this `false` so an envoy's tool calls prompt the user through the
     /// same modal a top-level call uses, and the reply routes back down.
     pub unattended: bool,
+    /// Whether an envoy spawned under this profile may have the **model**
+    /// supply stdin bytes for a `bash` call it emits (the opt-in automatic-
+    /// flow path). Default `false` for every built-in profile: autonomous
+    /// envoys run non-interactively (the L1 hard floor + L2 idle watchdog
+    /// keep them from hanging); a profile aimed at unattended CI/batch flows
+    /// where no human is reachable can set this `true` so the model can feed
+    /// a command's stdin directly. Without it, stdin is structurally
+    /// unreachable from the model's arguments even inside an envoy.
+    pub allow_model_stdin: bool,
 }
 
 impl EnvoyProfile {
@@ -277,6 +286,7 @@ handful of tool rounds, then answer.",
     },
     variant_pins: &[],
     unattended: true,
+    allow_model_stdin: false,
 };
 
 /// The diagnostic role used by session review (ADR-0016). Read-only,
@@ -303,6 +313,7 @@ the requested structured verdict only, no preamble.",
     },
     variant_pins: &[],
     unattended: true,
+    allow_model_stdin: false,
 };
 
 /// The session-titling role (ADR-0022). Read-only and non-interactive like
@@ -328,6 +339,7 @@ the title in the same language as the conversation.",
     },
     variant_pins: &[],
     unattended: true,
+    allow_model_stdin: false,
 };
 
 /// The interactive envoy role (ADR-0029). The built-in roles
@@ -365,6 +377,7 @@ turns short and report concrete findings, then stop.",
     },
     variant_pins: &[],
     unattended: false,
+    allow_model_stdin: false,
 };
 
 /// Tools a quant-analysis envoy may use: the read-only quant domain tools
@@ -418,6 +431,7 @@ so. Run at most a handful of tool rounds, then answer.",
     },
     variant_pins: &[],
     unattended: true,
+    allow_model_stdin: false,
 };
 
 #[cfg(test)]

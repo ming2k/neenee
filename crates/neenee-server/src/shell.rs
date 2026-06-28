@@ -74,7 +74,18 @@ pub async fn run_shell_command(
         ));
     };
 
-    let run = bash.call_structured_with_events("", &arguments, Box::new(|_| {}), &mut on_stream);
+    // The `!` passthrough is a user-direct shell invocation. We use the safe
+    // Closed default here too (consistent with the model-driven path); a
+    // future enhancement may let the `!` channel opt into a PTY or human
+    // input injection for truly interactive commands, but that is a separate
+    // UX decision from the autonomous-agent stdin contract.
+    let run = bash.call_structured_with_events(
+        "",
+        &arguments,
+        Box::new(|_| {}),
+        &mut on_stream,
+        neenee_core::StdinPolicy::default(),
+    );
 
     tokio::select! {
         biased;

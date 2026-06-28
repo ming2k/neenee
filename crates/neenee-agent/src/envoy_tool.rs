@@ -199,6 +199,7 @@ impl Tool for EnvoyTool {
         arguments: &str,
         on_event: Box<dyn FnMut(neenee_core::EnvoyEvent) + Send + 'a>,
         _on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
+        _stdin: neenee_core::StdinPolicy,
     ) -> Result<neenee_core::ToolOutput, String> {
         // Run the envoy, streaming its lifecycle as EnvoyEvents to the
         // parent harness (so the live TUI builds the nested view in real
@@ -495,6 +496,12 @@ impl EnvoyTool {
             // user interaction) and the child is parked awaiting answers.
             neenee_core::AgentEvent::UserQuestionRequest(request) => {
                 on_event(neenee_core::EnvoyEvent::UserQuestionRequest(request));
+            }
+            // L3.5 β: an interactive `bash` inside the envoy needs operator
+            // input; forward the request up so the parent harness can surface
+            // it, with the reply routed back down via `reply_input`.
+            neenee_core::AgentEvent::InputRequest(request) => {
+                on_event(neenee_core::EnvoyEvent::InputRequest(request));
             }
             _ => {}
         }

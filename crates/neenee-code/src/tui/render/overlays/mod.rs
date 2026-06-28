@@ -29,7 +29,7 @@ pub use activity::{ActivityModalView, draw_activity_modal};
 pub use help::draw_help_modal;
 pub use history::draw_history_modal;
 pub(crate) use mcp::draw_mcp_modal;
-pub use permission::{draw_permission_sheet, draw_question_modal};
+pub use permission::{draw_input_injection, draw_permission_sheet, draw_question_modal};
 pub(crate) use permissions_manager::draw_permissions_manager;
 pub(crate) use provider::{draw_model_editor, draw_models_modal};
 pub use session::{draw_session_modal, draw_sessions_modal};

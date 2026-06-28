@@ -344,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // table is absent, so this is a no-op for the common case.
     agent.set_hard_stop_rounds(config.principal.hard_stop_rounds);
     agent.set_loop_review_enabled(config.principal.loop_review_enabled);
+    agent.set_allow_model_stdin(config.principal.allow_model_stdin);
 
     // Lifecycle event hooks (ADR-0025): each `[[hooks]]` entry runs a shell
     // command at one lifecycle point (PreToolUse / PostToolUse / Stop / …).

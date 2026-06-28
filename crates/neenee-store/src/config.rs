@@ -57,6 +57,17 @@ pub struct PrincipalConfig {
     /// call) and the nudge is non-terminating — distinct from the removed
     /// ADR-0030 semantic review, and unrelated to on-demand `/review`.
     pub loop_review_enabled: bool,
+    /// Whether the model may supply stdin bytes for a `bash` command it emits
+    /// (the opt-in "automatic flow" path, L3.5 α). Default `false`: the bash
+    /// tool schema exposes no `stdin` parameter and a command that needs input
+    /// either gets it from a human (interactive-classifier → input panel) or
+    /// fails fast with a non-interactive remedy hint. When `true`, the bash
+    /// schema **dynamically** adds a `stdin` field the model can fill, and the
+    /// dispatch layer threads it through as [`StdinPolicy::Prefilled`]. This
+    /// is the explicit authorization that "input may come from the model" —
+    /// without it, stdin is structurally unreachable from the model's
+    /// arguments. Wired through `Agent::set_allow_model_stdin`.
+    pub allow_model_stdin: bool,
 }
 
 impl Default for PrincipalConfig {
@@ -64,6 +75,7 @@ impl Default for PrincipalConfig {
         Self {
             hard_stop_rounds: 0,
             loop_review_enabled: true,
+            allow_model_stdin: false,
         }
     }
 }

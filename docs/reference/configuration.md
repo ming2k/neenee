@@ -64,10 +64,12 @@ The optional `[principal]` table.
 |-----|---------|---------|
 | `principal.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
 | `principal.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on envoys and the `/review` diagnostic |
+| `principal.allow_model_stdin` | `false` | Whether the model may supply `stdin` bytes for a `bash` command it emits. Off by default: the bash schema exposes no `stdin` parameter and a command needing input either gets it from a human (interactive classifier → inline input panel) or fails fast with a non-interactive remedy hint (see ADR-0043). On: the bash schema dynamically adds a `stdin` field the model can fill, threaded through as a prefilled pipe — for unattended/automatic flows where no human is reachable |
 
 ```toml
 [principal]
 hard_stop_rounds = 0
+allow_model_stdin = false
 ```
 
 ## Provider selection and retry

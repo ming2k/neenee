@@ -52,6 +52,7 @@ pub(super) struct UiRuntime {
     pub activity_status: Arc<Mutex<String>>,
     pub pending_permission: Arc<Mutex<VecDeque<PermissionRequest>>>,
     pub pending_question: Arc<Mutex<VecDeque<UserQuestionRequest>>>,
+    pub pending_input: Arc<Mutex<VecDeque<neenee_core::InputRequest>>>,
     pub is_responding: Arc<AtomicBool>,
     /// Stage 3 redraw signal. The response listener sets this on every handled
     /// response (the only off-loop source of shared-state change), so the event
@@ -399,6 +400,35 @@ pub(super) async fn run_app_loop(
                         if app.active_modal == Modal::Question {
                             app.active_modal = Modal::None;
                             app.modal_index = 0;
+                        }
+                    }
+                }
+            }
+            // Input-injection modal (L3.5 β): mirror the pending-input queue
+            // front. A new front opens the modal and parks the composer draft;
+            // an emptied front closes it and restores the draft.
+            {
+                let front = runtime.pending_input.lock().await.front().cloned();
+                let matches_front = match (&app.pending_input, &front) {
+                    (Some(cur), Some(req)) => cur.id == req.id,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !matches_front {
+                    if let Some(req) = front {
+                        // Park the composer draft so Enter submits the injected
+                        // input, not a chat message (mirrors Provider/ModelEditor).
+                        app.park_input_draft();
+                        app.pending_input = Some(req);
+                        app.active_modal = Modal::InputInjection;
+                        app.modal_index = 0;
+                        app.focused_target = None;
+                    } else {
+                        app.pending_input = None;
+                        if app.active_modal == Modal::InputInjection {
+                            app.active_modal = Modal::None;
+                            app.modal_index = 0;
+                            app.restore_input_draft();
                         }
                     }
                 }
@@ -871,6 +901,20 @@ pub(super) async fn run_app_loop(
                         ))
                     }
                     Modal::Permission => None,
+                    Modal::InputInjection => {
+                        if let Some(ref req) = app.pending_input {
+                            Some(render::draw_input_injection(
+                                f,
+                                req,
+                                &app.input,
+                                app.cursor_position,
+                                input_rect,
+                                &app.theme,
+                            ))
+                        } else {
+                            None
+                        }
+                    }
                     Modal::Question => {
                         if let Some(ref qmodel) = app.question {
                             Some(render::draw_question_modal(
@@ -2459,6 +2503,7 @@ pub(super) async fn run_app_loop(
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::InputInjection
                     | Modal::Session
                     | Modal::Tools
                     | Modal::Mcp
@@ -2499,6 +2544,7 @@ pub(super) async fn run_app_loop(
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::InputInjection
                     | Modal::Session
                     | Modal::Tools
                     | Modal::Mcp
@@ -2570,6 +2616,49 @@ pub(super) async fn run_app_loop(
                         // Cancel discards the model immediately; the Closed
                         // effect drives the (empty-answers) reply + drain.
                         question_effects::apply(&effects, app, &runtime).await;
+                    }
+                }
+                input::InputAction::InputSubmit => {
+                    if app.active_modal == Modal::InputInjection {
+                        let text = std::mem::take(&mut app.input);
+                        if let Some(req) = app.pending_input.take() {
+                            // Drain the matching front so the per-frame sync
+                            // closes the modal and restores the composer draft.
+                            runtime.pending_input.lock().await.pop_front();
+                            let parent_call_id = runtime
+                                .envoy_question_parent
+                                .lock()
+                                .await
+                                .remove(&req.id);
+                            let _ = app.tx.send(AgentRequest::InputReply {
+                                request_id: req.id.clone(),
+                                text,
+                                parent_call_id,
+                            });
+                        }
+                        app.restore_input_draft();
+                        app.active_modal = Modal::None;
+                    }
+                }
+                input::InputAction::InputCancel => {
+                    if app.active_modal == Modal::InputInjection
+                        && let Some(req) = app.pending_input.take()
+                    {
+                        // Empty reply = cancel → the command runs with closed
+                        // stdin and fails fast with a non-interactive remedy.
+                        runtime.pending_input.lock().await.pop_front();
+                        let parent_call_id = runtime
+                            .envoy_question_parent
+                            .lock()
+                            .await
+                            .remove(&req.id);
+                        let _ = app.tx.send(AgentRequest::InputReply {
+                            request_id: req.id.clone(),
+                            text: String::new(),
+                            parent_call_id,
+                        });
+                        app.restore_input_draft();
+                        app.active_modal = Modal::None;
                     }
                 }
                 input::InputAction::QuestionInsertChar(c) => {

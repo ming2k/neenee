@@ -123,6 +123,14 @@ pub enum Modal {
     /// status. Opened by clicking the activity bar. The body scrolls via
     /// [`App::activity_scroll`].
     Activity,
+    /// Interactive-input injection panel (L3.5 β): shown when a `bash` command
+    /// is classified interactive and the agent cannot supply its own input.
+    /// Borrows the composer input line (like `Provider`/`ModelEditor`) for
+    /// free-text entry; masks the typed text when the request is `secret`
+    /// (password/passphrase). `Enter` submits (→ `AgentRequest::InputReply`),
+    /// `Esc` cancels (→ empty reply → command runs with closed stdin and fails
+    /// fast with a non-interactive remedy hint).
+    InputInjection,
 }
 
 /// How the live surface recedes while a modal owns the foreground.
@@ -421,6 +429,10 @@ pub struct App {
     /// modal unscrollable.
     pub help_scroll: usize,
     pub pending_permission: Option<PermissionRequest>,
+    /// The pending interactive-input request (L3.5 β) from an interactive
+    /// `bash` command, or `None`. Set when a `TurnEvent::InputRequest` arrives;
+    /// the input-injection modal reads it for its prompt/command/secret.
+    pub pending_input: Option<neenee_core::InputRequest>,
     /// The open question (ask_user) modal's self-contained MVU state, or
     /// `None` when no question modal is open. Replaces the four separate
     /// `question_*` fields that previously scattered the modal's state across
@@ -1002,6 +1014,26 @@ impl App {
         self.model_search = false;
         self.model_scroll = 0;
         self.model_modal_follow = true;
+    }
+
+    /// Park the composer draft into `stashed_input` and clear the live line so
+    /// the input-injection modal (L3.5 β) can borrow it for free-text entry.
+    /// Mirrors the stash half of the provider/history pickers.
+    pub fn park_input_draft(&mut self) {
+        self.stashed_input = std::mem::take(&mut self.input);
+        self.cursor_position = 0;
+        self.input_scroll = 0;
+        self.suggestion_index = None;
+    }
+
+    /// Tear down the input-injection modal's borrowed state: hand the parked
+    /// composer draft back. Does **not** touch `active_modal`.
+    pub fn restore_input_draft(&mut self) {
+        self.input = std::mem::take(&mut self.stashed_input);
+        self.cursor_position = self.input.chars().count();
+        self.input_scroll = 0;
+        self.suggestion_index = None;
+        self.modal_index = 0;
     }
 
     /// Compute the flat, ranked model rows for the picker. Delegates to

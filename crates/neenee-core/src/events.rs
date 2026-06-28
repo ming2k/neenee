@@ -36,6 +36,15 @@ pub enum AgentRequest {
         /// routing contract.
         parent_call_id: Option<String>,
     },
+    /// Reply to an [`AgentEvent::InputRequest`] (L3.5 β): the operator's input
+    /// for an interactive `bash` command, routed back to the parked oneshot.
+    /// `parent_call_id` mirrors the question/permission replies for envoy
+    /// routing.
+    InputReply {
+        request_id: String,
+        text: String,
+        parent_call_id: Option<String>,
+    },
     SwitchProvider {
         provider_type: String,
         model: String,
@@ -319,6 +328,9 @@ pub enum TurnEvent {
     },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),
+    /// Mirrors [`AgentEvent::InputRequest`]: an interactive `bash` command
+    /// needs operator input (L3.5 β).
+    InputRequest(InputRequest),
     Compacted {
         archived_messages: usize,
         before_chars: usize,
@@ -485,6 +497,10 @@ pub enum EnvoyEvent {
     /// back *down* through the envoy handle's `reply_user_question`. Only
     /// fires for profiles with `allow_user_interaction: true`.
     UserQuestionRequest(UserQuestionRequest),
+    /// The envoy's `bash` tool classified a command interactive and needs
+    /// operator input (L3.5 β). Carries the request *up*; the reply travels
+    /// back *down* through the envoy handle's `reply_input`.
+    InputRequest(InputRequest),
 }
 
 /// Steering operations a parent can submit into a running agent's inbox — the
@@ -580,6 +596,10 @@ pub enum AgentEvent {
     },
     PermissionRequest(PermissionRequest),
     UserQuestionRequest(UserQuestionRequest),
+    /// An interactive `bash` command needs a line of input from the operator
+    /// (L3.5 β). The TUI shows an inline input panel; the reply travels back
+    /// as [`AgentRequest::InputReply`].
+    InputRequest(InputRequest),
     /// An envoy spawned by a tool (e.g. `task`) emitted an event.
     Envoy {
         parent_call_id: String,
@@ -647,6 +667,32 @@ pub struct UserQuestionReply {
     pub request_id: String,
     /// One array of selected option labels per question.
     pub answers: Vec<Vec<String>>,
+}
+
+/// Request sent from the agent to the TUI when a `bash` command is classified
+/// interactive and needs a line of input the agent cannot supply itself
+/// (L3.5 β — the default human-input path). The TUI shows an inline input
+/// panel; the operator's reply is sent back as an [`InputReply`]. If the
+/// operator dismisses it (Esc), an empty reply cancels the command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRequest {
+    pub id: String,
+    /// The command that needs input, shown for context.
+    pub command: String,
+    /// A human-readable prompt describing what to enter (e.g. "sudo password",
+    /// "passphrase", "confirmation").
+    pub prompt: String,
+    /// Whether to mask the typed input (passwords/passphrases).
+    pub secret: bool,
+}
+
+/// Reply sent from the TUI back to the agent carrying the operator's input.
+/// An empty `text` signals cancellation (the command runs with closed stdin
+/// and fails fast with a non-interactive remedy hint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputReply {
+    pub request_id: String,
+    pub text: String,
 }
 
 /// A complete, render-ready picture of the live session, sent from the harness

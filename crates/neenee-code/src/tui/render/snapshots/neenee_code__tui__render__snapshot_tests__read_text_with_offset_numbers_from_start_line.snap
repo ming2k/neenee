@@ -4,6 +4,7 @@ expression: "render_grid(&m, 80, 40)"
 ---
 - Read src/lib.rs :100,$ · 0ms
 
+   rs
    100 fn a() {}
    101 fn b() {}
    102 fn c() {}
@@ -17,3 +18,4 @@ A=#070808  B=#111312  .=reset
 3: B80
 4: B80
 5: B80
+6: B80
