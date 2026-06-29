@@ -154,3 +154,20 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo-deny (licenses / bans / advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # cargo-deny reads Cargo.lock directly (no build), so no rust-cache is
+    # needed. `deny.toml` governs the checks: advisories + licenses + the
+    # explicitly banned crates (openssl, rustls-ffi) are failures, while
+    # duplicate-version and unknown-source hits are non-fatal warnings. This
+    # complements the `audit` job by additionally enforcing the license
+    # allow-list and crate bans that rustsec/audit-check does not cover.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace check
+          command: check

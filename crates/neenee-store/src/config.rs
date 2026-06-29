@@ -528,7 +528,7 @@ impl Config {
         let creds = Credentials::load();
         for id in CREDENTIALED_BUILTINS {
             if let Some(key) = creds.builtins.get(*id).filter(|k| !k.trim().is_empty()) {
-                config.set_builtin_api_key(*id, Some(key.clone()));
+                config.set_builtin_api_key(id, Some(key.clone()));
             }
         }
         for provider in &mut config.providers {
@@ -580,7 +580,7 @@ impl Config {
         // raw key material is moved out.
         let mut redacted = self.clone();
         for id in CREDENTIALED_BUILTINS {
-            redacted.set_builtin_api_key(*id, None);
+            redacted.set_builtin_api_key(id, None);
         }
         for provider in &mut redacted.providers {
             for channel in &mut provider.channels {
@@ -737,10 +737,7 @@ mod tests {
     /// A fresh throwaway directory + the test paths override installed against
     /// it. Drop the guard (returned here) to restore the default paths so the
     /// next test starts clean.
-    fn sandbox_config_dir() -> (
-        std::path::PathBuf,
-        std::sync::MutexGuard<'static, ()>,
-    ) {
+    fn sandbox_config_dir() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
         let guard = PATHS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("neenee-creds-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -759,9 +756,11 @@ mod tests {
     fn save_redacts_keys_into_credentials_and_load_merges_back() {
         let (tmp, _guard) = sandbox_config_dir();
 
-        let mut cfg = Config::default();
-        cfg.openai_api_key = Some("sk-openai".to_string());
-        cfg.anthropic_base_url = Some("https://ai.hihusky.com/v1/messages".to_string());
+        let mut cfg = Config {
+            openai_api_key: Some("sk-openai".to_string()),
+            anthropic_base_url: Some("https://ai.hihusky.com/v1/messages".to_string()),
+            ..Default::default()
+        };
         cfg.providers.push(UserProviderConfig {
             id: "my-relay".to_string(),
             name: Some("My Relay".to_string()),
@@ -778,8 +777,14 @@ mod tests {
 
         // config.toml keeps the definitions but never the raw keys.
         let on_disk = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
-        assert!(!on_disk.contains("sk-openai"), "builtin key leaked into config.toml");
-        assert!(!on_disk.contains("relay-secret"), "user key leaked into config.toml");
+        assert!(
+            !on_disk.contains("sk-openai"),
+            "builtin key leaked into config.toml"
+        );
+        assert!(
+            !on_disk.contains("relay-secret"),
+            "user key leaked into config.toml"
+        );
         assert!(on_disk.contains("my-relay"), "provider definition dropped");
         // Non-secret routing info survives redaction.
         assert!(
@@ -789,8 +794,14 @@ mod tests {
 
         // credentials.toml holds the keys.
         let creds_text = std::fs::read_to_string(tmp.join("credentials.toml")).unwrap();
-        assert!(creds_text.contains("sk-openai"), "builtin key missing from credentials.toml");
-        assert!(creds_text.contains("relay-secret"), "user key missing from credentials.toml");
+        assert!(
+            creds_text.contains("sk-openai"),
+            "builtin key missing from credentials.toml"
+        );
+        assert!(
+            creds_text.contains("relay-secret"),
+            "user key missing from credentials.toml"
+        );
 
         // load() merges them back (no env set → credentials wins over nothing).
         let reloaded = Config::load();
@@ -832,7 +843,9 @@ openai = "creds-key"
         .unwrap();
 
         // Env unset → credentials.toml value wins over the inline value.
-        let _env_guard = PATHS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        // (`_guard` from `sandbox_config_dir()` already holds `PATHS_GUARD`
+        // for the whole test body — re-locking it here would self-deadlock,
+        // since `std::sync::Mutex` is not reentrant.)
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
         }

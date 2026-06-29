@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`migrate_session_data`) is unchanged and remains the load path for older
   snapshots.
 
-## [0.11.0] - 2026-01-09
+## [0.11.0] - 2026-06-28
 
 ### Added
 
@@ -116,14 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `Space` toggle); the footer's `Space select` hint is now shown only for
   multi-select, since it is a harmless no-op for single-select.
 
-## [0.10.1] - 2026-06-29
+## [0.10.1] - 2026-06-28
 
 ### Changed
 
 - **All crates:** applied `cargo clippy --fix` across the workspace — 74 files
   cleaned up with no functional changes.
 
-## [0.10.0] - 2026-06-29
+## [0.10.0] - 2026-06-28
 
 ### Changed
 
@@ -173,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a line with `\r` now show the surviving text (after the last `\r`) instead of
   drawing the raw return and overlapping the two halves.
 
-## [0.9.1] - 2026-06-29
+## [0.9.1] - 2026-06-27
 
 ### Added
 
@@ -261,7 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status line is no longer surfaced. (These were added in the same cycle, so nothing is
   dropped from a prior release.)
 
-## [0.8.0] - 2026-07-14
+## [0.8.0] - 2026-06-27
 
 ### Fixed
 
@@ -277,7 +277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user message so the composed review prompt is rebuilt correctly every round.
   See [ADR-0039](docs/adr/0039-unified-prompt-registry.md).
 
-## [0.7.1] - 2026-07-11
+## [0.7.1] - 2026-06-27
 
 ### Fixed
 
@@ -287,7 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lines. Previously, any overflow or padding in a cell broke drag-to-select by
   referencing the wrong byte offsets outside the grid line.
 
-## [0.7.0] - 2026-07-10
+## [0.7.0] - 2026-06-26
 
 ### Added
 
@@ -567,7 +567,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADR-0030 entries above are retained for history but describe features that no
   longer ship.)
 
-## [0.3.0] - 2026-06-24
+## [0.3.0] - 2026-06-25
 
 > Note: the v0.3.0 tag was cut but its crate-version bump and CHANGELOG entry
 > were never landed — crates stayed at `0.2.0` at that tag. This section is

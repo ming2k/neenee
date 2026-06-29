@@ -1867,15 +1867,15 @@ pub(super) async fn run_app_loop(
                     // provider" row are ignored.
                     if app.active_modal == Modal::Provider && !app.picker_on_add_row() {
                         let ranked = app.providers_filtered();
-                        if let Some(row) =
-                            ranked.get(app.modal_index).or_else(|| ranked.first())
+                        if let Some(row) = ranked.get(app.modal_index).or_else(|| ranked.first())
                             && !row.builtin
                         {
                             // Return to stage 1 (close any drilled-in stage-2
                             // view) so the picker lands on a valid row.
                             app.picker_provider = None;
                             app.modal_index = app.modal_index.saturating_sub(1);
-                            let _ = app.tx
+                            let _ = app
+                                .tx
                                 .send(AgentRequest::DeleteProvider { id: row.id.clone() });
                         }
                     }
