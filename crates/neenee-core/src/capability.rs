@@ -3,6 +3,7 @@
 //! ([`ProviderStreamEvent`]), and the mid-turn model-context projection hook
 //! ([`ContextProjectionGate`]).
 
+use crate::pursuits::TokenUsage;
 use crate::tool_output::StdinPolicy;
 use crate::{EnvoyEvent, Message, ToolOutput, ToolStream};
 use async_trait::async_trait;
@@ -45,6 +46,13 @@ pub enum ProviderStreamEvent {
         name: Option<String>,
         arguments: String,
     },
+    /// Token usage reported by the provider at the end of a stream (e.g. from
+    /// an Anthropic `message_delta` event carrying `usage`). Emitted *in
+    /// addition to* the content deltas so the harness can book real
+    /// `prompt_tokens` instead of estimating them. Providers that never report
+    /// usage simply never emit this variant — the harness then falls back to
+    /// the local char-class estimator.
+    Usage(TokenUsage),
 }
 
 #[async_trait]
@@ -114,6 +122,32 @@ pub trait Provider: Send + Sync {
     /// `false`; the runtime proxy overrides it to report the live toggle state.
     fn debug_capture_enabled(&self) -> bool {
         false
+    }
+
+    /// Whether this provider surfaces real token usage from the upstream API.
+    ///
+    /// The harness uses this (together with [`Provider::take_last_usage`]) to
+    /// decide whether a turn's token accounting is **reported** (authoritative)
+    /// or **estimated** (local heuristic). The token-source report modal
+    /// surfaces this distinction so the user can see which turns are measured
+    /// and which are guessed.
+    ///
+    /// Defaults to `false`; concrete providers override it once they actually
+    /// parse usage from their HTTP responses.
+    fn usage_supported(&self) -> bool {
+        false
+    }
+
+    /// Drain and return the usage reported by the **last** `chat` /
+    /// `stream_chat_events` call, if the provider reports one.
+    ///
+    /// The contract is "consume once": a provider that supports usage stashes
+    /// the most recent `usage` object internally and hands it out here, then
+    /// clears it. The harness calls this right after a turn completes so the
+    /// value is always fresh. Returns `None` for providers that don't report
+    /// usage (the default), in which case the harness estimates locally.
+    fn take_last_usage(&self) -> Option<TokenUsage> {
+        None
     }
 }
 

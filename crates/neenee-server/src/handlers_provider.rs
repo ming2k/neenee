@@ -114,7 +114,7 @@ pub async fn add(
     protocol: String,
     base_url: String,
     api_key: String,
-    model: String,
+    models: Vec<String>,
 ) {
     use neenee_store::config::{UserChannelConfig, UserProviderConfig, UserTransport};
 
@@ -126,19 +126,38 @@ pub async fn add(
         _ => UserTransport::OpenAiCompat,
     };
     let trimmed_key = api_key.trim();
-    let channel = UserChannelConfig {
-        label: name.clone(),
-        transport,
-        api_key_env: None,
-        api_key: (!trimmed_key.is_empty()).then(|| trimmed_key.to_string()),
-        model: (!model.trim().is_empty()).then(|| model.trim().to_string()),
-        base_url: (!base_url.trim().is_empty()).then(|| base_url.trim().to_string()),
-        user_agent: None,
+    let api_key = (!trimmed_key.is_empty()).then(|| trimmed_key.to_string());
+    let base_url = {
+        let trimmed = base_url.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
+    // One channel per seeded model — a template that seeds the whole Claude
+    // family lands every model in the picker's stage-2 list, all sharing the
+    // provider's transport/endpoint/key. Empty/whitespace model ids are dropped.
+    let channels: Vec<UserChannelConfig> = models
+        .iter()
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty())
+        .map(|model| UserChannelConfig {
+            label: model.to_string(),
+            transport,
+            api_key_env: None,
+            api_key: api_key.clone(),
+            model: Some(model.to_string()),
+            base_url: base_url.clone(),
+            user_agent: None,
+        })
+        .collect();
+    // A provider must serve at least one model; a template with no usable model
+    // id is a no-op rather than a broken zero-channel entry.
+    if channels.is_empty() {
+        return;
+    }
+    let active_model = channels[0].model.clone().unwrap_or_default();
     let entry = UserProviderConfig {
         id: id.clone(),
         name: (!name.trim().is_empty()).then(|| name.trim().to_string()),
-        channels: vec![channel],
+        channels,
         default_channel: 0,
     };
     // Replace any existing custom provider with the same derived id, else append.
@@ -148,9 +167,9 @@ pub async fn add(
         config.providers.push(entry);
     }
     config.default_provider = id.clone();
-    // A single-channel custom provider has one model; record it as the active
-    // model so the picker and status surfaces show it.
-    config.default_model = (!model.trim().is_empty()).then(|| model.trim().to_string());
+    // Record the first seeded model as the active model so the picker and status
+    // surfaces land on it.
+    config.default_model = Some(active_model.clone());
     let _ = config.save();
     activate(
         config,
@@ -159,7 +178,7 @@ pub async fn add(
         resp_tx,
         provider_usage,
         id,
-        model,
+        active_model,
     )
     .await;
 }
@@ -306,6 +325,70 @@ pub async fn remove_model(
     )));
 }
 
+/// `AgentRequest::DeleteProvider` — remove a user-defined provider entry
+/// entirely. Drops it from `config.providers` (a no-op for built-ins or an
+/// unknown id), prunes it from `favorites`, and persists. When the deleted
+/// provider was the active one (`config.default_provider`), it falls back to
+/// the default built-in provider (`"kimi-code"`) and re-activates so the live
+/// provider never points at a removed entry. Otherwise (deleting an inactive
+/// provider) it only refreshes the picker snapshot.
+#[allow(clippy::too_many_arguments)]
+pub async fn delete(
+    config: &mut Config,
+    agent: &Agent,
+    provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    provider_usage: &mut ProviderUsage,
+    id: String,
+) {
+    // Drop the user-defined entry. `retain` is a no-op when the id is unknown,
+    // and built-in ids are never present in `config.providers`, so this is
+    // safely a built-in guard.
+    let before = config.providers.len();
+    config.providers.retain(|p| p.id != id);
+    // Nothing to do — the id was not a user-defined provider.
+    if config.providers.len() == before {
+        return;
+    }
+    // Prune the removed id from favorites so the picker never references it.
+    config.favorites.retain(|fav| *fav != id);
+
+    let was_active = config.default_provider == id;
+    if was_active {
+        // Fall back to the catalog's default built-in provider (kimi-code),
+        // clear any model pointer that belonged to the deleted provider, then
+        // activate so the live provider is rebuilt from a valid entry.
+        config.default_provider = catalog::default_provider_id(&Config::default()).to_string();
+        config.default_model = None;
+    }
+    if let Err(error) = config.save() {
+        tracing::warn!(?error, "could not persist deleted provider");
+    }
+
+    if was_active {
+        let fallback = config.default_provider.clone();
+        let model = catalog::resolved_model_name(config, &fallback);
+        activate(
+            config,
+            agent,
+            provider_for_task,
+            resp_tx,
+            provider_usage,
+            fallback,
+            model,
+        )
+        .await;
+    } else {
+        // Deleting an inactive provider: refresh the picker + key snapshots
+        // without switching the live provider.
+        let _ = resp_tx.send(AgentResponse::ProviderKeys(provider_key_status(config)));
+        let _ = resp_tx.send(AgentResponse::ProviderPicker(catalog::build_picker_state(
+            config,
+            provider_usage,
+        )));
+    }
+}
+
 /// Derive a stable provider id from a user-supplied display name: lowercase,
 /// non-alphanumeric runs collapsed to single hyphens, trimmed. Falls back to
 /// `"custom"` for an empty/symbol-only name so the id is always non-empty.
@@ -380,41 +463,6 @@ async fn activate(
     )));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use neenee_store::config::UserProviderConfig;
-
-    #[test]
-    fn custom_provider_id_slugifies_names() {
-        assert_eq!(custom_provider_id("My Relay"), "my-relay");
-        assert_eq!(custom_provider_id("  Acme  AI  "), "acme-ai");
-        assert_eq!(custom_provider_id("relay.example.com"), "relay-example-com");
-        assert_eq!(custom_provider_id("OpenAI!!!"), "openai");
-        // Symbol-only / empty names fall back to a usable id.
-        assert_eq!(custom_provider_id("***"), "custom");
-        assert_eq!(custom_provider_id(""), "custom");
-    }
-
-    #[test]
-    fn multi_model_provider_covers_builtins_and_multichannel_user_entries() {
-        let mut config = Config::default();
-        for id in ["openai", "opencode-go", "anthropic", "google", "deepseek"] {
-            assert!(is_multi_model_provider(&config, id), "{id} is multi-model");
-        }
-        // Single-model built-ins are not multi-model.
-        assert!(!is_multi_model_provider(&config, "kimi-code"));
-        assert!(!is_multi_model_provider(&config, "zai-code"));
-        // A user provider counts as multi-model only with >1 channel.
-        config.providers.push(UserProviderConfig {
-            id: "my-relay".to_string(),
-            channels: vec![Default::default(), Default::default()],
-            ..Default::default()
-        });
-        assert!(is_multi_model_provider(&config, "my-relay"));
-    }
-}
-
 /// `AgentRequest::ToggleFavorite` — flip the id in the favorites list,
 /// persist, and push a fresh picker snapshot so the ★ flips at once.
 pub async fn toggle_favorite(
@@ -475,4 +523,39 @@ pub async fn set_default_model(
         config,
         provider_usage,
     )));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neenee_store::config::UserProviderConfig;
+
+    #[test]
+    fn custom_provider_id_slugifies_names() {
+        assert_eq!(custom_provider_id("My Relay"), "my-relay");
+        assert_eq!(custom_provider_id("  Acme  AI  "), "acme-ai");
+        assert_eq!(custom_provider_id("relay.example.com"), "relay-example-com");
+        assert_eq!(custom_provider_id("OpenAI!!!"), "openai");
+        // Symbol-only / empty names fall back to a usable id.
+        assert_eq!(custom_provider_id("***"), "custom");
+        assert_eq!(custom_provider_id(""), "custom");
+    }
+
+    #[test]
+    fn multi_model_provider_covers_builtins_and_multichannel_user_entries() {
+        let mut config = Config::default();
+        for id in ["openai", "opencode-go", "anthropic", "google", "deepseek"] {
+            assert!(is_multi_model_provider(&config, id), "{id} is multi-model");
+        }
+        // Single-model built-ins are not multi-model.
+        assert!(!is_multi_model_provider(&config, "kimi-code"));
+        assert!(!is_multi_model_provider(&config, "zai-code"));
+        // A user provider counts as multi-model only with >1 channel.
+        config.providers.push(UserProviderConfig {
+            id: "my-relay".to_string(),
+            channels: vec![Default::default(), Default::default()],
+            ..Default::default()
+        });
+        assert!(is_multi_model_provider(&config, "my-relay"));
+    }
 }

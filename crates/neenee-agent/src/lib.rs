@@ -134,6 +134,7 @@ pub mod modelsdev;
 pub use hooks::{HookRegistry, UserPromptVerdict, matcher_matches};
 mod hook_runner;
 pub mod loop_guard;
+pub mod nudge;
 pub mod orchestration;
 mod permission_store;
 // Shadows core's `prompt` module under the `pub use neenee_core::*` glob

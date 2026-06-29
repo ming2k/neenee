@@ -86,7 +86,11 @@ pub async fn dispatch(
             // Handled in TUI
         }
         Some(BuiltinCmd::Config) => {
-            // Handled in TUI
+            // Handled in the TUI: `/config` opens the config manager modal
+            // locally (intercepted in input.rs as `InputAction::OpenConfig`),
+            // so it is never forwarded here as a SlashCommand. The modal
+            // reads the live `nudge_config` snapshot and sends
+            // `AgentRequest::UpdateNudgeConfig` to mutate settings.
         }
         Some(BuiltinCmd::Tools) => {
             // Handled in TUI (`/tools` opens the tools manager modal

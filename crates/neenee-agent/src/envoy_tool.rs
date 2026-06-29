@@ -312,7 +312,7 @@ impl EnvoyTool {
         // read-loop guard's nudge (ADR-0034) so a short-lived, parent-supervised
         // envoy is never steered by it. The parent and `abort` remain its
         // backstops.
-        envoy.set_loop_review_enabled(false);
+        envoy.set_nudge_config(neenee_core::NudgeConfig::disabled());
         // Full-duplex (ADR-0029): install the child's steering inbox and lodge
         // its handle in the registry keyed by the parent tool-call id. Now any
         // permission / `ask_user` request the child surfaces travels *up* via

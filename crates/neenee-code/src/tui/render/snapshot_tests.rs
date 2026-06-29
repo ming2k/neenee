@@ -487,6 +487,7 @@ fn render_transcript_grid(steps: &[TranscriptMessage], width: u16, height: u16) 
                 focused_target: None,
                 logo: None,
                 theme: &theme,
+                layout: crate::tui::render::layout::Strategy::default(),
                 height_cache: None,
             },
         );

@@ -414,7 +414,12 @@ pub struct HintBarView<'a> {
 ///
 /// Layout: focus-zone pill (shell mode) on the left,
 /// right-aligned cluster of `model · context-usage` on the right.
-pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme: &Theme) {
+pub fn draw_hint_bar(
+    frame: &mut Frame,
+    rect: Rect,
+    view: HintBarView<'_>,
+    theme: &Theme,
+) -> Option<Rect> {
     let HintBarView {
         current_model,
         messages,
@@ -492,6 +497,9 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     // edge.
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     let mut right_width = 0usize;
+    // The screen rect of the context-meter segment, returned to the caller so
+    // it can register the region as click-to-open (→ TokenReport modal).
+    let mut context_rect: Option<Rect> = None;
 
     // Model name (always present). Resolve the friendly preset name (e.g.
     // `DeepSeek V4 Pro`) from the provider id so the always-visible indicator
@@ -510,6 +518,7 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     // Context-usage segment: `89.2k (8%)`. Always shown when the model
     // reports a context window; the percentage takes the threshold color so
     // a nearly full window is unmissable.
+    let mut context_seg_width = 0usize;
     if context_max > 0 {
         let used = estimate_context_tokens(messages);
         let ctx_spans = context_usage_spans(used, context_max, theme, bg);
@@ -521,6 +530,7 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
         right_width += HINT_BAR_SEGMENT_GAP;
         right_spans.extend(ctx_spans);
         right_width += ctx_width;
+        context_seg_width = ctx_width;
     }
 
     let gap = full_w
@@ -540,6 +550,19 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+
+    // Compute the context-meter segment's screen rect so the caller can make it
+    // clickable. The right cluster starts at `inner + zone_pill_width + gap`
+    // from the rect's left edge; the context segment sits at the *end* of the
+    // right cluster (after the model name + its separator gap), spanning
+    // `context_seg_width`.
+    if context_seg_width > 0 {
+        let right_start = (inner + zone_pill_width + gap) as u16;
+        let ctx_offset = (right_width - HINT_BAR_SEGMENT_GAP - context_seg_width) as u16;
+        let x = rect.x + right_start + ctx_offset;
+        context_rect = Some(Rect::new(x, rect.y, context_seg_width as u16, rect.height));
+    }
+    context_rect
 }
 
 /// Context-usage ratio at which the usage bar turns from green to yellow.

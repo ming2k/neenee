@@ -89,6 +89,19 @@ impl Dirs {
         self.config_dir.join("logo.txt")
     }
 
+    /// Provider API keys, split out of `config.toml` into a file that holds
+    /// **only** secrets. Written `rw-------` via [`crate::fsutil`] so keys
+    /// never land on disk group- or world-readable. Keeping credentials here
+    /// (rather than inline in `config.toml`) lets the config file be safely
+    /// shared, screenshotted for support, or version-controlled, while
+    /// `config.toml` keeps the provider *definitions* (id/name/transport/
+    /// base_url/model). Resolution precedence — env var > credentials.toml >
+    /// config inline — lives in [`crate::config::Config::load`].
+    /// `$XDG_CONFIG_HOME/neenee/credentials.toml`.
+    pub fn credentials_file(&self) -> PathBuf {
+        self.config_dir.join("credentials.toml")
+    }
+
     /// Content-addressed blob store root. Large payloads are stored under
     /// `<root>/<2-char-prefix>/<hash>`.
     pub fn blobs_dir(&self) -> PathBuf {
@@ -108,12 +121,6 @@ impl Dirs {
     /// user's projects while keeping the directory name short and ASCII-safe.
     pub fn project_dir(&self, project_root: &Path) -> PathBuf {
         self.projects_dir().join(project_bucket_name(project_root))
-    }
-
-    /// Flat session archive used by the pre-project-isolation store. Retained
-    /// during the transition; new code uses [`Dirs::projects_dir`].
-    pub fn legacy_sessions_dir(&self) -> PathBuf {
-        self.data_dir.join("sessions")
     }
 
     /// Legacy SQLite pursuit database (pre-ADR-0032). Kept so the one-shot
@@ -245,7 +252,6 @@ impl Dirs {
             &self.state_dir,
             &self.cache_dir,
             &self.projects_dir(),
-            &self.legacy_sessions_dir(),
             &self.user_skills_dir(),
             &self.user_commands_dir(),
             &self.remote_skills_cache(),

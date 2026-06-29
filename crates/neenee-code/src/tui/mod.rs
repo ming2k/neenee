@@ -25,11 +25,12 @@ mod terminal;
 mod transcript;
 mod versioned;
 
-pub(crate) use app::{ActivityTab, App, Modal, Recess};
+pub(crate) use app::{ActivityTab, App, CaretOwner, Modal, Recess};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
-    CUSTOM_PROTOCOLS, RankedModel, RankedProvider, model_context_window, model_display_name,
-    protocol_model_candidates, providers_filtered_from,
+    CustomField, PROVIDER_TEMPLATES, RankedModel, RankedProvider, model_context_window,
+    model_display_name, protocol_model_candidates, provider_template_label_for,
+    providers_filtered_from,
 };
 
 use crossterm::{
@@ -77,6 +78,7 @@ pub async fn run_tui(
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
     session: Arc<SessionStore>,
+    token_ledger: Arc<neenee_core::TokenSourceLedger>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
@@ -182,6 +184,13 @@ pub async fn run_tui(
     // harness applies (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
+    // Live nudge config snapshot, mirrored from the harness whenever
+    // `AgentResponse::NudgeConfigUpdated` arrives. The `/config` modal reads
+    // this each frame to render the current thresholds and enabled state;
+    // edits are sent back as `AgentRequest::UpdateNudgeConfig` and the
+    // harness's reply updates this cell.
+    let nudge_config = Arc::new(Mutex::new(neenee_core::NudgeConfig::default()));
+    let nudge_config_clone = nudge_config.clone();
     // Global tool-step density (true = Comfortable: new tool steps spawn
     // expanded). Shared with the response listener so steps created mid-turn
     // respect the user's last Ctrl+T choice (ADR-0001 Step 8).
@@ -410,13 +419,19 @@ pub async fn run_tui(
                             }
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
+                            // Stamp the current tool round so the renderer can
+                            // separate adjacent collapsed tool steps that
+                            // belong to different rounds (`RoundStarted` has
+                            // already bumped this counter for the round).
+                            let round = *current_round_clone.lock().await;
                             let mut msgs = buf.write().await;
                             // A tool step starts collapsed: there's no result to show
                             // yet. The lifecycle-aware default (see `step_interaction`)
                             // expands it on completion — Ok follows per-tool density,
                             // Failed/Denied force-expand to surface the error.
                             let message = TranscriptMessage::tool_step(id, name, arguments)
-                                .with_attribution(provider, model);
+                                .with_attribution(provider, model)
+                                .with_round(round);
                             msgs.push(message);
                             if !routes_to_side {
                                 ir_clone.store(true, Ordering::SeqCst);
@@ -796,6 +811,23 @@ pub async fn run_tui(
                     let mut msgs = messages_clone.write().await;
                     push_local_notice(&mut msgs, NoticeSeverity::Error, msg);
                 }
+                AgentResponse::NudgeConfigUpdated(config) => {
+                    // Mirror the persisted nudge config into the TUI's
+                    // snapshot so the `/config` modal re-renders from the
+                    // authoritative state. The modal reads this field when
+                    // it is open; the write is a single assignment.
+                    *nudge_config_clone.lock().await = config;
+                }
+                AgentResponse::TuiLayoutUpdated(_value) => {
+                    // Persisted transcript layout confirmed by the harness.
+                    // The apply path already set `app.transcript_layout`
+                    // optimistically (via `Strategy::from_config`, the same
+                    // interpreter the harness-side value round-trips through),
+                    // so no re-seed is needed on success. A save failure is
+                    // surfaced separately as `AgentResponse::Error`. Kept as
+                    // an explicit arm (rather than a `_ =>` catch-all) so a
+                    // future normalization step can hook in here.
+                }
             }
         }
     });
@@ -820,6 +852,9 @@ pub async fn run_tui(
         sticky_step: None,
         sticky_rect: None,
         activity_rect: None,
+        hint_context_rect: None,
+        token_ledger: Some(token_ledger),
+        token_report_scroll: 0,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,
@@ -842,6 +877,7 @@ pub async fn run_tui(
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
+        config_scroll: 0,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -852,6 +888,7 @@ pub async fn run_tui(
         path_scan_cache: None,
         current_pursuit: None,
         session_context: None,
+        nudge_config: neenee_core::NudgeConfig::default(),
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         unattended: false,
@@ -885,8 +922,10 @@ pub async fn run_tui(
         modal_hit_map: crate::tui::layout::ModalHitMap::new(),
         hovered_step: None,
         tool_density: tool_density.clone(),
+        transcript_layout: crate::tui::render::layout::Strategy::from_config(
+            &tui_config.transcript_layout,
+        ),
         focused_target: None,
-        cursor_hidden: false,
         copy_toast_until: None,
         copy_toast_message: String::new(),
         copy_toast_failed: false,
@@ -899,13 +938,17 @@ pub async fn run_tui(
         editor_key: String::new(),
         editor_model: String::new(),
         custom_field: 0,
-        custom_protocol: 0,
+        custom_fields: Vec::new(),
+        custom_protocol_wire: String::new(),
+        custom_models: Vec::new(),
+        custom_url_hint: String::new(),
         custom_suggest_index: 0,
         custom_edit_id: None,
         custom_name: String::new(),
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
+        template_choice: 0,
         model_search: false,
         picker_provider: None,
         add_model_provider: None,
@@ -945,6 +988,7 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
+            nudge_config,
             todos,
             turn_count,
             current_round,
@@ -984,6 +1028,7 @@ pub async fn start_tui(
     mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
     session: Arc<SessionStore>,
+    token_ledger: Arc<neenee_core::TokenSourceLedger>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     run_tui(
         tx,
@@ -996,6 +1041,7 @@ pub async fn start_tui(
         mcp_statuses,
         tui_config,
         session,
+        token_ledger,
     )
     .await
 }

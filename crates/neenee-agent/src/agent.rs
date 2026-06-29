@@ -155,11 +155,16 @@ pub struct Agent {
     /// is on-demand (`/review`) and never aborts a turn.
     hard_stop_rounds: Arc<std::sync::Mutex<usize>>,
     /// Whether the deterministic read-loop guard ([`crate::loop_guard`]) may
-    /// inject its anti-anchoring nudge. Default `true`; seeded from
-    /// `[agent] loop_review_enabled` and flipped off for envoys and the
-    /// review diagnostic via `set_loop_review_enabled`. Lock-free so the round
-    /// boundary reads it without contention.
-    loop_guard_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// inject its anti-anchoring nudge, and the tunable thresholds it uses.
+    /// Default **disabled** ([`neenee_core::NudgeConfig::default`]);
+    /// seeded from `[principal.nudge]` in `config.toml` and flipped to
+    /// [`NudgeConfig::disabled`] for envoys and the review diagnostic via
+    /// `set_nudge_config`. Held behind an `Arc<RwLock>` so a runtime update
+    /// from the `/config` modal (`set_nudge_config`) replaces both the master
+    /// switch and the thresholds atomically; the round-boundary path reads
+    /// `enabled` and the per-turn guard reads the thresholds when it is
+    /// constructed (`TurnState::guards_default`).
+    nudge_config: Arc<std::sync::RwLock<neenee_core::NudgeConfig>>,
     /// Whether the model may supply stdin bytes for a `bash` call it emits
     /// (the opt-in automatic-flow path, L3.5 α). Default `false`; seeded from
     /// `[principal] allow_model_stdin`. Lock-free so the dispatch site reads
@@ -240,6 +245,12 @@ pub struct Agent {
     /// is re-resolved: scope by intersection, variants by agent-over-model
     /// precedence, model capability limits applied hard.
     agent_selection: std::sync::Mutex<neenee_core::ToolSelection>,
+    /// Token-source accounting: running tally of how many tokens each
+    /// provider+model reported authoritatively (upstream `usage`) vs. how many
+    /// were filled in by the local estimator. Shared with the TUI so the
+    /// token-source report modal renders live. `None` for envoys/tests that
+    /// don't surface the report.
+    token_ledger: std::sync::Mutex<Option<Arc<neenee_core::TokenSourceLedger>>>,
 }
 
 /// Capability handle for steering a running agent from the outside — the
@@ -337,13 +348,15 @@ pub(crate) struct TurnState {
 }
 
 impl TurnState {
-    /// Build a fresh per-turn guard state with the standard guard set. Whether
-    /// the guard is *enabled* (allowed to inject) is controlled by the
-    /// `loop_guard_enabled` AtomicBool on `Agent`, checked at the round
-    /// boundary — so the guard state is always present even when disabled.
-    fn guards_default() -> crate::loop_guard::RoundGuardState {
+    /// Build a fresh per-turn guard state with the standard guard set, tuned
+    /// by `config`. Whether the guard is *enabled* (allowed to inject) is
+    /// controlled by `config.enabled`, checked at the round boundary in
+    /// [`Agent::apply_guard_actions`] — so the guard state is always present
+    /// even when disabled (it just never fires). Per-turn: lives and dies
+    /// with this `TurnState` so loop state never crosses turns.
+    fn guards_default(config: neenee_core::NudgeConfig) -> crate::loop_guard::RoundGuardState {
         let mut registry = crate::loop_guard::GuardRegistry::new();
-        registry.register(Box::new(crate::loop_guard::ReadLoopGuard::new()));
+        registry.register(Box::new(crate::loop_guard::ReadLoopGuard::new(config)));
         crate::loop_guard::RoundGuardState::new(registry)
     }
 }
@@ -427,7 +440,7 @@ impl Agent {
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_projection_gate: Arc::new(std::sync::Mutex::new(None)),
             hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
-            loop_guard_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            nudge_config: Arc::new(std::sync::RwLock::new(neenee_core::NudgeConfig::default())),
             allow_model_stdin: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reviews: crate::default_reviews(),
             operation_scope: std::sync::Mutex::new(neenee_core::OperationScope::unrestricted()),
@@ -441,6 +454,7 @@ impl Agent {
                 std::sync::Mutex::new(neenee_core::VariantSelection::new()),
             ),
             agent_selection: std::sync::Mutex::new(agent_selection),
+            token_ledger: std::sync::Mutex::new(None),
         }
     }
 
@@ -570,15 +584,35 @@ impl Agent {
         }
     }
 
-    /// Enable or disable the deterministic read-loop guard's anti-anchoring
-    /// nudge ([`crate::loop_guard`]). Mirrors `[agent] loop_review_enabled` in
-    /// `config.toml`; flipped to `false` on envoys and the review diagnostic
-    /// so they run unobstructed. Detection is pure bookkeeping with no model
-    /// call, so unlike the removed ADR-0030 review this carries no recursion
-    /// risk — the flag is an off-switch, not a safety requirement.
-    pub fn set_loop_review_enabled(&self, enabled: bool) {
-        self.loop_guard_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    /// Replace the live nudge configuration atomically. The next turn
+    /// reconstructs its per-turn guard from the new thresholds (the current
+    /// turn, if any, keeps its already-built guard state — per-turn state is
+    /// not retroactively patched). The `enabled` flag is read at every round
+    /// boundary in [`Self::apply_guard_actions`], so a mid-turn toggle takes
+    /// effect on the very next round.
+    ///
+    /// Wired from `[principal.nudge]` in `config.toml` at startup, mutated at
+    /// runtime by the `/config` modal, and forced to
+    /// [`NudgeConfig::disabled`] on envoys and the review diagnostic so they
+    /// run unobstructed regardless of user settings.
+    pub fn set_nudge_config(&self, config: neenee_core::NudgeConfig) {
+        if let Ok(mut guard) = self.nudge_config.write() {
+            *guard = config;
+        }
+    }
+
+    /// Snapshot of the live nudge configuration. The `/config` modal reads
+    /// this to render the current values; the round boundary reads
+    /// `enabled` to gate [`Self::apply_guard_actions`].
+    pub fn nudge_config(&self) -> neenee_core::NudgeConfig {
+        self.nudge_config.read().map(|g| *g).unwrap_or_default()
+    }
+
+    /// Whether the deterministic read-loop guard is currently armed (allowed
+    /// to inject). Convenience wrapper over [`Self::nudge_config`] for the
+    /// round-boundary fast path.
+    pub fn nudge_enabled(&self) -> bool {
+        self.nudge_config().enabled
     }
 
     /// Enable or disable the model-supplied-stdin path for `bash` (L3.5 α).
@@ -606,6 +640,73 @@ impl Agent {
             .context_projection_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = gate;
+    }
+
+    /// Install the shared token-source ledger so this agent books each turn's
+    /// token counts (reported vs. estimated) into it. The embedding shares the
+    /// same `Arc` with the TUI so the token-source report modal reads live.
+    /// No-op for envoys/tests that never call this (the ledger stays `None`
+    /// and booking is skipped).
+    pub fn install_token_ledger(&self, ledger: Arc<neenee_core::TokenSourceLedger>) {
+        *self.token_ledger.lock().unwrap_or_else(|e| e.into_inner()) = Some(ledger);
+    }
+
+    /// A handle to the token-source ledger, if one was installed. The TUI uses
+    /// this to snapshot the report for the modal.
+    pub fn token_ledger(&self) -> Option<Arc<neenee_core::TokenSourceLedger>> {
+        self.token_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Book one turn's token usage into [`TurnState::token_usage`] and, when a
+    /// ledger is installed, into the token-source ledger.
+    ///
+    /// `streamed_usage` is the usage reported mid-stream (OpenAI
+    /// `include_usage` / Anthropic `message_delta`), if any. When absent, we
+    /// fall back to [`Provider::take_last_usage`] (the non-streaming path) and
+    /// finally to the local char-class estimator.
+    ///
+    /// This is the single point that decides whether a turn counts as
+    /// **reported** (authoritative) or **estimated** (heuristic), and records
+    /// that classification so the token-source report modal can render it.
+    fn book_turn_usage(
+        &self,
+        state: &mut TurnState,
+        response: &Message,
+        streamed_usage: Option<TokenUsage>,
+    ) {
+        let provider_id = self.provider.provider_id();
+        let model = self.provider.model();
+        // Prefer the usage the provider reported (streamed, then drained).
+        let reported = streamed_usage.or_else(|| self.provider.take_last_usage());
+        if let Some(usage) = reported {
+            state.token_usage.total_tokens += usage.total_tokens;
+            state.token_usage.prompt_tokens += usage.prompt_tokens;
+            state.token_usage.completion_tokens += usage.completion_tokens;
+            if let Some(ledger) = self
+                .token_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                ledger.record(&provider_id, &model, usage.total_tokens.max(1), true);
+            }
+        } else {
+            // No upstream usage: fall back to the local estimator and mark the
+            // turn as estimated so the report reflects reality.
+            let estimated = pressure::estimate_message_tokens(response);
+            state.token_usage.total_tokens += estimated;
+            if let Some(ledger) = self
+                .token_ledger
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                ledger.record(&provider_id, &model, estimated, false);
+            }
+        }
     }
 
     /// Install the lifecycle hook registry (ADR-0025). Replaces any prior
@@ -1277,7 +1378,7 @@ impl Agent {
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
-            guards: TurnState::guards_default(),
+            guards: TurnState::guards_default(self.nudge_config()),
             ..TurnState::default()
         };
         let mut tool_rounds = 0;
@@ -1333,7 +1434,7 @@ impl Agent {
             if !valid_assistant_response(&response) {
                 return Err(empty_response_error(&response));
             }
-            state.token_usage.total_tokens += pressure::estimate_message_tokens(&response);
+            self.book_turn_usage(&mut state, &response, None);
             messages.push(response.clone());
 
             // The model produced no text stream, so nothing was shown to the UI
@@ -1399,7 +1500,7 @@ impl Agent {
         self.provider.prepare_tools(&visible);
         let turn_start = std::time::Instant::now();
         let mut state = TurnState {
-            guards: TurnState::guards_default(),
+            guards: TurnState::guards_default(self.nudge_config()),
             ..TurnState::default()
         };
         let mut tool_rounds = 0;
@@ -1462,6 +1563,10 @@ impl Agent {
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut emitted_text = false;
             let mut emitted_reasoning = false;
+            // Token usage reported mid-stream via a `Usage` event (OpenAI
+            // `include_usage`, Anthropic `message_delta`). Captured here and
+            // preferred over the local estimate when booking the turn.
+            let mut streamed_usage: Option<TokenUsage> = None;
 
             loop {
                 tokio::select! {
@@ -1532,6 +1637,12 @@ impl Agent {
                                 }
                                 call.arguments.push_str(&arguments);
                             }
+                            ProviderStreamEvent::Usage(usage) => {
+                                // Take the last reported usage (providers may
+                                // emit one final usage chunk). Prefer it over
+                                // the local estimate at booking time.
+                                streamed_usage = Some(usage);
+                            }
                         }
                     }
                 }
@@ -1571,7 +1682,7 @@ impl Agent {
             if !valid_assistant_response(&response) {
                 return Err(empty_response_error(&response));
             }
-            state.token_usage.total_tokens += pressure::estimate_message_tokens(&response);
+            self.book_turn_usage(&mut state, &response, streamed_usage.take());
             messages.push(response.clone());
 
             // `emitted_text` means assistant text was already streamed to the
@@ -2087,8 +2198,8 @@ impl Agent {
     /// Consult the turn-guard registry for the round just dispatched and apply
     /// the resulting action. `Inject` appends a steering nudge as a hidden user
     /// message (non-terminating); `Abort` would terminate the turn. Gated by
-    /// `loop_guard_enabled` so envoys and the review diagnostic run
-    /// unobstructed. Mirrored at both loop boundaries.
+    /// the live [`NudgeConfig::enabled`] flag so envoys and the review
+    /// diagnostic run unobstructed. Mirrored at both loop boundaries.
     fn apply_guard_actions<F>(
         &self,
         messages: &mut Vec<Message>,
@@ -2097,10 +2208,7 @@ impl Agent {
     ) where
         F: FnMut(AgentEvent) + Send,
     {
-        if !self
-            .loop_guard_enabled
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if !self.nudge_enabled() {
             return;
         }
         match state.guards.take_action() {

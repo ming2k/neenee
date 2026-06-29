@@ -16,15 +16,110 @@ use neenee_core::{KNOWN_MODELS, ProviderPickerSnapshot, WireFormat, resolve_mode
 
 use crate::tui::fuzzy;
 
-/// The protocol choices offered by the custom-provider editor, as
-/// `(display label, wire id)`. The index is [`crate::tui::App::custom_protocol`];
-/// the wire id is sent in `AgentRequest::AddProvider` and mapped to a
-/// `UserTransport` by the harness.
-pub(crate) const CUSTOM_PROTOCOLS: &[(&str, &str)] = &[
-    ("OpenAI-compatible", "openai"),
-    ("Anthropic", "anthropic"),
-    ("Gemini", "gemini"),
+/// One editable field of the provider editor. The visible set is chosen by the
+/// active [`ProviderTemplate`] (create) or the edited provider's protocol (edit),
+/// rather than a fixed five-field form: Gemini hides Base URL (native endpoint),
+/// and only the OpenAI-compatible template exposes a free-text Model field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CustomField {
+    Name,
+    BaseUrl,
+    Token,
+    Model,
+}
+
+/// A curated starting point for adding a user-defined provider. The protocol is
+/// pre-locked (no protocol picker), the relay's model list is seeded, and the
+/// URL placeholder shows the expected endpoint shape. Modelled as *data* — one
+/// table entry per template — mirroring `neenee_providers::OPENAI_PROVIDER_SPECS`.
+pub(crate) struct ProviderTemplate {
+    /// List label, e.g. `"Custom Anthropic (Claude relay)"`.
+    pub label: &'static str,
+    /// One-line description shown under the label in the chooser.
+    pub description: &'static str,
+    /// Wire protocol sent in `AgentRequest::AddProvider`: `"openai"` |
+    /// `"anthropic"` | `"gemini"`.
+    pub protocol: &'static str,
+    /// Models seeded as channels. Empty means the user enters one via the Model
+    /// field (the OpenAI-compatible template).
+    pub models: &'static [&'static str],
+    /// Whether the editor shows a Base URL field (false for native Gemini).
+    pub needs_url: bool,
+    /// Placeholder shown in the Base URL field — the full endpoint shape.
+    pub url_hint: &'static str,
+    /// Whether the editor exposes a free-text Model field (OpenAI-compatible
+    /// relays serve an open model set; the others seed `models`).
+    pub needs_model: bool,
+}
+
+impl ProviderTemplate {
+    /// The ordered, visible editor fields for this template (create mode).
+    pub fn fields(&self) -> Vec<CustomField> {
+        let mut fields = vec![CustomField::Name];
+        if self.needs_url {
+            fields.push(CustomField::BaseUrl);
+        }
+        fields.push(CustomField::Token);
+        if self.needs_model {
+            fields.push(CustomField::Model);
+        }
+        fields
+    }
+}
+
+/// The provider templates offered when adding a provider, in display order.
+pub(crate) const PROVIDER_TEMPLATES: &[ProviderTemplate] = &[
+    ProviderTemplate {
+        label: "Custom Anthropic (Claude relay)",
+        description: "Anthropic /messages relay — serves the Claude family",
+        protocol: "anthropic",
+        models: neenee_providers::ANTHROPIC_BUILTIN_MODELS,
+        needs_url: true,
+        url_hint: "https://relay.example.com/v1/messages",
+        needs_model: false,
+    },
+    ProviderTemplate {
+        label: "Custom OpenAI-compatible",
+        description: "Any OpenAI chat-completions relay — you pick the model",
+        protocol: "openai",
+        models: &[],
+        needs_url: true,
+        url_hint: "https://relay.example.com/v1/chat/completions",
+        needs_model: true,
+    },
+    ProviderTemplate {
+        label: "Custom Gemini",
+        description: "Native Google Gemini API — serves the Gemini family",
+        protocol: "gemini",
+        models: neenee_providers::GOOGLE_BUILTIN_MODELS,
+        needs_url: false,
+        url_hint: "",
+        needs_model: false,
+    },
 ];
+
+/// The editor header title for a create-mode provider with the given protocol
+/// wire — the matching template's label (protocols are unique across templates),
+/// falling back to a generic header.
+pub(crate) fn provider_template_label_for(protocol: &str) -> String {
+    PROVIDER_TEMPLATES
+        .iter()
+        .find(|t| t.protocol == protocol)
+        .map(|t| t.label.to_string())
+        .unwrap_or_else(|| "＋ Add provider".to_string())
+}
+
+/// The ordered editor fields shown when **editing** an existing user provider:
+/// Name, Base URL (unless the provider speaks native Gemini), Token. The Model
+/// field is omitted — models are managed in the stage-2 list.
+pub(crate) fn edit_fields(protocol: &str) -> Vec<CustomField> {
+    let mut fields = vec![CustomField::Name];
+    if protocol != "gemini" {
+        fields.push(CustomField::BaseUrl);
+    }
+    fields.push(CustomField::Token);
+    fields
+}
 
 /// The registry model ids that match a custom protocol's wire format, used as the
 /// candidate list when picking a model for a custom provider (the "list select"

@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use neenee_core::{
-    Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall, model::resolve as resolve_model,
+    Message, Provider, ProviderStreamEvent, Role, TokenUsage, Tool, ToolCall,
+    model::resolve as resolve_model,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -24,6 +25,10 @@ pub struct OpenAiCompatProvider {
     /// `"kimi-code"`) in [`crate::OpenAiProviderSpec::build`].
     pub id: String,
     tools: Mutex<Option<Vec<Value>>>,
+    /// Stash for the top-level `usage` object returned by the most recent
+    /// non-streaming request, drained by [`Provider::take_last_usage`]. (The
+    /// streaming path emits usage as a `ProviderStreamEvent::Usage` instead.)
+    last_usage: Mutex<Option<TokenUsage>>,
 }
 
 impl OpenAiCompatProvider {
@@ -48,6 +53,7 @@ impl OpenAiCompatProvider {
             user_agent: user_agent.to_string(),
             id: "openai".to_string(),
             tools: Mutex::new(None),
+            last_usage: Mutex::new(None),
         }
     }
 
@@ -173,6 +179,13 @@ impl OpenAiCompatProvider {
             "messages": messages.into_iter().map(openai_message).collect::<Vec<_>>(),
             "stream": stream,
         });
+        if stream {
+            // Ask the endpoint to include a terminal `usage` chunk so the
+            // streaming path can book real token counts. Standard OpenAI &
+            // most OpenAI-compatible relays honour this; relays that don't
+            // recognise it ignore the unknown field harmlessly.
+            body["stream_options"] = json!({ "include_usage": true });
+        }
         if let Some(specs) = tool_specs {
             body["tools"] = specs;
         }
@@ -254,10 +267,46 @@ fn openai_message(m: Message) -> Value {
     map
 }
 
+/// Parse an OpenAI top-level `usage` object (`prompt_tokens` /
+/// `completion_tokens` / `total_tokens`) into a [`TokenUsage`]. Returns `None`
+/// when the object is absent or has no numeric fields.
+fn parse_openai_usage(usage: &Value) -> Option<TokenUsage> {
+    let prompt = usage["prompt_tokens"].as_i64();
+    let completion = usage["completion_tokens"].as_i64();
+    let total = usage["total_tokens"].as_i64();
+    match (prompt, completion, total) {
+        (Some(p), Some(c), _) => Some(TokenUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            total_tokens: total.unwrap_or(p + c),
+        }),
+        (Some(p), None, Some(t)) => Some(TokenUsage {
+            prompt_tokens: p,
+            completion_tokens: (t - p).max(0),
+            total_tokens: t,
+        }),
+        _ => {
+            // Fall back to total_tokens only.
+            total.map(|t| TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: t,
+            })
+        }
+    }
+}
+
 fn parse_openai_stream_data(data: &str) -> Vec<ProviderStreamEvent> {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
         return Vec::new();
     };
+    let mut events = Vec::new();
+    // The terminal chunk (carrying `finish_reason`) may include a top-level
+    // `usage` object when `stream_options: {include_usage: true}` was set.
+    // Forward it as a Usage event so the harness books real counts.
+    if let Some(usage) = parse_openai_usage(&value["usage"]) {
+        events.push(ProviderStreamEvent::Usage(usage));
+    }
     let delta = &value["choices"][0]["delta"];
     let mut events = Vec::new();
     if let Some(content) = delta["content"].as_str().filter(|value| !value.is_empty()) {
@@ -507,6 +556,17 @@ impl Provider for OpenAiCompatProvider {
         self.model.clone()
     }
 
+    fn usage_supported(&self) -> bool {
+        true
+    }
+
+    fn take_last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
         let client = reqwest::Client::new();
 
@@ -528,6 +588,12 @@ impl Provider for OpenAiCompatProvider {
 
         if let Some(err) = response_json.get("error") {
             return Err(format!("OpenAI Error: {}", err));
+        }
+
+        // Parse the top-level `usage` object (prompt_tokens /
+        // completion_tokens / total_tokens). Stash it for `take_last_usage`.
+        if let Some(usage) = parse_openai_usage(&response_json["usage"]) {
+            *self.last_usage.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
         }
 
         let choice = &response_json["choices"][0]["message"];
@@ -696,6 +762,11 @@ impl Provider for OpenAiCompatProvider {
                             name,
                             arguments,
                         }));
+                    }
+                    ProviderStreamEvent::Usage(usage) => {
+                        // Metadata, not content: pass through untouched so the
+                        // harness books real counts via the `Usage` event.
+                        events.push(Ok(ProviderStreamEvent::Usage(usage)));
                     }
                 }
             }

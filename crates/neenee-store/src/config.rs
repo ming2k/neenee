@@ -9,11 +9,11 @@
 use crate::fsutil;
 use crate::paths;
 use neenee_core::{
-    CompactionPolicy, HookEventKind, McpServerConfig, SkillsConfig, VariantSelection,
+    CompactionPolicy, HookEventKind, McpServerConfig, NudgeConfig, SkillsConfig, VariantSelection,
     WebSearchConfig,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -33,30 +33,19 @@ pub const THINKING_KEY: &str = "thinking";
 /// # turn cap; the loop otherwise runs until the model stops, the user
 /// # interrupts, or context compaction cannot relieve pressure (ADR-0009).
 /// # hard_stop_rounds = 0
-/// # loop_review_enabled is accepted for backwards compatibility but is now a
-/// # no-op: the automatic in-loop review and anti-anchoring nudge were removed
-/// # (they could reinforce the very read-loop they targeted). On-demand
-/// # `/review` remains available.
-/// loop_review_enabled = true
+///
+/// # Anti-anchoring nudge for the deterministic read-loop guard. Default
+/// # disabled — opt in here or via the `/config` modal. See [`NudgeConfig`].
+/// # [principal.nudge]
+/// # enabled = false
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrincipalConfig {
     /// Opt-in hard-stop budget: abort a turn after this many total tool
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
     /// `Agent::set_hard_stop_rounds`.
-    /// Opt-in hard-stop budget: abort a turn after this many total tool
-    /// rounds. `0` (the default) means uncapped. Mutated at runtime via
-    /// `Agent::set_hard_stop_rounds`.
     pub hard_stop_rounds: usize,
-    /// Whether the deterministic read-loop guard may inject its anti-anchoring
-    /// nudge when the model repeats the same read without progress (see
-    /// `neenee_agent::loop_guard`). Default `true`; wired through
-    /// `Agent::set_loop_review_enabled`, and flipped off for envoys and the
-    /// `/review` diagnostic. Detection is pure signature bookkeeping (no model
-    /// call) and the nudge is non-terminating — distinct from the removed
-    /// ADR-0030 semantic review, and unrelated to on-demand `/review`.
-    pub loop_review_enabled: bool,
     /// Whether the model may supply stdin bytes for a `bash` command it emits
     /// (the opt-in "automatic flow" path, L3.5 α). Default `false`: the bash
     /// tool schema exposes no `stdin` parameter and a command that needs input
@@ -68,17 +57,17 @@ pub struct PrincipalConfig {
     /// without it, stdin is structurally unreachable from the model's
     /// arguments. Wired through `Agent::set_allow_model_stdin`.
     pub allow_model_stdin: bool,
+    /// Anti-anchoring nudge configuration for the deterministic read-loop
+    /// guard (`neenee_agent::loop_guard`). Default **disabled** — opt in via
+    /// the `/config` modal or the `[principal.nudge]` sub-table. See
+    /// [`NudgeConfig`] for the per-field semantics.
+    pub nudge: NudgeConfig,
 }
 
-impl Default for PrincipalConfig {
-    fn default() -> Self {
-        Self {
-            hard_stop_rounds: 0,
-            loop_review_enabled: true,
-            allow_model_stdin: false,
-        }
-    }
-}
+// `NudgeConfig` is defined in `neenee_core::nudgeconfig` and re-exported
+// above via `use neenee_core::NudgeConfig`. It is the `[principal.nudge]`
+// TOML table and the wire type for `AgentRequest::UpdateNudgeConfig`. See
+// `neenee_core::NudgeConfig` for the per-field semantics and defaults.
 
 /// User-tunable frontend presentation, deserialized from the optional `[tui]`
 /// table of `config.toml`. This is the **pure-data** form shared by every
@@ -101,6 +90,16 @@ pub struct TuiConfig {
     /// thinking = false
     /// ```
     pub default_expanded: HashMap<String, bool>,
+    /// How the transcript message stream is arranged. Recognized values
+    /// (case-insensitive): `"compact"` (default — the original flush-stack
+    /// layout) and `"round_band"` (each tool round is grouped into a labelled
+    /// band with a header row). Unknown / empty values fall back to compact.
+    ///
+    /// ```toml
+    /// [tui]
+    /// transcript_layout = "round_band"
+    /// ```
+    pub transcript_layout: String,
 }
 
 /// Declarative permission configuration — the `[permissions]` table. Lets users
@@ -197,6 +196,83 @@ pub struct UserProviderConfig {
     pub channels: Vec<UserChannelConfig>,
     #[serde(default)]
     pub default_channel: usize,
+}
+
+/// The built-in provider ids whose API keys can live in [`Credentials`]. Each
+/// maps 1:1 to one `*_api_key` field on [`Config`] via
+/// [`Config::builtin_api_key`] / [`Config::set_builtin_api_key`]. Kept in sync
+/// with the `config_key_for` mapping in `neenee_agent::catalog` so a provider
+/// id resolves to the same field in every layer.
+const CREDENTIALED_BUILTINS: &[&str] = &[
+    "openai",
+    "google",
+    "kimi-code",
+    "deepseek",
+    "zai-code",
+    "opencode-go",
+    "anthropic",
+];
+
+/// Provider API keys split out of `config.toml` into their own
+/// `credentials.toml` (written `rw-------` via [`crate::fsutil`]). This is the
+/// **secret** half of provider configuration: `config.toml` holds the
+/// *definitions* (id/name/transport/base_url/model), this file holds the
+/// *keys*, so the config file can be shared, screenshotted, or
+/// version-controlled without leaking credentials.
+///
+/// - `builtins`: `provider_id → api_key` for the seven built-in providers.
+/// - `user`: `provider_id → (channel_label → api_key)` so a multi-channel
+///   user-defined entry keeps each key addressable.
+///
+/// Both maps are `BTreeMap` for stable, diff-friendly serialisation. Resolution
+/// precedence is **env var > credentials.toml > config inline**:
+/// [`Config::load`] folds this file over the inline key fields, and the
+/// catalog's `env_or_config` still keeps env vars highest priority. See the
+/// ADR note in [`Config::load`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Credentials {
+    #[serde(default)]
+    pub builtins: BTreeMap<String, String>,
+    #[serde(default)]
+    pub user: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Credentials {
+    fn path() -> PathBuf {
+        paths::get().credentials_file()
+    }
+
+    /// Read `credentials.toml`, returning an empty (not erroring) value when
+    /// the file is missing or unparseable. A missing secrets file is a normal
+    /// first-run condition; a corrupt one must never block startup, so it is
+    /// best-effort and only logs a warning.
+    pub fn load() -> Self {
+        let path = Self::path();
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match toml::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not parse credentials file; ignoring",
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Persist atomically with owner-only permissions (0600) via
+    /// [`crate::fsutil::atomic_write_bytes`]. An empty `Credentials` writes an
+    /// empty file (still valid TOML) so redaction on `Config::save` always has
+    /// a clean target. Errors propagate to the caller ([`Config::save`]).
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = toml::to_string_pretty(self)?.into_bytes();
+        fsutil::atomic_write_bytes(&Self::path(), &bytes)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -402,19 +478,117 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let config_path = Self::config_file_path();
-        if let Ok(content) = fs::read_to_string(config_path) {
-            toml::from_str(&content).unwrap_or_default()
-        } else {
-            Self::default()
+    /// The resolved inline API key for a built-in provider id, if any. The
+    /// single place that maps a provider id to its `*_api_key` field; both
+    /// `load` (merging credentials) and `save` (collecting/redacting) route
+    /// through here so the mapping cannot drift between the two.
+    fn builtin_api_key(&self, id: &str) -> Option<&str> {
+        match id {
+            "openai" => self.openai_api_key.as_deref(),
+            "google" => self.gemini_api_key.as_deref(),
+            "kimi-code" => self.moonshot_api_key.as_deref(),
+            "deepseek" => self.deepseek_api_key.as_deref(),
+            "zai-code" => self.zai_api_key.as_deref(),
+            "opencode-go" => self.opencode_go_api_key.as_deref(),
+            "anthropic" => self.anthropic_api_key.as_deref(),
+            _ => None,
         }
     }
 
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Set the inline API key field for a built-in provider id. Unknown ids are
+    /// ignored (never panic), so a future/unknown id is a no-op rather than a
+    /// crash.
+    fn set_builtin_api_key(&mut self, id: &str, value: Option<String>) {
+        match id {
+            "openai" => self.openai_api_key = value,
+            "google" => self.gemini_api_key = value,
+            "kimi-code" => self.moonshot_api_key = value,
+            "deepseek" => self.deepseek_api_key = value,
+            "zai-code" => self.zai_api_key = value,
+            "opencode-go" => self.opencode_go_api_key = value,
+            "anthropic" => self.anthropic_api_key = value,
+            _ => {}
+        }
+    }
+
+    pub fn load() -> Self {
         let config_path = Self::config_file_path();
-        let bytes = toml::to_string_pretty(self)?.into_bytes();
-        fsutil::atomic_write_bytes(&config_path, &bytes)?;
+        let mut config: Config = fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|content| toml::from_str(&content).ok())
+            .unwrap_or_default();
+
+        // Fold `credentials.toml` over the inline key fields: a non-empty key
+        // there overrides whatever was inline in `config.toml`. An env var
+        // still wins at catalog resolution time (`env_or_config` in
+        // neenee_agent::catalog), so the effective precedence is
+        //   env var > credentials.toml > config inline.
+        // This keeps catalog construction unchanged while letting users keep
+        // secrets out of the shareable `config.toml`.
+        let creds = Credentials::load();
+        for id in CREDENTIALED_BUILTINS {
+            if let Some(key) = creds.builtins.get(*id).filter(|k| !k.trim().is_empty()) {
+                config.set_builtin_api_key(*id, Some(key.clone()));
+            }
+        }
+        for provider in &mut config.providers {
+            if let Some(channels) = creds.user.get(&provider.id) {
+                for channel in &mut provider.channels {
+                    if let Some(key) = channels
+                        .get(&channel.label)
+                        .filter(|k| !k.trim().is_empty())
+                    {
+                        channel.api_key = Some(key.clone());
+                    }
+                }
+            }
+        }
+        config
+    }
+
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // ── secrets → credentials.toml (0600) ──────────────────────────────
+        // Collect every resolved key into the secrets file so it is the single
+        // home for credentials. Empty/whitespace keys are skipped — a keyless
+        // relay should not materialise a credentials entry.
+        let mut creds = Credentials::default();
+        for id in CREDENTIALED_BUILTINS {
+            if let Some(key) = self.builtin_api_key(id).filter(|k| !k.trim().is_empty()) {
+                creds.builtins.insert((*id).to_string(), key.to_string());
+            }
+        }
+        for provider in &self.providers {
+            for channel in &provider.channels {
+                if let Some(key) = channel.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+                    creds
+                        .user
+                        .entry(provider.id.clone())
+                        .or_default()
+                        .insert(channel.label.clone(), key.clone());
+                }
+            }
+        }
+        // Write secrets first: if this fails, `config.toml` stays untouched so
+        // the on-disk state remains self-consistent (config never refers to a
+        // key that is absent from credentials.toml).
+        creds.save()?;
+
+        // ── definitions → config.toml, with secrets redacted ───────────────
+        // Clone, then blank out every key-bearing field. `api_key_env` (a
+        // variable *name*), `anthropic_base_url` (an endpoint), and model
+        // ids / base_urls are NOT secrets and survive redaction — only the
+        // raw key material is moved out.
+        let mut redacted = self.clone();
+        for id in CREDENTIALED_BUILTINS {
+            redacted.set_builtin_api_key(*id, None);
+        }
+        for provider in &mut redacted.providers {
+            for channel in &mut provider.channels {
+                channel.api_key = None;
+            }
+        }
+        let bytes = toml::to_string_pretty(&redacted)?.into_bytes();
+        fsutil::atomic_write_bytes(&Self::config_file_path(), &bytes)?;
         Ok(())
     }
 
@@ -552,5 +726,124 @@ mod tests {
         let resolved = parsed.tool_variants.for_model("kimi-k2.7-code");
         assert_eq!(resolved.get("read_text").map(String::as_str), Some("terse"));
         assert_eq!(resolved.get("bash").map(String::as_str), Some("strict"));
+    }
+
+    /// Tests that mutate the process-wide paths override (`set_test_default`)
+    /// and read/write the throwaway config/credentials files must serialise
+    /// against each other so the parallel runner never observes another test's
+    /// Dirs. Mirrors the `ENV_GUARD` pattern in `paths.rs`.
+    static PATHS_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A fresh throwaway directory + the test paths override installed against
+    /// it. Drop the guard (returned here) to restore the default paths so the
+    /// next test starts clean.
+    fn sandbox_config_dir() -> (
+        std::path::PathBuf,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let guard = PATHS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("neenee-creds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dirs = paths::Dirs {
+            config_dir: tmp.clone(),
+            data_dir: tmp.join("data"),
+            state_dir: tmp.join("state"),
+            cache_dir: tmp.join("cache"),
+            runtime_dir: None,
+        };
+        paths::set_test_default(Some(dirs));
+        (tmp, guard)
+    }
+
+    #[test]
+    fn save_redacts_keys_into_credentials_and_load_merges_back() {
+        let (tmp, _guard) = sandbox_config_dir();
+
+        let mut cfg = Config::default();
+        cfg.openai_api_key = Some("sk-openai".to_string());
+        cfg.anthropic_base_url = Some("https://ai.hihusky.com/v1/messages".to_string());
+        cfg.providers.push(UserProviderConfig {
+            id: "my-relay".to_string(),
+            name: Some("My Relay".to_string()),
+            channels: vec![UserChannelConfig {
+                label: "default".to_string(),
+                transport: UserTransport::OpenAiCompat,
+                api_key: Some("relay-secret".to_string()),
+                base_url: Some("https://relay.example.com/v1/chat/completions".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        cfg.save().unwrap();
+
+        // config.toml keeps the definitions but never the raw keys.
+        let on_disk = std::fs::read_to_string(tmp.join("config.toml")).unwrap();
+        assert!(!on_disk.contains("sk-openai"), "builtin key leaked into config.toml");
+        assert!(!on_disk.contains("relay-secret"), "user key leaked into config.toml");
+        assert!(on_disk.contains("my-relay"), "provider definition dropped");
+        // Non-secret routing info survives redaction.
+        assert!(
+            on_disk.contains("https://ai.hihusky.com/v1/messages"),
+            "anthropic_base_url (endpoint, not a secret) was redacted"
+        );
+
+        // credentials.toml holds the keys.
+        let creds_text = std::fs::read_to_string(tmp.join("credentials.toml")).unwrap();
+        assert!(creds_text.contains("sk-openai"), "builtin key missing from credentials.toml");
+        assert!(creds_text.contains("relay-secret"), "user key missing from credentials.toml");
+
+        // load() merges them back (no env set → credentials wins over nothing).
+        let reloaded = Config::load();
+        assert_eq!(reloaded.openai_api_key.as_deref(), Some("sk-openai"));
+        assert_eq!(
+            reloaded.providers[0].channels[0].api_key.as_deref(),
+            Some("relay-secret")
+        );
+
+        // Round-trip stability: a second save+load produces identical results
+        // (idempotent — re-saving the redacted form does not lose the key).
+        reloaded.save().unwrap();
+        let reloaded2 = Config::load();
+        assert_eq!(reloaded2.openai_api_key.as_deref(), Some("sk-openai"));
+
+        paths::set_test_default(None);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn env_var_wins_over_credentials_and_inline() {
+        let (tmp, _guard) = sandbox_config_dir();
+
+        // Seed an inline key in config.toml and a *different* key in
+        // credentials.toml, then prove credentials beats inline (and env beats
+        // both, asserted indirectly via the catalog's env_or_config).
+        std::fs::write(
+            tmp.join("credentials.toml"),
+            r#"[builtins]
+openai = "creds-key"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("config.toml"),
+            r#"openai_api_key = "inline-key"
+"#,
+        )
+        .unwrap();
+
+        // Env unset → credentials.toml value wins over the inline value.
+        let _env_guard = PATHS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let loaded = Config::load();
+        assert_eq!(
+            loaded.openai_api_key.as_deref(),
+            Some("creds-key"),
+            "credentials.toml must override the inline key"
+        );
+
+        paths::set_test_default(None);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

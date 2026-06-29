@@ -618,8 +618,12 @@ async fn reasoning_only_response_is_accepted_not_treated_as_empty() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
-    let mut messages = vec![Message::new(Role::User, "hello")];
+    agent.set_nudge_config(neenee_core::NudgeConfig {
+        enabled: true,
+        ..neenee_core::NudgeConfig::default()
+    });
 
+    let mut messages = vec![Message::new(Role::User, "go")];
     let outcome = agent
         .run_streaming_with_events(&mut messages, &CancellationToken::new(), |_| {})
         .await;
@@ -1139,7 +1143,7 @@ async fn golden_repeated_identical_tool_calls_run_without_hard_abort() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
-    agent.set_loop_review_enabled(false);
+    agent.set_nudge_config(neenee_core::NudgeConfig::disabled());
 
     let (_events, outcome) = run_golden_turn(&agent, "go", PermissionDecision::Reject).await;
 
@@ -1166,6 +1170,10 @@ async fn read_loop_guard_injects_one_nudge_after_repeated_reads() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
+    agent.set_nudge_config(neenee_core::NudgeConfig {
+        enabled: true,
+        ..neenee_core::NudgeConfig::default()
+    });
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let outcome = agent
@@ -1217,6 +1225,10 @@ async fn read_loop_guard_hard_blocks_repeating_read_at_dispatch() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
+    agent.set_nudge_config(neenee_core::NudgeConfig {
+        enabled: true,
+        ..neenee_core::NudgeConfig::default()
+    });
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let outcome = agent
@@ -1278,6 +1290,10 @@ async fn read_loop_block_is_surgical_across_files() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
+    agent.set_nudge_config(neenee_core::NudgeConfig {
+        enabled: true,
+        ..neenee_core::NudgeConfig::default()
+    });
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let outcome = agent
@@ -1301,9 +1317,11 @@ async fn read_loop_block_is_surgical_across_files() {
     // asserted in the sibling test above.
 }
 
-/// The guard is gated by `set_loop_review_enabled`: disabled, the same looping
-/// transcript injects no nudge (envoys and the review diagnostic rely on
-/// this).
+/// The guard is gated by `set_nudge_config`: disabled (the default), the same
+/// looping transcript injects no nudge (envoys and the review diagnostic rely
+/// on this). The test is explicit about the disabled state rather than
+/// relying on the default so the assertion stays meaningful if the default
+/// ever flips.
 #[tokio::test]
 async fn read_loop_guard_suppressed_when_disabled() {
     let read = || tool_round(&[("c", "reader", r#"{"path":"big.rs"}"#)]);
@@ -1318,7 +1336,7 @@ async fn read_loop_guard_suppressed_when_disabled() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
-    agent.set_loop_review_enabled(false);
+    agent.set_nudge_config(neenee_core::NudgeConfig::disabled());
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let _ = agent

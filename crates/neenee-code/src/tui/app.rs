@@ -26,7 +26,8 @@ use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
 use crate::tui::layout::{InteractiveTarget, LayoutMap, ModalHitMap};
 use crate::tui::providers::{
-    RankedModel, RankedProvider, provider_models_filtered_from, providers_filtered_from,
+    CustomField, ProviderTemplate, RankedModel, RankedProvider, edit_fields,
+    provider_models_filtered_from, providers_filtered_from,
 };
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
@@ -61,7 +62,7 @@ pub struct QueuedDispatch {
     pub text_pastes: Vec<String>,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Modal {
     None,
     /// Two-stage provider/model picker (`Ctrl+P` / `/model`). **Stage 1** is a
@@ -94,14 +95,21 @@ pub enum Modal {
     /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
     /// ModelName modal chain.
     ModelEditor,
-    /// Custom-provider editor: a 5-field form (Name, Protocol, Base URL, Token,
-    /// Model) for defining a user provider — any protocol, any relay endpoint —
-    /// without editing config.toml by hand. Reached from the "＋ Add provider"
-    /// row at the bottom of the provider picker's stage-1 list. `Tab`/`BackTab`
-    /// cycle fields; `←/→` cycle the protocol on the protocol field; the focused
-    /// text field borrows the composer line (like [`Self::ModelEditor`]). `Enter`
-    /// saves (→ `AgentRequest::AddProvider`) and activates; `Esc` returns to the
-    /// provider picker. See [`App::custom_field`] and friends.
+    /// Provider-template chooser: a short list of curated templates (Custom
+    /// Anthropic relay / OpenAI-compatible / Gemini) shown when adding a provider.
+    /// Reached from the "＋ Add provider" row at the bottom of the picker's stage-1
+    /// list. `↑/↓` move; `Enter` opens the [`Self::CustomProvider`] editor seeded
+    /// from the chosen template; `Esc` returns to the picker. See
+    /// [`App::template_choice`] and [`crate::tui::PROVIDER_TEMPLATES`].
+    ProviderTemplate,
+    /// Provider editor: a per-template form (Name, Base URL, Token, and — for the
+    /// OpenAI-compatible template — Model) for defining a user provider without
+    /// editing config.toml by hand. The protocol and seeded models come from the
+    /// template chosen in [`Self::ProviderTemplate`]; `Tab`/`BackTab` cycle the
+    /// visible fields, and the focused field borrows the composer line (like
+    /// [`Self::ModelEditor`]). `Enter` saves (→ `AgentRequest::AddProvider`) and
+    /// activates; `Esc` returns to the picker. See [`App::custom_field`] and
+    /// friends.
     CustomProvider,
     /// Add-model overlay for a custom provider: pick a model from the provider's
     /// protocol candidates (cycled with `←/→`) or the synthetic "Custom…" slot
@@ -138,11 +146,38 @@ pub enum Modal {
     /// is the management surface — distinct from [`Modal::Permission`] (the
     /// inline real-time approval sheet).
     Permissions,
+    /// Config manager modal: a centered, dismissable overlay listing the
+    /// configurable categories (Nudge, …). Opened with the `/config` slash
+    /// command (intercepted locally, never sent to the backend). `Enter` /
+    /// `Space` drills into a category's sub-page ([`Modal::ConfigNudge`]);
+    /// `Esc` closes.
+    Config,
+    /// Nudge sub-page of the config manager. Reached from [`Modal::Config`]
+    /// by selecting the "Nudge" row. Shows the master `enabled` switch and
+    /// the four tunable thresholds (`window`, `threshold`, `escalate_at`,
+    /// `path_threshold`). `Space` toggles the enabled flag; `←`/`→` adjust
+    /// the selected threshold; `Esc` returns to the config root. Edits are
+    /// sent as `AgentRequest::UpdateNudgeConfig` and the harness replies with
+    /// `AgentResponse::NudgeConfigUpdated`, which re-seeds the snapshot.
+    ConfigNudge,
+    /// Transcript layout sub-page of the config manager. Reached from
+    /// [`Modal::Config`] by selecting the "Layout" row. Lists the layout
+    /// strategies (Compact / Round-band); `Space` or `Enter` applies the
+    /// selected strategy, which is sent as `AgentRequest::UpdateTuiLayout`
+    /// and persisted to `config.toml`. The harness replies with
+    /// [`AgentResponse::TuiLayoutUpdated`], which re-seeds
+    /// [`App::transcript_layout`]. `Esc` returns to the config root.
+    ConfigLayout,
     /// Activity overview: the current pursuit (objective + checklist), the live
     /// plan-progress breakdown, and the running turn/round/model/elapsed/
     /// status. Opened by clicking the activity bar. The body scrolls via
     /// [`App::activity_scroll`].
     Activity,
+    /// Token-source report: a read-only breakdown of how many tokens each
+    /// provider+model reported authoritatively (upstream `usage`) vs. how many
+    /// were filled in by the local char-class estimator. Opened by clicking
+    /// the context meter in the hint bar. Esc / outside-click closes.
+    TokenReport,
     /// Interactive-input injection panel (L3.5 β): shown when a `bash` command
     /// is classified interactive and the agent cannot supply its own input.
     /// Borrows the composer input line (like `Provider`/`ModelEditor`) for
@@ -151,6 +186,30 @@ pub enum Modal {
     /// `Esc` cancels (→ empty reply → command runs with closed stdin and fails
     /// fast with a non-interactive remedy hint).
     InputInjection,
+}
+
+/// Which surface owns the terminal cursor right now — the single source of
+/// truth that the event loop's hide/show state machine, the immediate
+/// pre-draw cursor re-sync, and the composer's `show_caret` flag all derive
+/// from.
+///
+/// The terminal cursor is what the host terminal's IME anchors its
+/// composition window to, so the owner must be exactly the one text-input
+/// surface the user is typing into — or [`Self::None`] when no such surface
+/// exists (a transcript step has keyboard focus, the view is zoomed into an
+/// envoy task, or a read-only / decision modal is open). In the `None` case
+/// the cursor is hidden so the IME has no stale anchor to bind to, which is
+/// the bug that previously let the IME "drift" when a disclosure was
+/// clicked mid-composition: the caret left the composer but the cursor
+/// stayed visible at its old coordinate.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum CaretOwner {
+    /// The live composer (no modal, no envoy zoom, no transcript-step focus).
+    Composer,
+    /// A modal that renders its own caret ([`Modal::owns_caret`]).
+    Modal,
+    /// No text-input surface is active — the cursor must be hidden.
+    None,
 }
 
 /// How the live surface recedes while a modal owns the foreground.
@@ -215,9 +274,32 @@ impl Modal {
                 | Modal::Mcp
                 | Modal::Sessions
                 | Modal::Permissions
+                | Modal::Config
+                | Modal::ConfigNudge
+                | Modal::ConfigLayout
                 | Modal::Activity
                 | Modal::HistorySearch
                 | Modal::Provider
+                | Modal::TokenReport
+        )
+    }
+
+    /// Whether this modal renders its own text caret (and thus owns the
+    /// terminal cursor while active) — the modals that borrow the composer
+    /// input line as a free-text field. Read-only / info overlays (Help,
+    /// Session, Activity, …) and the decision sheets (Question, Permission)
+    /// do not own a caret; while they are open the terminal cursor is hidden
+    /// so the host IME has no stale anchor to bind to. This is the modal half
+    /// of [`App::caret_owner`]; the composer half is decided there from
+    /// `focused_target` / `in_envoy_view`.
+    pub fn owns_caret(self) -> bool {
+        matches!(
+            self,
+            Modal::Provider
+                | Modal::ModelEditor
+                | Modal::AddModel
+                | Modal::CustomProvider
+                | Modal::HistorySearch
         )
     }
 }
@@ -306,6 +388,15 @@ pub struct App {
     /// it open the Activity modal. `None` when no activity bar is shown (idle,
     /// streaming, envoy view, or chrome hidden).
     pub activity_rect: Option<neenee_tui::Rect>,
+    /// Screen rect of the context-meter segment in the hint bar (the
+    /// `89.2k (8%)` indicator), so a click on it opens the TokenReport modal.
+    /// `None` when the hint bar or context meter is not shown.
+    pub hint_context_rect: Option<neenee_tui::Rect>,
+    /// Shared token-source ledger (reported vs. estimated token accounting),
+    /// read by the TokenReport modal. `None` in tests that don't surface it.
+    pub token_ledger: Option<Arc<neenee_core::TokenSourceLedger>>,
+    /// Scroll offset of the TokenReport modal body.
+    pub token_report_scroll: usize,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
     /// when no todos are shown (empty task list or bar hidden).
@@ -373,9 +464,10 @@ pub struct App {
     /// [`App::set_cursor`] (the single write site for `cursor_position`) and
     /// cleared by the event loop's immediate-flush after it syncs the backend.
     pub cursor_sync_pending: bool,
-    /// The cursor visibility we last told the terminal. The immediate-flush
-    /// path consults this so show/hide is a state transition that takes effect
-    /// when the selection/modal changes — not a per-frame guess.
+    /// The cursor visibility we last told the terminal. The event loop's
+    /// hide/show state machine consults this so show/hide is a state
+    /// transition (escape codes emitted only on an edge) driven by
+    /// [`App::caret_visible`], not a per-frame guess.
     pub cursor_visible: bool,
     /// Body scroll offset of the session-context dashboard ([`Modal::Session`]).
     /// Reset to 0 on open. Clamped (and, when `session_modal_follow` is set,
@@ -390,6 +482,10 @@ pub struct App {
     /// time the modal opens; clamped and auto-followed to the selection by the
     /// renderer each frame.
     pub permissions_scroll: usize,
+    /// Body scroll offset of the config manager modal. Reset to 0 each time
+    /// the modal opens; clamped each frame by the renderer. Selection cursor
+    /// for the config root and nudge sub-page reuses [`Self::modal_index`].
+    pub config_scroll: usize,
     /// Body scroll offset of the history modal (Ctrl+R). Reset to 0 each time
     /// the modal opens (and when toggling browse/search/preview); clamped and
     /// auto-followed to the selection by the renderer each frame.
@@ -424,6 +520,11 @@ pub struct App {
     /// the first `QuerySessionContext` round-trip completes. Refreshed each
     /// frame from the response listener.
     pub session_context: Option<neenee_core::SessionContextSnapshot>,
+    /// Live nudge config snapshot, mirrored from
+    /// `AgentResponse::NudgeConfigUpdated` each frame. The `/config` modal
+    /// reads this to render the current thresholds and enabled state; edits
+    /// go out as `AgentRequest::UpdateNudgeConfig`.
+    pub nudge_config: neenee_core::NudgeConfig,
     pub loop_status: String,
     pub activity_status: String,
     /// Whether write-tool permission prompts are bypassed this session
@@ -538,6 +639,10 @@ pub struct App {
     /// Global tool-step density (false = Compact default, true = Comfortable:
     /// new tool steps spawn expanded). Shared with the response listener.
     pub tool_density: Arc<AtomicBool>,
+    /// Which layout strategy arranges the transcript message stream. Selected
+    /// via `[tui] transcript_layout`; defaults to Compact (the original
+    /// flush-stack layout). See `crate::tui::render::layout::Strategy`.
+    pub transcript_layout: crate::tui::render::layout::Strategy,
     /// Keyboard-focused activatable target in the current frame, and the TUI's
     /// only navigation state — there is no separate "browse mode". `None` means
     /// every key has its ordinary input-box meaning (typing flows into the
@@ -545,10 +650,6 @@ pub struct App {
     /// (or bare `↑`/`↓`) cycle it, `Enter` activates it, and `Esc` clears it.
     /// Mouse hover/click is an acceleration path onto the same state.
     pub focused_target: Option<InteractiveTarget>,
-    /// Tracks the last cursor visibility command we sent to the terminal so
-    /// we only emit `Hide` / `Show` escape codes when the desired state
-    /// actually changes, avoiding per-frame flicker.
-    pub cursor_hidden: bool,
     /// Show a brief "copied" toast. Held until this deadline elapses so the
     /// duration is wall-clock consistent regardless of the event-loop cadence.
     pub copy_toast_until: Option<std::time::Instant>,
@@ -577,30 +678,41 @@ pub struct App {
     /// Wire model id the key editor will activate once a key is entered (carried
     /// from the stage-2 selection or the provider's default; not user-editable).
     pub editor_model: String,
-    /// Focused field of the custom-provider editor ([`Modal::CustomProvider`]):
-    /// `0` Name, `1` Protocol, `2` Base URL, `3` Token, `4` Model. The focused
-    /// *text* field (0/2/3/4) borrows the composer line; field `1` (Protocol) is
-    /// cycled with `←/→` and stores its choice in [`Self::custom_protocol`].
+    /// Focused field of the provider editor ([`Modal::CustomProvider`]) as an
+    /// index into [`Self::custom_fields`] — the per-template visible field set
+    /// (Name / Base URL / Token / Model). The focused field always borrows the
+    /// composer line; the Model field borrows it as a live filter query.
     pub custom_field: u8,
-    /// Selected protocol index for the custom-provider editor: `0`
-    /// OpenAI-compatible, `1` Anthropic, `2` Gemini. Cycled with `←/→` while the
-    /// Protocol field is focused (indexes [`crate::tui::CUSTOM_PROTOCOLS`]).
-    pub custom_protocol: u8,
-    /// Highlight index into the live suggestion list for the custom-provider
-    /// editor's Protocol / Model **filter** fields (type to filter, `↑/↓` to
-    /// move, the highlighted suggestion is committed live).
+    /// The ordered visible fields of the provider editor, chosen by the active
+    /// template (create) or the edited provider's protocol (edit). Empty when no
+    /// editor is open.
+    pub custom_fields: Vec<CustomField>,
+    /// Wire protocol of the provider being created/edited (`"openai"` |
+    /// `"anthropic"` | `"gemini"`), carried from the template or the edited
+    /// provider rather than chosen with a protocol picker.
+    pub custom_protocol_wire: String,
+    /// Models seeded by the active template (create mode). Submitted as the
+    /// provider's model list unless the editor exposes a free-text Model field
+    /// (then the single typed model is submitted instead). Empty in edit mode.
+    pub custom_models: Vec<String>,
+    /// Base URL placeholder for the active template (the expected endpoint shape).
+    pub custom_url_hint: String,
+    /// Highlight index into the live suggestion list for the provider editor's
+    /// Model **filter** field (type to filter, `↑/↓` to move, committed live).
     pub custom_suggest_index: usize,
-    /// When `Some(id)`, the custom-provider editor is **editing** the existing
-    /// user provider `id` (meta only: Name/Protocol/Base URL/Token, models stay
-    /// managed in the stage-2 list). `None` is create mode.
+    /// When `Some(id)`, the provider editor is **editing** the existing user
+    /// provider `id` (meta only: Name/Base URL/Token; models stay managed in the
+    /// stage-2 list). `None` is create mode.
     pub custom_edit_id: Option<String>,
-    /// Custom-provider editor buffers holding the unfocused text fields (the
-    /// focused one lives in the borrowed composer line). Name / Base URL / Token
-    /// / Model respectively.
+    /// Provider-editor buffers holding the unfocused text fields (the focused one
+    /// lives in the borrowed composer line). Name / Base URL / Token / Model.
     pub custom_name: String,
     pub custom_base_url: String,
     pub custom_token: String,
     pub custom_model: String,
+    /// Selected row of the provider-template chooser ([`Modal::ProviderTemplate`]),
+    /// indexing [`crate::tui::PROVIDER_TEMPLATES`]. Cycled with `↑/↓`.
+    pub template_choice: usize,
     /// Whether the model picker's **search sub-layer** is active. The picker
     /// ([`Modal::Provider`]) opens in browse mode (`false`): a plain ranked list
     /// with no query field. Pressing `/` enters search (`true`), which borrows
@@ -692,6 +804,44 @@ impl App {
     /// value). Marks the immediate flush pending.
     pub fn note_cursor_moved(&mut self) {
         self.cursor_sync_pending = true;
+    }
+
+    /// The single source of truth for which surface owns the terminal cursor
+    /// this frame. See [`CaretOwner`].
+    ///
+    /// This is a pure function of (`active_modal`, `focused_target`,
+    /// `focus_stack`) — never of the selection, which is folded in separately
+    /// by [`Self::caret_visible`] because a selection hides the cursor
+    /// regardless of who owns it. Keeping ownership and selection-appearance
+    /// decoupled is what lets the event loop distinguish "reposition the
+    /// composer's caret" (owner = `Composer`, no selection) from "hide it"
+    /// (owner = `Composer` but a selection is active) without re-deriving
+    /// either from raw fields.
+    pub fn caret_owner(&self) -> CaretOwner {
+        if self.active_modal != Modal::None {
+            return if self.active_modal.owns_caret() {
+                CaretOwner::Modal
+            } else {
+                CaretOwner::None
+            };
+        }
+        // No modal: the composer owns the caret unless a transcript step has
+        // keyboard focus or we are zoomed into an envoy task (which has no
+        // input line at all — its footer collapses to zero height).
+        if self.focused_target.is_some() || self.in_envoy_view() {
+            CaretOwner::None
+        } else {
+            CaretOwner::Composer
+        }
+    }
+
+    /// Whether the terminal cursor should be visible right now —
+    /// [`Self::caret_owner`] plus the one extra rule that an active text
+    /// selection hides the cursor (a block cursor would clash with the
+    /// selection background). This is what every cursor site consults; no
+    /// call site should re-derive visibility from raw fields.
+    pub fn caret_visible(&self) -> bool {
+        !self.selection.is_active() && self.caret_owner() != CaretOwner::None
     }
 
     /// Reconcile [`App::pending_images`] / [`App::pending_text_pastes`]
@@ -1134,20 +1284,46 @@ impl App {
         self.model_modal_follow = true;
     }
 
-    /// Open the custom-provider editor on the Name field with empty buffers. The
-    /// chat draft is already parked in `stashed_input` (the picker stashed it on
-    /// open); the composer line is borrowed for the focused Name field.
-    pub fn open_custom_provider_editor(&mut self) {
+    /// Open the provider-template chooser — the "＋ Add provider" entry point.
+    /// The chat draft is already parked in `stashed_input` (the picker stashed it
+    /// on open); the chooser is a pure list, so the composer line stays clear.
+    pub fn open_provider_template_chooser(&mut self) {
+        self.active_modal = Modal::ProviderTemplate;
+        self.template_choice = 0;
+        self.input.clear();
+        self.set_cursor(0);
+        self.picker_provider = None;
+    }
+
+    /// Move the template-chooser selection, wrapping at the ends.
+    pub fn move_template_choice(&mut self, forward: bool) {
+        let n = crate::tui::PROVIDER_TEMPLATES.len();
+        if n == 0 {
+            return;
+        }
+        self.template_choice = if forward {
+            (self.template_choice + 1) % n
+        } else {
+            (self.template_choice + n - 1) % n
+        };
+    }
+
+    /// Open the provider editor seeded from `template` (create mode) on the Name
+    /// field. The composer line is borrowed for the focused Name field.
+    pub fn open_custom_provider_editor(&mut self, template: &ProviderTemplate) {
         self.active_modal = Modal::CustomProvider;
         self.custom_edit_id = None;
+        self.custom_fields = template.fields();
         self.custom_field = 0;
-        self.custom_protocol = 0;
+        self.custom_protocol_wire = template.protocol.to_string();
+        self.custom_models = template.models.iter().map(|m| m.to_string()).collect();
+        self.custom_url_hint = template.url_hint.to_string();
         self.custom_suggest_index = 0;
         self.custom_name.clear();
         self.custom_base_url.clear();
         self.custom_token.clear();
-        // Default the model to the first candidate of the default protocol so a
-        // freshly-submitted provider is immediately usable.
+        // Default the (optional) Model field to the first candidate so the
+        // OpenAI-compatible template submits a usable model even if left untouched.
         self.custom_model = self
             .custom_model_candidates()
             .first()
@@ -1158,20 +1334,24 @@ impl App {
         self.picker_provider = None;
     }
 
-    /// Open the custom-provider editor in **edit** mode for an existing user
-    /// provider, pre-filling its metadata. The Model field is hidden (models are
-    /// managed in the stage-2 list), so only Name/Protocol/Base URL/Token show.
+    /// Open the provider editor in **edit** mode for an existing user provider,
+    /// pre-filling its metadata. The Model field is hidden (models are managed in
+    /// the stage-2 list), so only Name / Base URL / Token show — and Base URL is
+    /// omitted for a native-Gemini provider.
     pub fn open_edit_provider_editor(
         &mut self,
         id: String,
         name: String,
-        protocol_idx: u8,
+        protocol: String,
         base_url: String,
     ) {
         self.active_modal = Modal::CustomProvider;
         self.custom_edit_id = Some(id);
+        self.custom_fields = edit_fields(&protocol);
         self.custom_field = 0;
-        self.custom_protocol = protocol_idx;
+        self.custom_protocol_wire = protocol;
+        self.custom_models.clear();
+        self.custom_url_hint.clear();
         self.custom_suggest_index = 0;
         self.custom_name = name.clone();
         self.custom_base_url = base_url;
@@ -1182,39 +1362,25 @@ impl App {
         self.picker_provider = None;
     }
 
-    /// Whether the custom-provider editor is editing an existing provider.
+    /// Whether the provider editor is editing an existing provider.
     pub fn custom_is_editing(&self) -> bool {
         self.custom_edit_id.is_some()
     }
 
-    /// Number of fields the custom-provider editor exposes: 5 in create mode,
-    /// 4 in edit mode (the Model field is hidden — models live in stage 2).
+    /// The currently focused editor field, or `None` when no editor is open.
+    pub fn current_custom_field(&self) -> Option<CustomField> {
+        self.custom_fields.get(self.custom_field as usize).copied()
+    }
+
+    /// Number of visible fields the editor exposes for the active template.
     fn custom_field_count(&self) -> u8 {
-        if self.custom_is_editing() { 4 } else { 5 }
+        self.custom_fields.len().max(1) as u8
     }
 
-    /// The registry model ids matching the currently-selected protocol's wire
-    /// format — the Model filter field's candidate pool.
+    /// The registry model ids matching the editor's protocol wire format — the
+    /// Model filter field's candidate pool.
     pub fn custom_model_candidates(&self) -> Vec<&'static str> {
-        let wire = crate::tui::CUSTOM_PROTOCOLS
-            .get(self.custom_protocol as usize)
-            .map(|(_, w)| *w)
-            .unwrap_or("openai");
-        crate::tui::protocol_model_candidates(wire)
-    }
-
-    /// The protocol suggestions matching the live filter (`self.input` while the
-    /// Protocol field is focused), as indices into [`crate::tui::CUSTOM_PROTOCOLS`].
-    pub fn custom_protocol_suggestions(&self) -> Vec<u8> {
-        let q = self.input.trim();
-        crate::tui::CUSTOM_PROTOCOLS
-            .iter()
-            .enumerate()
-            .filter(|(_, (label, _))| {
-                q.is_empty() || crate::tui::fuzzy::fuzzy_match(label, q).is_some()
-            })
-            .map(|(i, _)| i as u8)
-            .collect()
+        crate::tui::protocol_model_candidates(&self.custom_protocol_wire)
     }
 
     /// The model suggestions matching the live filter (`self.input` while the
@@ -1239,43 +1405,24 @@ impl App {
         out
     }
 
-    /// Commit the highlighted suggestion into the focused filter field's value
-    /// (Protocol → `custom_protocol`, Model → `custom_model`).
+    /// Commit the highlighted Model suggestion into `custom_model`. No-op off the
+    /// Model field (the only filter field).
     fn commit_custom_suggestion(&mut self) {
-        match self.custom_field {
-            1 => {
-                let suggestions = self.custom_protocol_suggestions();
-                if let Some(&p) = suggestions.get(self.custom_suggest_index)
-                    && p != self.custom_protocol
-                {
-                    self.custom_protocol = p;
-                    // The candidate pool depends on the protocol, so re-default
-                    // the model to the new protocol's first candidate.
-                    self.custom_model = self
-                        .custom_model_candidates()
-                        .first()
-                        .map(|m| m.to_string())
-                        .unwrap_or_default();
-                }
+        if self.current_custom_field() == Some(CustomField::Model) {
+            let suggestions = self.custom_model_suggestions();
+            if let Some(value) = suggestions.get(self.custom_suggest_index) {
+                self.custom_model = value.clone();
             }
-            4 => {
-                let suggestions = self.custom_model_suggestions();
-                if let Some(value) = suggestions.get(self.custom_suggest_index) {
-                    self.custom_model = value.clone();
-                }
-            }
-            _ => {}
         }
     }
 
-    /// Move the suggestion highlight for the focused filter field, committing the
-    /// newly-highlighted suggestion live. No-op on non-filter fields.
+    /// Move the Model suggestion highlight, committing the newly-highlighted
+    /// suggestion live. No-op when the Model field is not focused.
     pub fn move_custom_suggestion(&mut self, forward: bool) {
-        let len = match self.custom_field {
-            1 => self.custom_protocol_suggestions().len(),
-            4 => self.custom_model_suggestions().len(),
-            _ => 0,
-        };
+        if self.current_custom_field() != Some(CustomField::Model) {
+            return;
+        }
+        let len = self.custom_model_suggestions().len();
         if len == 0 {
             return;
         }
@@ -1287,60 +1434,50 @@ impl App {
         self.commit_custom_suggestion();
     }
 
-    /// React to a change in the Protocol / Model filter query: reset the
-    /// highlight to the best (first) match and commit it.
+    /// React to a change in the Model filter query: reset the highlight to the
+    /// best (first) match and commit it.
     pub fn on_custom_filter_changed(&mut self) {
-        if matches!(self.custom_field, 1 | 4) {
+        if self.current_custom_field() == Some(CustomField::Model) {
             self.custom_suggest_index = 0;
             self.commit_custom_suggestion();
         }
     }
 
     /// Save the composer line into the focused text field's buffer (Name / Base
-    /// URL / Token). The Protocol / Model fields are filter fields whose value is
-    /// already committed live, so their transient query is discarded.
+    /// URL / Token). The Model field is a filter whose value is already committed
+    /// live, so its transient query is discarded.
     pub fn stash_custom_field(&mut self) {
         let value = std::mem::take(&mut self.input);
-        match self.custom_field {
-            0 => self.custom_name = value,
-            2 => self.custom_base_url = value,
-            3 => self.custom_token = value,
-            _ => {} // Protocol / Model filter fields: value already committed.
+        match self.current_custom_field() {
+            Some(CustomField::Name) => self.custom_name = value,
+            Some(CustomField::BaseUrl) => self.custom_base_url = value,
+            Some(CustomField::Token) => self.custom_token = value,
+            _ => {} // Model filter field: value already committed live.
         }
     }
 
     /// Load the focused field into the composer line: the buffer for a text
-    /// field, or a fresh (empty) filter for the Protocol / Model fields, with the
-    /// suggestion highlight positioned on the current committed value.
+    /// field, or a fresh (empty) filter for the Model field, with the suggestion
+    /// highlight positioned on the current committed value.
     pub fn load_custom_field(&mut self) {
-        self.input = match self.custom_field {
-            0 => self.custom_name.clone(),
-            2 => self.custom_base_url.clone(),
-            3 => self.custom_token.clone(),
+        self.input = match self.current_custom_field() {
+            Some(CustomField::Name) => self.custom_name.clone(),
+            Some(CustomField::BaseUrl) => self.custom_base_url.clone(),
+            Some(CustomField::Token) => self.custom_token.clone(),
             _ => String::new(),
         };
         self.set_cursor_end();
-        match self.custom_field {
-            1 => {
-                self.custom_suggest_index = self
-                    .custom_protocol_suggestions()
-                    .iter()
-                    .position(|&p| p == self.custom_protocol)
-                    .unwrap_or(0);
-            }
-            4 => {
-                self.custom_suggest_index = self
-                    .custom_model_suggestions()
-                    .iter()
-                    .position(|v| v == &self.custom_model)
-                    .unwrap_or(0);
-            }
-            _ => {}
+        if self.current_custom_field() == Some(CustomField::Model) {
+            self.custom_suggest_index = self
+                .custom_model_suggestions()
+                .iter()
+                .position(|v| v == &self.custom_model)
+                .unwrap_or(0);
         }
     }
 
-    /// Move the custom-provider editor focus (`Tab` / `BackTab`), wrapping across
-    /// its fields (5 in create mode, 4 in edit mode).
+    /// Move the provider editor focus (`Tab` / `BackTab`), wrapping across the
+    /// active template's visible fields.
     pub fn cycle_custom_field(&mut self, forward: bool) {
         self.stash_custom_field();
         let n = self.custom_field_count();

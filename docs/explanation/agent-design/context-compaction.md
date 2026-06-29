@@ -17,7 +17,8 @@ turn, see [Harness architecture](harness.md#context-projection).
 
 Every projection threshold is a fraction of the **active model's context
 window**, measured in tokens and re-seeded whenever the provider switches
-(ADR-0019). The
+(the model-relative-thresholds design, later codified in
+[ADR-0044](../../adr/0044-layered-token-accounting.md)). The
 declarative `CompactionPolicy` (`neenee-core/src/pressure.rs`) carries the
 fractions; `CompactionPolicy::resolve(window_tokens)` turns them into a concrete
 `ContextBudget`:
@@ -41,18 +42,22 @@ compare against them. `effective_pressure_tokens`
 projection layers:
 
 - A provider-reported `prompt_tokens` is *ground truth* for what the model
-  actually saw, so it is preferred when present **and plausible** — at least
-  half of the independent chars/4 estimate. Relays and local servers sometimes
-  report `0` or absurdly small usage; trusting that would under-count pressure
-  and risk overflow, so an implausible report is treated as missing.
-- Otherwise the cheap `estimate_tokens` proxy (chars ÷ 4) is used.
+  actually saw, so it is preferred when present. Since
+  [ADR-0044](../../adr/0044-layered-token-accounting.md) wired the `usage` object
+  through the streaming adapters, a provider that returns usage contributes an
+  authoritative count; see [Token accounting](token-accounting.md) for the full
+  priority chain.
+- Otherwise the local char-class estimator (`count_tokens`, which classifies
+  each Unicode scalar — CJK glyphs count ~1 token each, ASCII words ~0.25 —
+  replacing the old flat `chars ÷ 4`) is used.
 
 The bias is deliberately conservative: under-counting risks overflow (the
-expensive failure), while over-counting only prunes a little early. Today every
-call site passes `reported = None` — the `Provider` trait does not yet surface
-usage, and threading it through the streaming adapters is a separate epic
-(ADR-0019). Centralising the policy here means wiring real usage later is a
-one-line change at each call site, not a logic rewrite.
+expensive failure), while over-counting only prunes a little early. A provider
+that does not surface usage falls through to the estimator, and the
+`TokenSourceLedger` records those turns as *estimated* so the accuracy report
+modal can distinguish them. Centralising the booking in
+`Agent::book_turn_usage` keeps the reported-vs-estimated attribution in one
+place.
 
 ## What compaction does
 
@@ -128,7 +133,9 @@ that notice knows a real summarization happened.
 ## References
 
 - ADR-0009 — uncapped agentic loop; compaction as the runaway backstop.
-- ADR-0019 — model-relative thresholds derived from the model window.
+- ADR-0044 — layered token accounting: the provider `usage` path and the
+  char-class estimator that measures the tokens these thresholds compare against.
+- [Token accounting](token-accounting.md) — how the token count is measured.
 - ADR-0021 — only compaction keeps the `Compaction`/`Compacted` vocabulary and
   the transcript notice.
 - ADR-0040 — session state and model-context projection vocabulary.

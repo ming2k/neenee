@@ -336,12 +336,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // provider; re-seeded on provider/model switch.
     agent_setup::reseed_tool_variants(&agent, &config);
 
-    // Wire the `[agent]` config table: the opt-in hard-stop budget and the
-    // verify hard-nudge toggle. (Session review is on-demand via `/review`,
-    // so it has no config to seed.) All default to sensible values when the
-    // table is absent, so this is a no-op for the common case.
+    // Wire the `[principal]` config table: the opt-in hard-stop budget, the
+    // model-supplied-stdin toggle, and the anti-anchoring nudge config. (Session
+    // review is on-demand via `/review`, so it has no config to seed.) All
+    // default to sensible values when the table is absent, so this is a no-op
+    // for the common case — the nudge config defaults to disabled.
     agent.set_hard_stop_rounds(config.principal.hard_stop_rounds);
-    agent.set_loop_review_enabled(config.principal.loop_review_enabled);
+    agent.set_nudge_config(config.principal.nudge);
     agent.set_allow_model_stdin(config.principal.allow_model_stdin);
 
     // Lifecycle event hooks (ADR-0025): each `[[hooks]]` entry runs a shell
@@ -418,6 +419,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep an Arc handle on the main thread so SessionEnd hooks (ADR-0025) can
     // fire after the TUI returns — the background task below moves `agent`.
     let agent_for_session_end = Arc::clone(&agent);
+    // Shared token-source ledger: the agent books each turn's token usage
+    // (reported vs. estimated) into it, and the TUI reads it for the
+    // token-source report modal (opened by clicking the context meter).
+    let token_ledger = neenee_core::TokenSourceLedger::shared();
+
     let harness = agent_loop::Harness {
         tx: resp_tx,
         req_tx: req_tx_for_commands,
@@ -442,6 +448,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         startup,
         open_picker_on_start,
         ui: Arc::new(crate::tui::clipboard::TuiClipboard),
+        token_ledger: token_ledger.clone(),
     };
     tokio::spawn(agent_loop::run(req_rx, harness));
 
@@ -457,6 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_statuses_for_tui,
         tui_config,
         session.clone(),
+        token_ledger.clone(),
     )
     .await
     {

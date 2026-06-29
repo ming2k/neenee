@@ -51,6 +51,9 @@ pub mod todos;
 pub use todos::{MAX_TODOS, TodoId, TodoItem, TodoList, TodoStatus, TodoToolContext};
 pub mod envoy;
 pub mod pressure;
+pub mod token_ledger;
+pub use token_ledger::{TokenSourceLedger, TokenSourceReport, TokenSourceRow, TokenSourceTotals};
+pub mod nudgeconfig;
 pub mod prompt;
 pub mod session_review;
 pub mod session_title;
@@ -75,9 +78,10 @@ pub use events::{
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
 pub use model::{KNOWN_MODELS, Model, WireFormat, model_by_id, resolve as resolve_model};
+pub use nudgeconfig::NudgeConfig;
 pub use pressure::{
     CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
-    PruneOutcome, estimate_chars, estimate_tokens, prune_tool_results,
+    PruneOutcome, count_tokens, estimate_chars, estimate_tokens, prune_tool_results,
 };
 pub use prompt::{PromptChannel, PromptContext, PromptRegistry, PromptSection};
 pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};

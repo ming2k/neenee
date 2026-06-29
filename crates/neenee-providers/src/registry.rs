@@ -178,11 +178,10 @@ impl OpenAiProviderSpec {
 /// attributed to the logical model even after a mid-session switch.
 pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn Provider> {
     match &channel.transport {
-        Transport::GeminiNative => Arc::new(GeminiProvider {
-            api_key: channel.api_key.clone(),
-            model: channel.model.clone(),
-            id: entry_id.to_string(),
-        }),
+        Transport::GeminiNative => Arc::new(
+            GeminiProvider::new(channel.api_key.clone(), channel.model.clone())
+                .with_id(entry_id.to_string()),
+        ),
         Transport::Anthropic {
             base_url,
             user_agent,

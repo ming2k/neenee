@@ -235,6 +235,22 @@ impl Provider for ProxyProvider {
             (None, Err(error)) => Err(error),
         }
     }
+
+    /// Delegate usage support + drain to the live inner provider so attribution
+    /// tracks the active provider even after a mid-session `/provider` swap.
+    fn usage_supported(&self) -> bool {
+        self.holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .usage_supported()
+    }
+
+    fn take_last_usage(&self) -> Option<neenee_core::TokenUsage> {
+        self.holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .take_last_usage()
+    }
 }
 
 // ── /debug network capture ────────────────────────────────────────────

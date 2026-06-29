@@ -221,20 +221,18 @@ pub fn draw_session_modal(
             s.model.description.clone(),
             s.model.capabilities.clone(),
         ),
-        None => {
-            (
-                provider.to_string(),
-                crate::tui::model_display_name(model),
-                model.to_string(),
-                crate::tui::model_context_window(model),
-                key_status
-                    .get(&provider.to_lowercase())
-                    .copied()
-                    .unwrap_or(false),
-                String::new(),
-                Vec::new(),
-            )
-        }
+        None => (
+            provider.to_string(),
+            crate::tui::model_display_name(model),
+            model.to_string(),
+            crate::tui::model_context_window(model),
+            key_status
+                .get(&provider.to_lowercase())
+                .copied()
+                .unwrap_or(false),
+            String::new(),
+            Vec::new(),
+        ),
     };
     // Name (bold) · provider (muted) on one row.
     body.push(Line::from(vec![

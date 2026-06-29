@@ -26,7 +26,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use neenee_core::{Message, Provider, ProviderStreamEvent, Role, Tool, ToolCall};
+use neenee_core::{Message, Provider, ProviderStreamEvent, Role, TokenUsage, Tool, ToolCall};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -52,6 +52,10 @@ pub struct AnthropicMessagesProvider {
     /// generous default keeps long agent turns from truncating.
     pub max_tokens: u32,
     tools: Mutex<Option<Vec<Value>>>,
+    /// Stash for the `usage` object returned by the most recent request, drained
+    /// by [`Provider::take_last_usage`]. Populated by both the streaming
+    /// (`message_delta.usage`) and non-streaming (`response.usage`) paths.
+    last_usage: Mutex<Option<TokenUsage>>,
 }
 
 impl AnthropicMessagesProvider {
@@ -73,6 +77,7 @@ impl AnthropicMessagesProvider {
             id: "anthropic".to_string(),
             max_tokens: 8192,
             tools: Mutex::new(None),
+            last_usage: Mutex::new(None),
         }
     }
 
@@ -253,6 +258,26 @@ fn parse_arguments(arguments: &str) -> Value {
     serde_json::from_str::<Value>(arguments).unwrap_or(json!({}))
 }
 
+/// Parse an Anthropic `usage` object (`input_tokens` / `output_tokens`) into a
+/// [`TokenUsage`]. Returns `None` when the object is absent or has no numeric
+/// fields. `prompt_tokens` ← `input_tokens`, `completion_tokens` ←
+/// `output_tokens`, `total_tokens` ← their sum.
+fn parse_anthropic_usage(usage: &Value) -> Option<TokenUsage> {
+    let input = usage["input_tokens"].as_i64();
+    let output = usage["output_tokens"].as_i64();
+    let (p, c) = match (input, output) {
+        (Some(p), Some(c)) => (p, c),
+        (Some(p), None) => (p, 0),
+        (None, Some(c)) => (0, c),
+        (None, None) => return None,
+    };
+    Some(TokenUsage {
+        prompt_tokens: p,
+        completion_tokens: c,
+        total_tokens: p + c,
+    })
+}
+
 /// Parse one SSE `data:` payload (already stripped of the `data:` prefix) into
 /// provider stream events. Anthropic wraps each event in `{type, ...}`; the
 /// `type` discriminator selects the block/delta shape.
@@ -324,9 +349,19 @@ fn parse_anthropic_stream_data(data: &str) -> Result<Vec<ProviderStreamEvent>, S
                 _ => Ok(Vec::new()),
             }
         }
-        // message_start / content_block_stop / message_delta (stop_reason,
-        // usage) / message_stop: no content to forward. The harness observes
-        // stream end as the byte stream closing.
+        // message_delta carries the final cumulative `usage` (input +
+        // output tokens) right before `message_stop`. Forward it as a Usage
+        // event so the harness books authoritative counts instead of
+        // estimating. message_start / content_block_stop / message_stop carry
+        // no content to forward; a normal stream end is observed by the harness
+        // simply as the byte stream closing.
+        "message_delta" => {
+            if let Some(usage) = parse_anthropic_usage(&value["usage"]) {
+                Ok(vec![ProviderStreamEvent::Usage(usage)])
+            } else {
+                Ok(Vec::new())
+            }
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -346,6 +381,17 @@ impl Provider for AnthropicMessagesProvider {
 
     fn model(&self) -> String {
         self.model.clone()
+    }
+
+    fn usage_supported(&self) -> bool {
+        true
+    }
+
+    fn take_last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
@@ -402,6 +448,14 @@ impl Provider for AnthropicMessagesProvider {
                     _ => {}
                 }
             }
+        }
+
+        // Parse the top-level `usage` object (input_tokens / output_tokens).
+        // Anthropic reports authoritative token counts here; we stash them so
+        // the harness can drain them via `take_last_usage` instead of guessing.
+        let usage = parse_anthropic_usage(&response_json["usage"]);
+        if let Some(usage) = usage {
+            *self.last_usage.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
         }
 
         Ok(Message {

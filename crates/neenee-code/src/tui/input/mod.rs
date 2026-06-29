@@ -55,18 +55,18 @@ pub struct InputContext {
     /// list" instead of "close the modal", and gates the stage-1-only `*`/`e`
     /// shortcuts. Mirrors `App::picker_provider.is_some()`.
     pub picker_in_models_stage: bool,
-    /// Focused field of the custom-provider editor, or `None` when that modal is
-    /// not open. `Some(0|2|3|4)` is a text field (printable keys edit the
-    /// borrowed composer line); `Some(1)` is the Protocol field (`←/→` cycle the
-    /// choice, printable keys are inert). Mirrors `App::custom_field` while
-    /// [`Self::active_modal`] is [`super::Modal::CustomProvider`].
+    /// Focused field index of the provider editor, or `None` when that modal is
+    /// not open. Every visible field borrows the composer line (Name / Base URL /
+    /// Token as plain text, Model as a live filter), so printable keys always edit
+    /// it. Mirrors `App::custom_field` while [`Self::active_modal`] is
+    /// [`super::Modal::CustomProvider`].
     pub custom_provider_field: Option<u8>,
 }
 
 impl InputContext {
-    /// Whether any custom-provider editor field is focused. Every field now
-    /// borrows the composer line: Name / Base URL / Token are plain text, while
-    /// Protocol / Model borrow it as a live filter query.
+    /// Whether any provider-editor field is focused. Every visible field borrows
+    /// the composer line: Name / Base URL / Token as plain text, Model as a live
+    /// filter query.
     fn custom_text_field_focused(&self) -> bool {
         self.custom_provider_field.is_some()
     }
@@ -92,8 +92,8 @@ fn edits_input_field(
         | super::Modal::InputInjection => true,
         super::Modal::Provider => model_searching,
         super::Modal::HistorySearch => history_searching,
-        // The custom-provider editor edits the composer line only on its text
-        // fields; the Protocol field is non-text (printable keys are inert there).
+        // The provider editor edits the composer line on every visible field
+        // (Name / Base URL / Token / Model all borrow it).
         super::Modal::CustomProvider => custom_text_field,
         _ => false,
     }
@@ -138,13 +138,24 @@ pub enum InputAction {
     /// (`Tab` / `BackTab`), wrapping at the ends.
     CustomProviderNextField,
     CustomProviderPrevField,
-    /// Move the suggestion highlight in the custom-provider editor's focused
-    /// filter field (Protocol / Model) with `↑` / `↓`. `forward` = down.
+    /// Move the suggestion highlight in the provider editor's Model filter field
+    /// with `↑` / `↓`. `forward` = down.
     MoveCustomSuggestion {
         forward: bool,
     },
+    /// Move the provider-template chooser selection with `↑` / `↓`. `forward` = down.
+    MoveProviderTemplate {
+        forward: bool,
+    },
+    /// Open the provider editor seeded from the highlighted template (`Enter`).
+    SelectProviderTemplate,
+    /// Cancel the provider-template chooser and return to the provider picker.
+    CancelProviderTemplate,
     /// Remove the highlighted model from a custom provider's stage-2 list (`d`).
     ProviderPickerRemoveModel,
+    /// Delete the entire highlighted custom provider from the stage-1 list
+    /// (`Shift+D`). Built-in providers are ignored by the handler.
+    DeleteProvider,
     /// Move the add-model overlay's suggestion highlight with `↑` / `↓`.
     MoveAddModel {
         forward: bool,
@@ -183,6 +194,11 @@ pub enum InputAction {
     /// the `/mcp` slash command (intercepted locally, never sent to the
     /// backend). The request is never forwarded — it only opens the overlay.
     OpenMcp,
+    /// Open the config manager modal: a centered list of configurable
+    /// categories (Nudge, …). Reached via the `/config` slash command
+    /// (intercepted locally, never sent to the backend). `Enter` / `Space`
+    /// on a category drills into its sub-page.
+    OpenConfig,
     /// Connect/disconnect the selected MCP server in the MCP manager modal.
     /// Bound to `Space`.
     McpToggle,
@@ -194,6 +210,26 @@ pub enum InputAction {
     /// Clear every cached "always allow" rule. Bound to `c` in the
     /// permissions manager modal.
     PermissionsClearAll,
+    /// Drill into the selected config category's sub-page (from
+    /// [`Modal::Config`]). Bound to `Enter` / `Space`.
+    ConfigActivate,
+    /// Return from a config sub-page to the config root. Bound to `Esc`
+    /// inside a sub-page (a second `Esc` closes the modal).
+    ConfigBack,
+    /// Toggle the nudge master switch (`enabled`) in the nudge sub-page.
+    /// Bound to `Space` when the enabled row is selected.
+    ConfigNudgeToggle,
+    /// Adjust the selected nudge threshold by `delta` (±1). Bound to `←`
+    /// (delta = -1) and `→` (delta = +1) in the nudge sub-page. The harness
+    /// persists the new config and replies with
+    /// `AgentResponse::NudgeConfigUpdated`.
+    ConfigNudgeAdjust {
+        delta: i32,
+    },
+    /// Apply the selected transcript layout strategy in the layout sub-page.
+    /// Bound to `Enter` / `Space`. The harness persists the choice to
+    /// `config.toml` and replies with `AgentResponse::TuiLayoutUpdated`.
+    ConfigLayoutApply,
     /// Move the tool-selection cursor in the session-context dashboard when it
     /// still hosts the tools list, and in the tools manager modal otherwise.
     /// `forward` = down, else up.
@@ -718,6 +754,10 @@ pub fn process_event(
                         }
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionCancel
+                    } else if context.active_modal == super::Modal::ProviderTemplate {
+                        // Esc cancels the template chooser back to the provider
+                        // picker it was opened from.
+                        InputAction::CancelProviderTemplate
                     } else if context.active_modal == super::Modal::CustomProvider {
                         // Esc cancels the custom-provider editor and returns to the
                         // provider picker it was opened from.
@@ -747,6 +787,13 @@ pub fn process_event(
                         // In the stage-2 model sub-list (browse mode): Esc steps
                         // back to the stage-1 provider list rather than closing.
                         InputAction::ProviderPickerBack
+                    } else if context.active_modal == super::Modal::ConfigNudge {
+                        // Esc in the nudge sub-page returns to the config root
+                        // rather than closing the whole modal.
+                        InputAction::ConfigBack
+                    } else if context.active_modal == super::Modal::ConfigLayout {
+                        // Esc in the layout sub-page returns to the config root.
+                        InputAction::ConfigBack
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
                     } else if context.in_side_view {
@@ -834,6 +881,7 @@ pub fn process_event(
                 KeyCode::Enter => match context.active_modal {
                     super::Modal::Provider => InputAction::ProviderPickerActivate,
                     super::Modal::ModelEditor => InputAction::SubmitModelEditor,
+                    super::Modal::ProviderTemplate => InputAction::SelectProviderTemplate,
                     super::Modal::CustomProvider => InputAction::SubmitCustomProvider,
                     super::Modal::AddModel => InputAction::SubmitAddModel,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
@@ -846,7 +894,11 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::CloseModal,
                     super::Modal::Mcp => InputAction::CloseModal,
                     super::Modal::Permissions => InputAction::CloseModal,
+                    super::Modal::Config => InputAction::ConfigActivate,
+                    super::Modal::ConfigNudge => InputAction::ConfigNudgeToggle,
+                    super::Modal::ConfigLayout => InputAction::ConfigLayoutApply,
                     super::Modal::Activity => InputAction::CloseModal,
+                    super::Modal::TokenReport => InputAction::CloseModal,
                     super::Modal::None => {
                         if context.has_focused_target {
                             return InputAction::ActivateFocusedTarget;
@@ -889,6 +941,7 @@ pub fn process_event(
                                 "/permissions" => InputAction::OpenPermissions,
                                 "/tools" => InputAction::OpenTools,
                                 "/mcp" => InputAction::OpenMcp,
+                                "/config" => InputAction::OpenConfig,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
                             }
@@ -927,7 +980,7 @@ pub fn process_event(
                         // model-id fields.
                         InputAction::ModelEditorNextField
                     } else if context.active_modal == super::Modal::CustomProvider {
-                        // Tab advances through the five custom-provider fields.
+                        // Tab advances through the editor's visible fields.
                         InputAction::CustomProviderNextField
                     } else if context.active_modal == super::Modal::HistorySearch {
                         // Tab toggles the full-prompt preview of the selected
@@ -1200,6 +1253,21 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permissions && c == ' ' {
                         return InputAction::PermissionsActivate;
                     }
+                    // Space in the config root drills into the selected
+                    // category; in the nudge sub-page it toggles the enabled
+                    // flag (when the enabled row is selected) or drills into
+                    // a threshold (no-op — thresholds are adjusted with ←/→).
+                    if context.active_modal == super::Modal::Config && c == ' ' {
+                        return InputAction::ConfigActivate;
+                    }
+                    if context.active_modal == super::Modal::ConfigNudge && c == ' ' {
+                        return InputAction::ConfigNudgeToggle;
+                    }
+                    // Space in the layout sub-page applies the selected
+                    // strategy (same as Enter).
+                    if context.active_modal == super::Modal::ConfigLayout && c == ' ' {
+                        return InputAction::ConfigLayoutApply;
+                    }
                     if context.active_modal == super::Modal::Question
                         && let Some(d) = c.to_digit(10)
                         && (1..=9).contains(&d)
@@ -1246,6 +1314,15 @@ pub fn process_event(
                         // from a custom provider (ignored for built-ins / the
                         // "＋ Add model" row by the handler).
                         InputAction::ProviderPickerRemoveModel
+                    } else if context.active_modal == super::Modal::Provider
+                        && !context.model_searching
+                        && !context.picker_in_models_stage
+                        && c == 'D'
+                    {
+                        // Stage-1 browse mode: `Shift+D` deletes the entire
+                        // highlighted custom provider (ignored for built-ins and
+                        // the "＋ Add provider" row by the handler).
+                        InputAction::DeleteProvider
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
                     } else if context.active_modal == super::Modal::Session && c == 't' {
@@ -1368,8 +1445,14 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalUp;
                     }
-                    // On the custom-provider editor's Protocol field, ←/→ cycle
-                    // the protocol choice rather than moving a (nonexistent) caret.
+                    // In the nudge sub-page, ← decreases the selected
+                    // threshold by 1 (no-op on the enabled row, which is
+                    // toggled with Space).
+                    if context.active_modal == super::Modal::ConfigNudge {
+                        return InputAction::ConfigNudgeAdjust { delta: -1 };
+                    }
+                    // In the provider editor every field borrows the composer
+                    // line, so ←/→ move the caret within the focused field.
                     if edits_input_field(
                         context.active_modal,
                         context.history_searching,
@@ -1394,6 +1477,11 @@ pub fn process_event(
                 KeyCode::Right => {
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalDown;
+                    }
+                    // In the nudge sub-page, → increases the selected
+                    // threshold by 1.
+                    if context.active_modal == super::Modal::ConfigNudge {
+                        return InputAction::ConfigNudgeAdjust { delta: 1 };
                     }
                     if edits_input_field(
                         context.active_modal,
@@ -1458,12 +1546,19 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: false },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
+                    super::Modal::Config => InputAction::ModalUp,
+                    super::Modal::ConfigNudge => InputAction::ModalUp,
+                    super::Modal::ConfigLayout => InputAction::ModalUp,
+                    super::Modal::ProviderTemplate => {
+                        InputAction::MoveProviderTemplate { forward: false }
+                    }
                     super::Modal::CustomProvider => {
                         InputAction::MoveCustomSuggestion { forward: false }
                     }
                     super::Modal::AddModel => InputAction::MoveAddModel { forward: false },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
+                    super::Modal::TokenReport => InputAction::ScrollUp,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusPrevTarget
@@ -1508,12 +1603,19 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: true },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
+                    super::Modal::Config => InputAction::ModalDown,
+                    super::Modal::ConfigNudge => InputAction::ModalDown,
+                    super::Modal::ConfigLayout => InputAction::ModalDown,
+                    super::Modal::ProviderTemplate => {
+                        InputAction::MoveProviderTemplate { forward: true }
+                    }
                     super::Modal::CustomProvider => {
                         InputAction::MoveCustomSuggestion { forward: true }
                     }
                     super::Modal::AddModel => InputAction::MoveAddModel { forward: true },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
+                    super::Modal::TokenReport => InputAction::ScrollDown,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusNextTarget

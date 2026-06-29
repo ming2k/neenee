@@ -76,6 +76,12 @@ pub(super) fn transcript_messages_from_core(
     config: &TuiConfig,
 ) -> Vec<TranscriptMessage> {
     let mut restored = Vec::new();
+    // Tool-round counter for restored assistant turns. Each `Role::Assistant`
+    // message is one model request = one round, so the counter increments per
+    // assistant message and stamps its tool steps — mirroring the live path's
+    // `RoundStarted`-driven stamp so resumed sessions get the same round-
+    // boundary separators between adjacent tool-only rounds.
+    let mut restored_round: u64 = 0;
     for mut message in messages {
         if message.hidden || message.role == Role::System {
             continue;
@@ -85,6 +91,7 @@ pub(super) fn transcript_messages_from_core(
         let provider = message.provider.clone();
         let model = message.model.clone();
         if message.role == Role::Assistant {
+            restored_round = restored_round.saturating_add(1);
             if let Some(reasoning) = message.reasoning_content.take() {
                 let mut thinking = TranscriptMessage::thinking(reasoning);
                 thinking.provider = provider.clone();
@@ -106,6 +113,7 @@ pub(super) fn transcript_messages_from_core(
                         TranscriptMessage::tool_step(call.name.clone(), call.name, call.arguments);
                     step.provider = provider.clone();
                     step.model = model.clone();
+                    step.round = Some(restored_round);
                     restored.push(step);
                 }
                 if message.content.is_empty() {

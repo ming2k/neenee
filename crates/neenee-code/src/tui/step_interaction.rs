@@ -125,6 +125,7 @@ mod tests {
         }
         TuiConfig {
             default_expanded: map,
+            transcript_layout: String::new(),
         }
     }
 

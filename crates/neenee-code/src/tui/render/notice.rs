@@ -40,7 +40,7 @@ fn severity_presentation(severity: NoticeSeverity, theme: &Theme) -> (&'static s
 /// `content_lines`) so it drops into the same per-message render loop without
 /// special-casing.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_notice(
+pub(crate) fn draw_notice(
     frame: &mut Frame,
     area: Rect,
     msg: &TranscriptMessage,

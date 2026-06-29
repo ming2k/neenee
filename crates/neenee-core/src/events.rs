@@ -2,7 +2,7 @@
 //! responses ([`AgentResponse`]), live turn events ([`AgentEvent`]), and the
 //! small data records they carry.
 
-use crate::{ImagePart, Message, Pursuit, ToolOutput, ToolStream};
+use crate::{ImagePart, Message, NudgeConfig, Pursuit, ToolOutput, ToolStream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,16 +51,19 @@ pub enum AgentRequest {
         api_key: Option<String>,
         base_url: Option<String>,
     },
-    /// Add a user-defined ("custom") provider from the TUI editor, persist it to
-    /// config, then activate it. `protocol` is one of `"openai"` | `"anthropic"`
-    /// | `"gemini"`; `api_key` may be empty (a keyless OpenAI-compatible relay
+    /// Add a user-defined provider from a TUI template, persist it to config,
+    /// then activate it. `protocol` is one of `"openai"` | `"anthropic"` |
+    /// `"gemini"`; `api_key` may be empty (a keyless OpenAI-compatible relay
     /// suppresses the auth header). The harness derives a stable id from `name`.
+    /// `models` is the provider's seeded model list — one channel per model,
+    /// the first becoming the default/active model. A template that seeds the
+    /// whole Claude family lands all of them in the picker's stage-2 list.
     AddProvider {
         name: String,
         protocol: String,
         base_url: String,
         api_key: String,
-        model: String,
+        models: Vec<String>,
     },
     /// Edit a user-defined provider's metadata in place (display name, protocol,
     /// base URL, API key) without touching its model list — every channel keeps
@@ -87,6 +90,15 @@ pub enum AgentRequest {
     RemoveProviderModel {
         provider_id: String,
         model: String,
+    },
+    /// Delete a user-defined provider entirely: drop the entry from
+    /// `config.providers`, remove it from `favorites`, and persist. If the
+    /// deleted provider was active (`default_provider`), fall back to the
+    /// default built-in provider (`"kimi-code"`) and activate it so the live
+    /// provider never points at a removed entry. Built-in providers are not
+    /// deletable this way; the handler ignores unknown / built-in ids.
+    DeleteProvider {
+        id: String,
     },
     /// Toggle the favorite flag on a model in the picker. The id is
     /// canonicalized by the harness before it touches config.
@@ -169,6 +181,22 @@ pub enum AgentRequest {
     /// background tasks die with it. This is the model's self-initiated
     /// emergency escape hatch, not a user action.
     Abort,
+    /// Update the nudge configuration at runtime (from the `/config` modal).
+    /// The harness writes the new config to `config.toml`, calls
+    /// `Agent::set_nudge_config`, and replies with
+    /// [`AgentResponse::NudgeConfigUpdated`] so the modal reflects the
+    /// persisted state. The `enabled` flag takes effect on the next round
+    /// boundary; the thresholds take effect on the next turn (per-turn guard
+    /// state is rebuilt fresh each turn).
+    UpdateNudgeConfig(NudgeConfig),
+    /// Update the transcript layout preference (from the `/config` modal).
+    /// The harness writes the new value to `config.toml`'s `[tui]
+    /// transcript_layout` and replies with [`AgentResponse::TuiLayoutUpdated`]
+    /// carrying the persisted string so the modal re-renders from the
+    /// authoritative state. The value is a raw config string ("compact" /
+    /// "round_band"); interpretation into a [`crate`] layout `Strategy`
+    /// happens in the renderer, keeping the core free of render types.
+    UpdateTuiLayout(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +256,16 @@ pub enum AgentResponse {
     /// and re-sent after any mutation handled by the harness
     /// ([`AgentRequest::RevokePermission`] / [`AgentRequest::ToggleTool`]).
     SessionContext(SessionContextSnapshot),
+    /// The nudge configuration was updated (from the `/config` modal via
+    /// [`AgentRequest::UpdateNudgeConfig`]). Carries the persisted config so
+    /// the modal re-renders from the authoritative state — the TOML write
+    /// is the source of truth, not the TUI's optimistic local edit.
+    NudgeConfigUpdated(NudgeConfig),
+    /// The transcript layout preference was updated (from the `/config` modal
+    /// via [`AgentRequest::UpdateTuiLayout`]). Carries the persisted config
+    /// string so the modal re-renders from the authoritative state — the TOML
+    /// write is the source of truth, not the TUI's optimistic local edit.
+    TuiLayoutUpdated(String),
 }
 
 /// A user-visible notice emitted by the agent or harness.

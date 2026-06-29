@@ -87,6 +87,12 @@ deep-dive references, read as a pair:
     summarizing older complete turns into a durable checkpoint at ~85%, with
     a model-written anchored summary, deterministic fallback, and the visible
     `Compacted` notice.
+14. [Token accounting](token-accounting.md) — how the token count that drives
+    pruning and compaction is *measured*: the two-source priority chain
+    (upstream `usage` first, char-class estimator fallback), the ledger that
+    attributes every token as reported vs. estimated, and the report modal that
+    makes that accuracy visible. Read this to understand the unit the previous
+    two layers operate on.
 
 ## How a turn flows through the canon
 

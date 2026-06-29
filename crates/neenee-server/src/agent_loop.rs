@@ -105,6 +105,10 @@ pub struct Harness {
     /// impl; a future browser frontend provides its own. Used only by the
     /// `/export` slash command.
     pub ui: Arc<dyn UiBridge>,
+    /// Shared token-source ledger (reported vs. estimated token accounting).
+    /// Installed into `agent` once at startup; the TUI reads it for the
+    /// token-source report modal.
+    pub token_ledger: Arc<neenee_core::TokenSourceLedger>,
 }
 
 /// Run the agent background task to completion (i.e. until the TUI drops the
@@ -144,7 +148,11 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
         startup,
         open_picker_on_start,
         ui,
+        token_ledger,
     } = h;
+    // Hand the shared token-source ledger to the agent so each turn's token
+    // usage (reported vs. estimated) is booked into it for the report modal.
+    agent.install_token_ledger(token_ledger.clone());
     // The old inline block captured two clones of the skills registry —
     // `skills_registry` (read for the session-context snapshot) and
     // `skills_registry_for_commands` (handed to the `/skills` / `/skill`
@@ -260,7 +268,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 protocol,
                 base_url,
                 api_key,
-                model,
+                models,
             } => {
                 crate::handlers_provider::add(
                     &mut config,
@@ -272,7 +280,7 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     protocol,
                     base_url,
                     api_key,
-                    model,
+                    models,
                 )
                 .await;
             }
@@ -314,6 +322,17 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                     &provider_usage,
                     provider_id,
                     model,
+                )
+                .await;
+            }
+            AgentRequest::DeleteProvider { id } => {
+                crate::handlers_provider::delete(
+                    &mut config,
+                    &agent,
+                    &provider_for_task,
+                    &resp_tx,
+                    &mut provider_usage,
+                    id,
                 )
                 .await;
             }
@@ -458,6 +477,38 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
             }
             AgentRequest::ExitSideView => {
                 crate::handlers_session::exit_side_view(&side, &active_view_side, &resp_tx).await;
+            }
+            AgentRequest::UpdateNudgeConfig(new_config) => {
+                // Persist the updated nudge config to config.toml, apply it
+                // to the live agent, and reply with the persisted snapshot so
+                // the `/config` modal re-renders from the authoritative state.
+                config.principal.nudge = new_config;
+                if let Err(error) = config.save() {
+                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                        "Could not save nudge config: {error}"
+                    )));
+                } else {
+                    agent.set_nudge_config(new_config);
+                    let _ = resp_tx.send(AgentResponse::NudgeConfigUpdated(new_config));
+                }
+            }
+            AgentRequest::UpdateTuiLayout(layout) => {
+                // Persist the transcript layout preference to config.toml's
+                // `[tui] transcript_layout` and reply with the persisted string
+                // so the `/config` modal re-renders from the authoritative
+                // state. No live agent reconfiguration is needed — the TUI
+                // reads `app.transcript_layout` per frame and re-seeds it from
+                // this reply. Validation is intentionally lenient: an unknown
+                // value is stored verbatim and the renderer falls back to
+                // compact, so a typo never blocks startup.
+                config.tui.transcript_layout = layout.clone();
+                if let Err(error) = config.save() {
+                    let _ = resp_tx.send(AgentResponse::Error(format!(
+                        "Could not save transcript layout: {error}"
+                    )));
+                } else {
+                    let _ = resp_tx.send(AgentResponse::TuiLayoutUpdated(layout));
+                }
             }
         }
     }

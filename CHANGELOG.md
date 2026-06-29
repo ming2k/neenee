@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nothing yet.
 
+### Removed
+
+- **Phase 1 session-layout migration code.** The one-shot layout migrations
+  (`migrate_legacy_active_to_sessions`, `migrate_flat_sessions_to_project_buckets`)
+  that moved pre-ADR-0018 flat `data_dir/sessions/*.json` archives and per-project
+  root `session.json`/`events.jsonl` files into the per-session
+  `sessions/<id>.{json,jsonl}` layout have been removed, along with the now-unused
+  `Dirs::legacy_sessions_dir` accessor. Every session has been written to the
+  ADR-0018 layout since the transition completed, so the migrations are no-ops on
+  any current install; any user still holding the obsolete Phase 1 layout should
+  upgrade through an earlier release first. Field-level schema migration
+  (`migrate_session_data`) is unchanged and remains the load path for older
+  snapshots.
+
 ## [0.11.0] - 2026-01-09
 
 ### Added

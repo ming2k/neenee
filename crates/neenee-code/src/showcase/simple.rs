@@ -17,6 +17,7 @@ use neenee_core::{
 use neenee_core::{Pursuit, TodoId, TodoItem, TodoList, TodoStatus};
 
 use crate::showcase::common::{self, ShowAction};
+use crate::tui::ActivityTab;
 use crate::tui::fuzzy;
 use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
@@ -25,7 +26,6 @@ use crate::tui::render::{
     draw_history_modal, draw_model_editor, draw_models_modal, draw_session_modal,
     draw_sessions_modal,
 };
-use crate::tui::ActivityTab;
 
 // ─────────────────────────── provider picker ──────────────────────────────
 

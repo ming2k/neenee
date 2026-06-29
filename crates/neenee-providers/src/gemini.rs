@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use neenee_core::{Message, Provider, Role};
+use neenee_core::{Message, Provider, Role, TokenUsage};
 use serde_json::{Value, json};
 
 use crate::{ensure_success, transport_error};
@@ -12,6 +12,9 @@ pub struct GeminiProvider {
     pub api_key: String,
     pub model: String,
     pub id: String,
+    /// Stash for the `usageMetadata` object returned by the most recent
+    /// request, drained by [`Provider::take_last_usage`].
+    last_usage: std::sync::Mutex<Option<TokenUsage>>,
 }
 
 impl GeminiProvider {
@@ -20,7 +23,15 @@ impl GeminiProvider {
             api_key,
             model,
             id: "gemini".to_string(),
+            last_usage: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Set the attribution id (provider/solution id) so assistant responses are
+    /// attributed to the logical model.
+    pub fn with_id(mut self, id: String) -> Self {
+        self.id = id;
+        self
     }
 }
 
@@ -89,6 +100,27 @@ pub(crate) fn gemini_request_body(messages: Vec<Message>) -> Value {
     body
 }
 
+/// Parse Gemini's `usageMetadata` (`promptTokenCount` /
+/// `candidatesTokenCount` / `totalTokenCount`) into a [`TokenUsage`]. Returns
+/// `None` when the object is absent or has no numeric fields.
+fn parse_gemini_usage(usage: &Value) -> Option<TokenUsage> {
+    let prompt = usage["promptTokenCount"].as_i64();
+    let completion = usage["candidatesTokenCount"].as_i64();
+    let total = usage["totalTokenCount"].as_i64();
+    match (prompt, completion, total) {
+        (Some(p), Some(c), _) => Some(TokenUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            total_tokens: total.unwrap_or(p + c),
+        }),
+        _ => total.map(|t| TokenUsage {
+            prompt_tokens: prompt.unwrap_or(0),
+            completion_tokens: completion.unwrap_or(0),
+            total_tokens: t,
+        }),
+    }
+}
+
 #[async_trait]
 impl Provider for GeminiProvider {
     fn provider_id(&self) -> String {
@@ -97,6 +129,17 @@ impl Provider for GeminiProvider {
 
     fn model(&self) -> String {
         self.model.clone()
+    }
+
+    fn usage_supported(&self) -> bool {
+        true
+    }
+
+    fn take_last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     async fn chat(&self, messages: Vec<Message>) -> Result<Message, String> {
@@ -142,6 +185,12 @@ impl Provider for GeminiProvider {
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 content_text.push_str(text);
             }
+        }
+
+        // Parse `usageMetadata` (promptTokenCount / candidatesTokenCount /
+        // totalTokenCount) and stash it for `take_last_usage`.
+        if let Some(usage) = parse_gemini_usage(&response_json["usageMetadata"]) {
+            *self.last_usage.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
         }
 
         Ok(Message {

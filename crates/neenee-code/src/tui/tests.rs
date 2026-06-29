@@ -6,12 +6,12 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
-use crate::tui::app::{ActivityTab, App, Modal};
+use crate::tui::app::{ActivityTab, App, CaretOwner, Modal};
 use crate::tui::completion::CompletionKind;
 use crate::tui::completion::{manual_walk, mention_range_at, path_query_match};
 use crate::tui::config;
 use crate::tui::event_loop::{display_status, focused_messages_mut};
-use crate::tui::layout::LayoutMap;
+use crate::tui::layout::{InteractiveTarget, LayoutMap};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 use crate::tui::transcript::{
@@ -569,6 +569,9 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         sticky_step: None,
         sticky_rect: None,
         activity_rect: None,
+        hint_context_rect: None,
+        token_ledger: None,
+        token_report_scroll: 0,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,
@@ -591,6 +594,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
+        config_scroll: 0,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -601,6 +605,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         path_scan_cache: None,
         current_pursuit: None,
         session_context: None,
+        nudge_config: neenee_core::NudgeConfig::default(),
         loop_status: "idle".to_string(),
         activity_status: String::new(),
         unattended: false,
@@ -634,8 +639,8 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         modal_hit_map: crate::tui::layout::ModalHitMap::new(),
         hovered_step: None,
         tool_density: Arc::new(AtomicBool::new(false)),
+        transcript_layout: crate::tui::render::layout::Strategy::default(),
         focused_target: None,
-        cursor_hidden: false,
         copy_toast_until: None,
         copy_toast_message: String::new(),
         copy_toast_failed: false,
@@ -648,13 +653,17 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         editor_key: String::new(),
         editor_model: String::new(),
         custom_field: 0,
-        custom_protocol: 0,
+        custom_fields: Vec::new(),
+        custom_protocol_wire: String::new(),
+        custom_models: Vec::new(),
+        custom_url_hint: String::new(),
         custom_suggest_index: 0,
         custom_edit_id: None,
         custom_name: String::new(),
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
+        template_choice: 0,
         model_search: false,
         picker_provider: None,
         add_model_provider: None,
@@ -702,11 +711,43 @@ fn completions_classifies_slash_input_as_slash_kind() {
     }
 }
 
+/// The OpenAI-compatible template (Name / Base URL / Token / Model) — the
+/// richest field set, used to exercise field cycling and the Model filter.
+fn openai_template() -> &'static crate::tui::providers::ProviderTemplate {
+    crate::tui::PROVIDER_TEMPLATES
+        .iter()
+        .find(|t| t.protocol == "openai")
+        .expect("openai-compatible template")
+}
+
+/// The Anthropic relay template (Name / Base URL / Token), which seeds the Claude
+/// family and exposes no Model field.
+fn anthropic_template() -> &'static crate::tui::providers::ProviderTemplate {
+    crate::tui::PROVIDER_TEMPLATES
+        .iter()
+        .find(|t| t.protocol == "anthropic")
+        .expect("anthropic relay template")
+}
+
+#[test]
+fn add_provider_row_opens_the_template_chooser() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.open_provider_template_chooser();
+    assert!(app.active_modal == Modal::ProviderTemplate);
+    assert_eq!(app.template_choice, 0);
+    // `↑/↓` wrap across the template list.
+    let n = crate::tui::PROVIDER_TEMPLATES.len();
+    app.move_template_choice(false);
+    assert_eq!(app.template_choice, n - 1, "wraps to the last template");
+    app.move_template_choice(true);
+    assert_eq!(app.template_choice, 0, "wraps back to the first");
+}
+
 #[test]
 fn custom_provider_editor_opens_empty_on_name_field() {
     let (mut app, _tmp) = app_in_tempdir(&[], &[]);
     app.custom_name = "stale".to_string();
-    app.open_custom_provider_editor();
+    app.open_custom_provider_editor(openai_template());
     assert!(app.active_modal == Modal::CustomProvider);
     assert_eq!(app.custom_field, 0, "opens on the Name field");
     assert!(app.custom_name.is_empty(), "buffers reset on open");
@@ -714,50 +755,59 @@ fn custom_provider_editor_opens_empty_on_name_field() {
         app.input.is_empty(),
         "Name field borrows an empty input line"
     );
+    // The template seeds the protocol; the OpenAI template exposes a Model field.
+    assert_eq!(app.custom_protocol_wire, "openai");
+    assert!(app.custom_fields.contains(&crate::tui::CustomField::Model));
+}
+
+#[test]
+fn anthropic_template_seeds_the_claude_family_without_a_model_field() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.open_custom_provider_editor(anthropic_template());
+    assert_eq!(app.custom_protocol_wire, "anthropic");
+    // The Claude family is seeded as the provider's model list…
+    assert!(app.custom_models.len() > 1, "seeds multiple Claude models");
+    assert!(app.custom_models.iter().any(|m| m.starts_with("claude-")));
+    // …and there is no Model field (models are fixed by the template).
+    assert!(!app.custom_fields.contains(&crate::tui::CustomField::Model));
 }
 
 #[test]
 fn custom_provider_field_cycle_wraps_and_swaps_buffers() {
     let (mut app, _tmp) = app_in_tempdir(&[], &[]);
-    app.open_custom_provider_editor();
-    // Type a name, then advance: the name is stashed and the Protocol field
-    // (non-text) loads an empty line.
+    app.open_custom_provider_editor(openai_template());
+    // Fields: Name(0) / Base URL(1) / Token(2) / Model(3).
+    let n = app.custom_fields.len() as u8;
+    // Type a name, then advance: the name is stashed and the Base URL field
+    // loads its (empty) buffer.
     app.input = "My Relay".to_string();
     app.cycle_custom_field(true);
     assert_eq!(app.custom_field, 1);
     assert_eq!(app.custom_name, "My Relay");
-    assert!(app.input.is_empty(), "Protocol field has no text buffer");
-    // Wrap backward from Name (0) to Model (4).
+    assert!(app.input.is_empty(), "Base URL buffer is empty");
+    // Wrap backward from Name (0) to the last field (Model).
     app.cycle_custom_field(false); // 1 -> 0
     assert_eq!(app.custom_field, 0);
     assert_eq!(app.input, "My Relay", "Name buffer reloads into the line");
-    app.cycle_custom_field(false); // 0 -> 4 (wrap)
-    assert_eq!(app.custom_field, 4);
-}
-
-#[test]
-fn custom_provider_protocol_filter_selects_choices() {
-    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
-    app.open_custom_provider_editor();
-    let n = crate::tui::CUSTOM_PROTOCOLS.len() as u8;
-    // Focus the Protocol filter field; `↑/↓` move + commit the highlight.
-    app.cycle_custom_field(true); // Name -> Protocol
-    assert_eq!(app.custom_field, 1);
-    assert_eq!(app.custom_protocol, 0);
-    app.move_custom_suggestion(false); // wrap to last
-    assert_eq!(app.custom_protocol, n - 1);
-    app.move_custom_suggestion(true); // wrap back to first
-    assert_eq!(app.custom_protocol, 0);
+    app.cycle_custom_field(false); // 0 -> n-1 (wrap)
+    assert_eq!(app.custom_field, n - 1);
 }
 
 #[test]
 fn custom_provider_model_filter_commits_and_offers_custom_id() {
     let (mut app, _tmp) = app_in_tempdir(&[], &[]);
-    app.open_custom_provider_editor();
-    // The default model is the first candidate of the default (OpenAI) protocol.
-    assert!(app.custom_model_candidates().contains(&app.custom_model.as_str()));
-    // Focus the Model filter field and type a query that matches a known model.
-    app.custom_field = 4;
+    app.open_custom_provider_editor(openai_template());
+    // The default model is the first candidate of the template's (OpenAI) protocol.
+    assert!(
+        app.custom_model_candidates()
+            .contains(&app.custom_model.as_str())
+    );
+    // Focus the Model filter field (the last field) and type a known model.
+    app.custom_field = app.custom_fields.len() as u8 - 1;
+    assert_eq!(
+        app.current_custom_field(),
+        Some(crate::tui::CustomField::Model)
+    );
     app.load_custom_field();
     app.input = "gpt-4o".to_string();
     app.on_custom_filter_changed();
@@ -1392,5 +1442,150 @@ fn set_cursor_marks_immediate_sync_pending() {
     app.cursor_sync_pending = false;
     app.set_cursor_end();
     assert_eq!(app.cursor_position, 5);
-    assert!(app.cursor_sync_pending, "set_cursor_end must also arm the sync");
+    assert!(
+        app.cursor_sync_pending,
+        "set_cursor_end must also arm the sync"
+    );
+}
+
+// ── Caret ownership / visibility (IME anchor) ─────────────────────────────
+// `App::caret_owner` / `App::caret_visible` are the single source of truth for
+// which surface holds the terminal cursor. The IME anchors its composition
+// window to that cursor, so any state that owns no caret must hide it —
+// otherwise the IME binds to a stale coordinate (the "drift" when a disclosure
+// is clicked mid-composition). These lock the contract for every state.
+
+#[test]
+fn caret_owner_composer_by_default() {
+    let (app, _tmp) = app_in_tempdir(&[], &[]);
+    assert_eq!(app.caret_owner(), CaretOwner::Composer);
+    assert!(
+        app.caret_visible(),
+        "no modal, no focus, no selection → visible"
+    );
+}
+
+#[test]
+fn caret_owner_none_when_step_focused() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.focused_target = Some(InteractiveTarget::tool_step(0));
+    assert_eq!(app.caret_owner(), CaretOwner::None);
+    assert!(
+        !app.caret_visible(),
+        "a focused transcript step owns no caret → hidden, IME unanchored"
+    );
+}
+
+#[test]
+fn caret_owner_none_in_envoy_view() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.enter_envoy("call-1".to_string());
+    assert_eq!(app.caret_owner(), CaretOwner::None);
+    assert!(
+        !app.caret_visible(),
+        "envoy zoom has no input line → cursor hidden, IME unanchored"
+    );
+}
+
+#[test]
+fn caret_owner_modal_for_caret_modals() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    for modal in [
+        Modal::Provider,
+        Modal::ModelEditor,
+        Modal::AddModel,
+        Modal::CustomProvider,
+        Modal::HistorySearch,
+    ] {
+        app.active_modal = modal;
+        assert_eq!(
+            app.caret_owner(),
+            CaretOwner::Modal,
+            "{modal:?} borrows the input line and renders its own caret",
+        );
+        assert!(
+            app.caret_visible(),
+            "{modal:?} must keep the cursor visible so the IME anchors to its field",
+        );
+    }
+}
+
+#[test]
+fn caret_owner_none_for_read_only_and_decision_modals() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    for modal in [
+        Modal::Help,
+        Modal::Session,
+        Modal::Sessions,
+        Modal::Tools,
+        Modal::Mcp,
+        Modal::Permissions,
+        Modal::Activity,
+        Modal::Question,
+        Modal::Permission,
+        Modal::InputInjection,
+    ] {
+        app.active_modal = modal;
+        assert_eq!(
+            app.caret_owner(),
+            CaretOwner::None,
+            "{modal:?} renders no caret → cursor must hide so the IME has no stale anchor",
+        );
+        assert!(
+            !app.caret_visible(),
+            "{modal:?} must hide the terminal cursor",
+        );
+    }
+}
+
+#[test]
+fn caret_hidden_while_selection_active_even_for_composer() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    // Composer owns the caret, but an active selection hides the block cursor
+    // so it does not clash with the selection background. Ownership is
+    // unaffected; only visibility folds in the selection.
+    assert_eq!(app.caret_owner(), CaretOwner::Composer);
+    app.selection = SelectionState::Range {
+        anchor: crate::tui::layout::SemanticCursor::new(0, 0, 0),
+        head: crate::tui::layout::SemanticCursor::new(0, 0, 3),
+    };
+    assert_eq!(app.caret_owner(), CaretOwner::Composer);
+    assert!(
+        !app.caret_visible(),
+        "an active selection hides the cursor regardless of ownership",
+    );
+}
+
+#[test]
+fn modal_owns_caret_matches_renderer_set_cursor_sites() {
+    // Every modal that calls `set_cursor_position` in its renderer must be
+    // declared in `Modal::owns_caret`, and vice versa — the two lists must
+    // stay in lockstep so visibility and paint never disagree.
+    let owns = [
+        Modal::Provider,
+        Modal::ModelEditor,
+        Modal::AddModel,
+        Modal::CustomProvider,
+        Modal::HistorySearch,
+    ];
+    for m in owns {
+        assert!(m.owns_caret(), "{m:?} must own the caret");
+    }
+    let not_owns = [
+        Modal::None,
+        Modal::Help,
+        Modal::Session,
+        Modal::Sessions,
+        Modal::Tools,
+        Modal::Mcp,
+        Modal::Permissions,
+        Modal::Activity,
+        Modal::Question,
+        Modal::Permission,
+        Modal::InputInjection,
+        Modal::ProviderTemplate,
+    ];
+    for m in not_owns {
+        assert!(!m.owns_caret(), "{m:?} must not own the caret");
+    }
 }

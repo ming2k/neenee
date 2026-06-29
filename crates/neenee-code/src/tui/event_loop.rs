@@ -36,7 +36,7 @@ use crate::tui::selection::{
 };
 use crate::tui::step_interaction::StepKind;
 use crate::tui::versioned::Versioned;
-use crate::tui::{ActivityTab, App, Modal, Recess};
+use crate::tui::{ActivityTab, App, CaretOwner, Modal, Recess};
 
 use neenee_core::AgentResponse;
 use tokio::sync::{Mutex, broadcast};
@@ -102,6 +102,11 @@ pub(super) struct UiRuntime {
     /// the first `QuerySessionContext` round-trip completes. The modal renders
     /// a lightweight placeholder while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
+    /// Live nudge config snapshot, mirrored from
+    /// `AgentResponse::NudgeConfigUpdated`. The `/config` modal reads this
+    /// each frame; edits go out as `AgentRequest::UpdateNudgeConfig` and the
+    /// reply updates this cell.
+    pub nudge_config: Arc<Mutex<neenee_core::NudgeConfig>>,
     /// Unified task list, mirrored from `AgentResponse::TodosUpdated`. The
     /// render loop copies it into `App::todos` each frame so the Activity
     /// modal stays in sync with the agent's state.
@@ -350,6 +355,7 @@ pub(super) async fn run_app_loop(
             app.unattended = harness.unattended;
             app.activity_status = runtime.activity_status.lock().await.clone();
             app.session_context = runtime.session_context.lock().await.clone();
+            app.nudge_config = *runtime.nudge_config.lock().await;
             app.todos = runtime.todos.lock().await.clone();
             app.turn_count = *runtime.turn_count.lock().await;
             app.current_round = *runtime.current_round.lock().await;
@@ -599,65 +605,65 @@ pub(super) async fn run_app_loop(
         // paste), so a per-frame counter would make the breathing speed up and
         // stutter with input activity instead of holding a steady cadence.
 
-        // ── Immediate cursor sync (IME correctness) ─────────────────────────
+        // ── Cursor ownership & IME anchor ───────────────────────────────────
         // The terminal cursor is what the host terminal's IME anchors its
-        // composition window to, and the IME samples it the instant a keystroke
-        // arrives — *before* the next frame is rendered. If we only reposition
-        // the cursor as a per-frame side effect of drawing, there is a one-frame
-        // window in which the caret's logical position (from the keystroke) and
-        // its physical position (last frame) disagree, so the IME window drifts.
+        // composition window to. `App::caret_owner` / `App::caret_visible` are
+        // the single source of truth for which surface holds it and whether it
+        // is visible; every cursor decision below derives from them. No site
+        // re-derives visibility from raw fields — that is what previously let
+        // the cursor stay visible (and the IME anchored to a stale coordinate)
+        // on states that own no caret at all: a focused transcript step (e.g.
+        // clicking a disclosure mid-composition), an envoy zoom, or a
+        // read-only / decision modal.
+        let caret_owner = app.caret_owner();
+        let caret_visible = app.caret_visible();
+
+        // Immediate cursor sync (IME correctness): the IME samples the cursor
+        // the instant a keystroke arrives — *before* the next frame is
+        // rendered. If we only reposition as a per-frame side effect of
+        // drawing, there is a one-frame window in which the caret's logical
+        // and physical positions disagree, so the IME window drifts. Whenever
+        // input handling moved the caret, sync the backend's cursor *now*, in
+        // the same iteration, using the last-known composer rect (refreshed
+        // every draw). This closes the lag window to zero; the coordinates
+        // come from the same pure function the draw path uses, so the
+        // immediate value and the rendered value can never diverge.
         //
-        // The fix: whenever input handling moved the caret, sync the backend's
-        // cursor *now*, in the same iteration, using the last-known composer
-        // rect (refreshed every draw). This closes the lag window to zero. The
-        // coordinates come from the same pure function the draw path uses, so
-        // the immediate value and the rendered value can never diverge.
-        //
-        // This runs whether or not a full draw follows: a full draw will
-        // re-place the cursor anyway (and refresh `last_input_rect`), but doing
-        // it here first means the IME — which reads the cursor on its own
-        // schedule — never observes the stale position even on a draw frame.
-        //
-        // Cursor visibility is a state transition, not a per-frame guess: the
-        // only thing that hides the terminal cursor is an active text selection
-        // (a block cursor would clash with the selection background). Modals
-        // own their own caret via the draw closure's `set_cursor_position`, so
-        // they keep the cursor visible. Resolving show/hide here, at the same
-        // moment we (re)position, means the IME never samples a hide↔show edge
-        // at a coordinate that no longer matches the visible text.
-        let composer_owns_caret = app.active_modal == Modal::None
-            && !app.in_envoy_view()
-            && app.focused_target.is_none();
-        let cursor_should_hide = app.selection.is_active();
+        // Only the composer's caret is repositioned here, and only when it is
+        // actually visible (a selection hides it). A caret-owning modal places
+        // its own cursor via the draw closure's `set_cursor_position`, so a
+        // pending flag set while the composer didn't own the caret is consumed
+        // without action (it is stale by definition once ownership returns —
+        // the next real keystroke re-arms it).
         if app.cursor_sync_pending {
             app.cursor_sync_pending = false;
-            // Only the composer's caret is repositioned here. When a modal or
-            // envoy view owns the caret it places its own cursor via the draw
-            // closure, so a pending flag set while the composer didn't own the
-            // caret is consumed without action (it is stale by definition once
-            // ownership returns — the next real keystroke re-arms it).
-            if composer_owns_caret && !cursor_should_hide {
-                // Keystroke moved the caret: re-anchor the terminal cursor at
-                // the new logical position before the frame is drawn.
-                if let Some((x, y)) = render::cursor_screen_pos(
+            if caret_visible
+                && caret_owner == CaretOwner::Composer
+                && let Some((x, y)) = render::cursor_screen_pos(
                     app.last_input_rect,
                     &app.input,
                     app.byte_cursor(),
                     &mut app.input_scroll,
-                ) {
-                    let _ = terminal.backend().show_cursor_at(x, y);
-                    let _ = std::io::Write::flush(terminal.backend().writer());
-                }
+                )
+            {
+                let _ = terminal.backend().show_cursor_at(x, y);
+                let _ = std::io::Write::flush(terminal.backend().writer());
             }
         }
-        if cursor_should_hide != app.cursor_hidden {
-            if cursor_should_hide {
-                let _ = terminal.hide_cursor();
-            } else {
+
+        // Hide/show is a state transition, not a per-frame guess: emit the
+        // escape codes only when the desired visibility differs from what we
+        // last told the terminal, so there is no per-frame flicker. Resolving
+        // it here — at the same moment we (re)position — means the IME never
+        // samples a hide↔show edge at a coordinate that no longer matches a
+        // visible caret.
+        if caret_visible != app.cursor_visible {
+            if caret_visible {
                 let _ = terminal.show_cursor();
+            } else {
+                let _ = terminal.hide_cursor();
             }
-            app.cursor_hidden = cursor_should_hide;
-            app.cursor_visible = !cursor_should_hide;
+            app.cursor_visible = caret_visible;
         }
 
         // Draw frame (skipped when nothing changed — see `needs_draw`).
@@ -761,6 +767,7 @@ pub(super) async fn run_app_loop(
                         focused_target: chrome_interactive.then_some(app.focused_target).flatten(),
                         logo: app.logo.as_deref(),
                         theme: &app.theme,
+                        layout: app.transcript_layout,
                         height_cache: Some(&mut height_cache),
                     },
                 );
@@ -780,7 +787,7 @@ pub(super) async fn run_app_loop(
                 // The permission sheet takes over the hint line as well as the
                 // input box, so suppress the hint bar while it is open.
                 if !chrome_hidden && hint_rect.height > 0 && app.active_modal != Modal::Permission {
-                    render::draw_hint_bar(
+                    app.hint_context_rect = render::draw_hint_bar(
                         f,
                         hint_rect,
                         render::HintBarView {
@@ -793,6 +800,8 @@ pub(super) async fn run_app_loop(
                         },
                         &app.theme,
                     );
+                } else {
+                    app.hint_context_rect = None;
                 }
 
                 // The input box is only shown when no overlay modal is open. The
@@ -856,10 +865,17 @@ pub(super) async fn run_app_loop(
                         // user can see at a glance that the next keypress targets
                         // the step, not the input box. Typing into the box clears
                         // the focus and re-brightens it immediately.
+                        //
+                        // `show_caret` comes straight from the single source of
+                        // truth (`App::caret_visible`): in this branch the composer
+                        // is the only possible caret surface (the caret-owning
+                        // modals are handled by the `skip` branch above, and envoy
+                        // zoom is excluded by the `!in_envoy_view` gate), so
+                        // `caret_visible` reduces to "no step focus, no selection"
+                        // — exactly the old hand-rolled condition, without the risk
+                        // of drifting from the hide/show state machine.
                         let step_focused = app.focused_target.is_some();
-                        let show_caret = !step_focused
-                            && app.active_modal == Modal::None
-                            && !app.selection.is_active();
+                        let show_caret = app.caret_visible();
                         render::draw_composer(
                             f,
                             input_rect,
@@ -1026,52 +1042,46 @@ pub(super) async fn run_app_loop(
                             &app.theme,
                         ))
                     }
+                    Modal::ProviderTemplate => Some(render::draw_provider_template_chooser(
+                        app.template_choice,
+                        f,
+                        &app.theme,
+                    )),
                     Modal::CustomProvider => {
                         let editing = app.custom_is_editing();
-                        let protocol_label = crate::tui::CUSTOM_PROTOCOLS
-                            .get(app.custom_protocol as usize)
-                            .map(|(label, _)| *label)
-                            .unwrap_or("OpenAI-compatible");
+                        let title = if editing {
+                            format!("Edit · {}", app.custom_name)
+                        } else {
+                            crate::tui::provider_template_label_for(&app.custom_protocol_wire)
+                        };
                         let model_display = if app.custom_model.is_empty() {
                             "—".to_string()
                         } else {
                             crate::tui::model_display_name(&app.custom_model)
                         };
-                        // Suggestion dropdown for the focused filter field.
-                        let (suggestions, suggest_title): (Vec<String>, &str) =
-                            match app.custom_field {
-                                1 => (
-                                    app.custom_protocol_suggestions()
-                                        .iter()
-                                        .filter_map(|&i| {
-                                            crate::tui::CUSTOM_PROTOCOLS
-                                                .get(i as usize)
-                                                .map(|(l, _)| l.to_string())
-                                        })
-                                        .collect(),
-                                    "Protocol",
-                                ),
-                                4 => (
-                                    app.custom_model_suggestions()
-                                        .iter()
-                                        .map(|v| crate::tui::model_display_name(v))
-                                        .collect(),
-                                    "Model",
-                                ),
-                                _ => (Vec::new(), ""),
+                        // Suggestion dropdown for the Model filter field.
+                        let suggestions: Vec<String> =
+                            if app.current_custom_field() == Some(crate::tui::CustomField::Model) {
+                                app.custom_model_suggestions()
+                                    .iter()
+                                    .map(|v| crate::tui::model_display_name(v))
+                                    .collect()
+                            } else {
+                                Vec::new()
                             };
                         Some(render::draw_custom_provider_editor(
                             render::CustomEditorView {
+                                fields: &app.custom_fields,
                                 field: app.custom_field,
                                 editing,
+                                title: &title,
                                 name_buf: &app.custom_name,
                                 base_url_buf: &app.custom_base_url,
                                 token_buf: &app.custom_token,
-                                protocol_label,
                                 model_display: &model_display,
+                                url_hint: &app.custom_url_hint,
                                 suggestions: &suggestions,
                                 suggest_index: app.custom_suggest_index,
-                                suggest_title,
                                 input: &app.input,
                                 cursor_position: app.cursor_position,
                             },
@@ -1121,6 +1131,21 @@ pub(super) async fn run_app_loop(
                         &mut app.session_scroll,
                         &app.theme,
                     )),
+                    Modal::TokenReport => {
+                        // Snapshot the shared ledger; render an empty report
+                        // when no ledger is installed (tests).
+                        let report = app
+                            .token_ledger
+                            .as_ref()
+                            .map(|l| l.snapshot())
+                            .unwrap_or_default();
+                        Some(render::draw_token_report_modal(
+                            f,
+                            &report,
+                            &mut app.token_report_scroll,
+                            &app.theme,
+                        ))
+                    }
                     Modal::Tools => Some(render::draw_tools_modal(
                         f,
                         app.session_context.as_ref(),
@@ -1142,6 +1167,28 @@ pub(super) async fn run_app_loop(
                         app.session_context.as_ref(),
                         app.modal_index,
                         &mut app.permissions_scroll,
+                        &app.theme,
+                    )),
+                    Modal::Config => Some(render::draw_config_modal(
+                        f,
+                        app.modal_index,
+                        &mut app.config_scroll,
+                        &app.theme,
+                    )),
+                    Modal::ConfigNudge => Some(render::draw_config_nudge_modal(
+                        f,
+                        &app.nudge_config,
+                        app.modal_index
+                            .min(crate::tui::render::overlays::config_nudge::ROW_COUNT - 1),
+                        &mut app.config_scroll,
+                        &app.theme,
+                    )),
+                    Modal::ConfigLayout => Some(render::draw_config_layout_modal(
+                        f,
+                        app.transcript_layout,
+                        app.modal_index
+                            .min(crate::tui::render::overlays::config_layout::ROW_COUNT - 1),
+                        &mut app.config_scroll,
                         &app.theme,
                     )),
                     Modal::Activity => {
@@ -1587,9 +1634,9 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::ProviderPickerActivate => {
                     if app.active_modal == Modal::Provider && app.picker_on_add_row() {
-                        // Stage-1 "＋ Add provider" row: open the custom-provider
-                        // editor instead of activating a provider.
-                        app.open_custom_provider_editor();
+                        // Stage-1 "＋ Add provider" row: open the template chooser
+                        // instead of activating a provider.
+                        app.open_provider_template_chooser();
                     } else if app.active_modal == Modal::Provider && app.picker_on_add_model_row() {
                         // Stage-2 "＋ Add model" row (custom provider only): open the
                         // add-model overlay for the drilled-into provider.
@@ -1605,12 +1652,18 @@ pub(super) async fn run_app_loop(
                         // provider drills to stage 2; a single-model one activates
                         // its only model. Stage 2: the row pins an exact model.
                         enum Act {
-                            Drill { row_idx: usize, id: String },
-                            Activate { id: String, model: String, key_ready: bool },
+                            Drill {
+                                row_idx: usize,
+                                id: String,
+                            },
+                            Activate {
+                                id: String,
+                                model: String,
+                                key_ready: bool,
+                            },
                         }
-                        let key_ready = |app: &App, id: &str| {
-                            app.key_status.get(id).copied().unwrap_or(true)
-                        };
+                        let key_ready =
+                            |app: &App, id: &str| app.key_status.get(id).copied().unwrap_or(true);
                         let act = if app.picker_provider.is_some() {
                             let rows = app.provider_models_filtered();
                             rows.get(app.modal_index)
@@ -1714,8 +1767,7 @@ pub(super) async fn run_app_loop(
                         app.model_scroll = 0;
                         app.model_modal_follow = true;
                         let rows = app.providers_filtered();
-                        app.modal_index =
-                            rows.iter().position(|r| r.row_idx == idx).unwrap_or(0);
+                        app.modal_index = rows.iter().position(|r| r.row_idx == idx).unwrap_or(0);
                     }
                 }
                 input::InputAction::CustomProviderNextField => {
@@ -1733,6 +1785,34 @@ pub(super) async fn run_app_loop(
                         app.move_custom_suggestion(forward);
                     }
                 }
+                input::InputAction::MoveProviderTemplate { forward } => {
+                    if app.active_modal == Modal::ProviderTemplate {
+                        app.move_template_choice(forward);
+                    }
+                }
+                input::InputAction::SelectProviderTemplate => {
+                    // Open the editor seeded from the highlighted template.
+                    if app.active_modal == Modal::ProviderTemplate
+                        && let Some(template) =
+                            crate::tui::PROVIDER_TEMPLATES.get(app.template_choice)
+                    {
+                        app.open_custom_provider_editor(template);
+                    }
+                }
+                input::InputAction::CancelProviderTemplate => {
+                    // Return to the provider picker (stage 1) the chooser was
+                    // opened from; the chat draft stays parked in stashed_input.
+                    if app.active_modal == Modal::ProviderTemplate {
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.active_modal = Modal::Provider;
+                        app.picker_provider = None;
+                        app.model_search = false;
+                        app.model_scroll = 0;
+                        app.model_modal_follow = true;
+                        app.modal_index = 0;
+                    }
+                }
                 input::InputAction::MoveAddModel { forward } => {
                     if app.active_modal == Modal::AddModel {
                         app.move_add_model(forward);
@@ -1744,10 +1824,9 @@ pub(super) async fn run_app_loop(
                         if let (Some(provider_id), false) =
                             (app.add_model_provider.clone(), model.is_empty())
                         {
-                            let _ = app.tx.send(AgentRequest::AddProviderModel {
-                                provider_id,
-                                model,
-                            });
+                            let _ = app
+                                .tx
+                                .send(AgentRequest::AddProviderModel { provider_id, model });
                         }
                         // Return to the stage-2 model list; the fresh snapshot
                         // will include the new model next frame.
@@ -1782,6 +1861,25 @@ pub(super) async fn run_app_loop(
                         }
                     }
                 }
+                input::InputAction::DeleteProvider => {
+                    // Stage-1 `Shift+D`: delete the entire highlighted custom
+                    // provider. Built-in providers and the synthetic "＋ Add
+                    // provider" row are ignored.
+                    if app.active_modal == Modal::Provider && !app.picker_on_add_row() {
+                        let ranked = app.providers_filtered();
+                        if let Some(row) =
+                            ranked.get(app.modal_index).or_else(|| ranked.first())
+                            && !row.builtin
+                        {
+                            // Return to stage 1 (close any drilled-in stage-2
+                            // view) so the picker lands on a valid row.
+                            app.picker_provider = None;
+                            app.modal_index = app.modal_index.saturating_sub(1);
+                            let _ = app.tx
+                                .send(AgentRequest::DeleteProvider { id: row.id.clone() });
+                        }
+                    }
+                }
                 input::InputAction::CancelCustomProvider => {
                     // Return to the provider picker (stage 1) the editor was
                     // opened from; the chat draft stays parked in stashed_input.
@@ -1803,10 +1901,7 @@ pub(super) async fn run_app_loop(
                         // Commit the focused text field's live value first.
                         app.stash_custom_field();
                         let name = app.custom_name.trim().to_string();
-                        let protocol = crate::tui::CUSTOM_PROTOCOLS
-                            .get(app.custom_protocol as usize)
-                            .map(|(_, wire)| wire.to_string())
-                            .unwrap_or_else(|| "openai".to_string());
+                        let protocol = app.custom_protocol_wire.clone();
                         let base_url = app.custom_base_url.trim().to_string();
                         let api_key = app.custom_token.trim().to_string();
                         if let Some(id) = app.custom_edit_id.clone() {
@@ -1829,9 +1924,17 @@ pub(super) async fn run_app_loop(
                                 app.active_modal = Modal::None;
                             }
                         } else {
-                            // Create mode: name + model required.
-                            let model = app.custom_model.trim().to_string();
-                            if name.is_empty() || model.is_empty() {
+                            // Create mode: the model list comes from the template's
+                            // seeded models, or the single typed Model field when
+                            // the template exposes one (OpenAI-compatible).
+                            let models: Vec<String> =
+                                if app.custom_fields.contains(&crate::tui::CustomField::Model) {
+                                    vec![app.custom_model.trim().to_string()]
+                                } else {
+                                    app.custom_models.clone()
+                                };
+                            let usable = models.iter().any(|m| !m.trim().is_empty());
+                            if name.is_empty() || !usable {
                                 app.load_custom_field();
                             } else {
                                 let _ = app.tx.send(AgentRequest::AddProvider {
@@ -1839,7 +1942,7 @@ pub(super) async fn run_app_loop(
                                     protocol,
                                     base_url,
                                     api_key,
-                                    model,
+                                    models,
                                 });
                                 app.input = std::mem::take(&mut app.stashed_input);
                                 app.set_cursor_end();
@@ -1922,13 +2025,8 @@ pub(super) async fn run_app_loop(
                                 let (name, protocol, base_url) = row
                                     .map(|r| (r.name, r.protocol, r.base_url))
                                     .unwrap_or_default();
-                                let protocol_idx = crate::tui::CUSTOM_PROTOCOLS
-                                    .iter()
-                                    .position(|(_, wire)| *wire == protocol)
-                                    .unwrap_or(0)
-                                    as u8;
                                 app.model_search = false;
-                                app.open_edit_provider_editor(id, name, protocol_idx, base_url);
+                                app.open_edit_provider_editor(id, name, protocol, base_url);
                             }
                         }
                     }
@@ -2145,6 +2243,80 @@ pub(super) async fn run_app_loop(
                     app.session_modal_follow = true;
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
+                input::InputAction::OpenConfig => {
+                    // The config manager modal. Reached via `/config`
+                    // (intercepted locally, never sent to the backend). Lists
+                    // the configurable categories; selecting one drills into
+                    // its sub-page.
+                    app.active_modal = Modal::Config;
+                    app.modal_index = 0;
+                    app.config_scroll = 0;
+                }
+                input::InputAction::ConfigActivate => {
+                    // Drill into the selected config category's sub-page.
+                    // Index matches `categories()` order in config.rs
+                    // (0 = Nudge, 1 = Layout).
+                    match app.modal_index {
+                        0 => {
+                            app.active_modal = Modal::ConfigNudge;
+                            app.modal_index = 0;
+                            app.config_scroll = 0;
+                        }
+                        1 => {
+                            app.active_modal = Modal::ConfigLayout;
+                            app.modal_index = match app.transcript_layout {
+                                crate::tui::render::layout::Strategy::Compact => 0,
+                                crate::tui::render::layout::Strategy::RoundBand => 1,
+                            };
+                            app.config_scroll = 0;
+                        }
+                        _ => {}
+                    }
+                }
+                input::InputAction::ConfigBack => {
+                    // Return from a config sub-page to the config root.
+                    app.active_modal = Modal::Config;
+                    app.modal_index = 0;
+                    app.config_scroll = 0;
+                }
+                input::InputAction::ConfigLayoutApply => {
+                    // Apply the selected layout strategy. Persisted to
+                    // config.toml by the harness; the optimistic local update
+                    // makes the live transcript switch immediately, and the
+                    // `TuiLayoutUpdated` reply re-seeds the authoritative value.
+                    if let Some(value) =
+                        crate::tui::render::overlays::config_layout::config_value_at(
+                            app.modal_index,
+                        )
+                    {
+                        app.transcript_layout =
+                            crate::tui::render::layout::Strategy::from_config(value);
+                        let _ = app
+                            .tx
+                            .send(AgentRequest::UpdateTuiLayout(value.to_string()));
+                    }
+                }
+                input::InputAction::ConfigNudgeToggle => {
+                    // Only the `enabled` row (index 0) is toggled by Space.
+                    if app.modal_index == crate::tui::render::overlays::config_nudge::ROW_ENABLED {
+                        let mut cfg = app.nudge_config;
+                        cfg.enabled = !cfg.enabled;
+                        let _ = app.tx.send(AgentRequest::UpdateNudgeConfig(cfg));
+                    }
+                }
+                input::InputAction::ConfigNudgeAdjust { delta } => {
+                    // Adjust the selected threshold by `delta` (±1). The
+                    // `enabled` row (index 0) is not a threshold; it is
+                    // toggled with Space, so ←/→ is a no-op there.
+                    let row = app.modal_index;
+                    if row != crate::tui::render::overlays::config_nudge::ROW_ENABLED {
+                        let mut cfg = app.nudge_config;
+                        crate::tui::render::overlays::config_nudge::apply_threshold_delta(
+                            &mut cfg, row, delta,
+                        );
+                        let _ = app.tx.send(AgentRequest::UpdateNudgeConfig(cfg));
+                    }
+                }
                 input::InputAction::McpToggle => {
                     // Connect/disconnect the selected server for the session.
                     // The "enabled intent" is the inverse of its disabled flag;
@@ -2317,6 +2489,8 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::Question {
                         app.question_modal_follow = false;
                         app.question_scroll = app.question_scroll.saturating_sub(1);
+                    } else if app.active_modal == Modal::TokenReport {
+                        app.token_report_scroll = app.token_report_scroll.saturating_sub(1);
                     } else {
                         // While a permission sheet is open the transcript stays
                         // scrollable, so the wheel / page keys drive the
@@ -2347,6 +2521,8 @@ pub(super) async fn run_app_loop(
                     } else if app.active_modal == Modal::Question {
                         app.question_modal_follow = false;
                         app.question_scroll = app.question_scroll.saturating_add(1);
+                    } else if app.active_modal == Modal::TokenReport {
+                        app.token_report_scroll = app.token_report_scroll.saturating_add(1);
                     } else {
                         app.pin_summary_line = None;
                         app.scroll = app.scroll.saturating_add(4).min(app.max_scroll);
@@ -2888,9 +3064,24 @@ pub(super) async fn run_app_loop(
                             app.modal_index - 1
                         };
                     }
+                    Modal::Config => {
+                        // Config root: cycle down through the category list.
+                        // Count matches `categories()` in config.rs.
+                        let count = 2usize;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::ConfigNudge => {
+                        let count = crate::tui::render::overlays::config_nudge::ROW_COUNT;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::ConfigLayout => {
+                        let count = crate::tui::render::overlays::config_layout::ROW_COUNT;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::ProviderTemplate
                     | Modal::CustomProvider
                     | Modal::AddModel
                     | Modal::InputInjection
@@ -2898,6 +3089,7 @@ pub(super) async fn run_app_loop(
                     | Modal::Tools
                     | Modal::Mcp
                     | Modal::Activity
+                    | Modal::TokenReport
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
@@ -2931,9 +3123,24 @@ pub(super) async fn run_app_loop(
                             .max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                     }
+                    Modal::Config => {
+                        // Config root: cycle down through the category list.
+                        // Count matches `categories()` in config.rs.
+                        let count = 2usize;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::ConfigNudge => {
+                        let count = crate::tui::render::overlays::config_nudge::ROW_COUNT;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
+                    Modal::ConfigLayout => {
+                        let count = crate::tui::render::overlays::config_layout::ROW_COUNT;
+                        app.modal_index = (app.modal_index + 1) % count;
+                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::ProviderTemplate
                     | Modal::CustomProvider
                     | Modal::AddModel
                     | Modal::InputInjection
@@ -2941,6 +3148,7 @@ pub(super) async fn run_app_loop(
                     | Modal::Tools
                     | Modal::Mcp
                     | Modal::Activity
+                    | Modal::TokenReport
                     | Modal::None => {}
                 },
                 input::InputAction::QuestionUp => {
@@ -3177,6 +3385,19 @@ pub(super) async fn run_app_loop(
                         app.activity_tab = ActivityTab::Activity;
                         app.modal_index = 0;
                         app.activity_scroll = 0;
+                        app.selection = SelectionState::None;
+                        app.focused_target = None;
+                        app.drag.cancel();
+                    } else if app.active_modal == Modal::None
+                        && app.hint_context_rect.is_some_and(|r| {
+                            r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+                        })
+                    {
+                        // Click on the context meter in the hint bar → token
+                        // source report modal.
+                        app.active_modal = Modal::TokenReport;
+                        app.modal_index = 0;
+                        app.token_report_scroll = 0;
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();

@@ -500,26 +500,13 @@ impl SessionStore {
     /// in the same project never share a mutable file. To continue a previous
     /// session the caller picks one via the `/sessions` picker or
     /// [`Self::open`] / [`Self::resume`].
-    ///
-    /// On the first launch after the upgrade the legacy project-root
-    /// `session.json` + `events.jsonl` are lazily migrated into
-    /// `sessions/<legacy-id>.*` under a per-project lock, and the older flat
-    /// `data_dir/sessions/*.json` layout is migrated by
-    /// [`migrate_flat_sessions_to_project_buckets`].
     pub fn load_for_project(project_root: PathBuf) -> Self {
         let dirs = paths::get();
-        let project_dir = dirs.project_dir(&project_root);
         let sessions_dir = dirs.project_sessions_dir(&project_root);
         if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
             tracing::warn!(error = %e, "could not create project sessions dir");
         }
         let blob_store = BlobStore::new(dirs.blobs_dir());
-        // Lazy one-shot migrations. The flat-layout migration is global and
-        // idempotent (guarded by a marker file); the per-bucket active→sessions
-        // migration is guarded by a per-project flock so concurrent first-time
-        // starts do not race it.
-        let _ = migrate_flat_sessions_to_project_buckets(&dirs, &blob_store);
-        migrate_legacy_active_to_sessions(&project_dir, &sessions_dir, &blob_store);
 
         Self::pin_fresh(project_root, sessions_dir, blob_store)
     }
@@ -1773,197 +1760,13 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-/// One-shot migration of a project bucket's legacy "active" files into the
-/// per-session layout. Pre-ADR-0018 a bucket kept `session.json` (the active
-/// snapshot) and `events.jsonl` (the active log) at its root, plus archived
-/// branches under `sessions/<id>.json`. ADR-0018 retires the shared active
-/// pointer: every session lives at `sessions/<id>.json` + `sessions/<id>.jsonl`.
-///
-/// This moves the legacy root `session.json` → `sessions/<legacy-id>.json` and
-/// `events.jsonl` → `sessions/<legacy-id>.jsonl`, leaving the archived
-/// `sessions/*.json` snapshots where they are (their event logs are seeded
-/// lazily by `load_or_seed` when first opened). It is guarded by a
-/// per-project `flock` on `sessions.lock` so two instances starting for the
-/// first time cannot race the move: the second waits, then sees the root
-/// files gone and no-ops. Fully idempotent and best-effort — a failed move is
-/// logged and skipped, never fatal.
-pub fn migrate_legacy_active_to_sessions(
-    project_dir: &std::path::Path,
-    sessions_dir: &std::path::Path,
-    blob_store: &BlobStore,
-) {
-    let legacy_active = project_dir.join("session.json");
-    let legacy_log = project_dir.join("events.jsonl");
-    if !legacy_active.exists() && !legacy_log.exists() {
-        return;
-    }
-    if let Err(e) = fs::create_dir_all(sessions_dir) {
-        tracing::warn!(error = %e, "could not create sessions dir for migration");
-        return;
-    }
-    // Serialise concurrent first-time starts. Blocking flock; the window is
-    // one rename pair, so waiting is correct and cheap.
-    let lock_path = project_dir.join("sessions.lock");
-    let _lock = match crate::fsutil::FileLock::acquire(&lock_path) {
-        Ok(guard) => guard,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not acquire migration lock; skipping");
-            return;
-        }
-    };
-
-    // Re-check under the lock: a concurrent instance may have just migrated.
-    if !legacy_active.exists() && !legacy_log.exists() {
-        return;
-    }
-
-    // Resolve the legacy session id so the moved files keep their identity.
-    // Parse from the snapshot when present; otherwise mint a fresh id so the
-    // log is not orphaned.
-    let id = fs::read_to_string(&legacy_active)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<SessionData>(&raw).ok())
-        .map(|data| {
-            if data.id.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                data.id
-            }
-        })
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    let dest_snapshot = sessions_dir.join(format!("{id}.json"));
-    let dest_log = sessions_dir.join(format!("{id}.jsonl"));
-
-    if legacy_active.exists() && !dest_snapshot.exists() {
-        // Re-write through `write_session_file` so the moved snapshot gets a
-        // fresh checksum (the legacy file may predate checksumming). Falls
-        // back to a plain rename when the snapshot cannot be parsed.
-        let moved = fs::read_to_string(&legacy_active)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<SessionData>(&raw).ok())
-            .map(|data| write_session_file(&dest_snapshot, &data, blob_store).is_ok())
-            .unwrap_or_else(|| fs::rename(&legacy_active, &dest_snapshot).is_ok());
-        if moved {
-            let _ = fs::remove_file(&legacy_active);
-        }
-    }
-    if legacy_log.exists() && !dest_log.exists() {
-        let _ = fs::rename(&legacy_log, &dest_log);
-    }
-}
-
-/// One-shot migration from the Phase 1 flat `data_dir/sessions/<uuid>.json`
-/// layout to the Phase 2 per-project buckets `data_dir/projects/<hash>/...`.
-///
-/// Idempotent: a marker file (`data_dir/.migrated-v3`) is written on success
-/// and prevents re-running. Each legacy archive is routed to the bucket of its
-/// own `project_root` field (defaulting to the current cwd when missing, which
-/// matches the `SessionData::default` semantic for legacy snapshots). Files
-/// already present at the destination are not overwritten.
-///
-/// Errors are logged but non-fatal — the worst case is some legacy sessions
-/// remaining in the flat directory, still readable on rollback to Phase 1.
-pub fn migrate_flat_sessions_to_project_buckets(
-    dirs: &paths::Dirs,
-    blob_store: &BlobStore,
-) -> Result<(), String> {
-    let marker = dirs.data_dir.join(".migrated-v3");
-    if marker.exists() {
-        return Ok(());
-    }
-    let legacy_active = dirs.data_dir.join("session.json");
-    let legacy_archive = dirs.legacy_sessions_dir();
-    if !legacy_active.exists() && !legacy_archive.is_dir() {
-        // Fresh install or already migrated. Stamp the marker.
-        let _ = fsutil::atomic_write_bytes(&marker, b"nothing-to-migrate\n");
-        return Ok(());
-    }
-
-    let route =
-        |raw: &str, fallback_root: &std::path::Path| -> Option<(std::path::PathBuf, SessionData)> {
-            let data: SessionData = serde_json::from_str(raw).ok()?;
-            let root = if data.project_root.as_os_str().is_empty() {
-                fallback_root.to_path_buf()
-            } else {
-                data.project_root.clone()
-            };
-            Some((dirs.project_dir(&root), data))
-        };
-
-    let mut migrated = 0usize;
-
-    // 1. Legacy active session.json → its own bucket (becomes that bucket's active).
-    if let Ok(raw) = fs::read_to_string(&legacy_active) {
-        match route(&raw, &default_project_root()) {
-            Some((dest_dir, data)) => {
-                let dest = dest_dir.join("session.json");
-                if !dest.exists() {
-                    let _ = fs::create_dir_all(dest_dir.join("sessions"));
-                    if write_session_file(&dest, &data, blob_store).is_ok() {
-                        migrated += 1;
-                    }
-                }
-            }
-            None => {
-                let parse_err = serde_json::from_str::<SessionData>(&raw)
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                tracing::warn!(error = %parse_err, "could not route legacy active session");
-            }
-        }
-    }
-
-    // 2. Legacy archives → their own bucket's sessions/ subdir.
-    if let Ok(entries) = fs::read_dir(&legacy_archive) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(raw) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Some((dest_dir, data)) = route(&raw, &default_project_root()) else {
-                tracing::warn!(path = %path.display(), "could not route legacy archive");
-                continue;
-            };
-            let dest = dest_dir.join("sessions").join(format!("{}.json", data.id));
-            if dest.exists() {
-                continue;
-            }
-            let _ = fs::create_dir_all(dest.parent().unwrap_or(&dest_dir));
-            if write_session_file(&dest, &data, blob_store).is_ok() {
-                migrated += 1;
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-
-    tracing::info!(migrated, "migrated legacy flat sessions to project buckets");
-    let _ = fsutil::atomic_write_bytes(
-        &marker,
-        format!(
-            "migrated-at-{}\n",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        )
-        .as_bytes(),
-    );
-    Ok(())
-}
-
-/// Diagnostic scan of stored session files. When `project_root` is `None` every
-/// project bucket and the legacy flat archive are inspected; when supplied only
-/// that project's bucket is checked. Prints one line per file and a summary.
+/// Diagnostic scan of stored session files. When `project_root` is `None`
+/// every project bucket is inspected; when supplied only that project's bucket
+/// is checked. Prints one line per file and a summary.
 pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), String> {
     struct Report {
         examined: usize,
         corrupt: usize,
-        legacy: usize,
     }
 
     impl Report {
@@ -2009,9 +1812,8 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
 
     fn scan_bucket(path: &std::path::Path, report: &mut Report) {
         // ADR-0018: every session lives under `sessions/<id>.json` with its
-        // matching `<id>.jsonl` log. A stray pre-migration root `session.json`
-        // is still inspected if present (it should have been migrated on the
-        // first post-0018 start, but doctor must report it either way).
+        // matching `<id>.jsonl` log. A stray root `session.json` (left by an
+        // older layout) is still reported so the operator can spot it.
         let legacy_active = path.join("session.json");
         if legacy_active.exists() {
             inspect(&legacy_active, report);
@@ -2038,7 +1840,6 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
     let mut report = Report {
         examined: 0,
         corrupt: 0,
-        legacy: 0,
     };
 
     if let Some(root) = project_root {
@@ -2052,25 +1853,10 @@ pub async fn run_doctor(project_root: Option<&std::path::Path>) -> Result<(), St
                 }
             }
         }
-        if dirs.legacy_sessions_dir().is_dir()
-            && let Ok(entries) = fs::read_dir(dirs.legacy_sessions_dir())
-        {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                report.legacy += 1;
-                inspect(&path, &mut report);
-            }
-        }
     }
 
     println!("---");
-    println!(
-        "examined: {}, corrupt: {}, legacy flat archives: {}",
-        report.examined, report.corrupt, report.legacy
-    );
+    println!("examined: {}, corrupt: {}", report.examined, report.corrupt);
     Ok(())
 }
 
@@ -2316,92 +2102,6 @@ mod tests {
             assert!(alpha_sessions.iter().all(|s| !s.overview.contains("beta")));
             let beta_sessions = reloaded_b.list().await.unwrap();
             assert!(beta_sessions.iter().all(|s| !s.overview.contains("alpha")));
-
-            paths::set_test_default(None);
-            let _ = std::fs::remove_dir_all(root);
-        });
-    }
-
-    #[tokio::test]
-    async fn migrate_flat_sessions_buckets_by_project_root() {
-        locked!({
-            let root =
-                std::env::temp_dir().join(format!("neenee-flat-migrate-{}", uuid::Uuid::new_v4()));
-            let dirs = paths::Dirs::resolve(&paths::PathsOverride {
-                data_dir: Some(root.join("data")),
-                state_dir: Some(root.join("state")),
-                config_dir: Some(root.join("config")),
-                cache_dir: Some(root.join("cache")),
-            });
-            dirs.ensure().unwrap();
-            paths::set_test_default(Some(dirs.clone()));
-
-            let legacy_dir = dirs.legacy_sessions_dir();
-            std::fs::create_dir_all(&legacy_dir).unwrap();
-            let alpha_active = SessionData {
-                project_root: PathBuf::from("/projects/alpha"),
-                ..SessionData::default()
-            };
-            let alpha_active_id = alpha_active.id.clone();
-            fsutil::atomic_write_json(&dirs.data_dir.join("session.json"), &alpha_active).unwrap();
-            let alpha_archive = SessionData {
-                id: "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
-                project_root: PathBuf::from("/projects/alpha"),
-                ..SessionData::default()
-            };
-            let beta_archive = SessionData {
-                id: "bbbbbbbb-0000-0000-0000-000000000002".to_string(),
-                project_root: PathBuf::from("/projects/beta"),
-                ..SessionData::default()
-            };
-            fsutil::atomic_write_json(
-                &legacy_dir.join(format!("{}.json", alpha_archive.id)),
-                &alpha_archive,
-            )
-            .unwrap();
-            fsutil::atomic_write_json(
-                &legacy_dir.join(format!("{}.json", beta_archive.id)),
-                &beta_archive,
-            )
-            .unwrap();
-
-            let _ = SessionStore::load_for_project(PathBuf::from("/projects/alpha"));
-
-            let alpha_dir = dirs.project_dir(&PathBuf::from("/projects/alpha"));
-            // ADR-0018: the legacy active session is migrated all the way into
-            // `sessions/<id>.json`, not left at the project-root `session.json`.
-            assert!(
-                alpha_dir
-                    .join("sessions")
-                    .join(format!("{alpha_active_id}.json"))
-                    .exists()
-            );
-            assert!(!alpha_dir.join("session.json").exists());
-            assert!(
-                alpha_dir
-                    .join("sessions")
-                    .join(format!("{}.json", alpha_archive.id))
-                    .exists()
-            );
-            let beta_dir = dirs.project_dir(&PathBuf::from("/projects/beta"));
-            assert!(!beta_dir.join("session.json").exists());
-            assert!(
-                beta_dir
-                    .join("sessions")
-                    .join(format!("{}.json", beta_archive.id))
-                    .exists()
-            );
-            assert!(
-                !legacy_dir
-                    .join(format!("{}.json", alpha_archive.id))
-                    .exists()
-            );
-            assert!(
-                !legacy_dir
-                    .join(format!("{}.json", beta_archive.id))
-                    .exists()
-            );
-            assert!(dirs.data_dir.join(".migrated-v3").exists());
 
             paths::set_test_default(None);
             let _ = std::fs::remove_dir_all(root);
@@ -2733,60 +2433,6 @@ mod tests {
         assert_eq!(recovered[0].content, "rewritten");
 
         let _ = fs::remove_dir_all(directory);
-    }
-
-    #[tokio::test]
-    async fn snapshot_without_event_log_gets_imported() {
-        locked!({
-            let root = std::env::temp_dir()
-                .join(format!("neenee-snapshot-import-{}", uuid::Uuid::new_v4()));
-            let dirs = paths::Dirs::resolve(&paths::PathsOverride {
-                data_dir: Some(root.join("data")),
-                state_dir: Some(root.join("state")),
-                config_dir: Some(root.join("config")),
-                cache_dir: Some(root.join("cache")),
-            });
-            dirs.ensure().unwrap();
-            paths::set_test_default(Some(dirs.clone()));
-
-            let project_root = PathBuf::from("/projects/event-import-test");
-            let project_dir = dirs.project_dir(&project_root);
-            let path = project_dir.join("session.json");
-            std::fs::create_dir_all(&project_dir).unwrap();
-
-            let snapshot = SessionData {
-                id: "00000000-0000-0000-0000-000000000001".to_string(),
-                model_window: vec![Message::new(neenee_core::Role::User, "from snapshot")],
-                ..Default::default()
-            };
-            let blob_store = BlobStore::new(dirs.blobs_dir());
-            write_session_file(&path, &snapshot, &blob_store).unwrap();
-
-            let store = SessionStore::load_for_project(project_root);
-            // ADR-0018: load_for_project pins a fresh session and migrates the
-            // legacy project-root snapshot into sessions/<id>.json. The legacy
-            // content is reached by resuming the migrated id, which also seeds
-            // the per-session event log from the snapshot.
-            let migrated_snapshot = project_dir
-                .join("sessions")
-                .join(format!("{}.json", snapshot.id));
-            assert!(migrated_snapshot.exists(), "legacy snapshot migrated");
-            assert!(!path.exists(), "legacy project-root session.json removed");
-
-            store.resume(Some(&snapshot.id)).await.unwrap();
-            assert_eq!(store.id().await, snapshot.id);
-            assert_eq!(store.model_window().await[0].content, "from snapshot");
-            assert!(
-                project_dir
-                    .join("sessions")
-                    .join(format!("{}.jsonl", snapshot.id))
-                    .exists(),
-                "event log should be seeded from snapshot on resume"
-            );
-
-            paths::set_test_default(None);
-            let _ = std::fs::remove_dir_all(root);
-        });
     }
 
     #[tokio::test]

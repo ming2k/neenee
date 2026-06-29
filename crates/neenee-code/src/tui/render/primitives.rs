@@ -104,6 +104,9 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
         Modal::HistorySearch => fixed(70, 72),
         Modal::Question => fixed(78, 70),
         Modal::ModelEditor => fixed(60, 30),
+        // Provider-template chooser: a short list of templates (label +
+        // description) plus the footer.
+        Modal::ProviderTemplate => fixed(64, 46),
         // Custom-provider editor: tall enough for the form rows plus the
         // type-to-filter suggestion dropdown below them.
         Modal::CustomProvider => fixed(66, 66),
@@ -142,6 +145,51 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
             height: ModalHeight::Content {
                 min_rows: 9,
                 max_viewport_percent: 84,
+            },
+            header: true,
+            footer: true,
+        },
+        // Token-source report: a read-only table (provider/model × reported vs
+        // estimated). Content-sized so it fits a handful of rows compactly.
+        Modal::TokenReport => ModalSpec {
+            width_percent: 66,
+            height: ModalHeight::Content {
+                min_rows: 9,
+                max_viewport_percent: 80,
+            },
+            header: true,
+            footer: true,
+        },
+        // Config root: a short category list. Content-sized so a handful of
+        // rows never shrinks it to a sliver.
+        Modal::Config => ModalSpec {
+            width_percent: 62,
+            height: ModalHeight::Content {
+                min_rows: 8,
+                max_viewport_percent: 80,
+            },
+            header: true,
+            footer: true,
+        },
+        // Nudge sub-page: enabled toggle + 4 threshold rows + a description
+        // header line. Content-sized, slightly taller min so the description
+        // and all 5 rows fit without scrolling in the common case.
+        Modal::ConfigNudge => ModalSpec {
+            width_percent: 66,
+            height: ModalHeight::Content {
+                min_rows: 11,
+                max_viewport_percent: 84,
+            },
+            header: true,
+            footer: true,
+        },
+        // Layout sub-page: a short list of layout strategies (Compact /
+        // Round-band) plus a description line each. Content-sized, compact.
+        Modal::ConfigLayout => ModalSpec {
+            width_percent: 64,
+            height: ModalHeight::Content {
+                min_rows: 9,
+                max_viewport_percent: 80,
             },
             header: true,
             footer: true,
@@ -705,6 +753,7 @@ mod tests {
             Modal::HistorySearch,
             Modal::Question,
             Modal::ModelEditor,
+            Modal::ProviderTemplate,
             Modal::CustomProvider,
             Modal::AddModel,
             Modal::Help,

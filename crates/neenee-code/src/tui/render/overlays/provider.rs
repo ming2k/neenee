@@ -15,7 +15,7 @@ use crate::tui::render::Theme;
 use crate::tui::render::primitives::{
     FooterHint, modal_area, modal_frame, render_body, render_modal_footer,
 };
-use crate::tui::{Modal, RankedModel, RankedProvider};
+use crate::tui::{CustomField, Modal, PROVIDER_TEMPLATES, RankedModel, RankedProvider};
 
 /// Draw the **two-stage** provider/model picker. Mirrors the input-history
 /// modal's two-mode (browse/search) design within each stage:
@@ -179,6 +179,7 @@ pub(crate) fn draw_models_modal(
                 FooterHint::primary("Enter", "select"),
                 FooterHint::secondary("*", "favorite"),
                 FooterHint::secondary("e", "edit"),
+                FooterHint::secondary("D", "delete"),
                 FooterHint::always("Esc", "close"),
             ],
         };
@@ -218,7 +219,9 @@ fn provider_list_body(
     let longest_name = providers.iter().map(|p| p.name.width()).max().unwrap_or(0);
     // Leave room for at least a short suffix; clamp the name column so wide
     // terminals don't push the model far to the right.
-    let name_col = longest_name.clamp(1, avail.saturating_sub(10).max(1)).min(28);
+    let name_col = longest_name
+        .clamp(1, avail.saturating_sub(10).max(1))
+        .min(28);
 
     let header_line = |label: &str| {
         Line::from(Span::styled(
@@ -384,6 +387,7 @@ fn match_set(m: Option<&crate::tui::fuzzy::FuzzyMatch>) -> std::collections::Has
 /// - **Current** (the live provider/model): the name is underlined. This reads
 ///   as "the one that's running" without reserving a fixed glyph column.
 /// - **Favorite**: a `★` star in the warning tone.
+///
 /// When a row is both selected and current, both cues apply (marker + brand
 /// color + underline).
 struct RowGlyphs {
@@ -617,54 +621,119 @@ pub fn draw_add_model_editor(
     area
 }
 
+/// Draw the provider-template chooser: a short list of curated templates (Custom
+/// Anthropic relay / OpenAI-compatible / Gemini). Each row is a label + a muted
+/// one-line description; `↑/↓` move the highlight and Enter opens the editor.
+pub fn draw_provider_template_chooser(
+    selected: usize,
+    frame: &mut Frame,
+    theme: &Theme,
+) -> neenee_tui::Rect {
+    let area = modal_area(frame, Modal::ProviderTemplate)
+        .expect("provider template chooser modal has fixed geometry");
+    let f = modal_frame(frame, area, theme.panel(), true, true);
+
+    if let Some(h) = f.header {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "＋ Add provider".to_string(),
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            h,
+        );
+    }
+
+    let mut body: Vec<Line> = Vec::new();
+    for (i, template) in PROVIDER_TEMPLATES.iter().enumerate() {
+        let (marker, label_style) = if i == selected {
+            (
+                " › ",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("   ", Style::default().fg(theme.fg()))
+        };
+        body.push(Line::from(Span::styled(
+            format!("{marker}{}", template.label),
+            label_style,
+        )));
+        body.push(Line::from(Span::styled(
+            format!("     {}", template.description),
+            Style::default().fg(theme.muted()),
+        )));
+        body.push(Line::from(""));
+    }
+
+    render_body(frame, f.body, body, &mut 0, None, false, theme);
+
+    if let Some(fo) = f.footer {
+        render_modal_footer(
+            frame,
+            fo,
+            &[
+                FooterHint::navigation("↑↓", "choose"),
+                FooterHint::primary("Enter", "select"),
+                FooterHint::always("Esc", "cancel"),
+            ],
+            theme,
+        );
+    }
+    area
+}
+
 /// Everything [`draw_custom_provider_editor`] renders, bundled so the call site
 /// stays readable.
 pub struct CustomEditorView<'a> {
-    /// Focused field index: Name=0, Protocol=1, Base URL=2, Token=3, Model=4.
+    /// Ordered visible fields, chosen by the active template (create) or the
+    /// edited provider's protocol (edit).
+    pub fields: &'a [CustomField],
+    /// Focused field index into [`Self::fields`].
     pub field: u8,
-    /// Edit mode hides the Model field (models are managed in stage 2).
+    /// Edit mode hides the Model field and changes the Token hint / header.
     pub editing: bool,
+    /// Header title — the template label (create) or `Edit · <name>` (edit).
+    pub title: &'a str,
     pub name_buf: &'a str,
     pub base_url_buf: &'a str,
     pub token_buf: &'a str,
-    /// Display label of the committed protocol (shown when Protocol is unfocused).
-    pub protocol_label: &'a str,
     /// Display name of the committed model (shown when Model is unfocused).
     pub model_display: &'a str,
-    /// Suggestions for the focused filter field (Protocol or Model); empty for
-    /// the plain text fields.
+    /// Base URL placeholder — the template's expected endpoint shape.
+    pub url_hint: &'a str,
+    /// Model suggestions for the Model filter field (empty off that field).
     pub suggestions: &'a [String],
     pub suggest_index: usize,
-    /// Title for the suggestion block (`"Protocol"` / `"Model"`), or `""`.
-    pub suggest_title: &'a str,
-    /// The focused field's live value (text buffer, or filter query for the
-    /// Protocol / Model fields).
+    /// The focused field's live value (text buffer, or the Model filter query).
     pub input: &'a str,
     pub cursor_position: usize,
 }
 
-/// Draw the custom-provider editor: a Name / Protocol / Base URL / Token (/ Model)
-/// form. Protocol and Model are **type-to-filter** fields — focusing one borrows
-/// the input line as a filter and renders a suggestion dropdown below the form;
-/// `↑/↓` move the highlight (committed live). The Token is masked unless focused.
-/// In edit mode the Model field is hidden (models are managed in the stage-2
-/// list) and the header reads `Edit · <name>`.
+/// Draw the provider editor: a per-template form drawn from [`CustomEditorView::fields`]
+/// (Name / Base URL / Token, plus a type-to-filter Model field for the
+/// OpenAI-compatible template). Focusing the Model field renders a suggestion
+/// dropdown below the form; `↑/↓` move the highlight (committed live). The Token
+/// is masked unless focused. In edit mode the header reads `Edit · <name>`.
 pub fn draw_custom_provider_editor(
     view: CustomEditorView<'_>,
     frame: &mut Frame,
     theme: &Theme,
 ) -> neenee_tui::Rect {
     let CustomEditorView {
+        fields,
         field,
         editing,
+        title,
         name_buf,
         base_url_buf,
         token_buf,
-        protocol_label,
         model_display,
+        url_hint,
         suggestions,
         suggest_index,
-        suggest_title,
         input,
         cursor_position,
     } = view;
@@ -698,18 +767,10 @@ pub fn draw_custom_provider_editor(
             Span::styled(val, value_style(focused))
         }
     };
-    // A filter field shows the live query (caret) when focused, else its
-    // committed value.
-    let filter_row = |label: &str, focused: bool, committed: &str, hint: &str| {
-        let value = if focused {
-            placeholder(input.to_string(), true, hint)
-        } else {
-            Span::styled(committed.to_string(), value_style(false))
-        };
-        Line::from(vec![field_label(label, focused), value])
-    };
-    let text_row = |idx: u8, label: &str, buf: &str, hint: &str, mask: bool| {
-        let raw = if field == idx {
+    // A text row borrows the input line when focused; the Token row masks its
+    // stored value when unfocused.
+    let text_row = |focused: bool, label: &str, buf: &str, hint: &str, mask: bool| {
+        let raw = if focused {
             input.to_string()
         } else if mask {
             "•".repeat(buf.chars().count())
@@ -717,20 +778,25 @@ pub fn draw_custom_provider_editor(
             buf.to_string()
         };
         Line::from(vec![
-            field_label(label, field == idx),
-            placeholder(raw, field == idx, hint),
+            field_label(label, focused),
+            placeholder(raw, focused, hint),
         ])
+    };
+    // The Model filter row shows the live query (caret) when focused, else the
+    // committed model's display name.
+    let model_row = |focused: bool| {
+        let value = if focused {
+            placeholder(input.to_string(), true, "type to filter…")
+        } else {
+            Span::styled(model_display.to_string(), value_style(false))
+        };
+        Line::from(vec![field_label("Model", focused), value])
     };
 
     if let Some(h) = f.header {
-        let title = if editing {
-            format!("Edit · {name_buf}")
-        } else {
-            "＋ Add provider".to_string()
-        };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                title,
+                title.to_string(),
                 Style::default()
                     .fg(theme.brand())
                     .add_modifier(Modifier::BOLD),
@@ -739,42 +805,26 @@ pub fn draw_custom_provider_editor(
         );
     }
 
-    let mut body = vec![
-        text_row(0, "Name", name_buf, "e.g. My Relay", false),
-        filter_row("Protocol", field == 1, protocol_label, "type to filter…"),
-        text_row(
-            2,
-            "Base URL",
-            base_url_buf,
-            "https://relay.example.com/v1/chat/completions",
-            false,
-        ),
-        text_row(
-            3,
-            "Token",
-            token_buf,
-            if editing {
-                "blank = keep existing"
-            } else {
-                "API key (blank for local)"
-            },
-            true,
-        ),
-    ];
-    // Model row only in create mode (edit manages models in the stage-2 list).
-    if !editing {
-        body.push(filter_row(
-            "Model",
-            field == 4,
-            model_display,
-            "type to filter…",
-        ));
+    let token_hint = if editing {
+        "blank = keep existing"
+    } else {
+        "API key (blank for local)"
+    };
+    let mut body: Vec<Line> = Vec::new();
+    for (idx, fld) in fields.iter().enumerate() {
+        let focused = idx as u8 == field;
+        body.push(match fld {
+            CustomField::Name => text_row(focused, "Name", name_buf, "e.g. My Relay", false),
+            CustomField::BaseUrl => text_row(focused, "Base URL", base_url_buf, url_hint, false),
+            CustomField::Token => text_row(focused, "Token", token_buf, token_hint, true),
+            CustomField::Model => model_row(focused),
+        });
     }
-    // Suggestion dropdown for the focused filter field.
-    if matches!(field, 1 | 4) {
+    // Suggestion dropdown while the Model filter field is focused.
+    if fields.get(field as usize) == Some(&CustomField::Model) {
         body.push(Line::from(""));
         body.push(Line::from(Span::styled(
-            format!(" {suggest_title} matches"),
+            " Model matches".to_string(),
             Style::default().fg(theme.muted()),
         )));
         body.extend(suggestion_lines(suggestions, suggest_index, theme));
@@ -797,9 +847,9 @@ pub fn draw_custom_provider_editor(
         );
     }
 
-    // Caret on the focused field's row (every field borrows the input line —
-    // plain text for Name/URL/Token, the filter query for Protocol/Model).
-    let row = field as u16; // Name=0, Protocol=1, URL=2, Token=3, Model=4
+    // Caret on the focused field's row (every visible field borrows the input
+    // line — plain text for Name/URL/Token, the filter query for Model).
+    let row = field as u16;
     let prefix_w = 1 + LABEL_W as u16; // leading space + padded label
     let cursor_x = body_rect.x + prefix_w + caret_column(input, cursor_position);
     let cursor_y = body_rect.y + row;

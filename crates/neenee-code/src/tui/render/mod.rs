@@ -6,10 +6,11 @@ mod composer;
 mod design;
 mod disclosure;
 mod empty_state;
+pub(crate) mod layout;
 mod markdown_table;
 mod message_body;
 mod notice;
-mod overlays;
+pub(crate) mod overlays;
 mod primitives;
 mod text_layout;
 mod theme;
@@ -33,23 +34,22 @@ use design::{
     STATUS_BAR_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
     TRANSCRIPT_BODY_LEADING_INDENT, TRANSCRIPT_H_INSET,
 };
-use disclosure::{
-    StickyStep, draw_envoy_bar, draw_envoy_inline_step, draw_reasoning_trace, draw_side_banner,
-    draw_sticky_summary_if_needed, draw_tool_step,
-};
+use disclosure::{StickyStep, draw_envoy_bar, draw_side_banner, draw_sticky_summary_if_needed};
 /// Parse a raw logo file into clamped display lines for the empty-state hero.
 /// Re-exported so the startup loader and the renderer share one clamp rule.
 pub(crate) use empty_state::parse_logo;
 #[cfg(test)]
 use markdown_table::{build_table_render, shrink_column_widths};
-use message_body::draw_message_body;
-use notice::draw_notice;
+pub(super) use message_body::draw_message_body;
+pub(super) use notice::draw_notice;
 pub(crate) use overlays::{
     ActivityModalView, CustomEditorView, draw_activity_modal, draw_add_model_editor,
-    draw_armed_toast, draw_copy_toast, draw_custom_provider_editor, draw_help_modal,
-    draw_history_modal, draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
-    draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
-    draw_sessions_modal, draw_tools_modal,
+    draw_armed_toast, draw_config_layout_modal, draw_config_modal, draw_config_nudge_modal,
+    draw_copy_toast, draw_custom_provider_editor, draw_help_modal, draw_history_modal,
+    draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
+    draw_permission_sheet, draw_permissions_manager, draw_provider_template_chooser,
+    draw_question_modal, draw_session_modal, draw_sessions_modal, draw_token_report_modal,
+    draw_tools_modal,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
@@ -148,6 +148,9 @@ pub struct TranscriptView<'a> {
     /// Ignored entirely when the transcript is non-empty.
     pub logo: Option<&'a [String]>,
     pub theme: &'a Theme,
+    /// Which layout strategy to arrange messages with. Selectable via
+    /// `[tui] transcript_layout`; defaults to [`layout::Strategy::Compact`].
+    pub layout: layout::Strategy,
     /// Per-message laid-out height cache (Stage 2). Lets the transcript pass
     /// skip the expensive text-wrapping of messages that are entirely outside
     /// the viewport, turning per-frame layout from O(transcript) into
@@ -272,6 +275,7 @@ pub fn draw_transcript(
         focused_target,
         logo,
         theme,
+        layout,
         height_cache,
     } = view;
     // Outside the app loop (tests/showcase) no persistent cache is supplied;
@@ -393,8 +397,9 @@ pub fn draw_transcript(
     // own layout-split rects before this point, so they are unaffected.
     let band = transcript_band_rect(transcript_area);
     let mut current_y = band.y;
-    // Account for scroll
-    let mut skip_rows = scroll as usize;
+    // Account for scroll. Owned by the layout `Stream` once the loop runs; not
+    // mutated locally here, so it is not `mut`.
+    let skip_rows = scroll as usize;
     // Total stream height, counted independently of the viewport clip so the
     // app loop can follow the bottom.
     let mut content_lines: usize = 0;
@@ -403,8 +408,9 @@ pub fn draw_transcript(
     // The last model attribution badge drawn into the stream. A badge is shown
     // once at the start of an assistant turn and again only when the producing
     // model changes, so a session that mixes providers stays traceable without
-    // repeating the label on every message of a single-model run.
-    let mut last_shown_attribution: Option<(String, String)> = None;
+    // repeating the label on every message of a single-model run. Owned by the
+    // layout `Stream` once the loop runs; not mutated locally here.
+    let last_shown_attribution: Option<(String, String)> = None;
 
     // Empty-state replacement (ADR-0033): when the session has no messages and
     // no envoy/side view is open, the transcript is replaced by a centered
@@ -426,178 +432,38 @@ pub fn draw_transcript(
         // reproduces a fresh layout exactly, so off-screen messages can be
         // advanced from their cached height instead of being re-wrapped.
         height_cache.prepare(band.width);
-        let viewport_bottom = band.y + band.height;
-        for (mi, msg) in messages.iter().enumerate() {
-            // Model attribution badge: shown above the first assistant-side
-            // message of a turn (reasoning, text, or tool step) and whenever the
-            // producing provider/model changes. Tool results and tool steps share
-            // the turn's model, so a single badge per model-run keeps the
-            // transcript clean while remaining fully traceable.
-            let is_assistant_side =
-                msg.role == neenee_core::Role::Assistant || msg.is_thinking() || msg.is_tool_step();
-            if is_assistant_side
-                && let Some(attribution) = msg.attribution_label()
-                && last_shown_attribution.as_ref() != Some(&attribution)
-            {
-                draw_attribution_badge(
-                    frame,
-                    band,
-                    &attribution,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    theme,
-                );
-                last_shown_attribution = Some(attribution);
-            }
 
-            // Render blocks.
-            //
-            // Stage 2 off-screen fast path: a plain text body or notice carries
-            // no sticky-header candidacy and no interactive regions, so once its
-            // height is cached it can be advanced without re-wrapping whenever it
-            // is entirely outside the viewport. Tool steps and reasoning traces
-            // are deliberately excluded — they feed `sticky_steps` and hover/click
-            // regions even while scrolled above the viewport, so they always draw.
-            let body_before = content_lines;
-            let skippable = msg.is_notice()
-                || (!msg.is_envoy_task() && !msg.is_tool_step() && !msg.is_thinking());
-            let cached_height = if skippable {
-                height_cache.get(msg.id)
-            } else {
-                None
-            };
-            let fully_above = cached_height.is_some_and(|h| (h as usize) <= skip_rows);
-            let fully_below = current_y >= viewport_bottom;
-            if let Some(h) = cached_height.filter(|_| fully_above || fully_below) {
-                // Reproduce exactly the counter mutations a fully-clipped body
-                // draw would make, minus the wrapping work. `content_lines` is
-                // always the true (un-clipped) height; `skip_rows` is consumed
-                // only for content above the viewport; `current_y` does not
-                // advance for off-screen rows (it stops at the viewport bottom),
-                // so it is left untouched here.
-                content_lines += h as usize;
-                if fully_above {
-                    skip_rows -= h as usize;
-                }
-            } else if msg.is_notice() {
-                draw_notice(
-                    frame,
-                    band,
-                    msg,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    theme,
-                );
-            } else if msg.is_envoy_task() {
-                draw_envoy_inline_step(
-                    frame,
-                    band,
-                    msg,
-                    mi,
-                    theme,
-                    layout_map,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    hovered_step == Some(mi),
-                    focused_target == Some(InteractiveTarget::tool_step(mi)),
-                );
-            } else if msg.is_tool_step() {
-                draw_tool_step(
-                    frame,
-                    band,
-                    msg,
-                    mi,
-                    selection,
-                    cell_selection,
-                    theme,
-                    layout_map,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    &mut sticky_steps,
-                    hovered_step == Some(mi),
-                    focused_target == Some(InteractiveTarget::tool_step(mi)),
-                );
-            } else if msg.is_thinking() {
-                draw_reasoning_trace(
-                    frame,
-                    band,
-                    msg,
-                    mi,
-                    selection,
-                    cell_selection,
-                    theme,
-                    layout_map,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    &mut sticky_steps,
-                    hovered_step == Some(mi),
-                    focused_target == Some(InteractiveTarget::thinking(mi)),
-                );
-            } else {
-                draw_message_body(
-                    frame,
-                    band,
-                    msg,
-                    mi,
-                    selection,
-                    cell_selection,
-                    theme,
-                    layout_map,
-                    &mut skip_rows,
-                    &mut current_y,
-                    &mut content_lines,
-                    true,
-                );
-            }
-            // Record the freshly-measured body height so future frames can skip
-            // this message while it is off-screen and unchanged. Only skippable
-            // kinds are cached; tool/thinking/envoy rows always redraw.
-            if skippable && cached_height.is_none() {
-                height_cache.set(msg.id, (content_lines - body_before) as u16);
-            }
-
-            // Spacing between messages. A user message's panel already ends with a
-            // bottom transition row (▀) that separates it from the next message, so
-            // the extra blank line is omitted there to keep the gap to a single row
-            // (otherwise the sent message sits two rows above the following body).
-            // The exception is when the next message is a step (thinking or tool
-            // step): a blank row between the user panel's transition and the step
-            // header keeps the two visually distinct. This matches the spacing
-            // produced by live reasoning streams and restored history.
-            //
-            // Collapsed tool steps stack flush: a batch of parallel/sequential
-            // collapsed tool-call headers forms a compact log block with no blank
-            // rows between them. The separating row is supplied *only* by an
-            // expanded step's body — its top gap (`TOOL_STEP_BODY_TOP_GAP_ROWS`)
-            // separates it from its own header, and this message-level row supplies
-            // its bottom separator to the next step's header. So a collapsed tool
-            // step followed by any tool step suppresses the row.
-            let next_is_tool_step = messages
-                .get(mi + 1)
-                .is_some_and(|next| next.is_tool_step() || next.is_envoy_task());
-            let collapsed_tool_into_tool_step =
-                msg.is_tool_step() && msg.tool_step_expanded() == Some(false) && next_is_tool_step;
-            let next_is_step = messages.get(mi + 1).is_some_and(|next| {
-                next.is_thinking() || next.is_tool_step() || next.is_envoy_task()
-            });
-            if collapsed_tool_into_tool_step {
-                // Flush stack: no separating row between adjacent collapsed tool
-                // steps. Scroll accounting (content_lines / current_y) is left
-                // untouched because no rows are consumed.
-            } else if msg.role != neenee_core::Role::User || next_is_step {
-                content_lines += MESSAGE_GAP_ROWS;
-                if skip_rows > 0 {
-                    skip_rows = skip_rows.saturating_sub(1);
-                } else if current_y < band.y + band.height {
-                    current_y += MESSAGE_GAP_ROWS as u16;
-                }
-            }
-        }
+        // Delegate message arrangement to the selected layout strategy. The
+        // `Stream` carries every piece of shared render state (scroll/Y
+        // accounting, layout map, height cache, theme, hover/focus) and
+        // exposes `badge` / `dispatch` / `gap` as the sanctioned mutations, so
+        // every layout agrees on scroll semantics. The layout leaves
+        // `content_lines`, `sticky_steps`, and `current_y` populated for the
+        // post-processing below.
+        let mut stream = layout::Stream {
+            frame,
+            band,
+            messages,
+            theme,
+            layout_map,
+            height_cache,
+            selection,
+            cell_selection,
+            hovered_step,
+            focused_target,
+            current_y,
+            skip_rows,
+            content_lines,
+            sticky_steps,
+            last_shown_attribution,
+        };
+        layout.build().run(&mut stream);
+        // Recover the loop state the post-processing below needs.
+        // (`skip_rows` and `last_shown_attribution` are loop-internal and are
+        // not read after the layout returns, so they are not recovered.)
+        current_y = stream.current_y;
+        content_lines = stream.content_lines;
+        sticky_steps = stream.sticky_steps;
     } // end else (non-empty transcript branch)
 
     // Record the visible transcript content rect so clicks on gap rows
@@ -718,7 +584,7 @@ pub fn draw_transcript(
 /// separates it from the turn's content. Rendered in muted text so it reads as
 /// metadata. The provider half is dropped when empty (e.g. providers without an
 /// id).
-fn draw_attribution_badge(
+pub(crate) fn draw_attribution_badge(
     frame: &mut Frame,
     area: Rect,
     attribution: &(String, String),
@@ -814,6 +680,7 @@ mod tests {
                         focused_target: None,
                         logo: None,
                         theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                         height_cache: None,
                     },
                 );
@@ -894,21 +761,30 @@ mod tests {
                 &theme,
             );
             draw_model_editor(f, "OpenAI", "", 0, &theme);
-            // Custom-provider editor on the Protocol filter field.
+            // Provider-template chooser.
+            draw_provider_template_chooser(0, f, &theme);
+            // Provider editor (OpenAI-compatible template) on the Model filter field.
+            use crate::tui::CustomField;
             draw_custom_provider_editor(
                 CustomEditorView {
-                    field: 1,
+                    fields: &[
+                        CustomField::Name,
+                        CustomField::BaseUrl,
+                        CustomField::Token,
+                        CustomField::Model,
+                    ],
+                    field: 3,
                     editing: false,
+                    title: "Custom OpenAI-compatible",
                     name_buf: "My Relay",
                     base_url_buf: "https://relay/v1/chat/completions",
                     token_buf: "tok",
-                    protocol_label: "Anthropic",
-                    model_display: "Claude Opus 4.8",
-                    suggestions: &["OpenAI-compatible".to_string(), "Anthropic".to_string()],
-                    suggest_index: 1,
-                    suggest_title: "Protocol",
-                    input: "an",
-                    cursor_position: 2,
+                    model_display: "GPT-4o",
+                    url_hint: "https://relay.example.com/v1/chat/completions",
+                    suggestions: &["GPT-4o".to_string(), "GPT-4o mini".to_string()],
+                    suggest_index: 0,
+                    input: "gpt",
+                    cursor_position: 3,
                 },
                 f,
                 &theme,
@@ -1108,6 +984,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -1145,6 +1022,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -1207,6 +1085,7 @@ mod tests {
                         focused_target: None,
                         logo: None,
                         theme: &theme,
+                        layout: crate::tui::render::layout::Strategy::default(),
                         height_cache: Some(cache),
                     },
                 );
@@ -1360,6 +1239,7 @@ mod tests {
                         focused_target: None,
                         logo: None,
                         theme,
+                        layout: crate::tui::render::layout::Strategy::default(),
                         height_cache: None,
                     },
                 );
@@ -1594,7 +1474,6 @@ mod tests {
         );
         assert!(scroll > 0, "scroll should have advanced to track the caret");
     }
-
 
     /// (head + continuation), cover exactly the selected glyphs, and leave the
     /// trailing pad on the panel background — no extra glyph, no half-highlighted
@@ -1875,6 +1754,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2017,6 +1897,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2093,6 +1974,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2534,6 +2416,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             ));
@@ -2587,6 +2470,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             ));
@@ -2649,6 +2533,7 @@ mod tests {
                     focused_target: None,
                     logo: Some(&logo),
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             ));
@@ -2698,6 +2583,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2772,6 +2658,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2842,6 +2729,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );
@@ -2911,6 +2799,7 @@ mod tests {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );

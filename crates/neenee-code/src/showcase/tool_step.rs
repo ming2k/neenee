@@ -97,6 +97,7 @@ pub fn run() -> io::Result<()> {
                     focused_target: None,
                     logo: None,
                     theme: &theme,
+                    layout: crate::tui::render::layout::Strategy::default(),
                     height_cache: None,
                 },
             );

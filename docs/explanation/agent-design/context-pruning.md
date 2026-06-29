@@ -94,7 +94,10 @@ chars/4 estimate — see
 > **History.** The pre-turn entry point originally ran on *every* turn with no
 > pressure check, so on a 1M-token model it fired at a few percent of the
 > window — far below the documented 65%. ADR-0021 gated it to match the
-> mid-turn gate and the `prune_utilization` design from ADR-0019.
+> mid-turn gate and the `prune_utilization` design. (The token count that gate
+> compares against is measured by the layered policy in
+> [ADR-0044](../../adr/0044-layered-token-accounting.md) — see
+> [Token accounting](token-accounting.md).)
 
 ## Implicit by design
 
@@ -136,11 +139,16 @@ reclaim floor and is not configurable.
 ## References
 
 - ADR-0009 — uncapped agentic loop; relief as the runaway backstop.
-- ADR-0019 — model-relative thresholds; the `prune_utilization` design.
+- ADR-0044 — layered token accounting: the provider `usage` path and the
+  char-class estimator that measures the tokens these thresholds compare against
+  (implements the token-accounting half of the earlier, since-removed layered
+  design).
 - ADR-0021 — pruning gated at 65% and made implicit.
 - ADR-0040 — session state and model-context projection vocabulary.
 - ADR-0023 — relevance-aware selection, tiered degradation, informative
-  placeholders, and layered token accounting.
+  placeholders (the pruning-strategy half; its token-accounting half is now
+  [ADR-0044](../../adr/0044-layered-token-accounting.md)).
+- [Token accounting](token-accounting.md) — how the token count is measured.
 - [Context compaction](context-compaction.md) — the next, heavier relief layer.
 - `neenee-core/src/pressure.rs` — `prune_tool_results`, `CompactionPolicy`,
   `ContextBudget`.

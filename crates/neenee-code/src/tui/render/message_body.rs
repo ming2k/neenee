@@ -123,7 +123,7 @@ fn cell_drag_selected_span(
 /// This is extracted so that normal messages and tool steps can share
 /// the same block-rendering logic while using different containing rects.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_message_body(
+pub(crate) fn draw_message_body(
     frame: &mut Frame,
     area: Rect,
     msg: &TranscriptMessage,

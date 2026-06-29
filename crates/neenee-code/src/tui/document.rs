@@ -223,34 +223,42 @@ impl Block {
 /// (a short summary when collapsed), so tool-step bulk is measured directly
 /// from `arguments` + `output` + nested children; thinking text uses `content`;
 /// plain-text messages use `raw`.
-fn context_chars_of(messages: &[TranscriptMessage]) -> usize {
-    let mut chars = 0usize;
+fn context_token_weight(messages: &[TranscriptMessage]) -> i64 {
+    let mut tokens: i64 = 0;
     for m in messages {
         match &m.kind {
-            MessageKind::Text => chars += m.raw.len(),
-            MessageKind::Notice { .. } => chars += m.raw.len(),
-            MessageKind::Thinking { content, .. } => chars += content.len(),
+            MessageKind::Text => tokens += neenee_core::count_tokens(&m.raw),
+            MessageKind::Notice { .. } => tokens += neenee_core::count_tokens(&m.raw),
+            MessageKind::Thinking { content, .. } => tokens += neenee_core::count_tokens(content),
             MessageKind::ToolStep {
                 arguments,
                 output,
                 children,
                 ..
             } => {
-                chars += arguments.len();
+                tokens += neenee_core::count_tokens(arguments);
                 if let Some(o) = output {
-                    chars += o.len();
+                    tokens += neenee_core::count_tokens(o);
                 }
-                chars += context_chars_of(children);
+                tokens += context_token_weight(children);
             }
         }
     }
-    chars
+    tokens
 }
 
-/// Rough token estimate for the active context, using the same ~4 chars/token
-/// heuristic as `neenee_core`'s `estimate_string_tokens_len`.
+/// Token estimate for the active context, using `neenee_core`'s char-class
+/// estimator ([`neenee_core::count_tokens`]). This accounts for CJK glyphs,
+/// code punctuation, and other Unicode — so the on-screen indicator tracks
+/// reality for mixed Chinese + code conversations instead of the old flat
+/// `bytes / 4` heuristic.
+///
+/// Note: this counts the *displayed* transcript, which includes `Thinking`
+/// (reasoning) content. The runtime decision layer ([`estimate_tokens`])
+/// excludes reasoning because it is never sent to providers. The display
+/// figure is therefore an intentional upper bound, not a bug.
 pub fn estimate_context_tokens(messages: &[TranscriptMessage]) -> usize {
-    context_chars_of(messages) / 4
+    context_token_weight(messages).max(1) as usize
 }
 
 /// Lifecycle of a user-authored message from the user's point of view.
@@ -334,6 +342,15 @@ pub struct TranscriptMessage {
     pub provider: Option<String>,
     /// Model id that produced this message, companion to [`TranscriptMessage::provider`].
     pub model: Option<String>,
+    /// The tool-round this assistant-side message belongs to (1-indexed,
+    /// stamped from the harness's `RoundStarted` counter). Only tool steps
+    /// carry it in practice. The renderer uses it to insert a round-boundary
+    /// separator between adjacent collapsed tool steps that belong to
+    /// different rounds, so two tool-only rounds never read as one batch.
+    /// `None` (the default, and for restored sessions that predate the stamp)
+    /// means "round unknown" — the renderer then preserves the legacy
+    /// same-round flush stack.
+    pub round: Option<u64>,
 }
 
 impl TranscriptMessage {
@@ -359,6 +376,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
+            round: None,
         }
     }
 
@@ -386,6 +404,12 @@ impl TranscriptMessage {
     ) -> Self {
         self.provider = Some(provider.into());
         self.model = Some(model.into());
+        self
+    }
+
+    /// Stamp the tool round this message belongs to (see [`TranscriptMessage::round`]).
+    pub fn with_round(mut self, round: u64) -> Self {
+        self.round = Some(round);
         self
     }
 
@@ -427,6 +451,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
+            round: None,
         };
         message.refresh_tool_step();
         message
@@ -908,6 +933,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
+            round: None,
         };
         message.raw = content;
         message.blocks = parse_blocks(&message.raw);
@@ -939,6 +965,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
+            round: None,
         }
     }
 
