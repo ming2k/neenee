@@ -220,6 +220,17 @@ impl<W: Write> Backend<W> {
         Ok(())
     }
 
+    /// Hide the terminal cursor and park its physical position at `(x, y)`.
+    ///
+    /// Some terminal/multiplexer/IME stacks still sample the hidden cursor's
+    /// physical coordinate as a composition-window hint. Parking it after
+    /// hiding keeps "no visible caret" states from inheriting the last diff
+    /// write position, which can move during streaming transcript updates.
+    pub fn hide_cursor_at(&mut self, x: u16, y: u16) -> io::Result<()> {
+        self.out.queue(cursor::Hide)?;
+        self.move_to(x, y)
+    }
+
     /// Show the terminal cursor at `(x, y)`, keeping the backend's cursor
     /// tracker in sync with the real terminal.
     pub fn show_cursor_at(&mut self, x: u16, y: u16) -> io::Result<()> {
@@ -444,6 +455,26 @@ mod tests {
             .expect("second frame text must be emitted")
             + redraw_move;
         assert!(redraw_move < redraw_text, "MoveTo must precede B: {s:?}");
+    }
+
+    #[test]
+    fn hidden_cursor_can_be_parked_at_stable_coordinate() {
+        let mut buf = Vec::new();
+        {
+            let mut be = Backend::with_bce(&mut buf, Bce::Yes);
+            be.hide_cursor_at(3, 2).unwrap();
+            assert_eq!(be.cur, Some((3, 2)));
+        }
+
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("\x1b[?25l"),
+            "cursor hide must be emitted: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[3;4H"),
+            "hidden cursor must be moved to row 3 col 4: {s:?}"
+        );
     }
 
     #[test]

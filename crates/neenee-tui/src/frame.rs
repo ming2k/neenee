@@ -144,6 +144,11 @@ impl<W: io::Write> Terminal<W> {
         ));
     }
 
+    fn hidden_cursor_parking_pos(&self) -> (u16, u16) {
+        let (w, h) = self.back.size();
+        (w.saturating_sub(1), h.saturating_sub(1))
+    }
+
     /// Run the app's draw closure against a fresh frame, then diff → render
     /// → promote. Returns `Ok(())` on success.
     pub fn draw<F>(&mut self, render: F) -> io::Result<()>
@@ -180,7 +185,8 @@ impl<W: io::Write> Terminal<W> {
         // aligned with the real terminal before the next diff render.
         match self.cursor {
             CursorState::Hidden => {
-                self.backend.hide_cursor()?;
+                let (x, y) = self.hidden_cursor_parking_pos();
+                self.backend.hide_cursor_at(x, y)?;
             }
             CursorState::Visible(x, y) => {
                 self.backend.show_cursor_at(x, y)?;
@@ -210,8 +216,8 @@ impl<W: io::Write> Terminal<W> {
 
     /// Hide the cursor.
     pub fn hide_cursor(&mut self) -> io::Result<()> {
-        use crossterm::{QueueableCommand, cursor};
-        self.backend.writer().queue(cursor::Hide)?;
+        let (x, y) = self.hidden_cursor_parking_pos();
+        self.backend.hide_cursor_at(x, y)?;
         self.backend.writer().flush()?;
         Ok(())
     }
