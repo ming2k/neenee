@@ -3,8 +3,8 @@
 //! ([`ProviderStreamEvent`]), and the mid-turn model-context projection hook
 //! ([`ContextProjectionGate`]).
 
-use crate::{EnvoyEvent, Message, ToolOutput, ToolStream};
 use crate::tool_output::StdinPolicy;
+use crate::{EnvoyEvent, Message, ToolOutput, ToolStream};
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};

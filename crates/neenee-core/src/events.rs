@@ -51,6 +51,43 @@ pub enum AgentRequest {
         api_key: Option<String>,
         base_url: Option<String>,
     },
+    /// Add a user-defined ("custom") provider from the TUI editor, persist it to
+    /// config, then activate it. `protocol` is one of `"openai"` | `"anthropic"`
+    /// | `"gemini"`; `api_key` may be empty (a keyless OpenAI-compatible relay
+    /// suppresses the auth header). The harness derives a stable id from `name`.
+    AddProvider {
+        name: String,
+        protocol: String,
+        base_url: String,
+        api_key: String,
+        model: String,
+    },
+    /// Edit a user-defined provider's metadata in place (display name, protocol,
+    /// base URL, API key) without touching its model list — every channel keeps
+    /// its model id, so a multi-model custom provider is not collapsed. An empty
+    /// `api_key` leaves the existing key untouched. Built-in providers are not
+    /// editable this way (their `e` editor only sets the API key).
+    EditProvider {
+        id: String,
+        name: String,
+        protocol: String,
+        base_url: String,
+        api_key: String,
+    },
+    /// Append a model to an existing user-defined provider (a new channel sharing
+    /// the provider's transport/endpoint/key), persist, and push a fresh picker
+    /// snapshot. Built-in providers reject this (curated model lists).
+    AddProviderModel {
+        provider_id: String,
+        model: String,
+    },
+    /// Remove a model (channel) from a user-defined provider, persist, and push a
+    /// fresh picker snapshot. The last remaining model is kept (a provider must
+    /// serve at least one model).
+    RemoveProviderModel {
+        provider_id: String,
+        model: String,
+    },
     /// Toggle the favorite flag on a model in the picker. The id is
     /// canonicalized by the harness before it touches config.
     ToggleFavorite {
@@ -422,12 +459,32 @@ pub struct SessionOverview {
 }
 
 /// One row of provider-picker state sent from the harness to the TUI. Carries
-/// the dynamic per-provider signals the picker needs — key readiness, favorite
-/// flag, and last-used timestamp — keyed by canonical provider id. The TUI
-/// joins this with its own static display metadata. See ADR-0002.
+/// everything the picker renders for a provider — display name, the served model
+/// ids and the active one, plus the dynamic signals (key readiness, favorite,
+/// last-used) — keyed by canonical provider id. The TUI renders directly from
+/// these rows (built-in and user-defined providers share one path), so no static
+/// per-provider table is consulted. See ADR-0002.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderPickerRow {
     pub id: String,
+    /// Display name (e.g. `"OpenAI"`, `"Anthropic"`, or a custom provider's name).
+    pub name: String,
+    /// Wire id of the currently-active model on this provider.
+    pub model: String,
+    /// Every model id this provider serves, in catalog order. A single-model
+    /// provider lists exactly one; multi-model providers list all of them.
+    pub models: Vec<String>,
+    /// `true` for built-in presets, `false` for user-defined providers. The TUI
+    /// only offers add/remove-model (and full meta editing) on user-defined
+    /// providers.
+    pub builtin: bool,
+    /// Wire protocol id of the default channel (`"openai"` | `"anthropic"` |
+    /// `"gemini"`), used to pre-fill the edit form for a user-defined provider.
+    /// Empty for built-ins (their `e` editor only changes the API key).
+    pub protocol: String,
+    /// Base URL of the default channel, used to pre-fill the edit form. Empty
+    /// for built-ins and keyless/native transports.
+    pub base_url: String,
     pub key_ready: bool,
     pub favorite: bool,
     /// Unix epoch milliseconds of the last activation. `None` if the provider

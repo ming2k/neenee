@@ -36,7 +36,7 @@ use crate::tui::selection::{
 };
 use crate::tui::step_interaction::StepKind;
 use crate::tui::versioned::Versioned;
-use crate::tui::{ActivityTab, App, Modal, PROVIDERS, Recess};
+use crate::tui::{ActivityTab, App, Modal, Recess};
 
 use neenee_core::AgentResponse;
 use tokio::sync::{Mutex, broadcast};
@@ -599,6 +599,67 @@ pub(super) async fn run_app_loop(
         // paste), so a per-frame counter would make the breathing speed up and
         // stutter with input activity instead of holding a steady cadence.
 
+        // ── Immediate cursor sync (IME correctness) ─────────────────────────
+        // The terminal cursor is what the host terminal's IME anchors its
+        // composition window to, and the IME samples it the instant a keystroke
+        // arrives — *before* the next frame is rendered. If we only reposition
+        // the cursor as a per-frame side effect of drawing, there is a one-frame
+        // window in which the caret's logical position (from the keystroke) and
+        // its physical position (last frame) disagree, so the IME window drifts.
+        //
+        // The fix: whenever input handling moved the caret, sync the backend's
+        // cursor *now*, in the same iteration, using the last-known composer
+        // rect (refreshed every draw). This closes the lag window to zero. The
+        // coordinates come from the same pure function the draw path uses, so
+        // the immediate value and the rendered value can never diverge.
+        //
+        // This runs whether or not a full draw follows: a full draw will
+        // re-place the cursor anyway (and refresh `last_input_rect`), but doing
+        // it here first means the IME — which reads the cursor on its own
+        // schedule — never observes the stale position even on a draw frame.
+        //
+        // Cursor visibility is a state transition, not a per-frame guess: the
+        // only thing that hides the terminal cursor is an active text selection
+        // (a block cursor would clash with the selection background). Modals
+        // own their own caret via the draw closure's `set_cursor_position`, so
+        // they keep the cursor visible. Resolving show/hide here, at the same
+        // moment we (re)position, means the IME never samples a hide↔show edge
+        // at a coordinate that no longer matches the visible text.
+        let composer_owns_caret = app.active_modal == Modal::None
+            && !app.in_envoy_view()
+            && app.focused_target.is_none();
+        let cursor_should_hide = app.selection.is_active();
+        if app.cursor_sync_pending {
+            app.cursor_sync_pending = false;
+            // Only the composer's caret is repositioned here. When a modal or
+            // envoy view owns the caret it places its own cursor via the draw
+            // closure, so a pending flag set while the composer didn't own the
+            // caret is consumed without action (it is stale by definition once
+            // ownership returns — the next real keystroke re-arms it).
+            if composer_owns_caret && !cursor_should_hide {
+                // Keystroke moved the caret: re-anchor the terminal cursor at
+                // the new logical position before the frame is drawn.
+                if let Some((x, y)) = render::cursor_screen_pos(
+                    app.last_input_rect,
+                    &app.input,
+                    app.byte_cursor(),
+                    &mut app.input_scroll,
+                ) {
+                    let _ = terminal.backend().show_cursor_at(x, y);
+                    let _ = std::io::Write::flush(terminal.backend().writer());
+                }
+            }
+        }
+        if cursor_should_hide != app.cursor_hidden {
+            if cursor_should_hide {
+                let _ = terminal.hide_cursor();
+            } else {
+                let _ = terminal.show_cursor();
+            }
+            app.cursor_hidden = cursor_should_hide;
+            app.cursor_visible = !cursor_should_hide;
+        }
+
         // Draw frame (skipped when nothing changed — see `needs_draw`).
         if needs_draw {
             terminal.draw(|f| {
@@ -723,7 +784,6 @@ pub(super) async fn run_app_loop(
                         f,
                         hint_rect,
                         render::HintBarView {
-                            current_provider: &app.current_provider,
                             current_model: &app.current_model,
                             messages: view_messages,
                             shell_active: app.focused_target.is_none()
@@ -769,7 +829,10 @@ pub(super) async fn run_app_loop(
                         }
                     } else if matches!(
                         app.active_modal,
-                        Modal::Provider | Modal::ModelEditor | Modal::HistorySearch
+                        Modal::Provider
+                            | Modal::ModelEditor
+                            | Modal::CustomProvider
+                            | Modal::HistorySearch
                     ) {
                         // These modals borrow the input line as their own field
                         // (filter / key+model / history-query), so the composer
@@ -823,6 +886,11 @@ pub(super) async fn run_app_loop(
                 app.view_height = view_height;
                 app.activity_rect = activity_rect;
                 app.todos_rect = todos_rect;
+                // Feed the observed composer rect back so the *next* iteration's
+                // immediate cursor flush (which runs before this draw closure
+                // re-runs) places the caret against the geometry the user is
+                // actually looking at.
+                app.observe_input_rect(input_rect);
                 match sticky {
                     Some(info) => {
                         app.sticky_step = Some(info.message_idx);
@@ -866,11 +934,21 @@ pub(super) async fn run_app_loop(
                 // Modals
                 let drawn_modal_rect = match app.active_modal {
                     Modal::Provider => {
-                        let ranked = app.models_filtered();
+                        let providers = app.providers_filtered();
+                        let models = app.provider_models_filtered();
+                        let stage2_name = app
+                            .picker_provider
+                            .and_then(|idx| app.provider_picker.rows.get(idx))
+                            .map(|r| r.name.clone());
+                        let stage2_custom = app.picker_provider_is_custom();
                         Some(render::draw_models_modal(
                             f,
                             &mut layout_map,
-                            &ranked,
+                            &providers,
+                            &models,
+                            app.picker_provider,
+                            stage2_name.as_deref(),
+                            stage2_custom,
                             &app.current_provider,
                             &app.current_model,
                             app.modal_index,
@@ -936,15 +1014,88 @@ pub(super) async fn run_app_loop(
                     Modal::ModelEditor => {
                         let title = app
                             .editor_target
-                            .and_then(|idx| PROVIDERS.get(idx))
-                            .map(|s| s.name)
-                            .unwrap_or("model");
+                            .as_deref()
+                            .and_then(|id| app.provider_picker.rows.iter().find(|r| r.id == id))
+                            .map(|r| r.name.clone())
+                            .unwrap_or_else(|| "model".to_string());
                         Some(render::draw_model_editor(
                             f,
-                            title,
-                            app.editor_field,
-                            &app.editor_key,
-                            &app.editor_model,
+                            &title,
+                            &app.input,
+                            app.cursor_position,
+                            &app.theme,
+                        ))
+                    }
+                    Modal::CustomProvider => {
+                        let editing = app.custom_is_editing();
+                        let protocol_label = crate::tui::CUSTOM_PROTOCOLS
+                            .get(app.custom_protocol as usize)
+                            .map(|(label, _)| *label)
+                            .unwrap_or("OpenAI-compatible");
+                        let model_display = if app.custom_model.is_empty() {
+                            "—".to_string()
+                        } else {
+                            crate::tui::model_display_name(&app.custom_model)
+                        };
+                        // Suggestion dropdown for the focused filter field.
+                        let (suggestions, suggest_title): (Vec<String>, &str) =
+                            match app.custom_field {
+                                1 => (
+                                    app.custom_protocol_suggestions()
+                                        .iter()
+                                        .filter_map(|&i| {
+                                            crate::tui::CUSTOM_PROTOCOLS
+                                                .get(i as usize)
+                                                .map(|(l, _)| l.to_string())
+                                        })
+                                        .collect(),
+                                    "Protocol",
+                                ),
+                                4 => (
+                                    app.custom_model_suggestions()
+                                        .iter()
+                                        .map(|v| crate::tui::model_display_name(v))
+                                        .collect(),
+                                    "Model",
+                                ),
+                                _ => (Vec::new(), ""),
+                            };
+                        Some(render::draw_custom_provider_editor(
+                            render::CustomEditorView {
+                                field: app.custom_field,
+                                editing,
+                                name_buf: &app.custom_name,
+                                base_url_buf: &app.custom_base_url,
+                                token_buf: &app.custom_token,
+                                protocol_label,
+                                model_display: &model_display,
+                                suggestions: &suggestions,
+                                suggest_index: app.custom_suggest_index,
+                                suggest_title,
+                                input: &app.input,
+                                cursor_position: app.cursor_position,
+                            },
+                            f,
+                            &app.theme,
+                        ))
+                    }
+                    Modal::AddModel => {
+                        let provider_name = app
+                            .add_model_provider
+                            .as_deref()
+                            .and_then(|id| app.provider_picker.rows.iter().find(|r| r.id == id))
+                            .map(|r| r.name.clone())
+                            .unwrap_or_else(|| "provider".to_string());
+                        let suggestions: Vec<String> = app
+                            .add_model_suggestions()
+                            .iter()
+                            .map(|v| crate::tui::model_display_name(v))
+                            .collect();
+                        Some(render::draw_add_model_editor(
+                            f,
+                            &provider_name,
+                            &suggestions,
+                            app.add_model_choice,
                             &app.input,
                             app.cursor_position,
                             &app.theme,
@@ -1064,26 +1215,6 @@ pub(super) async fn run_app_loop(
                 };
             })?;
         } // end `if needs_draw`
-
-        // Cursor visibility follows the focus zone so the caret only shows up
-        // where keys actually land. While a modal is open the modal itself
-        // owns the caret (and may hide it for non-edit modals like Help). The
-        // input box always owns typing — a focused transcript step does not
-        // blur it — so the caret stays visible while navigating steps. Active
-        // selections hide the terminal cursor; otherwise a block cursor can
-        // draw over CJK selection backgrounds and look like a duplicated input
-        // glyph.
-        // Toggled only when the desired state changes to avoid spamming the
-        // terminal with redundant escape codes every frame.
-        let cursor_should_hide = app.active_modal == Modal::None && app.selection.is_active();
-        if cursor_should_hide != app.cursor_hidden {
-            if cursor_should_hide {
-                let _ = terminal.hide_cursor();
-            } else {
-                let _ = terminal.show_cursor();
-            }
-            app.cursor_hidden = cursor_should_hide;
-        }
 
         // Recompute the bottom scroll offset for the next frame and keep the
         // manual scroll position within bounds when not following.
@@ -1217,9 +1348,17 @@ pub(super) async fn run_app_loop(
                     has_queued: !app.pending_dispatch.is_empty(),
                     history_searching: app.history_search,
                     model_searching: app.model_search,
+                    picker_in_models_stage: app.picker_provider.is_some(),
+                    custom_provider_field: (app.active_modal == Modal::CustomProvider)
+                        .then_some(app.custom_field),
                 },
                 &mut app.drag,
             );
+
+            // `process_event` mutates `cursor_position` in place (it cannot go
+            // through `App::set_cursor`), so any keystroke that moved the caret
+            // must still mark the terminal cursor for an immediate re-sync.
+            app.note_cursor_moved();
 
             match action {
                 input::InputAction::None => {}
@@ -1447,47 +1586,265 @@ pub(super) async fn run_app_loop(
                     let _ = app.tx.send(AgentRequest::ShellCommand { command });
                 }
                 input::InputAction::ProviderPickerActivate => {
-                    if app.active_modal == Modal::Provider {
-                        // Activate the highlighted row of the flat model list
-                        // (falling back to the first row). Each row already pins
-                        // an exact (provider, model) pair — multi-model providers
-                        // are fanned out into one row per model — so there is no
-                        // second-stage picker: Enter switches straight to that
-                        // model. The cursor starts on the current model when the
-                        // picker opens (see `OpenProvider`), so "open + Enter"
-                        // re-activates the current model.
-                        let ranked = app.models_filtered();
-                        if let Some(row) = ranked.get(app.modal_index).or_else(|| ranked.first()) {
-                            let solution = PROVIDERS[row.provider_idx];
-                            let model = row.model;
-                            if app.key_status.get(solution.id).copied().unwrap_or(true) {
-                                // Key present (or unknown → assume usable): switch
-                                // to the chosen model. The backend's SwitchProvider
-                                // routes it through build_provider_for_model so the
-                                // per-model transport (OpenAI vs Anthropic
-                                // /messages) is selected correctly.
-                                let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                    provider_type: solution.id.to_string(),
-                                    model: model.to_string(),
-                                    api_key: None,
-                                    base_url: None,
-                                });
-                                app.restore_model_draft();
-                                app.active_modal = Modal::None;
-                            } else {
-                                // No key configured: open the unified editor,
-                                // prefilled with this exact model id, so the user
-                                // can enter a key before activating. The picker
-                                // filter in `input` is discarded (transient
-                                // search); the chat draft stays in stashed_input.
-                                app.editor_target = Some(row.provider_idx);
-                                app.editor_field = 0;
-                                app.editor_key.clear();
-                                app.editor_model = model.to_string();
-                                app.input.clear();
-                                app.cursor_position = 0;
+                    if app.active_modal == Modal::Provider && app.picker_on_add_row() {
+                        // Stage-1 "＋ Add provider" row: open the custom-provider
+                        // editor instead of activating a provider.
+                        app.open_custom_provider_editor();
+                    } else if app.active_modal == Modal::Provider && app.picker_on_add_model_row() {
+                        // Stage-2 "＋ Add model" row (custom provider only): open the
+                        // add-model overlay for the drilled-into provider.
+                        if let Some(id) = app
+                            .picker_provider
+                            .and_then(|idx| app.provider_picker.rows.get(idx))
+                            .map(|r| r.id.clone())
+                        {
+                            app.open_add_model_overlay(id);
+                        }
+                    } else if app.active_modal == Modal::Provider {
+                        // Resolve the activation target. Stage 1: a multi-model
+                        // provider drills to stage 2; a single-model one activates
+                        // its only model. Stage 2: the row pins an exact model.
+                        enum Act {
+                            Drill { row_idx: usize, id: String },
+                            Activate { id: String, model: String, key_ready: bool },
+                        }
+                        let key_ready = |app: &App, id: &str| {
+                            app.key_status.get(id).copied().unwrap_or(true)
+                        };
+                        let act = if app.picker_provider.is_some() {
+                            let rows = app.provider_models_filtered();
+                            rows.get(app.modal_index)
+                                .or_else(|| rows.first())
+                                .map(|row| Act::Activate {
+                                    id: row.provider_id.clone(),
+                                    model: row.model.clone(),
+                                    key_ready: key_ready(app, &row.provider_id),
+                                })
+                        } else {
+                            let rows = app.providers_filtered();
+                            rows.get(app.modal_index)
+                                .or_else(|| rows.first())
+                                .map(|row| {
+                                    // A custom (user-defined) provider always
+                                    // drills into its stage-2 model list, even
+                                    // when it currently has a single model:
+                                    // that is the only surface where models
+                                    // can be added (`＋ Add model`) or removed
+                                    // (`d`), so it must be reachable from a
+                                    // freshly-created single-model provider.
+                                    // Built-in presets with one model activate
+                                    // directly; multi-model ones drill.
+                                    if !row.builtin || row.is_multi_model() {
+                                        Act::Drill {
+                                            row_idx: row.row_idx,
+                                            id: row.id.clone(),
+                                        }
+                                    } else {
+                                        Act::Activate {
+                                            id: row.id.clone(),
+                                            model: row.model.clone(),
+                                            key_ready: key_ready(app, &row.id),
+                                        }
+                                    }
+                                })
+                        };
+
+                        match act {
+                            Some(Act::Drill { row_idx, id }) => {
+                                app.picker_provider = Some(row_idx);
                                 app.model_search = false;
-                                app.active_modal = Modal::ModelEditor;
+                                app.input.clear();
+                                app.set_cursor(0);
+                                app.model_scroll = 0;
+                                app.model_modal_follow = true;
+                                // Land the cursor on the currently-active model when
+                                // re-entering the provider serving it.
+                                let rows = app.provider_models_filtered();
+                                app.modal_index = rows
+                                    .iter()
+                                    .position(|r| {
+                                        id == app.current_provider && r.model == app.current_model
+                                    })
+                                    .unwrap_or(0);
+                            }
+                            Some(Act::Activate {
+                                id,
+                                model,
+                                key_ready,
+                            }) => {
+                                if key_ready {
+                                    // SwitchProvider routes through
+                                    // build_provider_for_model so the per-model
+                                    // transport is selected correctly.
+                                    let _ = app.tx.send(AgentRequest::SwitchProvider {
+                                        provider_type: id,
+                                        model,
+                                        api_key: None,
+                                        base_url: None,
+                                    });
+                                    app.restore_model_draft();
+                                    app.active_modal = Modal::None;
+                                } else {
+                                    // No key configured: open the key editor
+                                    // prefilled with this model so the user can enter
+                                    // a key before activating.
+                                    app.editor_target = Some(id);
+                                    app.editor_field = 0;
+                                    app.editor_key.clear();
+                                    app.editor_model = model;
+                                    app.input.clear();
+                                    app.set_cursor(0);
+                                    app.model_search = false;
+                                    app.active_modal = Modal::ModelEditor;
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                input::InputAction::ProviderPickerBack => {
+                    // Stage 2 → stage 1: drop back to the provider list and land
+                    // the cursor on the provider we were just inside.
+                    if app.active_modal == Modal::Provider
+                        && let Some(idx) = app.picker_provider.take()
+                    {
+                        app.model_search = false;
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.model_scroll = 0;
+                        app.model_modal_follow = true;
+                        let rows = app.providers_filtered();
+                        app.modal_index =
+                            rows.iter().position(|r| r.row_idx == idx).unwrap_or(0);
+                    }
+                }
+                input::InputAction::CustomProviderNextField => {
+                    if app.active_modal == Modal::CustomProvider {
+                        app.cycle_custom_field(true);
+                    }
+                }
+                input::InputAction::CustomProviderPrevField => {
+                    if app.active_modal == Modal::CustomProvider {
+                        app.cycle_custom_field(false);
+                    }
+                }
+                input::InputAction::MoveCustomSuggestion { forward } => {
+                    if app.active_modal == Modal::CustomProvider {
+                        app.move_custom_suggestion(forward);
+                    }
+                }
+                input::InputAction::MoveAddModel { forward } => {
+                    if app.active_modal == Modal::AddModel {
+                        app.move_add_model(forward);
+                    }
+                }
+                input::InputAction::SubmitAddModel => {
+                    if app.active_modal == Modal::AddModel {
+                        let model = app.add_model_selected();
+                        if let (Some(provider_id), false) =
+                            (app.add_model_provider.clone(), model.is_empty())
+                        {
+                            let _ = app.tx.send(AgentRequest::AddProviderModel {
+                                provider_id,
+                                model,
+                            });
+                        }
+                        // Return to the stage-2 model list; the fresh snapshot
+                        // will include the new model next frame.
+                        app.add_model_provider = None;
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.active_modal = Modal::Provider;
+                    }
+                }
+                input::InputAction::CancelAddModel => {
+                    if app.active_modal == Modal::AddModel {
+                        app.add_model_provider = None;
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.active_modal = Modal::Provider;
+                    }
+                }
+                input::InputAction::ProviderPickerRemoveModel => {
+                    // Stage-2 `d`: remove the highlighted model from a custom
+                    // provider. Built-in providers and the synthetic "＋ Add model"
+                    // row are ignored.
+                    if app.active_modal == Modal::Provider
+                        && app.picker_provider_is_custom()
+                        && !app.picker_on_add_model_row()
+                    {
+                        let rows = app.provider_models_filtered();
+                        if let Some(row) = rows.get(app.modal_index) {
+                            let _ = app.tx.send(AgentRequest::RemoveProviderModel {
+                                provider_id: row.provider_id.clone(),
+                                model: row.model.clone(),
+                            });
+                        }
+                    }
+                }
+                input::InputAction::CancelCustomProvider => {
+                    // Return to the provider picker (stage 1) the editor was
+                    // opened from; the chat draft stays parked in stashed_input.
+                    if app.active_modal == Modal::CustomProvider {
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.custom_field = 0;
+                        app.custom_edit_id = None;
+                        app.active_modal = Modal::Provider;
+                        app.picker_provider = None;
+                        app.model_search = false;
+                        app.model_scroll = 0;
+                        app.model_modal_follow = true;
+                        app.modal_index = 0;
+                    }
+                }
+                input::InputAction::SubmitCustomProvider => {
+                    if app.active_modal == Modal::CustomProvider {
+                        // Commit the focused text field's live value first.
+                        app.stash_custom_field();
+                        let name = app.custom_name.trim().to_string();
+                        let protocol = crate::tui::CUSTOM_PROTOCOLS
+                            .get(app.custom_protocol as usize)
+                            .map(|(_, wire)| wire.to_string())
+                            .unwrap_or_else(|| "openai".to_string());
+                        let base_url = app.custom_base_url.trim().to_string();
+                        let api_key = app.custom_token.trim().to_string();
+                        if let Some(id) = app.custom_edit_id.clone() {
+                            // Edit mode: update meta (models stay managed in
+                            // stage 2). A name is still required.
+                            if name.is_empty() {
+                                app.load_custom_field();
+                            } else {
+                                let _ = app.tx.send(AgentRequest::EditProvider {
+                                    id,
+                                    name,
+                                    protocol,
+                                    base_url,
+                                    api_key,
+                                });
+                                app.input = std::mem::take(&mut app.stashed_input);
+                                app.set_cursor_end();
+                                app.custom_field = 0;
+                                app.custom_edit_id = None;
+                                app.active_modal = Modal::None;
+                            }
+                        } else {
+                            // Create mode: name + model required.
+                            let model = app.custom_model.trim().to_string();
+                            if name.is_empty() || model.is_empty() {
+                                app.load_custom_field();
+                            } else {
+                                let _ = app.tx.send(AgentRequest::AddProvider {
+                                    name,
+                                    protocol,
+                                    base_url,
+                                    api_key,
+                                    model,
+                                });
+                                app.input = std::mem::take(&mut app.stashed_input);
+                                app.set_cursor_end();
+                                app.custom_field = 0;
+                                app.active_modal = Modal::None;
                             }
                         }
                     }
@@ -1510,7 +1867,7 @@ pub(super) async fn run_app_loop(
                     if app.active_modal == Modal::Provider {
                         app.model_search = false;
                         app.input.clear();
-                        app.cursor_position = 0;
+                        app.set_cursor(0);
                         app.input_scroll = 0;
                         app.suggestion_index = None;
                         app.modal_index = 0;
@@ -1519,85 +1876,93 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ProviderPickerToggleFavorite => {
-                    if app.active_modal == Modal::Provider {
-                        // Toggle the favorite on the highlighted row's provider
-                        // (falling back to the first visible row). Sending the
-                        // request is enough; the backend pushes a fresh snapshot
-                        // that flips the ★ next frame.
-                        let ranked = app.models_filtered();
+                    // Stage-1 only (gated in input): toggle the favorite on the
+                    // highlighted provider (falling back to the first visible
+                    // row). Sending the request is enough; the backend pushes a
+                    // fresh snapshot that flips the ★ next frame.
+                    if app.active_modal == Modal::Provider && app.picker_provider.is_none() {
+                        let ranked = app.providers_filtered();
                         if let Some(row) = ranked.get(app.modal_index).or_else(|| ranked.first()) {
-                            let id = PROVIDERS[row.provider_idx].id.to_string();
-                            let _ = app.tx.send(AgentRequest::ToggleFavorite { id });
+                            let _ = app
+                                .tx
+                                .send(AgentRequest::ToggleFavorite { id: row.id.clone() });
                         }
                     }
                 }
                 input::InputAction::OpenModelEditor => {
-                    // `e` in browse mode: open the unified editor for the
-                    // highlighted row's provider, prefilled with that row's model
-                    // id. The picker filter is discarded (transient search); the
-                    // chat draft stays stashed.
-                    if app.active_modal == Modal::Provider {
-                        let ranked = app.models_filtered();
-                        if let Some(row) = ranked.get(app.modal_index).or_else(|| ranked.first()) {
-                            app.editor_target = Some(row.provider_idx);
-                            app.editor_field = 0;
-                            app.editor_key.clear();
-                            app.editor_model = row.model.to_string();
-                            app.input.clear();
-                            app.cursor_position = 0;
-                            app.model_search = false;
-                            app.active_modal = Modal::ModelEditor;
+                    // `e` in stage-1 browse mode. A built-in provider opens the
+                    // API-key editor (only its auth changes; the model is chosen
+                    // from the stage-2 list). A user-defined provider opens the
+                    // full meta edit form (Name/Protocol/Base URL/Token); its
+                    // models stay managed in the stage-2 list.
+                    if app.active_modal == Modal::Provider && app.picker_provider.is_none() {
+                        let ranked = app.providers_filtered();
+                        let target = ranked
+                            .get(app.modal_index)
+                            .or_else(|| ranked.first())
+                            .map(|row| (row.id.clone(), row.model.clone(), row.builtin));
+                        if let Some((id, model, builtin)) = target {
+                            if builtin {
+                                app.editor_target = Some(id);
+                                app.editor_field = 0;
+                                app.editor_key.clear();
+                                app.editor_model = model;
+                                app.input.clear();
+                                app.set_cursor(0);
+                                app.model_search = false;
+                                app.active_modal = Modal::ModelEditor;
+                            } else {
+                                // Pre-fill the edit form from the snapshot row.
+                                let row = app
+                                    .provider_picker
+                                    .rows
+                                    .iter()
+                                    .find(|r| r.id == id)
+                                    .cloned();
+                                let (name, protocol, base_url) = row
+                                    .map(|r| (r.name, r.protocol, r.base_url))
+                                    .unwrap_or_default();
+                                let protocol_idx = crate::tui::CUSTOM_PROTOCOLS
+                                    .iter()
+                                    .position(|(_, wire)| *wire == protocol)
+                                    .unwrap_or(0)
+                                    as u8;
+                                app.model_search = false;
+                                app.open_edit_provider_editor(id, name, protocol_idx, base_url);
+                            }
                         }
                     }
                 }
                 input::InputAction::ModelEditorNextField => {
-                    // Tab: save the focused field's buffer, swap input to the
-                    // other field. The composer input line is borrowed for the
-                    // focused field; the unfocused one lives in its buf.
-                    if app.active_modal == Modal::ModelEditor {
-                        if app.editor_field == 0 {
-                            app.editor_key = std::mem::take(&mut app.input);
-                            app.input = std::mem::take(&mut app.editor_model);
-                            app.editor_field = 1;
-                        } else {
-                            app.editor_model = std::mem::take(&mut app.input);
-                            app.input = std::mem::take(&mut app.editor_key);
-                            app.editor_field = 0;
-                        }
-                        app.cursor_position = app.input.chars().count();
-                    }
+                    // The key editor now has a single field (API key); Tab is a
+                    // no-op (kept so the binding is harmless).
                 }
                 input::InputAction::SubmitModelEditor => {
                     if app.active_modal == Modal::ModelEditor
-                        && let Some(idx) = app.editor_target
+                        && let Some(id) = app.editor_target.clone()
                     {
-                        // Commit the focused field's input to its buffer first.
-                        if app.editor_field == 0 {
-                            app.editor_key = app.input.clone();
+                        // The single editor field is the API key; the model was
+                        // carried in from the picker selection / provider default.
+                        let key = app.input.trim().to_string();
+                        let model = if app.editor_model.trim().is_empty() {
+                            app.provider_picker
+                                .rows
+                                .iter()
+                                .find(|r| r.id == id)
+                                .map(|r| r.model.clone())
+                                .unwrap_or_default()
                         } else {
-                            app.editor_model = app.input.clone();
-                        }
-                        if let Some(solution) = PROVIDERS.get(idx) {
-                            let key = app.editor_key.trim();
-                            let model = if app.editor_model.trim().is_empty() {
-                                solution.model.to_string()
-                            } else {
-                                app.editor_model.trim().to_string()
-                            };
-                            let _ = app.tx.send(AgentRequest::SwitchProvider {
-                                provider_type: solution.id.to_string(),
-                                model,
-                                api_key: if key.is_empty() {
-                                    None
-                                } else {
-                                    Some(key.to_string())
-                                },
-                                base_url: None,
-                            });
-                        }
+                            app.editor_model.trim().to_string()
+                        };
+                        let _ = app.tx.send(AgentRequest::SwitchProvider {
+                            provider_type: id,
+                            model,
+                            api_key: if key.is_empty() { None } else { Some(key) },
+                            base_url: None,
+                        });
                         // Close to chat: restore the original draft.
                         app.input = std::mem::take(&mut app.stashed_input);
-                        app.cursor_position = app.input.chars().count();
+                        app.set_cursor_end();
                         app.editor_target = None;
                         app.active_modal = Modal::None;
                     }
@@ -1619,26 +1984,26 @@ pub(super) async fn run_app_loop(
                     // line stays empty until `/` enters search and borrows it as
                     // the fuzzy query (same pattern as the history modal).
                     app.stashed_input = std::mem::take(&mut app.input);
-                    app.cursor_position = 0;
+                    app.set_cursor(0);
                     app.input_scroll = 0;
                     app.active_modal = Modal::Provider;
                     app.model_search = false;
+                    app.picker_provider = None;
                     app.model_scroll = 0;
                     app.model_modal_follow = true;
-                    // Land the cursor on the currently-active model so the "open
-                    // picker + Enter" fast path re-activates it. Activation always
-                    // honors the highlighted row (see `ProviderPickerActivate`).
-                    let ranked = app.models_filtered();
+                    // Open in stage 1 (the provider list) and land the cursor on
+                    // the currently-active provider (falling back to the default),
+                    // so "open picker + Enter" re-selects it — drilling into its
+                    // models for a multi-model provider, or re-activating directly
+                    // for a single-model one.
+                    let ranked = app.providers_filtered();
                     app.modal_index = ranked
                         .iter()
-                        .position(|row| {
-                            PROVIDERS[row.provider_idx].id == app.current_provider
-                                && row.model == app.current_model
-                        })
+                        .position(|row| row.id == app.current_provider)
                         .or_else(|| {
-                            ranked.iter().position(|row| {
-                                PROVIDERS[row.provider_idx].id == app.provider_picker.default_id
-                            })
+                            ranked
+                                .iter()
+                                .position(|row| row.id == app.provider_picker.default_id)
                         })
                         .unwrap_or(0);
                     app.suggestion_index = None;
@@ -1649,7 +2014,7 @@ pub(super) async fn run_app_loop(
                     // line stays empty until `/` enters search and borrows it as
                     // the fuzzy query.
                     app.stashed_input = std::mem::take(&mut app.input);
-                    app.cursor_position = 0;
+                    app.set_cursor(0);
                     app.input_scroll = 0;
                     app.suggestion_index = None;
                     app.active_modal = Modal::HistorySearch;
@@ -1677,7 +2042,7 @@ pub(super) async fn run_app_loop(
                     // `stashed_input` until the modal closes for real.
                     app.history_search = false;
                     app.input.clear();
-                    app.cursor_position = 0;
+                    app.set_cursor(0);
                     app.input_scroll = 0;
                     app.suggestion_index = None;
                     app.modal_index = 0;
@@ -1696,7 +2061,7 @@ pub(super) async fn run_app_loop(
                     if let Some((orig_idx, _)) = pick {
                         let original = *orig_idx;
                         app.input = app.input_history[original].clone();
-                        app.cursor_position = app.input.chars().count();
+                        app.set_cursor_end();
                     }
                     // The selection replaces the in-progress draft, so the
                     // stash is dropped (not restored).
@@ -1724,7 +2089,7 @@ pub(super) async fn run_app_loop(
                     // slash-suggestion popup acts as a filterable palette.
                     if !app.input.starts_with('/') {
                         app.input = "/".to_string();
-                        app.cursor_position = app.input.chars().count();
+                        app.set_cursor_end();
                     }
                     app.suggestion_index = None;
                 }
@@ -1912,9 +2277,19 @@ pub(super) async fn run_app_loop(
                         // closes.
                         app.editor_target = None;
                         app.input.clear();
-                        app.cursor_position = 0;
+                        app.set_cursor(0);
                         app.model_search = false;
                         app.model_modal_follow = true;
+                        return_to_picker = true;
+                    } else if app.active_modal == Modal::CustomProvider {
+                        // Same as Esc: discard the editor fields and step back to
+                        // the picker; the chat draft stays parked in stashed_input.
+                        app.input.clear();
+                        app.set_cursor(0);
+                        app.custom_field = 0;
+                        app.model_search = false;
+                        app.model_modal_follow = true;
+                        app.modal_index = 0;
                         return_to_picker = true;
                     }
                     app.active_modal = if return_to_picker {
@@ -2149,7 +2524,7 @@ pub(super) async fn run_app_loop(
                         // per-frame refresh while the quit window is armed
                         // so this toast keeps the floor.
                         app.input.clear();
-                        app.cursor_position = 0;
+                        app.set_cursor(0);
                         app.input_scroll = 0;
                         show_local_toast(
                             app,
@@ -2285,6 +2660,13 @@ pub(super) async fn run_app_loop(
                 input::InputAction::InsertChar(c) => {
                     // Already handled by process_event mutating app.input
                     let _ = c;
+                    // The custom-provider / add-model filter fields re-rank their
+                    // suggestion list as the query changes.
+                    if app.active_modal == Modal::CustomProvider {
+                        app.on_custom_filter_changed();
+                    } else if app.active_modal == Modal::AddModel {
+                        app.on_add_model_filter_changed();
+                    }
                     app.suggestion_index = None;
                     // The user is editing again, so live completions are
                     // once again useful — clear the Enter-commit dismissal.
@@ -2300,6 +2682,11 @@ pub(super) async fn run_app_loop(
                     app.reconcile_attachments();
                 }
                 input::InputAction::Backspace => {
+                    if app.active_modal == Modal::CustomProvider {
+                        app.on_custom_filter_changed();
+                    } else if app.active_modal == Modal::AddModel {
+                        app.on_add_model_filter_changed();
+                    }
                     app.suggestion_index = None;
                     app.completion_dismissed = false;
                     // Same as InsertChar: editing the input box reclaims focus
@@ -2386,7 +2773,7 @@ pub(super) async fn run_app_loop(
                         };
                         app.history_index = Some(new_idx);
                         app.input = app.input_history[new_idx].clone();
-                        app.cursor_position = app.input.chars().count();
+                        app.set_cursor_end();
                         // History navigation is a programmatic input replacement,
                         // not an edit — so it latches `completion_dismissed` like
                         // a slash-command accept rather than re-enabling the popup
@@ -2413,7 +2800,7 @@ pub(super) async fn run_app_loop(
                             let new_idx = i + 1;
                             app.history_index = Some(new_idx);
                             app.input = app.input_history[new_idx].clone();
-                            app.cursor_position = app.input.chars().count();
+                            app.set_cursor_end();
                             // Same programmatic-replacement latch as HistoryPrev.
                             app.suggestion_index = None;
                             app.completion_dismissed = true;
@@ -2423,7 +2810,7 @@ pub(super) async fn run_app_loop(
                             // rather than blanking the composer.
                             app.history_index = None;
                             app.input = std::mem::take(&mut app.history_draft);
-                            app.cursor_position = app.input.chars().count();
+                            app.set_cursor_end();
                             // The restored draft may be a partial slash/path
                             // the user was mid-edit on, but it still arrived
                             // via navigation rather than a keystroke, so hold
@@ -2435,10 +2822,11 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::ModalUp => match app.active_modal {
                     Modal::Provider => {
-                        // Walk the fuzzy-filtered model list, not the raw
-                        // catalog, so the cursor never lands on a hidden row
-                        // (same rule as the history-search modal).
-                        let count = app.models_filtered().len();
+                        // Walk the fuzzy-filtered rows of the *current stage*
+                        // (providers in stage 1, that provider's models in stage
+                        // 2), so the cursor never lands on a hidden row (same rule
+                        // as the history-search modal).
+                        let count = app.picker_row_count();
                         app.modal_index = if count == 0 {
                             0
                         } else if app.modal_index == 0 {
@@ -2503,6 +2891,8 @@ pub(super) async fn run_app_loop(
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::CustomProvider
+                    | Modal::AddModel
                     | Modal::InputInjection
                     | Modal::Session
                     | Modal::Tools
@@ -2512,7 +2902,7 @@ pub(super) async fn run_app_loop(
                 },
                 input::InputAction::ModalDown => match app.active_modal {
                     Modal::Provider => {
-                        let count = app.models_filtered().len().max(1);
+                        let count = app.picker_row_count().max(1);
                         app.modal_index = (app.modal_index + 1) % count;
                         app.model_modal_follow = true;
                     }
@@ -2544,6 +2934,8 @@ pub(super) async fn run_app_loop(
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
+                    | Modal::CustomProvider
+                    | Modal::AddModel
                     | Modal::InputInjection
                     | Modal::Session
                     | Modal::Tools
@@ -2625,11 +3017,8 @@ pub(super) async fn run_app_loop(
                             // Drain the matching front so the per-frame sync
                             // closes the modal and restores the composer draft.
                             runtime.pending_input.lock().await.pop_front();
-                            let parent_call_id = runtime
-                                .envoy_question_parent
-                                .lock()
-                                .await
-                                .remove(&req.id);
+                            let parent_call_id =
+                                runtime.envoy_question_parent.lock().await.remove(&req.id);
                             let _ = app.tx.send(AgentRequest::InputReply {
                                 request_id: req.id.clone(),
                                 text,
@@ -2647,11 +3036,8 @@ pub(super) async fn run_app_loop(
                         // Empty reply = cancel → the command runs with closed
                         // stdin and fails fast with a non-interactive remedy.
                         runtime.pending_input.lock().await.pop_front();
-                        let parent_call_id = runtime
-                            .envoy_question_parent
-                            .lock()
-                            .await
-                            .remove(&req.id);
+                        let parent_call_id =
+                            runtime.envoy_question_parent.lock().await.remove(&req.id);
                         let _ = app.tx.send(AgentRequest::InputReply {
                             request_id: req.id.clone(),
                             text: String::new(),

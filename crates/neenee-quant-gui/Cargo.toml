@@ -1,0 +1,25 @@
+[package]
+name = "neenee-quant-gui"
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[[bin]]
+name = "neenee-quant-gui"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = []
+gui = ["dep:iris"]
+
+[dependencies]
+neenee-core = { path = "../neenee-core" }
+neenee-quant = { path = "../neenee-quant" }
+iris = { path = "../../../optics/bindings/iris-rs/crates/iris", optional = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

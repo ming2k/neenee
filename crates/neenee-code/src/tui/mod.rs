@@ -28,8 +28,8 @@ mod versioned;
 pub(crate) use app::{ActivityTab, App, Modal, Recess};
 pub(crate) use completion::{Completion, CompletionKind};
 pub(crate) use providers::{
-    PROVIDERS, ProviderPreset, RankedModel, model_display_name, models_filtered_from,
-    provider_context_window,
+    CUSTOM_PROTOCOLS, RankedModel, RankedProvider, model_context_window, model_display_name,
+    protocol_model_candidates, providers_filtered_from,
 };
 
 use crossterm::{
@@ -836,6 +836,9 @@ pub async fn run_tui(
         input_scroll: 0,
         active_modal: Modal::None,
         modal_index: 0,
+        last_input_rect: neenee_tui::Rect::default(),
+        cursor_sync_pending: false,
+        cursor_visible: true,
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
@@ -895,7 +898,18 @@ pub async fn run_tui(
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
+        custom_field: 0,
+        custom_protocol: 0,
+        custom_suggest_index: 0,
+        custom_edit_id: None,
+        custom_name: String::new(),
+        custom_base_url: String::new(),
+        custom_token: String::new(),
+        custom_model: String::new(),
         model_search: false,
+        picker_provider: None,
+        add_model_provider: None,
+        add_model_choice: 0,
         model_scroll: 0,
         model_modal_follow: true,
         key_status: HashMap::new(),

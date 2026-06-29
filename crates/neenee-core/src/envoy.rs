@@ -383,7 +383,7 @@ turns short and report concrete findings, then stop.",
 /// Tools a quant-analysis envoy may use: the read-only quant domain tools
 /// (market data, backtest, position review) plus the generic read-only
 /// inspection tools (so it can read strategy code, configs, logs). Crucially,
-/// this list excludes live-trading tools (`place_order`) and all coding
+/// this list excludes live-trading tools (`place_order`, `cancel_order`) and all coding
 /// write/edit tools — a quant *analyst* role observes and reasons, it does not
 /// trade or mutate the repo. Listed by name so adding a new tool to the parent
 /// never silently widens this profile.
@@ -406,13 +406,13 @@ const QUANT_ANALYSIS_TOOLS: &[&str] = &[
 /// [`EXPLORE`], but scoped to a quantitative-trading domain: it may pull
 /// market data, run backtests, and review open positions, but it cannot place
 /// live orders or modify any file. A quant agent that *should* trade binds a
-/// different profile (one that admits `place_order` under user supervision —
-/// the analogue of [`INTERACTIVE`] for the quant domain); this one is the
+/// different profile (one that admits `place_order` / `cancel_order` under user
+/// supervision — the analogue of [`INTERACTIVE`] for the quant domain); this one is the
 /// "research before you risk capital" shape.
 ///
 /// This profile exists precisely so the per-role tool-allocation requirement holds:
 /// a quant analyst never sees coding tools (`write_file`, `edit_file`, `bash`),
-/// and a coding agent never sees quant tools (`market_data`, `place_order`).
+/// and a coding agent never sees quant tools (`market_data`, `place_order`, `cancel_order`).
 /// The two domains are isolated by name at the profile layer, which is the
 /// single source of truth for what a bounded envoy may touch (ADR-0011).
 pub const QUANT: EnvoyProfile = EnvoyProfile {
@@ -633,8 +633,8 @@ mod tests {
     /// QUANT is the per-role isolation contract between the coding and
     /// quant domains (the "separate tool allocation per role" requirement). It
     /// admits the read-only quant tools and shared read-only inspection tools,
-    /// but excludes: live trading (place_order), every coding write/edit tool,
-    /// bash, and recursion/control. This test pins the domain boundary so a
+    /// but excludes: live trading (place_order/cancel_order), every coding
+    /// write/edit tool, bash, and recursion/control. This test pins the domain boundary so a
     /// future tool added to either domain cannot leak across it without an
     /// explicit profile edit.
     #[test]
@@ -650,6 +650,7 @@ mod tests {
         // Live trading is NOT admitted — a quant analyst recommends, never
         // trades. Trading needs a separate, user-supervised profile.
         assert!(!QUANT.tool_policy.admits(&make("place_order")));
+        assert!(!QUANT.tool_policy.admits(&make("cancel_order")));
         // Coding write/edit tools are NOT admitted — domain isolation.
         assert!(!QUANT.tool_policy.admits(&make("write_file")));
         assert!(!QUANT.tool_policy.admits(&make("edit_file")));
@@ -667,6 +668,7 @@ mod tests {
         assert!(!EXPLORE.tool_policy.admits(&make("market_data")));
         assert!(!EXPLORE.tool_policy.admits(&make("backtest")));
         assert!(!EXPLORE.tool_policy.admits(&make("place_order")));
+        assert!(!EXPLORE.tool_policy.admits(&make("cancel_order")));
         assert!(!EXPLORE.tool_policy.admits(&make("list_positions")));
     }
 }

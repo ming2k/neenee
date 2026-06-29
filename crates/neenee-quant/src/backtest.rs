@@ -7,20 +7,27 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::NaiveDate;
 use neenee_core::Tool;
 use serde_json::json;
+
+use crate::runtime::{BacktestOptions, QuantRuntime};
 
 /// Run a backtest of a trading strategy over historical market data.
 ///
 /// Despite producing "orders" internally, it never touches a live account —
 /// all fills are simulated. Returns summary performance metrics.
 pub struct BacktestTool {
-    _private: (),
+    runtime: QuantRuntime,
 }
 
 impl BacktestTool {
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::with_runtime(QuantRuntime::new())
+    }
+
+    pub fn with_runtime(runtime: QuantRuntime) -> Self {
+        Self { runtime }
     }
 }
 
@@ -53,6 +60,14 @@ impl Tool for BacktestTool {
                 },
                 "start": { "type": "string", "description": "Backtest start date (YYYY-MM-DD)" },
                 "end": { "type": "string", "description": "Backtest end date (YYYY-MM-DD)" },
+                "interval": {
+                    "type": "string",
+                    "description": "Candle interval, e.g. 1d, 1h. Defaults to 1d."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum candle count to request. Defaults to the start/end daily span or 365."
+                },
                 "initial_capital": { "type": "number", "description": "Starting capital for the simulation" }
             },
             "required": ["symbol", "strategy"]
@@ -69,23 +84,62 @@ impl Tool for BacktestTool {
             .as_str()
             .ok_or("Missing 'strategy'")?
             .to_string();
-        Ok(json!({
-            "symbol": symbol,
-            "strategy": strategy,
-            "total_return_pct": 0.0,
-            "annualized_return_pct": 0.0,
-            "sharpe_ratio": 0.0,
-            "max_drawdown_pct": 0.0,
-            "trades": 0,
-            "note": "stub backtest — wire a real backtest engine",
-        })
-        .to_string())
+        let initial_capital = args["initial_capital"].as_f64().unwrap_or(100_000.0);
+        let start = optional_string(&args, "start");
+        let end = optional_string(&args, "end");
+        let interval = args["interval"].as_str().unwrap_or("1d").to_string();
+        let default_limit = infer_limit(&interval, start.as_deref(), end.as_deref())?;
+        let limit = args["limit"]
+            .as_u64()
+            .map(|value| value as usize)
+            .unwrap_or(default_limit);
+        serde_json::to_string(&self.runtime.run_backtest_with_options(
+            &symbol,
+            &strategy,
+            initial_capital,
+            BacktestOptions {
+                interval,
+                limit,
+                start,
+                end,
+            },
+        )?)
+        .map_err(|e| format!("Serialize backtest failed: {e}"))
     }
 }
 
 /// Convenience: an `Arc<dyn Tool>` ready for an agent's tool list.
 pub fn shared() -> Arc<dyn Tool> {
     Arc::new(BacktestTool::new())
+}
+
+fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value[key]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_limit(interval: &str, start: Option<&str>, end: Option<&str>) -> Result<usize, String> {
+    if interval != "1d" {
+        return Ok(365);
+    }
+    let (Some(start), Some(end)) = (start, end) else {
+        return Ok(365);
+    };
+    let start = parse_date("start", start)?;
+    let end = parse_date("end", end)?;
+    if end < start {
+        return Err("end date must be on or after start date".to_string());
+    }
+    let days = end.signed_duration_since(start).num_days() + 1;
+    Ok((days as usize).clamp(1, 1000))
+}
+
+fn parse_date(label: &str, value: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|e| format!("{label} must use YYYY-MM-DD: {e}"))
 }
 
 #[cfg(test)]
@@ -128,12 +182,25 @@ mod tests {
     #[tokio::test]
     async fn call_returns_metrics_for_valid_request() {
         let out = tool()
-            .call(r#"{"symbol":"BTCUSDT","strategy":"sma_cross(50,200)"}"#)
+            .call(
+                r#"{
+                    "symbol":"BTCUSDT",
+                    "strategy":"sma_cross(50,200)",
+                    "start":"2024-01-01",
+                    "end":"2024-12-31",
+                    "initial_capital":100000
+                }"#,
+            )
             .await
             .expect("backtest ok");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["symbol"], "BTCUSDT");
         assert_eq!(v["strategy"], "sma_cross(50,200)");
+        assert_eq!(v["interval"], "1d");
+        assert_eq!(v["requested_start"], "2024-01-01");
+        assert_eq!(v["requested_end"], "2024-12-31");
+        assert_eq!(v["candles"], 366);
+        assert_eq!(v["market_data_source"], "synthetic-paper");
         // All advertised metrics are present and numeric.
         for key in [
             "total_return_pct",
@@ -144,6 +211,41 @@ mod tests {
             assert!(v[key].is_number(), "{key} numeric: {v}");
         }
         assert!(v["trades"].is_i64(), "trades is integer");
+        assert!(
+            v["trade_log"].as_array().is_some(),
+            "trade log present: {v}"
+        );
+        assert!(
+            v["equity_curve"]
+                .as_array()
+                .is_some_and(|curve| curve.len() == 366),
+            "equity curve present: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_rejects_unknown_strategy() {
+        let err = tool()
+            .call(r#"{"symbol":"BTCUSDT","strategy":"magic_alpha"}"#)
+            .await
+            .expect_err("unknown strategy");
+        assert!(err.contains("unsupported strategy"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn call_rejects_inverted_date_range() {
+        let err = tool()
+            .call(
+                r#"{
+                    "symbol":"BTCUSDT",
+                    "strategy":"buy_hold",
+                    "start":"2024-12-31",
+                    "end":"2024-01-01"
+                }"#,
+            )
+            .await
+            .expect_err("bad date range");
+        assert!(err.contains("end date"), "err: {err}");
     }
 
     #[tokio::test]

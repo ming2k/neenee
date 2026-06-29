@@ -24,15 +24,14 @@ mod snapshot_tests;
 
 pub use chrome::draw_activity_bar;
 pub use chrome::{HintBarView, draw_completion_menu, draw_hint_bar};
-pub use composer::{INPUT_MSG_IDX, draw_composer};
+pub use composer::{INPUT_MSG_IDX, cursor_screen_pos, draw_composer};
 use design::{
-    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH,
-    COMPOSER_MAX_HEIGHT_DIVISOR, COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS,
-    COMPOSER_RIGHT_PAD_COLS, COMPOSER_VERTICAL_CHROME_ROWS, ENVOY_BAR_ROWS, FOOTER_H_INSET,
-    HINT_BAR_ROWS, MESSAGE_GAP_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,
-    REASONING_TRACE_BODY_TOP_GAP_ROWS, SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
-    TRANSCRIPT_H_INSET,
+    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, COMPOSER_MAX_HEIGHT_DIVISOR,
+    COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS,
+    COMPOSER_VERTICAL_CHROME_ROWS, ENVOY_BAR_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS, MESSAGE_GAP_ROWS,
+    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, SIDE_BANNER_ROWS,
+    STATUS_BAR_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
+    TRANSCRIPT_BODY_LEADING_INDENT, TRANSCRIPT_H_INSET,
 };
 use disclosure::{
     StickyStep, draw_envoy_bar, draw_envoy_inline_step, draw_reasoning_trace, draw_side_banner,
@@ -46,7 +45,8 @@ use markdown_table::{build_table_render, shrink_column_widths};
 use message_body::draw_message_body;
 use notice::draw_notice;
 pub(crate) use overlays::{
-    ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
+    ActivityModalView, CustomEditorView, draw_activity_modal, draw_add_model_editor,
+    draw_armed_toast, draw_copy_toast, draw_custom_provider_editor, draw_help_modal,
     draw_history_modal, draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_question_modal, draw_session_modal,
     draw_sessions_modal, draw_tools_modal,
@@ -861,6 +861,10 @@ mod tests {
                 f,
                 &mut LayoutMap::new(),
                 &[],
+                &[],
+                None,
+                None,
+                false,
                 "mock",
                 "mock-model",
                 0,
@@ -889,7 +893,26 @@ mod tests {
                 true,
                 &theme,
             );
-            draw_model_editor(f, "OpenAI", 0, "", "gpt-4o", "", 0, &theme);
+            draw_model_editor(f, "OpenAI", "", 0, &theme);
+            // Custom-provider editor on the Protocol filter field.
+            draw_custom_provider_editor(
+                CustomEditorView {
+                    field: 1,
+                    editing: false,
+                    name_buf: "My Relay",
+                    base_url_buf: "https://relay/v1/chat/completions",
+                    token_buf: "tok",
+                    protocol_label: "Anthropic",
+                    model_display: "Claude Opus 4.8",
+                    suggestions: &["OpenAI-compatible".to_string(), "Anthropic".to_string()],
+                    suggest_index: 1,
+                    suggest_title: "Protocol",
+                    input: "an",
+                    cursor_position: 2,
+                },
+                f,
+                &theme,
+            );
             {
                 let mut scroll = 0;
                 draw_help_modal(f, &mut scroll, &theme);
@@ -954,12 +977,12 @@ mod tests {
             // list panes and the MCP per-server tool names.
             let snapshot = neenee_core::SessionContextSnapshot {
                 model: neenee_core::ModelInfo {
-                    provider: "gemini".to_string(),
+                    provider: "google".to_string(),
                     model: "gemini-2.5-flash".to_string(),
                     display_name: "Gemini 2.5 Flash".to_string(),
                     context_window: 1_000_000,
                     api_key_ready: true,
-                    description: "Google Gemini 2.5 Flash".to_string(),
+                    description: "Google Gemini".to_string(),
                     capabilities: vec!["tool calling".to_string()],
                 },
                 tools: vec![neenee_core::ToolInfo {
@@ -989,7 +1012,7 @@ mod tests {
                 }],
             };
             let mut key_status = HashMap::new();
-            key_status.insert("gemini".to_string(), true);
+            key_status.insert("google".to_string(), true);
             for _ in [0usize, 2] {
                 draw_session_modal(
                     f,
@@ -1473,7 +1496,106 @@ mod tests {
         }
     }
 
-    /// A CJK selection highlight must paint BOTH columns of each wide glyph
+    /// Regression for the IME cursor-lag fix: the input-driven immediate flush
+    /// places the terminal cursor via [`composer::cursor_screen_pos`], and the
+    /// draw path places it via [`draw_composer`]'s `set_cursor_position`. The
+    /// two **must agree** for every (input, caret offset) pair — if they ever
+    /// diverge, the IME composition window (which samples the cursor on its own
+    /// schedule) anchors to a different coordinate than the rendered caret, the
+    /// exact "IME 捕获位置错乱" symptom. This test locks the invariant by
+    /// rendering each case and asserting the rendered cursor equals the pure
+    /// function's output.
+    #[test]
+    fn cursor_screen_pos_matches_drawn_caret() {
+        use super::composer::cursor_screen_pos;
+
+        let theme = Theme::default();
+        // Composer rect must fit inside the test terminal (24×8): a 4-row box
+        // at y=0..4, x=0..20.
+        let rect = Rect::new(0, 0, 20, 4);
+
+        // (label, input, byte cursor) spanning ASCII, CJK (wide), mid-string,
+        // empty, and a cursor that rests past the last wrapped line.
+        let cases: &[(&str, &str, usize)] = &[
+            ("ascii end", "hello", 5),
+            ("ascii mid", "hello", 2),
+            ("empty", "", 0),
+            ("cjk end", "中文测试", 12),
+            ("cjk mid", "中文测试", 6),
+            ("mixed", "a中b文", 5),
+            ("past wrap", "aaaa bbbb cccc dd", 16),
+        ];
+
+        for (label, input, byte_cursor) in cases {
+            let byte_cursor = *byte_cursor;
+            // What the draw path places.
+            let mut terminal = neenee_tui::TestTerminal::new(24, 8);
+            terminal.draw(|f| {
+                draw_composer(
+                    f,
+                    rect,
+                    input,
+                    byte_cursor,
+                    true,
+                    true,
+                    &theme,
+                    &mut LayoutMap::new(),
+                    false,
+                    &mut 0,
+                    &SelectionState::None,
+                );
+            });
+            let drawn = match terminal.cursor() {
+                neenee_tui::CursorState::Visible(x, y) => (x, y),
+                other => panic!("{label}: caret should be visible, got {other:?}"),
+            };
+
+            // What the immediate-flush pure function places.
+            let mut scroll = 0usize;
+            let flushed = cursor_screen_pos(rect, input, byte_cursor, &mut scroll)
+                .unwrap_or_else(|| panic!("{label}: cursor_screen_pos returned None"));
+
+            assert_eq!(
+                drawn, flushed,
+                "{label} (input={input:?}, byte={byte_cursor}): \
+                 draw path and immediate-flush path disagree — \
+                 this is what re-introduces the IME anchor drift"
+            );
+        }
+    }
+
+    /// The immediate flush must update `input_scroll` to keep the caret in view
+    /// exactly as the draw path does — otherwise a caret moved below the
+    /// visible window would render at the right place but be anchored
+    /// off-screen by the flush, desyncing scroll state across frames.
+    #[test]
+    fn cursor_screen_pos_clamps_scroll_like_draw() {
+        use super::composer::cursor_screen_pos;
+
+        // A 20-wide box (text width ~16) with a long input; the box shows only
+        // a couple of rows, so a caret near the end forces a scroll.
+        let rect = Rect::new(0, 0, 20, 4);
+        let input = "word ".repeat(20); // ~100 chars, wraps many times
+        let byte_cursor = input.len();
+
+        let mut scroll = 0usize;
+        let flushed = cursor_screen_pos(rect, &input, byte_cursor, &mut scroll)
+            .expect("caret position resolves");
+
+        // The flushed caret must sit on a visible row (within the box's text
+        // rows), proving scroll advanced to track it.
+        let visible_rows = (rect.height as usize)
+            .saturating_sub(super::design::COMPOSER_VERTICAL_CHROME_ROWS as usize)
+            .max(1);
+        let caret_row = (flushed.1 - rect.y - super::design::COMPOSER_TEXT_ROW_OFFSET) as usize;
+        assert!(
+            caret_row < visible_rows,
+            "flushed caret row {caret_row} outside the {visible_rows} visible rows"
+        );
+        assert!(scroll > 0, "scroll should have advanced to track the caret");
+    }
+
+
     /// (head + continuation), cover exactly the selected glyphs, and leave the
     /// trailing pad on the panel background — no extra glyph, no half-highlighted
     /// wide char. Exercises the full-3-CJK selection the live bug report used.

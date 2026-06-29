@@ -745,13 +745,19 @@ pub fn draw_input_injection(
     let entry_rect = chunks[1];
 
     // Prompt line: the command for context, then what to enter.
-    let secret_label = if request.secret { " (input hidden)" } else { "" };
+    let secret_label = if request.secret {
+        " (input hidden)"
+    } else {
+        ""
+    };
     let prompt_text = format!("{}  —  {}{}", request.command, request.prompt, secret_label);
     let prompt_line = Line::from(vec![
         Span::styled("┃ ", Style::default().fg(theme.warn())),
         Span::styled(
             request.command.clone(),
-            Style::default().fg(theme.warn()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.warn())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  —  {}{}", request.prompt, secret_label),
@@ -775,7 +781,9 @@ pub fn draw_input_injection(
     let entry_line = Line::from(vec![
         Span::styled(
             entry_prefix,
-            Style::default().fg(theme.brand()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.brand())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(display, Style::default().fg(theme.fg())),
         Span::styled(

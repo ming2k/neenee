@@ -222,19 +222,16 @@ pub fn draw_session_modal(
             s.model.capabilities.clone(),
         ),
         None => {
-            let solution = crate::tui::PROVIDERS.iter().find(|x| x.id == provider);
             (
                 provider.to_string(),
                 crate::tui::model_display_name(model),
                 model.to_string(),
-                crate::tui::provider_context_window(provider),
+                crate::tui::model_context_window(model),
                 key_status
                     .get(&provider.to_lowercase())
                     .copied()
                     .unwrap_or(false),
-                solution
-                    .map(|s| s.description.to_string())
-                    .unwrap_or_default(),
+                String::new(),
                 Vec::new(),
             )
         }

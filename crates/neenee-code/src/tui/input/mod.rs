@@ -49,6 +49,27 @@ pub struct InputContext {
     /// `true` borrows the composer line as the live fuzzy query. Mirrors
     /// `App::model_search`.
     pub model_searching: bool,
+    /// Whether the provider picker is in its **stage-2** model sub-list (drilled
+    /// into a multi-model provider). Only meaningful while [`Self::active_modal`]
+    /// is [`super::Modal::Provider`]: it routes Esc to "back to the provider
+    /// list" instead of "close the modal", and gates the stage-1-only `*`/`e`
+    /// shortcuts. Mirrors `App::picker_provider.is_some()`.
+    pub picker_in_models_stage: bool,
+    /// Focused field of the custom-provider editor, or `None` when that modal is
+    /// not open. `Some(0|2|3|4)` is a text field (printable keys edit the
+    /// borrowed composer line); `Some(1)` is the Protocol field (`←/→` cycle the
+    /// choice, printable keys are inert). Mirrors `App::custom_field` while
+    /// [`Self::active_modal`] is [`super::Modal::CustomProvider`].
+    pub custom_provider_field: Option<u8>,
+}
+
+impl InputContext {
+    /// Whether any custom-provider editor field is focused. Every field now
+    /// borrows the composer line: Name / Base URL / Token are plain text, while
+    /// Protocol / Model borrow it as a live filter query.
+    fn custom_text_field_focused(&self) -> bool {
+        self.custom_provider_field.is_some()
+    }
 }
 
 /// Whether `modal` currently treats the composer line as an editable free-text
@@ -58,11 +79,22 @@ pub struct InputContext {
 /// active (`history_searching` / `model_searching`); in browse mode those keys
 /// are inert so `/` can open search and stray letters never mutate a buffer the
 /// user isn't editing.
-fn edits_input_field(modal: super::Modal, history_searching: bool, model_searching: bool) -> bool {
+fn edits_input_field(
+    modal: super::Modal,
+    history_searching: bool,
+    model_searching: bool,
+    custom_text_field: bool,
+) -> bool {
     match modal {
-        super::Modal::None | super::Modal::ModelEditor | super::Modal::InputInjection => true,
+        super::Modal::None
+        | super::Modal::ModelEditor
+        | super::Modal::AddModel
+        | super::Modal::InputInjection => true,
         super::Modal::Provider => model_searching,
         super::Modal::HistorySearch => history_searching,
+        // The custom-provider editor edits the composer line only on its text
+        // fields; the Protocol field is non-text (printable keys are inert there).
+        super::Modal::CustomProvider => custom_text_field,
         _ => false,
     }
 }
@@ -86,6 +118,9 @@ pub enum InputAction {
     /// filter is empty (fast path), otherwise the highlighted filtered row.
     /// Falls through to the API-key setup modal when the target has no key.
     ProviderPickerActivate,
+    /// Step back from the picker's stage-2 model sub-list to the stage-1 provider
+    /// list (Esc while drilled into a multi-model provider).
+    ProviderPickerBack,
     /// Toggle the favorite flag on the highlighted picker row.
     ProviderPickerToggleFavorite,
     /// Open the unified provider editor (`e`) for the highlighted picker row.
@@ -95,6 +130,29 @@ pub enum InputAction {
     SubmitModelEditor,
     /// Cycle focus between the editor's fields (API key ↔ model id).
     ModelEditorNextField,
+    /// Submit the custom-provider editor → `AgentRequest::AddProvider`.
+    SubmitCustomProvider,
+    /// Cancel the custom-provider editor and return to the provider picker.
+    CancelCustomProvider,
+    /// Move focus to the next / previous field of the custom-provider editor
+    /// (`Tab` / `BackTab`), wrapping at the ends.
+    CustomProviderNextField,
+    CustomProviderPrevField,
+    /// Move the suggestion highlight in the custom-provider editor's focused
+    /// filter field (Protocol / Model) with `↑` / `↓`. `forward` = down.
+    MoveCustomSuggestion {
+        forward: bool,
+    },
+    /// Remove the highlighted model from a custom provider's stage-2 list (`d`).
+    ProviderPickerRemoveModel,
+    /// Move the add-model overlay's suggestion highlight with `↑` / `↓`.
+    MoveAddModel {
+        forward: bool,
+    },
+    /// Submit the add-model overlay → `AgentRequest::AddProviderModel`.
+    SubmitAddModel,
+    /// Cancel the add-model overlay and return to the stage-2 model list.
+    CancelAddModel,
     /// Interrupt current operation.
     Interrupt,
     /// Open models modal.
@@ -139,7 +197,9 @@ pub enum InputAction {
     /// Move the tool-selection cursor in the session-context dashboard when it
     /// still hosts the tools list, and in the tools manager modal otherwise.
     /// `forward` = down, else up.
-    SessionSelect { forward: bool },
+    SessionSelect {
+        forward: bool,
+    },
     /// Toggle the selected tool's enabled flag in the session dashboard or
     /// tools manager modal. Bound to `Space`.
     SessionActivate,
@@ -285,20 +345,35 @@ pub enum InputAction {
     /// Delete a character from the question modal's "Other" free-text field.
     QuestionBackspace,
     /// Start selection at screen coordinates.
-    SelectionStart { x: u16, y: u16 },
+    SelectionStart {
+        x: u16,
+        y: u16,
+    },
     /// Update selection to screen coordinates.
-    SelectionUpdate { x: u16, y: u16 },
+    SelectionUpdate {
+        x: u16,
+        y: u16,
+    },
     /// End selection.
     SelectionEnd,
     /// Select entire block at coordinates (e.g. triple-click).
-    SelectBlock { x: u16, y: u16 },
+    SelectBlock {
+        x: u16,
+        y: u16,
+    },
     /// Right-click at screen coordinates. Opens a context/detail view for the
     /// interactive element under the cursor (e.g. a tool step's full output).
-    RightClick { x: u16, y: u16 },
+    RightClick {
+        x: u16,
+        y: u16,
+    },
     /// Mouse pointer moved to screen coordinates (hover tracking). Used to
     /// drive hover affordances on clickable elements like reasoning-trace
     /// headers. Suppressed while an overlay modal is open.
-    Hover { x: u16, y: u16 },
+    Hover {
+        x: u16,
+        y: u16,
+    },
     /// Leave the current envoy view and return to the parent.
     ExitEnvoy,
     /// Leave the `/btw` side conversation and return to the primary transcript
@@ -643,6 +718,14 @@ pub fn process_event(
                         }
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionCancel
+                    } else if context.active_modal == super::Modal::CustomProvider {
+                        // Esc cancels the custom-provider editor and returns to the
+                        // provider picker it was opened from.
+                        InputAction::CancelCustomProvider
+                    } else if context.active_modal == super::Modal::AddModel {
+                        // Esc cancels the add-model overlay back to the stage-2
+                        // model list it was opened from.
+                        InputAction::CancelAddModel
                     } else if context.active_modal == super::Modal::InputInjection {
                         InputAction::InputCancel
                     } else if context.active_modal == super::Modal::HistorySearch
@@ -658,6 +741,12 @@ pub fn process_event(
                         // drops the model picker's search sub-layer back to the
                         // browse list; the next Esc (browse mode) closes.
                         InputAction::ModelExitSearch
+                    } else if context.active_modal == super::Modal::Provider
+                        && context.picker_in_models_stage
+                    {
+                        // In the stage-2 model sub-list (browse mode): Esc steps
+                        // back to the stage-1 provider list rather than closing.
+                        InputAction::ProviderPickerBack
                     } else if context.active_modal != super::Modal::None {
                         InputAction::CloseModal
                     } else if context.in_side_view {
@@ -745,6 +834,8 @@ pub fn process_event(
                 KeyCode::Enter => match context.active_modal {
                     super::Modal::Provider => InputAction::ProviderPickerActivate,
                     super::Modal::ModelEditor => InputAction::SubmitModelEditor,
+                    super::Modal::CustomProvider => InputAction::SubmitCustomProvider,
+                    super::Modal::AddModel => InputAction::SubmitAddModel,
                     super::Modal::HistorySearch => InputAction::HistoryInsert,
                     super::Modal::Sessions => InputAction::OpenSelectedSession,
                     super::Modal::Permission => InputAction::PermissionSubmit,
@@ -835,6 +926,9 @@ pub fn process_event(
                         // Tab cycles focus between the editor's API-key and
                         // model-id fields.
                         InputAction::ModelEditorNextField
+                    } else if context.active_modal == super::Modal::CustomProvider {
+                        // Tab advances through the five custom-provider fields.
+                        InputAction::CustomProviderNextField
                     } else if context.active_modal == super::Modal::HistorySearch {
                         // Tab toggles the full-prompt preview of the selected
                         // entry. The fuzzy filter is a free-text field, so an
@@ -848,10 +942,14 @@ pub fn process_event(
                     }
                 }
                 KeyCode::BackTab => {
-                    // Shift+Tab mirrors Tab in modals (no-op outside model
-                    // editor). Transcript focus uses Ctrl+Up/Ctrl-Down, not
-                    // Tab.
-                    InputAction::None
+                    // Shift+Tab steps backward through the custom-provider
+                    // editor's fields; elsewhere it is a no-op (transcript focus
+                    // uses Ctrl+Up/Ctrl-Down, not Tab).
+                    if context.active_modal == super::Modal::CustomProvider {
+                        InputAction::CustomProviderPrevField
+                    } else {
+                        InputAction::None
+                    }
                 }
                 // Ctrl+J: alias for Alt+Enter — insert a literal newline.
                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -870,6 +968,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         InputAction::Paste
                     } else {
@@ -886,6 +985,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) && *cursor_position > 0
                     {
                         *cursor_position -= 1;
@@ -902,6 +1002,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         cursor_line_start(input, cursor_position);
                     }
@@ -913,6 +1014,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         cursor_line_end(input, cursor_position);
                     }
@@ -929,6 +1031,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         let start = prev_word_start(input, *cursor_position);
                         if start < *cursor_position {
@@ -958,6 +1061,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         let mut start = *cursor_position;
                         cursor_line_start(input, &mut start);
@@ -987,6 +1091,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         let mut end = *cursor_position;
                         cursor_line_end(input, &mut end);
@@ -1013,6 +1118,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         *cursor_position = prev_word_start(input, *cursor_position);
                     }
@@ -1024,6 +1130,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         *cursor_position = next_word_end(input, *cursor_position);
                     }
@@ -1036,6 +1143,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         let end = next_word_end(input, *cursor_position);
                         if end > *cursor_position {
@@ -1112,19 +1220,32 @@ pub fn process_event(
                         InputAction::ModelEnterSearch
                     } else if context.active_modal == super::Modal::Provider
                         && !context.model_searching
+                        && !context.picker_in_models_stage
                         && c == '*'
                     {
-                        // Browse mode only: star the highlighted provider as a
-                        // favorite. In the search sub-layer `*` is a query char.
+                        // Stage-1 browse mode only: star the highlighted provider
+                        // as a favorite. In the search sub-layer `*` is a query
+                        // char; favoriting is a provider-level action so it is not
+                        // offered in the stage-2 model sub-list.
                         InputAction::ProviderPickerToggleFavorite
                     } else if context.active_modal == super::Modal::Provider
                         && !context.model_searching
+                        && !context.picker_in_models_stage
                         && c == 'e'
                     {
-                        // Browse mode only: `e` opens the editor for the
-                        // highlighted row (key + model id). In search mode `e`
-                        // is a query char.
+                        // Stage-1 browse mode only: `e` opens the editor for the
+                        // highlighted provider (key + model id). In search mode `e`
+                        // is a query char; editing is provider-level.
                         InputAction::OpenModelEditor
+                    } else if context.active_modal == super::Modal::Provider
+                        && !context.model_searching
+                        && context.picker_in_models_stage
+                        && c == 'd'
+                    {
+                        // Stage-2 browse mode: `d` removes the highlighted model
+                        // from a custom provider (ignored for built-ins / the
+                        // "＋ Add model" row by the handler).
+                        InputAction::ProviderPickerRemoveModel
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
                     } else if context.active_modal == super::Modal::Session && c == 't' {
@@ -1148,6 +1269,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         let byte_pos = input
                             .char_indices()
@@ -1173,6 +1295,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) && *cursor_position > 0
                     {
                         // Alt+Backspace / Ctrl+Backspace delete the previous
@@ -1245,11 +1368,13 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalUp;
                     }
-
+                    // On the custom-provider editor's Protocol field, ←/→ cycle
+                    // the protocol choice rather than moving a (nonexistent) caret.
                     if edits_input_field(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) && *cursor_position > 0
                     {
                         // Ctrl+Left (and Alt+Left on terminals that translate
@@ -1270,11 +1395,11 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalDown;
                     }
-
                     if edits_input_field(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) && *cursor_position < input.chars().count()
                     {
                         // Ctrl+Right (and Alt+Right) jump forward one word.
@@ -1333,6 +1458,10 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: false },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
+                    super::Modal::CustomProvider => {
+                        InputAction::MoveCustomSuggestion { forward: false }
+                    }
+                    super::Modal::AddModel => InputAction::MoveAddModel { forward: false },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::None => {
@@ -1379,6 +1508,10 @@ pub fn process_event(
                     super::Modal::Tools => InputAction::SessionSelect { forward: true },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
+                    super::Modal::CustomProvider => {
+                        InputAction::MoveCustomSuggestion { forward: true }
+                    }
+                    super::Modal::AddModel => InputAction::MoveAddModel { forward: true },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::None => {
@@ -1430,6 +1563,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         cursor_line_start(input, cursor_position);
                         InputAction::None
@@ -1447,6 +1581,7 @@ pub fn process_event(
                         context.active_modal,
                         context.history_searching,
                         context.model_searching,
+                        context.custom_text_field_focused(),
                     ) {
                         cursor_line_end(input, cursor_position);
                         InputAction::None
@@ -1467,6 +1602,7 @@ pub fn process_event(
                 context.active_modal,
                 context.history_searching,
                 context.model_searching,
+                context.custom_text_field_focused(),
             ) {
                 InputAction::BracketedPaste(text)
             } else {
@@ -1516,6 +1652,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -1559,6 +1697,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -1679,6 +1819,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1717,6 +1859,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1754,6 +1898,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1788,6 +1934,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1822,6 +1970,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1860,6 +2010,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1898,6 +2050,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -1931,6 +2085,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2005,6 +2161,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -2039,6 +2197,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2069,6 +2229,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2099,10 +2261,114 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
         assert_eq!(action, InputAction::ProviderPickerToggleFavorite);
+    }
+
+    #[test]
+    fn esc_in_stage2_steps_back_to_provider_list() {
+        // In the stage-2 model sub-list (browse mode), Esc returns to the
+        // provider list rather than closing the modal.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::Provider,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_envoy_view: false,
+                in_side_view: false,
+                has_focused_target: false,
+                has_queued: false,
+                history_searching: false,
+                model_searching: false,
+                picker_in_models_stage: true,
+                custom_provider_field: None,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::ProviderPickerBack);
+    }
+
+    #[test]
+    fn esc_in_stage1_closes_the_modal() {
+        // In the stage-1 provider list (browse mode), Esc closes the picker.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::Provider,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_envoy_view: false,
+                in_side_view: false,
+                has_focused_target: false,
+                has_queued: false,
+                history_searching: false,
+                model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::CloseModal);
+    }
+
+    #[test]
+    fn star_in_stage2_is_inert_favorite_is_provider_level() {
+        // `*` favorites a provider — a stage-1-only action. In the stage-2 model
+        // sub-list it must not map to ToggleFavorite (it falls through to the
+        // ordinary char path, which is inert in browse mode).
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE)),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::Provider,
+                is_responding: false,
+                completion_kind: crate::tui::CompletionKind::None,
+                suggestion_count: 0,
+                has_exact_suggestion: false,
+                suggestion_index: None,
+                permission_confirm_always: false,
+                permission_show_details: false,
+                in_envoy_view: false,
+                in_side_view: false,
+                has_focused_target: false,
+                has_queued: false,
+                history_searching: false,
+                model_searching: false,
+                picker_in_models_stage: true,
+                custom_provider_field: None,
+            },
+            &mut drag,
+        );
+        assert_ne!(action, InputAction::ProviderPickerToggleFavorite);
     }
 
     #[test]
@@ -2132,6 +2398,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: true,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2161,6 +2429,8 @@ mod tests {
             has_queued: false,
             history_searching: false,
             model_searching: false,
+            picker_in_models_stage: false,
+            custom_provider_field: None,
         };
         let letter = process_event(
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
@@ -2209,6 +2479,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2235,6 +2507,8 @@ mod tests {
             has_queued: false,
             history_searching: false,
             model_searching: false,
+            picker_in_models_stage: false,
+            custom_provider_field: None,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -2272,6 +2546,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -2300,6 +2576,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -2328,6 +2606,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -2540,6 +2820,8 @@ mod tests {
                 // here as search mode (browse mode never reaches editing keys).
                 history_searching: modal == crate::tui::Modal::HistorySearch,
                 model_searching: modal == crate::tui::Modal::Provider,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -2695,6 +2977,8 @@ mod tests {
                     has_queued: false,
                     history_searching: false,
                     model_searching: false,
+                    picker_in_models_stage: false,
+                    custom_provider_field: None,
                 },
                 &mut drag,
             )
@@ -3247,6 +3531,8 @@ mod tests {
                 has_queued: false,
                 history_searching: true,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -3328,6 +3614,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -3445,6 +3733,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -3474,6 +3764,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -3507,6 +3799,8 @@ mod tests {
                 has_queued,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -3559,6 +3853,8 @@ mod tests {
                 has_queued: true,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );
@@ -3596,6 +3892,8 @@ mod tests {
                 // search sub-layer; treat those cases as search mode here.
                 history_searching: modal == crate::tui::Modal::HistorySearch,
                 model_searching: modal == crate::tui::Modal::Provider,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         )
@@ -3720,6 +4018,8 @@ mod tests {
                 has_queued: false,
                 history_searching: false,
                 model_searching: false,
+                picker_in_models_stage: false,
+                custom_provider_field: None,
             },
             &mut drag,
         );

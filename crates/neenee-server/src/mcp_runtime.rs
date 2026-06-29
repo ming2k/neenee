@@ -245,7 +245,15 @@ impl McpRuntime {
                 Job::Skip => (idx, None),
                 Job::Reconnect(server) => {
                     let (tools, status) = reconnect_server(&server).await;
-                    (idx, Some(McpEntry { name, server: Some(server), tools, status }))
+                    (
+                        idx,
+                        Some(McpEntry {
+                            name,
+                            server: Some(server),
+                            tools,
+                            status,
+                        }),
+                    )
                 }
                 Job::Connect => {
                     let config = self.configs.get(&name);

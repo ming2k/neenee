@@ -153,7 +153,6 @@ pub enum UserTransport {
     /// MiniMax/Qwen models and any Anthropic-format relay.
     Anthropic,
     GeminiNative,
-    Llama,
 }
 
 /// One delivery channel for a user-defined model. Channels are fully
@@ -175,7 +174,8 @@ pub struct UserChannelConfig {
     /// Wire model id sent in the request body. Falls back to the model id.
     #[serde(default)]
     pub model: Option<String>,
-    /// Full chat-completions URL (OpenAI-compatible) or server root (Llama).
+    /// Full chat-completions URL (OpenAI-compatible) or `/messages` URL
+    /// (Anthropic).
     #[serde(default)]
     pub base_url: Option<String>,
     /// `User-Agent` header (OpenAI-compatible only).
@@ -225,21 +225,17 @@ pub struct Config {
     // OpenAI
     pub openai_api_key: Option<String>,
     pub openai_model: Option<String>,
-    // Gemini
+    // Google / Gemini. The `google` provider is multi-model: the active Gemini
+    // model lives in `default_model`, so there is no per-provider model slot.
     pub gemini_api_key: Option<String>,
-    pub gemini_model: Option<String>,
-    // Llama (local)
-    pub llama_base_url: Option<String>,
-    pub llama_model: Option<String>,
     // Moonshot / Kimi Code (membership platform). The `kimi-code` preset pins
     // its model id via the provider registry, so the model override is kept
     // only for config/schema compatibility.
     pub moonshot_api_key: Option<String>,
     pub moonshot_model: Option<String>,
-    // DeepSeek V4 (Flash + Pro); shared API key.
+    // DeepSeek V4 (Flash + Pro); shared API key. The `deepseek` provider is
+    // multi-model: the active model lives in `default_model`.
     pub deepseek_api_key: Option<String>,
-    pub deepseek_flash_model: Option<String>,
-    pub deepseek_pro_model: Option<String>,
     // ZAI Code (Z.AI coding-plan platform / Zhipu GLM-5 family). Shares the
     // Zhipu key with the broader ecosystem in practice, but carries its own
     // config field so the z.ai endpoint can be keyed independently.
@@ -250,6 +246,16 @@ pub struct Config {
     // /messages); a single OPENCODE_API_KEY authenticates all of them. The
     // chosen model id lives in `default_model`.
     pub opencode_go_api_key: Option<String>,
+    // Anthropic `/messages` relay (the built-in `anthropic` provider). A
+    // *configurable* Claude relay: `anthropic_base_url` points at the official
+    // API by default but can be set to any Anthropic-compatible relay (e.g. a
+    // self-hosted proxy), so users with different relay addresses need no code
+    // change. One key authenticates every Claude model; the active model id
+    // lives in `default_model` (multi-model provider, like opencode-go).
+    pub anthropic_api_key: Option<String>,
+    /// Full `/messages` endpoint URL for the `anthropic` provider. Defaults to
+    /// Anthropic's official API; override with any relay's `/v1/messages` URL.
+    pub anthropic_base_url: Option<String>,
     /// The model id to use within the active provider. For single-model
     /// providers this mirrors the provider's pinned model; for multi-model
     /// providers (opencode-go) it selects which of the provider's models is
@@ -373,17 +379,14 @@ impl Default for Config {
             openai_api_key: None,
             openai_model: Some("gpt-4o".to_string()),
             gemini_api_key: None,
-            gemini_model: Some("gemini-2.5-flash".to_string()),
-            llama_base_url: Some("http://localhost:8080".to_string()),
-            llama_model: Some("local-model".to_string()),
             moonshot_api_key: None,
             moonshot_model: Some("kimi-k2.7-code".to_string()),
             deepseek_api_key: None,
-            deepseek_flash_model: Some("deepseek-v4-flash".to_string()),
-            deepseek_pro_model: Some("deepseek-v4-pro".to_string()),
             zai_api_key: None,
             zai_model: Some("glm-5.2".to_string()),
             opencode_go_api_key: None,
+            anthropic_api_key: None,
+            anthropic_base_url: Some("https://api.anthropic.com/v1/messages".to_string()),
             default_model: None,
             favorites: Vec::new(),
             providers: Vec::new(),

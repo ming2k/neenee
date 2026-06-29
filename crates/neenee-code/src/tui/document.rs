@@ -510,7 +510,10 @@ impl TranscriptMessage {
             }));
         }
         if let Some(neenee_core::ToolOutput::Shell {
-            stdout, stderr, lines, ..
+            stdout,
+            stderr,
+            lines,
+            ..
         }) = structured.as_deref_mut()
         {
             // Build the TUI-authoritative `lines` view alongside the flat
@@ -525,12 +528,8 @@ impl TranscriptMessage {
             // stream. Trailing empties (from the terminal `\n`) are dropped so
             // they don't paint phantom blank rows.
             let stream_tag = match stream {
-                neenee_core::ToolStream::Stdout(_) => {
-                    neenee_core::tool_output::ShellStream::Out
-                }
-                neenee_core::ToolStream::Stderr(_) => {
-                    neenee_core::tool_output::ShellStream::Err
-                }
+                neenee_core::ToolStream::Stdout(_) => neenee_core::tool_output::ShellStream::Out,
+                neenee_core::ToolStream::Stderr(_) => neenee_core::tool_output::ShellStream::Err,
             };
             let text = match stream {
                 neenee_core::ToolStream::Stdout(s) | neenee_core::ToolStream::Stderr(s) => s,
@@ -2356,7 +2355,10 @@ mod tests {
             _ => panic!("expected ToolStep"),
         };
         assert_eq!(
-            lines.iter().map(|l| (l.stream, l.text.as_str())).collect::<Vec<_>>(),
+            lines
+                .iter()
+                .map(|l| (l.stream, l.text.as_str()))
+                .collect::<Vec<_>>(),
             vec![
                 (ShellStream::Out, "Compiling a"),
                 (ShellStream::Err, "warning: b"),

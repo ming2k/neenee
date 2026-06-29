@@ -5,6 +5,7 @@ members = [
     "crates/neenee-providers",
     "crates/neenee-tools",
     "crates/neenee-quant",
+    "crates/neenee-quant-gui",
     "crates/neenee-agent",
     "crates/neenee-code",
     "crates/neenee-server",

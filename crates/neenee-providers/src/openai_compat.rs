@@ -52,11 +52,10 @@ impl OpenAiCompatProvider {
     }
 
     /// Attach the `Authorization: Bearer <key>` header only when a key is
-    /// configured. Keyless OpenAI-compatible servers (a local `llama-server`
-    /// started without `--api-key`) must not receive an empty bearer token:
-    /// some reject a malformed header even when they would otherwise ignore
-    /// the key. `Transport::Llama` channels carry an empty key, so they pass
-    /// through with no auth header at all.
+    /// configured. Keyless OpenAI-compatible relays (e.g. a local server started
+    /// without `--api-key`) must not receive an empty bearer token: some reject a
+    /// malformed header even when they would otherwise ignore the key. A channel
+    /// with an empty key passes through with no auth header at all.
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if self.api_key.trim().is_empty() {
             req

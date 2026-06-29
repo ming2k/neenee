@@ -165,6 +165,43 @@ pub const KNOWN_MODELS: &[Model] = &[
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
     },
+    // ── Claude (Anthropic, via the hihusky relay / any Anthropic relay) ─────
+    // Served over the Anthropic Messages wire format. The relay forwards to
+    // Anthropic's own `/messages` surface, so these carry
+    // `WireFormat::AnthropicCompat`.
+    Model {
+        id: "claude-opus-4-8",
+        name: "Claude Opus 4.8",
+        family: "claude",
+        context_window: 200_000,
+        reasoning: true,
+        tool_call: true,
+        vision: true,
+        format: WireFormat::AnthropicCompat,
+        model_guidance: "",
+    },
+    Model {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        family: "claude",
+        context_window: 200_000,
+        reasoning: true,
+        tool_call: true,
+        vision: true,
+        format: WireFormat::AnthropicCompat,
+        model_guidance: "",
+    },
+    Model {
+        id: "claude-haiku-4-5-20251001",
+        name: "Claude Haiku 4.5",
+        family: "claude",
+        context_window: 200_000,
+        reasoning: true,
+        tool_call: true,
+        vision: true,
+        format: WireFormat::AnthropicCompat,
+        model_guidance: "",
+    },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
         id: "gpt-4o",

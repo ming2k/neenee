@@ -25,10 +25,9 @@ use crate::tui::render::text_layout::{
 };
 use crate::tui::render::tools::{ArgLayout, DiffLine, DiffOp, ResultKind, ToolStatus};
 use crate::tui::render::{
-    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, EnvoyBarInfo,
-    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo,
-    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
-    Theme,
+    CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, EnvoyBarInfo, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, STEP_MIN_WIDTH, StickyInfo, TOOL_STEP_BODY_TOP_GAP_ROWS,
+    TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT, Theme,
 };
 
 /// Cursor + environment carried through the tool-step body renderers.
@@ -329,7 +328,10 @@ fn draw_code_content(
         let line = Line::from(vec![
             Span::styled(" ".repeat(left_indent), pad),
             Span::styled(" ", pad),
-            Span::styled(lang.to_string(), Style::default().bg(code_bg).fg(ctx.theme.dim())),
+            Span::styled(
+                lang.to_string(),
+                Style::default().bg(code_bg).fg(ctx.theme.dim()),
+            ),
             Span::styled(padded_tail(ctx.full_width, used), pad),
         ]);
         ctx.paint(line);
@@ -678,10 +680,7 @@ fn termination_footer(
                 .to_string(),
             warn_style,
         )),
-        T::Cancelled => Some((
-            "✗ command cancelled (interrupted).".to_string(),
-            err_style,
-        )),
+        T::Cancelled => Some(("✗ command cancelled (interrupted).".to_string(), err_style)),
     }
 }
 
@@ -1013,7 +1012,10 @@ fn draw_tool_result(
             // 1-based numbering).
             let (content, start_line, lang) = match structured {
                 Some(neenee_core::ToolOutput::Code {
-                    text, start_line, lang, ..
+                    text,
+                    start_line,
+                    lang,
+                    ..
                 }) => (text.as_str(), *start_line, lang.as_deref()),
                 Some(neenee_core::ToolOutput::Patch {
                     new, start_line, ..

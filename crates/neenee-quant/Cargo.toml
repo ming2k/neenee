@@ -11,6 +11,8 @@ neenee-agent = { path = "../neenee-agent" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+chrono = { workspace = true }
 
 [dev-dependencies]
 neenee-tools = { path = "../neenee-tools" }

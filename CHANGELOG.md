@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **IME composition window anchor drift.** The terminal cursor — which the host
+  terminal's IME anchors its composition window to — was repositioned only as a
+  per-frame side effect of drawing, so a keystroke's logical caret position and
+  its physical terminal position disagreed for one frame, and the IME (which
+  samples the cursor the instant the keystroke arrives) anchored to the stale
+  coordinate. The caret position is now derived from a single pure function
+  (`composer::cursor_screen_pos`) shared by both the draw path and a new
+  input-driven *immediate flush* that syncs the backend cursor in the same
+  iteration a keystroke is handled, before the next frame is rendered. All
+  caret moves now route through `App::set_cursor` (the single sanctioned write
+  site), which arms the flush; cursor show/hide is a real state transition
+  rather than a per-frame guess, so the IME never samples a hide↔show edge at a
+  coordinate that no longer matches the visible text. See
+  [ADR-0038](docs/adr/0038-in-house-grid-diff-rendering-engine.md).
+
 ### Added
 
 - Nothing yet.

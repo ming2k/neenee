@@ -32,7 +32,7 @@ pub fn short_session_id(id: &str) -> &str {
 }
 
 /// Whether each provider has a usable API key (env var or config).
-/// Keyless providers (local llama, mock) always report `true`.
+/// Keyless providers (the mock fixture) always report `true`.
 ///
 /// Derived from the provider catalog so the readiness signal and the actual
 /// provider construction share one resolution path.

@@ -390,7 +390,6 @@ pub fn draw_completion_menu(
 /// Inputs for [`draw_hint_bar`]. Carries the model + context-usage info that
 /// the old top header showed, now collapsed onto one row.
 pub struct HintBarView<'a> {
-    pub current_provider: &'a str,
     pub current_model: &'a str,
     pub messages: &'a [TranscriptMessage],
     /// True while the prompt is a `!`-prefixed shell command and no transcript
@@ -417,7 +416,6 @@ pub struct HintBarView<'a> {
 /// right-aligned cluster of `model · context-usage` on the right.
 pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme: &Theme) {
     let HintBarView {
-        current_provider,
         current_model,
         messages,
         shell_active,
@@ -479,7 +477,7 @@ pub fn draw_hint_bar(frame: &mut Frame, rect: Rect, view: HintBarView<'_>, theme
     // --- Right cluster: model name and context bar.
     // Build each segment separately so we can drop optional ones when the
     // terminal is too narrow.
-    let context_max = crate::tui::provider_context_window(current_provider);
+    let context_max = crate::tui::model_context_window(current_model);
 
     // Left side: optional shell pill. Computed now so the gap to the right
     // cluster can hug the right edge.
@@ -646,7 +644,6 @@ mod tests {
                 f,
                 Rect::new(0, 2, 80, 1),
                 HintBarView {
-                    current_provider: "mock",
                     current_model: "mock-model",
                     messages: &messages,
                     shell_active: false,
@@ -667,7 +664,6 @@ mod tests {
             let mut captured = String::new();
             terminal.draw(|f| {
                 let view = HintBarView {
-                    current_provider: "",
                     current_model: "",
                     messages: &Vec::<TranscriptMessage>::new(),
                     shell_active,

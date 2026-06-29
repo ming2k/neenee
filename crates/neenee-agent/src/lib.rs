@@ -68,16 +68,17 @@ pub use neenee_store::RepeatStore;
 // Keep this list in sync with `neenee_core`'s lib.rs re-exports.
 pub use neenee_core::{
     AgentEvent, AgentOp, AgentRequest, AgentResponse, Channel, ContextProjectionGate, EXPLORE,
-    EnvoyEvent, EnvoyProfile, HarnessError, HarnessSnapshot, ImagePart, McpConnectionStatus,
-    McpServerConfig, Message, PRUNED_TOOL_PLACEHOLDER, PatchOp, PermissionDecision,
-    PermissionRequest, PromptChannel, PromptContext, PromptRegistry, PromptSection, Provider,
-    ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot, ProviderStreamEvent, PruneOutcome,
-    Pursuit, RetryableError, Role, SessionOverview, SkillsConfig, TITLE, ThreadPursuit, TokenUsage,
-    Tool, ToolCall, ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome,
-    TurnTimer, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
-    InputReply, InputRequest, StdinPolicy, ShellTermination, is_interactive_command,
-    WebSearchConfig, estimate_chars, estimate_tokens, is_context_overflow, parse_retryable_error,
-    prune_tool_results, public_error_message, retryable_error, truncate_utf8,
+    EnvoyEvent, EnvoyProfile, HarnessError, HarnessSnapshot, ImagePart, InputReply, InputRequest,
+    McpConnectionStatus, McpServerConfig, Message, PRUNED_TOOL_PLACEHOLDER, PatchOp,
+    PermissionDecision, PermissionRequest, PromptChannel, PromptContext, PromptRegistry,
+    PromptSection, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
+    ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role, SessionOverview,
+    ShellTermination, SkillsConfig, StdinPolicy, TITLE, ThreadPursuit, TokenUsage, Tool, ToolCall,
+    ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
+    UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
+    estimate_chars, estimate_tokens, is_context_overflow, is_interactive_command,
+    parse_retryable_error, prune_tool_results, public_error_message, retryable_error,
+    truncate_utf8,
 };
 
 // Same ambient std/tokio prelude the Agent struct used to inherit from

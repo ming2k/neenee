@@ -13,7 +13,10 @@
 
 use neenee_core::catalog::{Channel, ProviderEntry, Transport, builtin_provider_metadata};
 use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot, WireFormat};
-use neenee_providers::{NEENEE_USER_AGENT, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec};
+use neenee_providers::{
+    ANTHROPIC_BUILTIN_MODELS, DEEPSEEK_BUILTIN_MODELS, GOOGLE_BUILTIN_MODELS, NEENEE_USER_AGENT,
+    OPENAI_BUILTIN_MODELS, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec,
+};
 use neenee_store::config::{Config, UserChannelConfig, UserProviderConfig, UserTransport};
 use neenee_store::provider_usage::ProviderUsage;
 
@@ -39,12 +42,6 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
         .unwrap_or_else(|| fallback_model.to_string());
     let transport = match uc.transport {
         UserTransport::GeminiNative => Transport::GeminiNative,
-        UserTransport::Llama => Transport::Llama {
-            base_url: uc
-                .base_url
-                .clone()
-                .unwrap_or_else(|| "http://localhost:8080".to_string()),
-        },
         UserTransport::Anthropic => Transport::Anthropic {
             base_url: uc
                 .base_url
@@ -122,11 +119,12 @@ fn env_or_config(env_var: Option<&str>, config_value: Option<String>) -> Option<
 fn config_key_for(config: &Config, id: &str) -> Option<String> {
     match id {
         "openai" => config.openai_api_key.clone(),
-        "gemini" => config.gemini_api_key.clone(),
+        "google" => config.gemini_api_key.clone(),
         "kimi-code" => config.moonshot_api_key.clone(),
-        "deepseek-v4-flash" | "deepseek-v4-pro" => config.deepseek_api_key.clone(),
+        "deepseek" => config.deepseek_api_key.clone(),
         "zai-code" => config.zai_api_key.clone(),
         "opencode-go" => config.opencode_go_api_key.clone(),
+        "anthropic" => config.anthropic_api_key.clone(),
         _ => None,
     }
 }
@@ -135,16 +133,13 @@ fn config_key_for(config: &Config, id: &str) -> Option<String> {
 /// `config_model` free function in `main.rs`.
 fn config_model_for(config: &Config, id: &str) -> Option<String> {
     match id {
-        "openai" => config.openai_model.clone(),
-        "gemini" => config.gemini_model.clone(),
-        "llama" => config.llama_model.clone(),
         "kimi-code" => config.moonshot_model.clone(),
-        "deepseek-v4-flash" => config.deepseek_flash_model.clone(),
-        "deepseek-v4-pro" => config.deepseek_pro_model.clone(),
         "zai-code" => config.zai_model.clone(),
-        // opencode-go is multi-model: the active model lives in the shared
+        // Multi-model built-ins: the active model lives in the shared
         // `default_model` field, not a per-provider slot.
-        "opencode-go" => config.default_model.clone(),
+        "openai" | "opencode-go" | "anthropic" | "google" | "deepseek" => {
+            config.default_model.clone()
+        }
         _ => None,
     }
 }
@@ -197,6 +192,95 @@ fn openai_compat_entry_from_spec(config: &Config, spec: &OpenAiProviderSpec) -> 
         model,
     };
     entry_with_metadata(spec.id, vec![channel], true)
+}
+
+/// Build a multi-model built-in provider entry: one channel per id in `models`,
+/// all sharing `api_key` and the transport produced by `make_transport` (the
+/// same endpoint for every model). `config.default_model` selects the active
+/// channel. Backs the `anthropic`, `google`, and `deepseek` built-ins — each
+/// hosts several models behind one key, distinguished only by transport.
+fn multi_model_builtin_entry(
+    config: &Config,
+    id: &str,
+    api_key: String,
+    models: &[&str],
+    make_transport: impl Fn() -> Transport,
+) -> ProviderEntry {
+    let channels: Vec<Channel> = models
+        .iter()
+        .map(|&model_id| Channel {
+            id: model_id.to_string(),
+            label: neenee_core::model::resolve(model_id).name.to_string(),
+            transport: make_transport(),
+            api_key: api_key.clone(),
+            model: model_id.to_string(),
+        })
+        .collect();
+    let default_channel = config
+        .default_model
+        .as_deref()
+        .and_then(|m| channels.iter().position(|c| c.model == m))
+        .unwrap_or(0);
+    let (name, description) = builtin_provider_metadata(id)
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .unwrap_or_else(|| (id.to_string(), String::new()));
+    ProviderEntry {
+        id: id.to_string(),
+        name,
+        description,
+        channels,
+        default_channel,
+        builtin: true,
+    }
+}
+
+/// The configurable Anthropic `/messages` provider (`anthropic`). The endpoint
+/// is *configurable*: `anthropic_base_url` (env `ANTHROPIC_BASE_URL` first)
+/// supplies the full `/messages` URL, defaulting to Anthropic's official API, so
+/// the same preset serves the official API or any relay with no code change. One
+/// key (`ANTHROPIC_API_KEY` then `config.anthropic_api_key`) authenticates every
+/// Claude model.
+fn anthropic_builtin_entry(config: &Config) -> ProviderEntry {
+    let api_key = env_or_config(Some("ANTHROPIC_API_KEY"), config.anthropic_api_key.clone())
+        .unwrap_or_default();
+    let base_url = env_or_config(
+        Some("ANTHROPIC_BASE_URL"),
+        config.anthropic_base_url.clone(),
+    )
+    .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
+    multi_model_builtin_entry(
+        config,
+        "anthropic",
+        api_key,
+        ANTHROPIC_BUILTIN_MODELS,
+        || Transport::Anthropic {
+            base_url: base_url.clone(),
+            user_agent: NEENEE_USER_AGENT.to_string(),
+        },
+    )
+}
+
+/// The `google` provider: the Gemini family over the native Gemini API, one key
+/// (`GEMINI_API_KEY` then `config.gemini_api_key`).
+fn google_builtin_entry(config: &Config) -> ProviderEntry {
+    let api_key =
+        env_or_config(Some("GEMINI_API_KEY"), config.gemini_api_key.clone()).unwrap_or_default();
+    multi_model_builtin_entry(config, "google", api_key, GOOGLE_BUILTIN_MODELS, || {
+        Transport::GeminiNative
+    })
+}
+
+/// The `deepseek` provider: DeepSeek V4 Flash + Pro over the OpenAI-compatible
+/// API, one key (`DEEPSEEK_API_KEY` then `config.deepseek_api_key`).
+fn deepseek_builtin_entry(config: &Config) -> ProviderEntry {
+    let api_key = env_or_config(Some("DEEPSEEK_API_KEY"), config.deepseek_api_key.clone())
+        .unwrap_or_default();
+    multi_model_builtin_entry(config, "deepseek", api_key, DEEPSEEK_BUILTIN_MODELS, || {
+        Transport::OpenAiCompat {
+            base_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+            user_agent: NEENEE_USER_AGENT.to_string(),
+        }
+    })
 }
 
 /// The models.dev provider ids neenee treats as "catalog-driven": their model
@@ -363,61 +447,31 @@ pub fn build_catalog(config: &Config) -> Vec<ProviderEntry> {
         entries.push(openai_compat_entry_from_spec(config, spec));
     }
 
-    // Bespoke OpenAI (not in the registry, but same transport).
+    // OpenAI (chat-completions) — one multi-model provider (gpt-4o + gpt-4o-mini),
+    // one key. The active model lives in `config.default_model`.
     let openai_api_key =
         env_or_config(Some("OPENAI_API_KEY"), config.openai_api_key.clone()).unwrap_or_default();
-    let openai_model = env_or_config(Some("OPENAI_MODEL"), config.openai_model.clone())
-        .unwrap_or_else(|| "gpt-4o".to_string());
-    entries.push(entry_with_metadata(
+    entries.push(multi_model_builtin_entry(
+        config,
         "openai",
-        vec![Channel {
-            id: "default".to_string(),
-            label: "OpenAI".to_string(),
-            transport: Transport::OpenAiCompat {
-                base_url: "https://api.openai.com/v1/chat/completions".to_string(),
-                user_agent: NEENEE_USER_AGENT.to_string(),
-            },
-            api_key: openai_api_key,
-            model: openai_model,
-        }],
-        true,
+        openai_api_key,
+        OPENAI_BUILTIN_MODELS,
+        || Transport::OpenAiCompat {
+            base_url: "https://api.openai.com/v1/chat/completions".to_string(),
+            user_agent: NEENEE_USER_AGENT.to_string(),
+        },
     ));
 
-    // Bespoke Gemini (native API, not OpenAI-compatible).
-    let gemini_api_key =
-        env_or_config(Some("GEMINI_API_KEY"), config.gemini_api_key.clone()).unwrap_or_default();
-    let gemini_model = env_or_config(Some("GEMINI_MODEL"), config.gemini_model.clone())
-        .unwrap_or_else(|| "gemini-2.5-flash".to_string());
-    entries.push(entry_with_metadata(
-        "gemini",
-        vec![Channel {
-            id: "default".to_string(),
-            label: "Gemini 2.5 Flash".to_string(),
-            transport: Transport::GeminiNative,
-            api_key: gemini_api_key,
-            model: gemini_model,
-        }],
-        true,
-    ));
+    // Google (Gemini family, native API) — one multi-model provider.
+    entries.push(google_builtin_entry(config));
 
-    // Local llama.cpp / compatible server. Keyless: no API key resolution.
-    let llama_model = env_or_config(Some("LLAMA_MODEL"), config.llama_model.clone())
-        .unwrap_or_else(|| "local-model".to_string());
-    let llama_base_url = env_or_config(Some("LLAMA_BASE_URL"), config.llama_base_url.clone())
-        .unwrap_or_else(|| "http://localhost:8080".to_string());
-    entries.push(entry_with_metadata(
-        "llama",
-        vec![Channel {
-            id: "default".to_string(),
-            label: "Llama".to_string(),
-            transport: Transport::Llama {
-                base_url: llama_base_url,
-            },
-            api_key: String::new(),
-            model: llama_model,
-        }],
-        true,
-    ));
+    // DeepSeek (V4 Flash + Pro, OpenAI-compatible) — one multi-model provider.
+    entries.push(deepseek_builtin_entry(config));
+
+    // Configurable Anthropic `/messages` relay hosting the Claude family. The
+    // endpoint URL comes from config (defaulting to Anthropic's official API),
+    // so the same preset serves the official API or any relay.
+    entries.push(anthropic_builtin_entry(config));
 
     // Catalog-driven providers (opencode-go): model lists, wire formats, and
     // endpoints come from the models.dev mirror — zero hardcoding. When the
@@ -495,14 +549,21 @@ pub fn resolved_model_name(config: &Config, id: &str) -> String {
     build_catalog(config)
         .iter()
         .find(|e| e.id == id)
-        .and_then(|entry| {
-            config
-                .default_model
-                .as_deref()
-                .filter(|m| entry.offers_model(m))
-                .map(|m| m.to_string())
-                .or_else(|| entry.default_channel().map(|channel| channel.model.clone()))
-        })
+        .map(|entry| active_model_id_for_entry(config, entry))
+        .unwrap_or_else(|| "mock-model".to_string())
+}
+
+/// The active wire model id for an already-built entry: `config.default_model`
+/// when the entry serves it, otherwise the entry's default-channel model.
+/// Shared by [`resolved_model_name`] and [`build_picker_state`] so both pick the
+/// same active model without rebuilding the catalog per row.
+fn active_model_id_for_entry(config: &Config, entry: &ProviderEntry) -> String {
+    config
+        .default_model
+        .as_deref()
+        .filter(|m| entry.offers_model(m))
+        .map(|m| m.to_string())
+        .or_else(|| entry.default_channel().map(|channel| channel.model.clone()))
         .unwrap_or_else(|| "mock-model".to_string())
 }
 
@@ -527,14 +588,43 @@ pub fn build_picker_state(config: &Config, usage: &ProviderUsage) -> ProviderPic
     let default_id = default_provider_id(config).to_string();
     let rows = entries
         .iter()
-        .map(|entry| ProviderPickerRow {
-            id: entry.id.clone(),
-            key_ready: entry.key_ready(),
-            favorite: config.favorites.iter().any(|fav| fav == &entry.id),
-            last_used_ms: usage.last_used_ms(&entry.id),
+        .map(|entry| {
+            // Protocol / base-URL are only meaningful for user-defined providers,
+            // whose edit form pre-fills from them; built-ins leave them empty.
+            let (protocol, base_url) = if entry.builtin {
+                (String::new(), String::new())
+            } else {
+                entry
+                    .default_channel()
+                    .map(channel_protocol_and_base_url)
+                    .unwrap_or_default()
+            };
+            ProviderPickerRow {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                model: active_model_id_for_entry(config, entry),
+                models: entry.channels.iter().map(|c| c.model.clone()).collect(),
+                builtin: entry.builtin,
+                protocol,
+                base_url,
+                key_ready: entry.key_ready(),
+                favorite: config.favorites.iter().any(|fav| fav == &entry.id),
+                last_used_ms: usage.last_used_ms(&entry.id),
+            }
         })
         .collect();
     ProviderPickerSnapshot { default_id, rows }
+}
+
+/// Map a channel's transport to the `(protocol_wire_id, base_url)` pair the TUI
+/// edit form pre-fills from. `base_url` is empty for the keyless native Gemini
+/// transport (it has no configurable endpoint).
+fn channel_protocol_and_base_url(channel: &Channel) -> (String, String) {
+    match &channel.transport {
+        Transport::OpenAiCompat { base_url, .. } => ("openai".to_string(), base_url.clone()),
+        Transport::Anthropic { base_url, .. } => ("anthropic".to_string(), base_url.clone()),
+        Transport::GeminiNative => ("gemini".to_string(), String::new()),
+    }
 }
 
 #[cfg(test)]
@@ -560,9 +650,10 @@ mod tests {
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
         assert!(ids.contains(&"kimi-code"), "missing kimi-code: {ids:?}");
         assert!(ids.contains(&"openai"));
-        assert!(ids.contains(&"gemini"));
-        assert!(ids.contains(&"llama"));
+        assert!(ids.contains(&"google"), "missing google: {ids:?}");
+        assert!(ids.contains(&"deepseek"), "missing deepseek: {ids:?}");
         assert!(ids.contains(&"opencode-go"), "missing opencode-go: {ids:?}");
+        assert!(ids.contains(&"anthropic"), "missing anthropic: {ids:?}");
         // Every registry preset is present.
         for spec in OPENAI_PROVIDER_SPECS {
             assert!(
@@ -605,6 +696,67 @@ mod tests {
             ),
             "minimax-m3 must use Anthropic /messages"
         );
+    }
+
+    #[test]
+    fn anthropic_relay_hosts_claude_family_over_messages() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+        let entries = build_catalog(&bare_config());
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "anthropic")
+            .expect("anthropic entry");
+        // Every Claude model is a channel, all on the Anthropic /messages
+        // transport pointed at the configured endpoint.
+        assert!(!entry.channels.is_empty());
+        let opus = entry
+            .channel_for_model("claude-opus-4-8")
+            .expect("claude-opus-4-8 served");
+        match &opus.transport {
+            Transport::Anthropic { base_url, .. } => {
+                // Default endpoint is Anthropic's official API.
+                assert_eq!(base_url, "https://api.anthropic.com/v1/messages");
+            }
+            other => panic!("anthropic must use the Anthropic transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_relay_base_url_is_configurable() {
+        // A custom relay address (e.g. a self-hosted proxy) flows through config
+        // with no code change — the load-bearing requirement for users whose
+        // relay URL differs.
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+        let mut config = bare_config();
+        config.anthropic_base_url = Some("https://ai.hihusky.com/v1/messages".to_string());
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "anthropic").unwrap();
+        let channel = entry.default_channel().expect("default channel");
+        match &channel.transport {
+            Transport::Anthropic { base_url, .. } => {
+                assert_eq!(base_url, "https://ai.hihusky.com/v1/messages");
+            }
+            other => panic!("expected Anthropic transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_default_model_selects_its_channel_and_builds() {
+        let mut config = bare_config();
+        config.default_model = Some("claude-sonnet-4-6".to_string());
+        assert_eq!(
+            resolved_model_name(&config, "anthropic"),
+            "claude-sonnet-4-6"
+        );
+        let provider = build_provider_for_model(&config, "anthropic", Some("claude-sonnet-4-6"));
+        assert_eq!(provider.model(), "claude-sonnet-4-6");
+        assert_eq!(provider.provider_id(), "anthropic");
     }
 
     #[test]
@@ -661,36 +813,46 @@ mod tests {
     }
 
     #[test]
-    fn config_model_override_wins_over_default() {
-        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("GEMINI_MODEL");
-        }
+    fn google_default_model_selects_its_gemini_channel() {
+        // google is multi-model: default_model picks which Gemini channel is
+        // active; every channel uses the native Gemini transport.
         let mut config = bare_config();
-        config.gemini_model = Some("gemini-2.0-flash".to_string());
+        config.default_model = Some("gemini-2.0-flash".to_string());
         let entries = build_catalog(&config);
         let entry = entries
             .iter()
-            .find(|e| e.id == "gemini")
-            .expect("gemini entry");
+            .find(|e| e.id == "google")
+            .expect("google entry");
         assert_eq!(entry.default_channel().unwrap().model, "gemini-2.0-flash");
+        assert!(matches!(
+            entry.default_channel().unwrap().transport,
+            Transport::GeminiNative
+        ));
+    }
+
+    #[test]
+    fn deepseek_hosts_flash_and_pro_as_one_provider() {
+        // The two DeepSeek models are now channels of one `deepseek` provider,
+        // both over the OpenAI-compatible transport at the DeepSeek endpoint.
+        let entries = build_catalog(&bare_config());
+        let entry = entries
+            .iter()
+            .find(|e| e.id == "deepseek")
+            .expect("deepseek entry");
+        assert!(entry.offers_model("deepseek-v4-flash"));
+        assert!(entry.offers_model("deepseek-v4-pro"));
+        let flash = entry.channel_for_model("deepseek-v4-flash").unwrap();
+        match &flash.transport {
+            Transport::OpenAiCompat { base_url, .. } => {
+                assert_eq!(base_url, "https://api.deepseek.com/v1/chat/completions");
+            }
+            other => panic!("deepseek must be OpenAiCompat, got {other:?}"),
+        }
     }
 
     #[test]
     fn resolved_model_name_falls_back_for_unknown_id() {
         assert_eq!(resolved_model_name(&bare_config(), "nope"), "mock-model");
-    }
-
-    #[test]
-    fn resolved_model_name_returns_default_channel_model() {
-        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("DEEPSEEK_PRO_MODEL");
-        }
-        assert_eq!(
-            resolved_model_name(&bare_config(), "deepseek-v4-pro"),
-            "deepseek-v4-pro"
-        );
     }
 
     #[test]
@@ -700,23 +862,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_deepseek_ids_fall_back_to_mock() {
-        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("DEEPSEEK_FLASH_MODEL");
-        } // No alias mapping: stale ids no longer resolve and fall back to mock.
-        let provider = build_provider_for(&bare_config(), "deepseek");
+    fn split_deepseek_ids_no_longer_resolve_as_providers() {
+        // The pre-merge provider ids are gone; only the merged `deepseek` id is a
+        // provider now, so the old ids fall back to mock.
+        let provider = build_provider_for(&bare_config(), "deepseek-v4-flash");
         assert_eq!(provider.provider_id(), "mock");
-    }
-
-    #[test]
-    fn keyless_providers_report_ready_without_keys() {
-        let entries = build_catalog(&bare_config());
-        let llama = entries
-            .iter()
-            .find(|e| e.id == "llama")
-            .expect("llama entry");
-        assert!(llama.key_ready(), "llama must be keyless-ready");
+        let provider = build_provider_for(&bare_config(), "deepseek-v4-pro");
+        assert_eq!(provider.provider_id(), "mock");
     }
 
     #[test]
@@ -844,5 +996,34 @@ mod tests {
             .find(|r| r.id == "gemini")
             .expect("gemini row present");
         assert!(gemini_row.key_ready, "Relay channel has an inline key");
+        // The picker row is fully self-describing: a user-defined provider shows
+        // its display name, served models, active model, and builtin=false — the
+        // fields the snapshot-driven TUI renders directly (no static table).
+        assert_eq!(gemini_row.name, "Gemini (custom)");
+        assert!(!gemini_row.builtin, "user-defined provider is not builtin");
+        assert_eq!(gemini_row.models.len(), 2, "both channels' models listed");
+        assert!(gemini_row.models.iter().all(|m| m == "gemini-2.5-flash"));
+        assert_eq!(gemini_row.model, "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn openai_is_a_multi_model_builtin_with_gpt_4o_default() {
+        // OpenAI is now a multi-model provider: its picker row lists every
+        // OPENAI_BUILTIN_MODELS entry and defaults to gpt-4o.
+        let config = bare_config();
+        let usage = ProviderUsage::default();
+        let snapshot = build_picker_state(&config, &usage);
+        let openai = snapshot
+            .rows
+            .iter()
+            .find(|r| r.id == "openai")
+            .expect("openai row present");
+        assert_eq!(openai.name, "OpenAI");
+        assert!(openai.builtin);
+        assert!(openai.models.contains(&"gpt-4o".to_string()));
+        assert!(openai.models.contains(&"gpt-4o-mini".to_string()));
+        assert_eq!(openai.model, "gpt-4o");
+        // Llama no longer appears as a built-in provider.
+        assert!(snapshot.rows.iter().all(|r| r.id != "llama"));
     }
 }

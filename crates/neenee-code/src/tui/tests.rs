@@ -585,6 +585,9 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         input_scroll: 0,
         active_modal: Modal::None,
         modal_index: 0,
+        last_input_rect: neenee_tui::Rect::default(),
+        cursor_sync_pending: false,
+        cursor_visible: true,
         session_scroll: 0,
         session_modal_follow: true,
         permissions_scroll: 0,
@@ -644,7 +647,18 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
+        custom_field: 0,
+        custom_protocol: 0,
+        custom_suggest_index: 0,
+        custom_edit_id: None,
+        custom_name: String::new(),
+        custom_base_url: String::new(),
+        custom_token: String::new(),
+        custom_model: String::new(),
         model_search: false,
+        picker_provider: None,
+        add_model_provider: None,
+        add_model_choice: 0,
         model_scroll: 0,
         model_modal_follow: true,
         key_status: HashMap::new(),
@@ -686,6 +700,105 @@ fn completions_classifies_slash_input_as_slash_kind() {
         assert_eq!(c.replace_start, 0);
         assert_eq!(c.replace_end, app.input.len());
     }
+}
+
+#[test]
+fn custom_provider_editor_opens_empty_on_name_field() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.custom_name = "stale".to_string();
+    app.open_custom_provider_editor();
+    assert!(app.active_modal == Modal::CustomProvider);
+    assert_eq!(app.custom_field, 0, "opens on the Name field");
+    assert!(app.custom_name.is_empty(), "buffers reset on open");
+    assert!(
+        app.input.is_empty(),
+        "Name field borrows an empty input line"
+    );
+}
+
+#[test]
+fn custom_provider_field_cycle_wraps_and_swaps_buffers() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.open_custom_provider_editor();
+    // Type a name, then advance: the name is stashed and the Protocol field
+    // (non-text) loads an empty line.
+    app.input = "My Relay".to_string();
+    app.cycle_custom_field(true);
+    assert_eq!(app.custom_field, 1);
+    assert_eq!(app.custom_name, "My Relay");
+    assert!(app.input.is_empty(), "Protocol field has no text buffer");
+    // Wrap backward from Name (0) to Model (4).
+    app.cycle_custom_field(false); // 1 -> 0
+    assert_eq!(app.custom_field, 0);
+    assert_eq!(app.input, "My Relay", "Name buffer reloads into the line");
+    app.cycle_custom_field(false); // 0 -> 4 (wrap)
+    assert_eq!(app.custom_field, 4);
+}
+
+#[test]
+fn custom_provider_protocol_filter_selects_choices() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.open_custom_provider_editor();
+    let n = crate::tui::CUSTOM_PROTOCOLS.len() as u8;
+    // Focus the Protocol filter field; `↑/↓` move + commit the highlight.
+    app.cycle_custom_field(true); // Name -> Protocol
+    assert_eq!(app.custom_field, 1);
+    assert_eq!(app.custom_protocol, 0);
+    app.move_custom_suggestion(false); // wrap to last
+    assert_eq!(app.custom_protocol, n - 1);
+    app.move_custom_suggestion(true); // wrap back to first
+    assert_eq!(app.custom_protocol, 0);
+}
+
+#[test]
+fn custom_provider_model_filter_commits_and_offers_custom_id() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.open_custom_provider_editor();
+    // The default model is the first candidate of the default (OpenAI) protocol.
+    assert!(app.custom_model_candidates().contains(&app.custom_model.as_str()));
+    // Focus the Model filter field and type a query that matches a known model.
+    app.custom_field = 4;
+    app.load_custom_field();
+    app.input = "gpt-4o".to_string();
+    app.on_custom_filter_changed();
+    assert_eq!(app.custom_model, "gpt-4o");
+    // A query matching nothing in the registry is still offered as a custom id.
+    app.input = "my-private-model".to_string();
+    app.on_custom_filter_changed();
+    assert_eq!(app.custom_model, "my-private-model");
+}
+
+#[test]
+fn picker_add_row_is_the_trailing_stage1_row() {
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.active_modal = Modal::Provider;
+    app.picker_provider = None;
+    // Seed a few snapshot rows so providers_filtered() renders the full list
+    // (the picker is snapshot-driven).
+    let row = |id: &str| neenee_core::ProviderPickerRow {
+        id: id.to_string(),
+        name: id.to_string(),
+        model: "m".to_string(),
+        models: vec!["m".to_string()],
+        builtin: true,
+        protocol: String::new(),
+        base_url: String::new(),
+        key_ready: true,
+        favorite: false,
+        last_used_ms: None,
+    };
+    app.provider_picker = neenee_core::ProviderPickerSnapshot {
+        default_id: "kimi-code".to_string(),
+        rows: vec![row("kimi-code"), row("openai"), row("anthropic")],
+    };
+    // The add row sits just past the provider rows and is counted as selectable.
+    let providers = app.providers_filtered().len();
+    assert!(providers > 0, "snapshot seeds the full provider list");
+    assert_eq!(app.picker_row_count(), providers + 1);
+    app.modal_index = providers;
+    assert!(app.picker_on_add_row(), "last stage-1 row is the add row");
+    app.modal_index = providers - 1;
+    assert!(!app.picker_on_add_row());
 }
 
 #[test]
@@ -1256,4 +1369,28 @@ fn composer_image_paste_accepted_when_model_has_vision() {
         "vision-capable model should show a success toast"
     );
     assert!(app.copy_toast_until.is_some());
+}
+
+#[test]
+fn set_cursor_marks_immediate_sync_pending() {
+    // The IME-correctness fix hinges on every caret move routing through
+    // `set_cursor` so the event loop's immediate flush re-anchors the
+    // terminal cursor before the next frame. A raw write to
+    // `cursor_position` would silently skip it. This locks the contract.
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    app.input = "hello".to_string();
+    app.cursor_sync_pending = false;
+
+    app.set_cursor(3);
+    assert_eq!(app.cursor_position, 3);
+    assert!(
+        app.cursor_sync_pending,
+        "set_cursor must arm the immediate cursor sync — the whole IME fix depends on it"
+    );
+
+    // set_cursor_end is the common post-replacement helper and must do the same.
+    app.cursor_sync_pending = false;
+    app.set_cursor_end();
+    assert_eq!(app.cursor_position, 5);
+    assert!(app.cursor_sync_pending, "set_cursor_end must also arm the sync");
 }

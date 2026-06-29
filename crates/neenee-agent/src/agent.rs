@@ -973,13 +973,8 @@ impl Agent {
     /// resolving each with `None` so the awaiting dispatch returns a
     /// cancelled result.
     pub fn reject_pending_inputs(&self) {
-        let pending = std::mem::take(
-            &mut self
-                .input
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending,
-        );
+        let pending =
+            std::mem::take(&mut self.input.lock().unwrap_or_else(|e| e.into_inner()).pending);
         for (_, sender) in pending {
             let _ = sender.send(None);
         }
@@ -1767,8 +1762,10 @@ impl Agent {
                 .map(|(idx, _)| idx)
                 .collect();
             if !exec_indices.is_empty() {
-                let exec_calls: Vec<ToolCall> =
-                    exec_indices.iter().map(|&i| tool_calls[i].clone()).collect();
+                let exec_calls: Vec<ToolCall> = exec_indices
+                    .iter()
+                    .map(|&i| tool_calls[i].clone())
+                    .collect();
                 let exec_ids: Vec<String> =
                     exec_indices.iter().map(|&i| call_ids[i].clone()).collect();
                 let exec_results = self
@@ -1781,7 +1778,9 @@ impl Agent {
             // Flatten back to a positional Vec, matching tool_calls order.
             let results: Vec<(ToolOutput, u64)> = results
                 .into_iter()
-                .map(|r| r.unwrap_or_else(|| (ToolOutput::Text("[loop guard] blocked".to_string()), 0)))
+                .map(|r| {
+                    r.unwrap_or_else(|| (ToolOutput::Text("[loop guard] blocked".to_string()), 0))
+                })
                 .collect();
             let denied = results
                 .iter()
@@ -1826,10 +1825,9 @@ impl Agent {
             } else {
                 state.consecutive_readonly_rounds = 0;
             }
-            state.guards.set_round(
-                vec![(call.name.clone(), call.arguments.clone())],
-                all_read,
-            );
+            state
+                .guards
+                .set_round(vec![(call.name.clone(), call.arguments.clone())], all_read);
             let call_id = format!("call_{}", uuid::Uuid::new_v4());
             on_event(AgentEvent::ToolCall {
                 id: call_id.clone(),
@@ -2395,7 +2393,11 @@ impl Agent {
         // already extracts it, but re-reading here keeps this self-contained).
         let command = serde_json::from_str::<serde_json::Value>(arguments)
             .ok()
-            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(str::to_string))
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         if is_interactive_command(&command) {
             let secret = command.split_whitespace().next().map(|t| {

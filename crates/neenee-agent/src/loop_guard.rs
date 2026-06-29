@@ -591,7 +591,9 @@ impl ReadLoopGuard {
         };
         self.path_nudges_sent.insert(path_sig.to_string(), level);
         if level == 1 {
-            Some(GuardAction::Inject(build_path_nudge(path_sig, count, level)))
+            Some(GuardAction::Inject(build_path_nudge(
+                path_sig, count, level,
+            )))
         } else {
             let message = build_path_block_nudge(&humanize(path_sig), count);
             Some(GuardAction::Block {
@@ -888,9 +890,8 @@ mod tests {
         // through the `RoundGuard` trait — the real dispatch path — because the
         // legacy `observe()` string API cannot represent a `Block`.
         let mut guard = ReadLoopGuard::new();
-        let args = |offset, limit| {
-            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
-        };
+        let args =
+            |offset, limit| format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#);
         let mut actions = Vec::new();
         for _ in 0..10 {
             let args = args(1, 50);
@@ -1130,7 +1131,10 @@ mod tests {
             message: "second".into(),
         });
         match merged {
-            GuardAction::Block { signatures, message } => {
+            GuardAction::Block {
+                signatures,
+                message,
+            } => {
                 assert_eq!(signatures.len(), 2, "signature sets union: {signatures:?}");
                 assert!(signatures.contains(&"read_text|a.rs".to_string()));
                 assert!(signatures.contains(&"read_text|b.rs".to_string()));
@@ -1167,9 +1171,8 @@ mod tests {
             reg.register(Box::new(ReadLoopGuard::new()));
             reg
         });
-        let args = |offset, limit| {
-            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
-        };
+        let args =
+            |offset, limit| format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#);
         // Six identical reads → nudge at 3, Block at 6.
         let mut last_action = GuardAction::Continue;
         for _ in 0..6 {
@@ -1200,9 +1203,8 @@ mod tests {
             reg.register(Box::new(ReadLoopGuard::new()));
             reg
         });
-        let args = |offset, limit| {
-            format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#)
-        };
+        let args =
+            |offset, limit| format!(r#"{{"path":"a.rs","offset":{offset},"limit":{limit}}}"#);
         for _ in 0..6 {
             let call = ("read_text", args(1, 50));
             state.set_round(vec![(call.0.into(), call.1.into())], true);
@@ -1268,9 +1270,7 @@ mod tests {
             reg.register(Box::new(ReadLoopGuard::new()));
             reg
         });
-        let args = |offset| {
-            format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#)
-        };
+        let args = |offset| format!(r#"{{"path":"a.rs","offset":{offset},"limit":50}}"#);
         // Push past PATH_THRESHOLD (8) then past ESCALATE_AT (6 more) to
         // escalate. Each round is a distinct exact signature (different
         // offset), so the exact axis never latches; the path axis accumulates
@@ -1296,10 +1296,7 @@ mod tests {
         );
         // But a different file is still fine.
         assert!(
-            !state.is_blocked(
-                "read_text",
-                r#"{"path":"b.rs","offset":1,"limit":50}"#
-            ),
+            !state.is_blocked("read_text", r#"{"path":"b.rs","offset":1,"limit":50}"#),
             "path-bucket block on a.rs should spare b.rs"
         );
     }

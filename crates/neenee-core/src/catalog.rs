@@ -41,16 +41,15 @@ pub enum Transport {
     /// Google Gemini native API (`generativelanguage.googleapis.com`). The model
     /// id and API key are read from the owning [`Channel`].
     GeminiNative,
-    /// A local llama.cpp / compatible server at `${base_url}/v1/chat/completions`.
-    Llama { base_url: String },
 }
 
 impl Transport {
-    /// Whether this transport needs an API key at all. Local servers never do;
-    /// the cloud transports do.
+    /// Whether this transport needs an API key at all. Every remaining transport
+    /// is a cloud transport, so all require a key. (A keyless OpenAI-compatible
+    /// relay still constructs fine — an empty `api_key` simply suppresses the
+    /// `Authorization` header in the provider.)
     pub fn needs_api_key(&self) -> bool {
         match self {
-            Transport::Llama { .. } => false,
             Transport::OpenAiCompat { .. }
             | Transport::Anthropic { .. }
             | Transport::GeminiNative => true,
@@ -83,8 +82,8 @@ pub struct Channel {
 
 impl Channel {
     /// Whether this channel has a usable API key. Keyless transports
-    /// ([`Transport::Llama`], the in-memory mock) always report ready; the rest
-    /// require a non-empty key.
+    /// (the in-memory mock) always report ready; the rest require a non-empty
+    /// key.
     pub fn key_ready(&self) -> bool {
         if !self.transport.needs_api_key() {
             return true;
@@ -159,10 +158,11 @@ impl ProviderEntry {
 pub fn builtin_provider_metadata(id: &str) -> Option<(&'static str, &'static str)> {
     let (name, description) = match id {
         "kimi-code" => ("Kimi Code", "Moonshot AI coding model"),
-        "openai" => ("OpenAI GPT-4o", "OpenAI API"),
-        "gemini" => ("Gemini 2.5 Flash", "Google Gemini 2.5 Flash"),
-        "deepseek-v4-flash" => ("DeepSeek V4 Flash", "DeepSeek V4 Flash"),
-        "deepseek-v4-pro" => ("DeepSeek V4 Pro", "DeepSeek V4 Pro"),
+        "openai" => ("OpenAI", "OpenAI API"),
+        // Google hosts the Gemini family as one multi-model provider.
+        "google" => ("Google", "Google Gemini"),
+        // DeepSeek hosts V4 Flash + Pro as one multi-model provider.
+        "deepseek" => ("DeepSeek", "DeepSeek V4 (Flash + Pro)"),
         "zai-code" => ("ZAI Code", "Z.AI coding plan (GLM-5.2)"),
         // OpenCode Go — opencode.ai's low-cost relay. One provider id hosts many
         // models (GLM/Kimi/DeepSeek/MiMo via OpenAI format, MiniMax/Qwen via
@@ -170,7 +170,9 @@ pub fn builtin_provider_metadata(id: &str) -> Option<(&'static str, &'static str
         // registry selects the transport. Both formats share one
         // `OPENCODE_API_KEY`.
         "opencode-go" => ("OpenCode Go", "opencode.ai relay (multi-model)"),
-        "llama" => ("Llama", "Local Llama server"),
+        // Anthropic — Claude family over the `/messages` API (configurable base
+        // URL; defaults to the official endpoint).
+        "anthropic" => ("Anthropic", "Claude models"),
         _ => return None,
     };
     Some((name, description))
@@ -211,20 +213,6 @@ mod tests {
         assert!(entries.iter().find(|e| e.id == "deepseek").is_none());
         assert!(entries.iter().find(|e| e.id == "deepseek-flash").is_none());
         assert!(entries.iter().find(|e| e.id == "unknown").is_none());
-    }
-
-    #[test]
-    fn key_ready_is_true_for_keyless_transports() {
-        let llama = Channel {
-            id: "default".to_string(),
-            label: "Llama".to_string(),
-            transport: Transport::Llama {
-                base_url: "http://localhost:8080".to_string(),
-            },
-            api_key: String::new(),
-            model: "local-model".to_string(),
-        };
-        assert!(llama.key_ready(), "llama must be keyless-ready");
     }
 
     #[test]
@@ -319,12 +307,11 @@ mod tests {
         for id in [
             "kimi-code",
             "openai",
-            "gemini",
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
+            "google",
+            "deepseek",
             "zai-code",
             "opencode-go",
-            "llama",
+            "anthropic",
         ] {
             let (name, _) = builtin_provider_metadata(id)
                 .unwrap_or_else(|| panic!("missing metadata for {id}"));

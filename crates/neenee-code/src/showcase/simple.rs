@@ -25,7 +25,7 @@ use crate::tui::render::{
     draw_history_modal, draw_model_editor, draw_models_modal, draw_session_modal,
     draw_sessions_modal,
 };
-use crate::tui::{ActivityTab, PROVIDERS};
+use crate::tui::ActivityTab;
 
 // ─────────────────────────── provider picker ──────────────────────────────
 
@@ -37,34 +37,41 @@ struct ProviderState {
     search: bool,
     picker: ProviderPickerSnapshot,
     key_status: HashMap<String, bool>,
-    solutions: Vec<crate::tui::ProviderPreset>,
 }
 
 pub fn provider() -> io::Result<()> {
     let theme = Theme::default();
-    let mut rows = Vec::new();
-    for p in PROVIDERS.iter() {
-        rows.push(ProviderPickerRow {
-            id: p.id.to_string(),
-            key_ready: p.id != "openai",
-            favorite: p.id == "anthropic",
-            last_used_ms: if p.id == "anthropic" {
-                Some(1_700_000_000_000)
-            } else {
-                None
-            },
-        });
-    }
+    let mk = |id: &str, name: &str, models: &[&str], fav: bool, key: bool| ProviderPickerRow {
+        id: id.to_string(),
+        name: name.to_string(),
+        model: models.first().copied().unwrap_or("").to_string(),
+        models: models.iter().map(|m| m.to_string()).collect(),
+        builtin: true,
+        protocol: String::new(),
+        base_url: String::new(),
+        key_ready: key,
+        favorite: fav,
+        last_used_ms: fav.then_some(1_700_000_000_000),
+    };
     let picker = ProviderPickerSnapshot {
         default_id: "anthropic".into(),
-        rows,
+        rows: vec![
+            mk("openai", "OpenAI", &["gpt-4o", "gpt-4o-mini"], false, false),
+            mk(
+                "anthropic",
+                "Anthropic",
+                &["claude-opus-4-8", "claude-sonnet-4-6"],
+                true,
+                true,
+            ),
+            mk("kimi-code", "Kimi Code", &["kimi-k2.7-code"], false, true),
+        ],
     };
     let key_status: HashMap<String, bool> = picker
         .rows
         .iter()
         .map(|r| (r.id.clone(), r.key_ready))
         .collect();
-    let solutions: Vec<_> = PROVIDERS.to_vec();
 
     let mut state = ProviderState {
         index: 0,
@@ -74,7 +81,6 @@ pub fn provider() -> io::Result<()> {
         search: false,
         picker,
         key_status,
-        solutions,
     };
 
     common::run_showcase(
@@ -82,13 +88,13 @@ pub fn provider() -> io::Result<()> {
         |f, s| {
             let title = format!(
                 " model picker · {} providers · / to search · q/Ctrl+C=quit",
-                s.solutions.len(),
+                s.picker.rows.len(),
             );
             let hint = " ↑↓ navigate · Enter select · / search · Esc back/quit ";
             common::draw_with_chrome(f, &title, hint, &theme, |f| {
                 let mut lm = LayoutMap::new();
                 let query = if s.search { s.query.trim() } else { "" };
-                let ranked = crate::tui::models_filtered_from(&s.solutions, &s.picker, query);
+                let ranked = crate::tui::providers_filtered_from(&s.picker, query);
                 // The draw closure borrows state immutably; follow-selection
                 // re-anchors the scroll each frame, so a frame-local offset is
                 // sufficient for the showcase.
@@ -97,6 +103,10 @@ pub fn provider() -> io::Result<()> {
                     f,
                     &mut lm,
                     &ranked,
+                    &[],
+                    None,
+                    None,
+                    false,
                     &s.picker.default_id,
                     "",
                     s.index,
@@ -162,19 +172,13 @@ pub fn provider() -> io::Result<()> {
 // ──────────────────────────── model editor ────────────────────────────────
 
 struct ModelEditorState {
-    field: u8, // 0 = API key, 1 = model id
-    key_buf: String,
-    model_buf: String,
-    input: String, // the focused field's live value
+    input: String, // the live API-key value
     cursor: usize,
 }
 
 pub fn model_editor() -> io::Result<()> {
     let theme = Theme::default();
     let mut state = ModelEditorState {
-        field: 0,
-        key_buf: String::new(),
-        model_buf: String::from("gpt-4o"),
         input: String::new(),
         cursor: 0,
     };
@@ -182,38 +186,14 @@ pub fn model_editor() -> io::Result<()> {
     common::run_showcase(
         &mut state,
         |f, s| {
-            let field_name = if s.field == 0 { "API key" } else { "Model id" };
-            let title =
-                format!(" model editor · focused: {field_name} · Tab switch field · q/Ctrl+C=quit");
-            let hint = " type to edit · Tab switch field · Esc quit ";
+            let title = " key editor · API key · q/Ctrl+C=quit".to_string();
+            let hint = " type to edit · Enter save · Esc quit ";
             common::draw_with_chrome(f, &title, hint, &theme, |f| {
-                draw_model_editor(
-                    f,
-                    "OpenAI",
-                    s.field,
-                    &s.key_buf,
-                    &s.model_buf,
-                    &s.input,
-                    s.cursor,
-                    &theme,
-                );
+                draw_model_editor(f, "OpenAI", &s.input, s.cursor, &theme);
             });
         },
         |s, key| -> ShowAction {
             match key.code {
-                KeyCode::Tab => {
-                    // Commit the focused field to its buf, swap focus.
-                    if s.field == 0 {
-                        s.key_buf = s.input.clone();
-                        s.input = s.model_buf.clone();
-                    } else {
-                        s.model_buf = s.input.clone();
-                        s.input = s.key_buf.clone();
-                    }
-                    s.cursor = s.input.chars().count();
-                    s.field = if s.field == 0 { 1 } else { 0 };
-                    ShowAction::Continue
-                }
                 KeyCode::Esc => ShowAction::Exit,
                 KeyCode::Backspace => {
                     if s.cursor > 0 {

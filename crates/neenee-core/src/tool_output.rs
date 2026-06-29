@@ -773,7 +773,9 @@ mod tests {
         assert!(is_interactive_command("gpg --list-keys"));
         // With --batch / --passphrase it is non-interactive.
         assert!(!is_interactive_command("gpg --batch --sign file"));
-        assert!(!is_interactive_command("gpg --passphrase-file /tmp/pw --decrypt f"));
+        assert!(!is_interactive_command(
+            "gpg --passphrase-file /tmp/pw --decrypt f"
+        ));
     }
 
     #[test]

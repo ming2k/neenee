@@ -8,12 +8,14 @@
 //! - `anthropic_compat` — Anthropic-compatible `/messages` (used by
 //!   opencode-go's MiniMax/Qwen models and any Anthropic-format relay).
 //! - `gemini` — Google Gemini native REST surface.
-//! - `registry` — `OpenAiProviderSpec` table of OpenAI-compatible endpoints
-//!   and [`build_provider_for_channel`], which is the single place that knows
+//! - `registry` — the `OpenAiProviderSpec` table of OpenAI-compatible endpoints
+//!   plus the `ANTHROPIC_BUILTIN_MODELS` list backing the configurable
+//!   `anthropic` Claude relay, and [`build_provider_for_channel`], which is the
+//!   single place that knows
 //!   how to turn a [`neenee_core::catalog::Channel`] into a concrete
-//!   `dyn Provider`. A local `llama-server --jinja` reaches the same
-//!   `OpenAiCompatProvider` as a cloud endpoint (keyless), so there is no
-//!   separate local provider module.
+//!   `dyn Provider`. A keyless OpenAI-compatible relay reaches the same
+//!   `OpenAiCompatProvider` as a cloud endpoint (an empty key suppresses the
+//!   auth header), so there is no separate local provider module.
 //! - `sse` — the shared Server-Sent Events byte-stream decoder every streaming
 //!   provider routes through. It reassembles raw bytes across network chunk
 //!   boundaries so a multi-byte UTF-8 character split between chunks is not
@@ -37,7 +39,9 @@ pub use gemini::GeminiProvider;
 pub use mock::MockProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use registry::{
-    OPENAI_PROVIDER_SPECS, OpenAiProviderSpec, build_provider_for_channel, openai_provider_spec,
+    ANTHROPIC_BUILTIN_MODELS, DEEPSEEK_BUILTIN_MODELS, GOOGLE_BUILTIN_MODELS,
+    OPENAI_BUILTIN_MODELS, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec, build_provider_for_channel,
+    openai_provider_spec,
 };
 
 use neenee_core::retryable_error;

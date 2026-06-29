@@ -40,7 +40,9 @@ pub enum McpConnectionStatus {
     /// reconnect). The server is not usable yet; the model sees none of its
     /// tools until it transitions to `Connected`.
     Connecting,
-    Connected { tools: usize },
+    Connected {
+        tools: usize,
+    },
     Disabled,
     Failed(String),
 }

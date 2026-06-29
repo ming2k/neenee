@@ -1018,7 +1018,10 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("user-question {}", request.questions.len())
             }
             AgentEvent::InputRequest(request) => {
-                format!("input-request {} (secret={})", request.command, request.secret)
+                format!(
+                    "input-request {} (secret={})",
+                    request.command, request.secret
+                )
             }
             AgentEvent::Envoy { .. } => "subtask".to_string(),
             AgentEvent::TodosUpdated(list) => {
@@ -1295,7 +1298,7 @@ async fn read_loop_block_is_surgical_across_files() {
         "the unblocked read should return its real content"
     );
     let _ = big_calls; // suppress unused warning; big.rs execution count is
-                       // asserted in the sibling test above.
+    // asserted in the sibling test above.
 }
 
 /// The guard is gated by `set_loop_review_enabled`: disabled, the same looping

@@ -31,7 +31,10 @@ pub use history::draw_history_modal;
 pub(crate) use mcp::draw_mcp_modal;
 pub use permission::{draw_input_injection, draw_permission_sheet, draw_question_modal};
 pub(crate) use permissions_manager::draw_permissions_manager;
-pub(crate) use provider::{draw_model_editor, draw_models_modal};
+pub(crate) use provider::{
+    CustomEditorView, draw_add_model_editor, draw_custom_provider_editor, draw_model_editor,
+    draw_models_modal,
+};
 pub use session::{draw_session_modal, draw_sessions_modal};
 pub use toast::{draw_armed_toast, draw_copy_toast};
 pub(crate) use tools::draw_tools_modal;

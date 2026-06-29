@@ -25,6 +25,12 @@ const ANTHROPIC_MODEL_MAX_TOKENS: &[(&str, u32)] = &[
     ("qwen3.7-plus", 65536),
     ("qwen3.6-plus", 65536),
     ("qwen3.5-plus", 65536),
+    // Claude family served via the hihusky relay (and any Anthropic relay).
+    // Claude 4.x supports a 64K output limit; cap there so long agent turns
+    // are not truncated by the provider's flat 8192 default.
+    ("claude-opus-4-8", 64000),
+    ("claude-sonnet-4-6", 64000),
+    ("claude-haiku-4-5-20251001", 32000),
 ];
 
 /// Look up the `max_tokens` for an Anthropic-format model id. `None` lets the
@@ -79,26 +85,9 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
         fixed_model: Some("kimi-k2.7-code"),
         default_user_agent: Some("opencode/0.1.0"),
     },
-    // DeepSeek V4 Flash — versatile model with thinking + non-thinking modes.
-    OpenAiProviderSpec {
-        id: "deepseek-v4-flash",
-        base_url: "https://api.deepseek.com/v1/chat/completions",
-        default_model: "deepseek-v4-flash",
-        env_api_key: "DEEPSEEK_API_KEY",
-        env_model: "DEEPSEEK_FLASH_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
-    },
-    // DeepSeek V4 Pro — most capable model.
-    OpenAiProviderSpec {
-        id: "deepseek-v4-pro",
-        base_url: "https://api.deepseek.com/v1/chat/completions",
-        default_model: "deepseek-v4-pro",
-        env_api_key: "DEEPSEEK_API_KEY",
-        env_model: "DEEPSEEK_PRO_MODEL",
-        fixed_model: None,
-        default_user_agent: None,
-    },
+    // DeepSeek V4 (Flash + Pro) is served as one multi-model `deepseek` provider
+    // built in the catalog layer (both models share one DEEPSEEK_API_KEY), not as
+    // two single-model registry presets.
     // ZAI Code — Z.AI (Zhipu) coding-plan platform
     // (api.z.ai/api/coding/paas/v4). A coding-agent membership endpoint that
     // serves the GLM-5 family; glm-5.2 is the current flagship. Like the Kimi
@@ -121,6 +110,31 @@ pub const OPENAI_PROVIDER_SPECS: &[OpenAiProviderSpec] = &[
 pub fn openai_provider_spec(id: &str) -> Option<&'static OpenAiProviderSpec> {
     OPENAI_PROVIDER_SPECS.iter().find(|spec| spec.id == id)
 }
+
+/// The Claude model ids the built-in `anthropic` provider serves, in display
+/// order. The provider is a *configurable* Anthropic `/messages` relay: the
+/// endpoint URL is supplied by config (defaulting to Anthropic's official API),
+/// so the same preset serves the official API or any Anthropic-compatible relay.
+/// Each id exists in the model registry, so its metadata (context window, output
+/// limit, capabilities) resolves there.
+pub const ANTHROPIC_BUILTIN_MODELS: &[&str] = &[
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+];
+
+/// The Gemini model ids the built-in `google` provider serves (native Gemini
+/// API, one key). Each id exists in the model registry.
+pub const GOOGLE_BUILTIN_MODELS: &[&str] = &["gemini-2.5-flash", "gemini-2.0-flash"];
+
+/// The model ids the built-in `deepseek` provider serves (V4 Flash + Pro over
+/// the OpenAI-compatible API, one key). Each id exists in the model registry.
+pub const DEEPSEEK_BUILTIN_MODELS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
+
+/// The model ids the built-in `openai` provider serves over the OpenAI
+/// chat-completions API, one key (`OPENAI_API_KEY`). `gpt-4o` is the default.
+/// Each id exists in the model registry.
+pub const OPENAI_BUILTIN_MODELS: &[&str] = &["gpt-4o", "gpt-4o-mini"];
 
 impl OpenAiProviderSpec {
     /// Resolve the model to use: a pinned `fixed_model` always wins, otherwise
@@ -169,23 +183,6 @@ pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn 
             model: channel.model.clone(),
             id: entry_id.to_string(),
         }),
-        Transport::Llama { base_url } => {
-            // `llama-server --jinja` speaks the full OpenAI chat-completions
-            // surface — including native tool calls and streaming tool-call
-            // deltas — so the local server is reached through the same
-            // `OpenAiCompatProvider` as any cloud endpoint. The channel is
-            // keyless (`Transport::Llama` resolves no API key), so the empty
-            // key suppresses the `Authorization` header entirely.
-            let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
-            let mut provider = OpenAiCompatProvider::with_base_url_and_user_agent(
-                channel.api_key.clone(),
-                channel.model.clone(),
-                &url,
-                NEENEE_USER_AGENT,
-            );
-            provider.id = entry_id.to_string();
-            Arc::new(provider)
-        }
         Transport::Anthropic {
             base_url,
             user_agent,
@@ -251,33 +248,18 @@ mod spec_tests {
 
     #[test]
     fn openai_compat_spec_resolves_model_override_and_default() {
-        let spec = openai_provider_spec("deepseek-v4-flash").expect("deepseek-v4-flash spec");
-        assert_eq!(spec.resolve_model(None), "deepseek-v4-flash");
-        assert_eq!(
-            spec.resolve_model(Some("deepseek-v4-pro".to_string())),
-            "deepseek-v4-pro"
-        );
-        // Non-coding providers fall back to the shared neenee user agent.
-        let provider = spec.build("k".to_string(), None, None);
-        assert_eq!(provider.user_agent, NEENEE_USER_AGENT);
+        let spec = openai_provider_spec("zai-code").expect("zai-code spec");
+        assert_eq!(spec.resolve_model(None), "glm-5.2");
+        assert_eq!(spec.resolve_model(Some("glm-5.1".to_string())), "glm-5.1");
     }
 
     #[test]
-    fn deepseek_pro_defaults_to_pro_model() {
-        let spec = openai_provider_spec("deepseek-v4-pro").expect("deepseek-v4-pro spec");
-        assert_eq!(spec.resolve_model(None), "deepseek-v4-pro");
-        assert_eq!(
-            spec.base_url,
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-    }
-
-    #[test]
-    fn stale_deepseek_ids_do_not_resolve() {
-        // No alias mapping: the pre-rename ids are gone and must not resolve.
+    fn deepseek_is_not_a_registry_preset() {
+        // DeepSeek is now a multi-model catalog entry, not a single-model registry
+        // preset: neither the merged id nor the old split ids resolve here.
         assert!(openai_provider_spec("deepseek").is_none());
-        assert!(openai_provider_spec("deepseek-flash").is_none());
-        assert!(openai_provider_spec("deepseek-pro").is_none());
+        assert!(openai_provider_spec("deepseek-v4-flash").is_none());
+        assert!(openai_provider_spec("deepseek-v4-pro").is_none());
         // Qwen was removed from the registry and must not resolve.
         assert!(openai_provider_spec("qwen").is_none());
     }
@@ -325,33 +307,6 @@ mod build_tests {
     }
 
     #[test]
-    fn build_provider_routes_llama_transport_through_openai_compat() {
-        // `llama-server --jinja` speaks the full OpenAI chat-completions
-        // surface (native tool calls + streaming tool-call deltas), so the local
-        // server is reached through `OpenAiCompatProvider` rather than a limited
-        // local provider. The channel is keyless: the request body builder keeps
-        // the tool-capable machinery, and the empty key suppresses auth.
-        let channel = Channel {
-            id: "default".to_string(),
-            label: "Llama".to_string(),
-            transport: Transport::Llama {
-                base_url: "http://localhost:8080".to_string(),
-            },
-            api_key: String::new(),
-            model: "gemma-4-E4B-it-GGUF".to_string(),
-        };
-        let provider = build_provider_for_channel(&channel, "llama");
-        assert_eq!(provider.provider_id(), "llama");
-        assert_eq!(provider.model(), "gemma-4-E4B-it-GGUF");
-        // The concrete provider is the OpenAI-compatible one (downcast is not
-        // available on `dyn Provider`, so verify the identity indirectly: a
-        // provider with native tool support exposes the same id/model surface,
-        // and the trait default for `prepare_tools` would be a no-op). The
-        // load-bearing assertion is that construction succeeds and attributes
-        // correctly; tool wiring is exercised by the agent harness.
-    }
-
-    #[test]
     fn anthropic_max_tokens_derives_from_model_output_limit() {
         // minimax-m3's registered output limit (131072) must cap the request's
         // max_tokens, not the provider's flat 8192 default. Construct directly
@@ -368,5 +323,50 @@ mod build_tests {
         // An unknown model id falls back to None (the provider keeps its
         // default), proving the lookup does not invent a limit.
         assert!(anthropic_model_max_tokens("not-a-model").is_none());
+    }
+
+    #[test]
+    fn claude_models_cap_max_tokens_above_the_flat_default() {
+        // Claude's registered output limit must lift the request cap above the
+        // provider's flat 8192 default so long agent turns are not truncated.
+        let opus = AnthropicMessagesProvider::with_user_agent(
+            "k".to_string(),
+            "claude-opus-4-8".to_string(),
+            "https://ai.hihusky.com/v1/messages",
+            "agent",
+        )
+        .with_max_tokens(anthropic_model_max_tokens("claude-opus-4-8").unwrap());
+        assert_eq!(opus.max_tokens, 64000);
+    }
+
+    #[test]
+    fn builtin_provider_models_resolve_with_expected_wire_formats() {
+        use neenee_core::WireFormat;
+        // Every model a multi-model built-in serves must exist in the model
+        // registry (so metadata resolves) and carry the wire format its provider
+        // speaks.
+        for (&id, expected) in crate::ANTHROPIC_BUILTIN_MODELS
+            .iter()
+            .map(|id| (id, WireFormat::AnthropicCompat))
+            .chain(
+                crate::GOOGLE_BUILTIN_MODELS
+                    .iter()
+                    .map(|id| (id, WireFormat::Gemini)),
+            )
+            .chain(
+                crate::DEEPSEEK_BUILTIN_MODELS
+                    .iter()
+                    .map(|id| (id, WireFormat::OpenAiCompat)),
+            )
+            .chain(
+                crate::OPENAI_BUILTIN_MODELS
+                    .iter()
+                    .map(|id| (id, WireFormat::OpenAiCompat)),
+            )
+        {
+            let model = neenee_core::model::resolve(id);
+            assert_eq!(model.id, id, "model {id} must be registered");
+            assert_eq!(model.format, expected, "{id} wire format");
+        }
     }
 }

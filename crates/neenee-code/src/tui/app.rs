@@ -25,7 +25,9 @@ use crate::tui::document::{DeliveryStatus, TranscriptMessage};
 use crate::tui::event_loop::resolve_focused_mut;
 use crate::tui::fuzzy;
 use crate::tui::layout::{InteractiveTarget, LayoutMap, ModalHitMap};
-use crate::tui::providers::{PROVIDERS, RankedModel, models_filtered_from};
+use crate::tui::providers::{
+    RankedModel, RankedProvider, provider_models_filtered_from, providers_filtered_from,
+};
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
 
@@ -62,15 +64,18 @@ pub struct QueuedDispatch {
 #[derive(PartialEq, Clone, Copy)]
 pub enum Modal {
     None,
-    /// Flat model picker (`Ctrl+P` / `/model`). A single searchable list of
-    /// every `(provider, model)` pair — multi-model providers fan out into one
-    /// row per model — that mirrors the input-history modal's two-mode design:
-    /// it opens in **browse** mode (a plain ranked list, composer line not
-    /// borrowed, typing inert) and `/` drops into a **search** sub-layer that
-    /// borrows the line as a live fuzzy query (`App::model_search` distinguishes
-    /// the two). Rows come from [`App::models_filtered`]; Enter activates the
-    /// highlighted model. The first Esc in search returns to browse, the second
-    /// (or an outside click) closes and restores the draft.
+    /// Two-stage provider/model picker (`Ctrl+P` / `/model`). **Stage 1** is a
+    /// ranked *provider* list ([`App::providers_filtered`]); **stage 2**
+    /// ([`App::picker_provider`] = `Some`) is the model sub-list for a
+    /// drilled-into multi-model provider ([`App::provider_models_filtered`]).
+    /// Enter on a multi-model provider drills into stage 2; on a single-model
+    /// provider (or any stage-2 row) it activates that (provider, model). Each
+    /// stage mirrors the input-history modal's two-mode design: it opens in
+    /// **browse** mode (composer line not borrowed, typing inert) and `/` drops
+    /// into a **search** sub-layer that borrows the line as a live fuzzy query
+    /// (`App::model_search` distinguishes the two). Esc in search returns to
+    /// browse; Esc in stage 2 returns to stage 1; Esc in stage 1 (or an outside
+    /// click) closes and restores the draft.
     Provider,
     /// Input-history recall (Ctrl+R). A two-mode surface: it opens in **browse**
     /// mode — a plain reverse-chronological list (newest first, top-focused)
@@ -89,6 +94,21 @@ pub enum Modal {
     /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
     /// ModelName modal chain.
     ModelEditor,
+    /// Custom-provider editor: a 5-field form (Name, Protocol, Base URL, Token,
+    /// Model) for defining a user provider — any protocol, any relay endpoint —
+    /// without editing config.toml by hand. Reached from the "＋ Add provider"
+    /// row at the bottom of the provider picker's stage-1 list. `Tab`/`BackTab`
+    /// cycle fields; `←/→` cycle the protocol on the protocol field; the focused
+    /// text field borrows the composer line (like [`Self::ModelEditor`]). `Enter`
+    /// saves (→ `AgentRequest::AddProvider`) and activates; `Esc` returns to the
+    /// provider picker. See [`App::custom_field`] and friends.
+    CustomProvider,
+    /// Add-model overlay for a custom provider: pick a model from the provider's
+    /// protocol candidates (cycled with `←/→`) or the synthetic "Custom…" slot
+    /// (free-text id in the borrowed input line). `Enter` sends
+    /// `AgentRequest::AddProviderModel`; `Esc` returns to the stage-2 model list.
+    /// Reached from the "＋ Add model" row in a custom provider's stage-2 list.
+    AddModel,
     Help,
     Sessions,
     /// Session context modal: a single scrollable **read-only** dashboard of
@@ -338,6 +358,25 @@ pub struct App {
     pub input_scroll: usize,
     pub active_modal: Modal,
     pub modal_index: usize,
+    /// Last-known screen rect of the composer. Refreshed every draw and reused
+    /// between frames by the input-driven immediate cursor flush so the IME
+    /// composition window is re-anchored in the *same* iteration a keystroke is
+    /// handled — before the next frame is even rendered (the fix for the
+    /// one-frame cursor lag that mis-anchored IME). It is only an approximation
+    /// of the rect the *next* frame will compute (the footer height can change
+    /// when wrapping shifts), but a follow-up full draw always lands when that
+    /// happens, so the approximation is correct exactly when it matters (the
+    /// non-wrap-moving keystrokes that dominate real typing).
+    pub last_input_rect: neenee_tui::Rect,
+    /// Whether the terminal cursor should be moved to match `cursor_position`
+    /// before the next frame, eliminating the one-frame IME lag. Set by
+    /// [`App::set_cursor`] (the single write site for `cursor_position`) and
+    /// cleared by the event loop's immediate-flush after it syncs the backend.
+    pub cursor_sync_pending: bool,
+    /// The cursor visibility we last told the terminal. The immediate-flush
+    /// path consults this so show/hide is a state transition that takes effect
+    /// when the selection/modal changes — not a per-frame guess.
+    pub cursor_visible: bool,
     /// Body scroll offset of the session-context dashboard ([`Modal::Session`]).
     /// Reset to 0 on open. Clamped (and, when `session_modal_follow` is set,
     /// auto-followed to the tool selection) by the renderer each frame.
@@ -527,15 +566,41 @@ pub struct App {
     pub spinner_epoch: std::time::Instant,
     /// Input stashed while the API-key modal borrows the input line.
     pub stashed_input: String,
-    /// Target `PROVIDERS` index for the unified provider editor.
-    pub editor_target: Option<usize>,
-    /// Which editor field is focused: `0` = API key, `1` = model id.
+    /// Provider id targeted by the unified key editor ([`Modal::ModelEditor`]).
+    pub editor_target: Option<String>,
+    /// Which editor field is focused. The key editor now has a single field
+    /// (API key), so this stays `0`; retained for caret/field plumbing symmetry.
     pub editor_field: u8,
     /// API-key buffer for the editor (the input line is borrowed for the
-    /// focused field; this holds the key while the model-id field is focused).
+    /// focused field).
     pub editor_key: String,
-    /// Model-id buffer for the editor.
+    /// Wire model id the key editor will activate once a key is entered (carried
+    /// from the stage-2 selection or the provider's default; not user-editable).
     pub editor_model: String,
+    /// Focused field of the custom-provider editor ([`Modal::CustomProvider`]):
+    /// `0` Name, `1` Protocol, `2` Base URL, `3` Token, `4` Model. The focused
+    /// *text* field (0/2/3/4) borrows the composer line; field `1` (Protocol) is
+    /// cycled with `←/→` and stores its choice in [`Self::custom_protocol`].
+    pub custom_field: u8,
+    /// Selected protocol index for the custom-provider editor: `0`
+    /// OpenAI-compatible, `1` Anthropic, `2` Gemini. Cycled with `←/→` while the
+    /// Protocol field is focused (indexes [`crate::tui::CUSTOM_PROTOCOLS`]).
+    pub custom_protocol: u8,
+    /// Highlight index into the live suggestion list for the custom-provider
+    /// editor's Protocol / Model **filter** fields (type to filter, `↑/↓` to
+    /// move, the highlighted suggestion is committed live).
+    pub custom_suggest_index: usize,
+    /// When `Some(id)`, the custom-provider editor is **editing** the existing
+    /// user provider `id` (meta only: Name/Protocol/Base URL/Token, models stay
+    /// managed in the stage-2 list). `None` is create mode.
+    pub custom_edit_id: Option<String>,
+    /// Custom-provider editor buffers holding the unfocused text fields (the
+    /// focused one lives in the borrowed composer line). Name / Base URL / Token
+    /// / Model respectively.
+    pub custom_name: String,
+    pub custom_base_url: String,
+    pub custom_token: String,
+    pub custom_model: String,
     /// Whether the model picker's **search sub-layer** is active. The picker
     /// ([`Modal::Provider`]) opens in browse mode (`false`): a plain ranked list
     /// with no query field. Pressing `/` enters search (`true`), which borrows
@@ -543,6 +608,21 @@ pub struct App {
     /// and the second closes the modal. Mirrors [`Self::history_search`]. See
     /// [`Self::models_filtered`].
     pub model_search: bool,
+    /// The two-stage provider picker's current stage. `None` is **stage 1**, the
+    /// provider list; `Some(row_idx)` is **stage 2**, the model sub-list for the
+    /// snapshot row at `row_idx` (reached by activating a multi-model provider).
+    /// Esc in stage 2 returns to stage 1; Esc in stage 1 closes the modal. Reset
+    /// to `None` whenever the picker opens or closes. See
+    /// [`Self::providers_filtered`] and [`Self::provider_models_filtered`].
+    pub picker_provider: Option<usize>,
+    /// Provider id targeted by the **add-model** overlay ([`Modal::AddModel`]),
+    /// opened from a custom provider's stage-2 list. `None` when the overlay is
+    /// closed.
+    pub add_model_provider: Option<String>,
+    /// Index into the add-model overlay's candidate list. The last index is the
+    /// synthetic "Custom…" slot (free-text id in the borrowed input line).
+    /// Cycled with `←/→`.
+    pub add_model_choice: usize,
     /// Body scroll offset of the model picker. Reset to 0 each time the modal
     /// opens (and when toggling browse/search); clamped and auto-followed to the
     /// selection by the renderer each frame. Mirrors [`Self::history_scroll`].
@@ -575,6 +655,43 @@ impl App {
             .map(|(i, _)| i)
             .nth(self.cursor_position)
             .unwrap_or(self.input.len())
+    }
+
+    /// Set the input caret position and mark the terminal cursor as needing an
+    /// immediate re-sync before the next frame.
+    ///
+    /// This is the **single sanctioned write site** for `cursor_position`.
+    /// Routing every caret move through it guarantees the event loop's
+    /// immediate-flush (which re-anchors the IME composition window in the same
+    /// iteration as the keystroke) always fires — a raw `app.cursor_position =
+    /// …` would silently skip the flush and re-introduce the one-frame lag.
+    pub fn set_cursor(&mut self, pos: usize) {
+        self.cursor_position = pos;
+        self.cursor_sync_pending = true;
+    }
+
+    /// Set the input caret to the end of `self.input` (common case after a
+    /// programmatic input replacement: history navigation, modal restore,
+    /// paste). Equivalent to `set_cursor(self.input.chars().count())` but
+    /// reads as intent at the call site.
+    pub fn set_cursor_end(&mut self) {
+        let end = self.input.chars().count();
+        self.set_cursor(end);
+    }
+
+    /// Record the composer's screen rect as observed during the latest draw, so
+    /// the input-driven immediate cursor flush can place the caret without
+    /// waiting for the next frame.
+    pub fn observe_input_rect(&mut self, rect: neenee_tui::Rect) {
+        self.last_input_rect = rect;
+    }
+
+    /// Record that the caret moved without going through [`App::set_cursor`]
+    /// (the only legitimate caller is the input handler, which mutates
+    /// `cursor_position` in place for performance and then reports the new
+    /// value). Marks the immediate flush pending.
+    pub fn note_cursor_moved(&mut self) {
+        self.cursor_sync_pending = true;
     }
 
     /// Reconcile [`App::pending_images`] / [`App::pending_text_pastes`]
@@ -627,7 +744,7 @@ impl App {
             messages.remove(pos);
         }
         self.input = dispatch.text;
-        self.cursor_position = self.input.chars().count();
+        self.set_cursor_end();
         if !dispatch.images.is_empty() {
             self.pending_images = dispatch.images;
         }
@@ -697,7 +814,7 @@ impl App {
         let cursor_byte = replace_start + label.len();
         new_input.push_str(&self.input[replace_end..]);
         self.input = new_input;
-        self.cursor_position = self.input[..cursor_byte].chars().count();
+        self.set_cursor(self.input[..cursor_byte].chars().count());
         // Drop the cached project scan so newly-created files become
         // visible on the next `@` mention without a restart.
         self.path_scan_cache = None;
@@ -992,7 +1109,7 @@ impl App {
     /// the caller owns that transition.
     pub fn restore_history_draft(&mut self) {
         self.input = std::mem::take(&mut self.stashed_input);
-        self.cursor_position = self.input.chars().count();
+        self.set_cursor_end();
         self.input_scroll = 0;
         self.suggestion_index = None;
         self.modal_index = 0;
@@ -1007,13 +1124,232 @@ impl App {
     /// does **not** touch `active_modal` — the caller owns that transition.
     pub fn restore_model_draft(&mut self) {
         self.input = std::mem::take(&mut self.stashed_input);
-        self.cursor_position = self.input.chars().count();
+        self.set_cursor_end();
         self.input_scroll = 0;
         self.suggestion_index = None;
         self.modal_index = 0;
         self.model_search = false;
+        self.picker_provider = None;
         self.model_scroll = 0;
         self.model_modal_follow = true;
+    }
+
+    /// Open the custom-provider editor on the Name field with empty buffers. The
+    /// chat draft is already parked in `stashed_input` (the picker stashed it on
+    /// open); the composer line is borrowed for the focused Name field.
+    pub fn open_custom_provider_editor(&mut self) {
+        self.active_modal = Modal::CustomProvider;
+        self.custom_edit_id = None;
+        self.custom_field = 0;
+        self.custom_protocol = 0;
+        self.custom_suggest_index = 0;
+        self.custom_name.clear();
+        self.custom_base_url.clear();
+        self.custom_token.clear();
+        // Default the model to the first candidate of the default protocol so a
+        // freshly-submitted provider is immediately usable.
+        self.custom_model = self
+            .custom_model_candidates()
+            .first()
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        self.input.clear();
+        self.set_cursor(0);
+        self.picker_provider = None;
+    }
+
+    /// Open the custom-provider editor in **edit** mode for an existing user
+    /// provider, pre-filling its metadata. The Model field is hidden (models are
+    /// managed in the stage-2 list), so only Name/Protocol/Base URL/Token show.
+    pub fn open_edit_provider_editor(
+        &mut self,
+        id: String,
+        name: String,
+        protocol_idx: u8,
+        base_url: String,
+    ) {
+        self.active_modal = Modal::CustomProvider;
+        self.custom_edit_id = Some(id);
+        self.custom_field = 0;
+        self.custom_protocol = protocol_idx;
+        self.custom_suggest_index = 0;
+        self.custom_name = name.clone();
+        self.custom_base_url = base_url;
+        self.custom_token.clear();
+        self.custom_model.clear();
+        self.input = name;
+        self.set_cursor_end();
+        self.picker_provider = None;
+    }
+
+    /// Whether the custom-provider editor is editing an existing provider.
+    pub fn custom_is_editing(&self) -> bool {
+        self.custom_edit_id.is_some()
+    }
+
+    /// Number of fields the custom-provider editor exposes: 5 in create mode,
+    /// 4 in edit mode (the Model field is hidden — models live in stage 2).
+    fn custom_field_count(&self) -> u8 {
+        if self.custom_is_editing() { 4 } else { 5 }
+    }
+
+    /// The registry model ids matching the currently-selected protocol's wire
+    /// format — the Model filter field's candidate pool.
+    pub fn custom_model_candidates(&self) -> Vec<&'static str> {
+        let wire = crate::tui::CUSTOM_PROTOCOLS
+            .get(self.custom_protocol as usize)
+            .map(|(_, w)| *w)
+            .unwrap_or("openai");
+        crate::tui::protocol_model_candidates(wire)
+    }
+
+    /// The protocol suggestions matching the live filter (`self.input` while the
+    /// Protocol field is focused), as indices into [`crate::tui::CUSTOM_PROTOCOLS`].
+    pub fn custom_protocol_suggestions(&self) -> Vec<u8> {
+        let q = self.input.trim();
+        crate::tui::CUSTOM_PROTOCOLS
+            .iter()
+            .enumerate()
+            .filter(|(_, (label, _))| {
+                q.is_empty() || crate::tui::fuzzy::fuzzy_match(label, q).is_some()
+            })
+            .map(|(i, _)| i as u8)
+            .collect()
+    }
+
+    /// The model suggestions matching the live filter (`self.input` while the
+    /// Model field is focused): protocol candidates that fuzzy-match, plus the
+    /// raw typed text as a custom id when it is not already a candidate.
+    pub fn custom_model_suggestions(&self) -> Vec<String> {
+        let q = self.input.trim();
+        let mut out: Vec<String> = self
+            .custom_model_candidates()
+            .into_iter()
+            .filter(|id| {
+                q.is_empty()
+                    || id.contains(q)
+                    || crate::tui::fuzzy::fuzzy_match(&crate::tui::model_display_name(id), q)
+                        .is_some()
+            })
+            .map(|s| s.to_string())
+            .collect();
+        if !q.is_empty() && !out.iter().any(|m| m == q) {
+            out.push(q.to_string());
+        }
+        out
+    }
+
+    /// Commit the highlighted suggestion into the focused filter field's value
+    /// (Protocol → `custom_protocol`, Model → `custom_model`).
+    fn commit_custom_suggestion(&mut self) {
+        match self.custom_field {
+            1 => {
+                let suggestions = self.custom_protocol_suggestions();
+                if let Some(&p) = suggestions.get(self.custom_suggest_index)
+                    && p != self.custom_protocol
+                {
+                    self.custom_protocol = p;
+                    // The candidate pool depends on the protocol, so re-default
+                    // the model to the new protocol's first candidate.
+                    self.custom_model = self
+                        .custom_model_candidates()
+                        .first()
+                        .map(|m| m.to_string())
+                        .unwrap_or_default();
+                }
+            }
+            4 => {
+                let suggestions = self.custom_model_suggestions();
+                if let Some(value) = suggestions.get(self.custom_suggest_index) {
+                    self.custom_model = value.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the suggestion highlight for the focused filter field, committing the
+    /// newly-highlighted suggestion live. No-op on non-filter fields.
+    pub fn move_custom_suggestion(&mut self, forward: bool) {
+        let len = match self.custom_field {
+            1 => self.custom_protocol_suggestions().len(),
+            4 => self.custom_model_suggestions().len(),
+            _ => 0,
+        };
+        if len == 0 {
+            return;
+        }
+        self.custom_suggest_index = if forward {
+            (self.custom_suggest_index + 1) % len
+        } else {
+            (self.custom_suggest_index + len - 1) % len
+        };
+        self.commit_custom_suggestion();
+    }
+
+    /// React to a change in the Protocol / Model filter query: reset the
+    /// highlight to the best (first) match and commit it.
+    pub fn on_custom_filter_changed(&mut self) {
+        if matches!(self.custom_field, 1 | 4) {
+            self.custom_suggest_index = 0;
+            self.commit_custom_suggestion();
+        }
+    }
+
+    /// Save the composer line into the focused text field's buffer (Name / Base
+    /// URL / Token). The Protocol / Model fields are filter fields whose value is
+    /// already committed live, so their transient query is discarded.
+    pub fn stash_custom_field(&mut self) {
+        let value = std::mem::take(&mut self.input);
+        match self.custom_field {
+            0 => self.custom_name = value,
+            2 => self.custom_base_url = value,
+            3 => self.custom_token = value,
+            _ => {} // Protocol / Model filter fields: value already committed.
+        }
+    }
+
+    /// Load the focused field into the composer line: the buffer for a text
+    /// field, or a fresh (empty) filter for the Protocol / Model fields, with the
+    /// suggestion highlight positioned on the current committed value.
+    pub fn load_custom_field(&mut self) {
+        self.input = match self.custom_field {
+            0 => self.custom_name.clone(),
+            2 => self.custom_base_url.clone(),
+            3 => self.custom_token.clone(),
+            _ => String::new(),
+        };
+        self.set_cursor_end();
+        match self.custom_field {
+            1 => {
+                self.custom_suggest_index = self
+                    .custom_protocol_suggestions()
+                    .iter()
+                    .position(|&p| p == self.custom_protocol)
+                    .unwrap_or(0);
+            }
+            4 => {
+                self.custom_suggest_index = self
+                    .custom_model_suggestions()
+                    .iter()
+                    .position(|v| v == &self.custom_model)
+                    .unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the custom-provider editor focus (`Tab` / `BackTab`), wrapping across
+    /// its fields (5 in create mode, 4 in edit mode).
+    pub fn cycle_custom_field(&mut self, forward: bool) {
+        self.stash_custom_field();
+        let n = self.custom_field_count();
+        self.custom_field = if forward {
+            (self.custom_field + 1) % n
+        } else {
+            (self.custom_field + n - 1) % n
+        };
+        self.load_custom_field();
     }
 
     /// Park the composer draft into `stashed_input` and clear the live line so
@@ -1021,7 +1357,7 @@ impl App {
     /// Mirrors the stash half of the provider/history pickers.
     pub fn park_input_draft(&mut self) {
         self.stashed_input = std::mem::take(&mut self.input);
-        self.cursor_position = 0;
+        self.set_cursor(0);
         self.input_scroll = 0;
         self.suggestion_index = None;
     }
@@ -1030,24 +1366,160 @@ impl App {
     /// composer draft back. Does **not** touch `active_modal`.
     pub fn restore_input_draft(&mut self) {
         self.input = std::mem::take(&mut self.stashed_input);
-        self.cursor_position = self.input.chars().count();
+        self.set_cursor_end();
         self.input_scroll = 0;
         self.suggestion_index = None;
         self.modal_index = 0;
     }
 
-    /// Compute the flat, ranked model rows for the picker. Delegates to
-    /// [`models_filtered_from`] so the input handler and the renderer share one
-    /// filter+sort implementation. The query is the borrowed composer line only
-    /// while the search sub-layer is active; in browse mode it is empty so every
-    /// row is shown unhighlighted.
-    pub fn models_filtered(&self) -> Vec<RankedModel> {
-        let query = if self.model_search {
+    /// The active fuzzy query for the picker: the borrowed composer line while
+    /// the search sub-layer is active, else empty (browse mode shows every row).
+    fn picker_query(&self) -> &str {
+        if self.model_search {
             self.input.trim()
         } else {
             ""
+        }
+    }
+
+    /// Compute the **stage-1** provider rows. Delegates to
+    /// [`providers_filtered_from`] so the input handler and the renderer share
+    /// one filter+sort implementation.
+    pub fn providers_filtered(&self) -> Vec<RankedProvider> {
+        providers_filtered_from(&self.provider_picker, self.picker_query())
+    }
+
+    /// Compute the **stage-2** model rows for the drilled-into provider
+    /// ([`Self::picker_provider`]). Empty in stage 1 (no provider selected).
+    pub fn provider_models_filtered(&self) -> Vec<RankedModel> {
+        match self.picker_provider {
+            Some(idx) => {
+                provider_models_filtered_from(&self.provider_picker, idx, self.picker_query())
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the drilled-into provider (stage 2) is user-defined, so the model
+    /// list offers add/remove. `false` in stage 1 or for built-in providers.
+    pub fn picker_provider_is_custom(&self) -> bool {
+        self.picker_provider
+            .and_then(|idx| self.provider_picker.rows.get(idx))
+            .map(|row| !row.builtin)
+            .unwrap_or(false)
+    }
+
+    /// The model candidate list for the add-model overlay: the registry models
+    /// matching the targeted custom provider's wire format (derived from its
+    /// active model). Empty when the overlay is closed or the provider is gone.
+    pub fn add_model_candidates(&self) -> Vec<&'static str> {
+        let Some(id) = self.add_model_provider.as_deref() else {
+            return Vec::new();
         };
-        models_filtered_from(PROVIDERS, &self.provider_picker, query)
+        let Some(row) = self.provider_picker.rows.iter().find(|r| r.id == id) else {
+            return Vec::new();
+        };
+        let format = neenee_core::resolve_model(&row.model).format;
+        let wire = match format {
+            neenee_core::WireFormat::AnthropicCompat => "anthropic",
+            neenee_core::WireFormat::Gemini => "gemini",
+            neenee_core::WireFormat::OpenAiCompat => "openai",
+        };
+        crate::tui::protocol_model_candidates(wire)
+    }
+
+    /// Number of selectable rows in the picker's current stage — stage-2 model
+    /// rows when drilled into a provider, else stage-1 provider rows. Used to
+    /// clamp the ↑/↓ selection cursor.
+    pub fn picker_row_count(&self) -> usize {
+        if self.picker_provider.is_some() {
+            // Custom providers gain a trailing synthetic "＋ Add model" row.
+            let models = self.provider_models_filtered().len();
+            if self.picker_provider_is_custom() {
+                models + 1
+            } else {
+                models
+            }
+        } else {
+            // Stage 1 has a trailing synthetic "＋ Add provider" row after the
+            // provider rows, so it is always selectable even with no matches.
+            self.providers_filtered().len() + 1
+        }
+    }
+
+    /// Whether `modal_index` is on the stage-1 "＋ Add provider" row (the
+    /// synthetic trailing row, index == provider count). Only meaningful in
+    /// stage 1.
+    pub fn picker_on_add_row(&self) -> bool {
+        self.picker_provider.is_none() && self.modal_index == self.providers_filtered().len()
+    }
+
+    /// Whether `modal_index` is on the stage-2 "＋ Add model" row — the synthetic
+    /// trailing row present only for a drilled-into custom provider.
+    pub fn picker_on_add_model_row(&self) -> bool {
+        self.picker_provider.is_some()
+            && self.picker_provider_is_custom()
+            && self.modal_index == self.provider_models_filtered().len()
+    }
+
+    /// Open the add-model overlay for custom provider `id`. The borrowed input
+    /// line is a filter; `↑/↓` move the highlight over the matching candidates.
+    pub fn open_add_model_overlay(&mut self, id: String) {
+        self.add_model_provider = Some(id);
+        self.add_model_choice = 0;
+        self.input.clear();
+        self.set_cursor(0);
+        self.active_modal = Modal::AddModel;
+    }
+
+    /// The add-model overlay's suggestions matching the live filter: the
+    /// provider's protocol candidates that fuzzy-match, plus the raw typed text
+    /// as a custom id when it is not already a candidate.
+    pub fn add_model_suggestions(&self) -> Vec<String> {
+        let q = self.input.trim();
+        let mut out: Vec<String> = self
+            .add_model_candidates()
+            .into_iter()
+            .filter(|id| {
+                q.is_empty()
+                    || id.contains(q)
+                    || crate::tui::fuzzy::fuzzy_match(&crate::tui::model_display_name(id), q)
+                        .is_some()
+            })
+            .map(|s| s.to_string())
+            .collect();
+        if !q.is_empty() && !out.iter().any(|m| m == q) {
+            out.push(q.to_string());
+        }
+        out
+    }
+
+    /// Move the add-model highlight over the filtered suggestions.
+    pub fn move_add_model(&mut self, forward: bool) {
+        let len = self.add_model_suggestions().len();
+        if len == 0 {
+            return;
+        }
+        self.add_model_choice = if forward {
+            (self.add_model_choice + 1) % len
+        } else {
+            (self.add_model_choice + len - 1) % len
+        };
+    }
+
+    /// Reset the add-model highlight after the filter query changes.
+    pub fn on_add_model_filter_changed(&mut self) {
+        self.add_model_choice = 0;
+    }
+
+    /// The model id the add-model overlay would submit: the highlighted
+    /// suggestion. Empty when there are no matches.
+    pub fn add_model_selected(&self) -> String {
+        let suggestions = self.add_model_suggestions();
+        suggestions
+            .get(self.add_model_choice)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Number of selectable rows in the session dashboard — the tool list, the

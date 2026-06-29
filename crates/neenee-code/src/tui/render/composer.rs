@@ -62,6 +62,71 @@ pub(super) fn input_row_count(input: &str, text_width: usize, byte_cursor: usize
         .max(1)
 }
 
+/// Compute the caret's screen coordinates `(x, y)` for `input` at `byte_cursor`
+/// laid out inside `input_rect`, updating `input_scroll` in place to keep the
+/// caret within the visible window.
+///
+/// This is the **single source of truth** for the caret's screen position.
+/// Both the per-frame draw path ([`draw_composer`]) and the input-driven
+/// immediate flush (which syncs the terminal cursor to the IME *before* the
+/// next draw, eliminating the one-frame lag that mis-anchors IME composition
+/// windows) resolve through this function, so the two paths can never diverge.
+///
+/// Returns `None` when `input_rect` has no room for text rows. The caller is
+/// responsible for deciding whether the caret should be shown at all (modal
+/// owning the keyboard, active selection, etc.).
+pub fn cursor_screen_pos(
+    input_rect: Rect,
+    input: &str,
+    byte_cursor: usize,
+    input_scroll: &mut usize,
+) -> Option<(u16, u16)> {
+    let full_w = input_rect.width as usize;
+    if full_w == 0 || input_rect.height == 0 {
+        return None;
+    }
+    let text_width = full_w
+        .saturating_sub(COMPOSER_PROMPT_PREFIX_COLS + COMPOSER_RIGHT_PAD_COLS)
+        .max(1);
+    let wrapped = composer_wrapped(input, text_width, byte_cursor);
+
+    let visible_rows = (input_rect.height as usize)
+        .saturating_sub(COMPOSER_VERTICAL_CHROME_ROWS as usize)
+        .max(1);
+
+    // Map the caret's byte offset onto the wrapped grid (mirrors the draw
+    // loop's scan exactly).
+    let mut cursor_line = wrapped.len().saturating_sub(1);
+    let mut cursor_col = 0usize;
+    for (i, wl) in wrapped.iter().enumerate() {
+        if byte_cursor <= wl.end_byte {
+            cursor_line = i;
+            let local_byte = byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len());
+            cursor_col = cursor_column(&wl.text, local_byte);
+            break;
+        }
+    }
+
+    // Clamp the scroll window the same way the draw loop does.
+    let max_scroll = wrapped.len().saturating_sub(visible_rows);
+    if wrapped.len() <= visible_rows {
+        *input_scroll = 0;
+    } else {
+        if cursor_line < *input_scroll {
+            *input_scroll = cursor_line;
+        } else if cursor_line >= *input_scroll + visible_rows {
+            *input_scroll = cursor_line.saturating_sub(visible_rows - 1);
+        }
+        *input_scroll = (*input_scroll).min(max_scroll);
+    }
+
+    let visible_cursor_line = cursor_line.saturating_sub(*input_scroll);
+    let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
+    let cursor_x =
+        input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16 + cursor_col.min(text_width) as u16;
+    Some((cursor_x, cursor_y))
+}
+
 /// Draw the flat input box panel at the bottom of the screen.
 ///
 /// `focused` selects the panel palette. The live composer passes `true` when
@@ -125,43 +190,12 @@ pub fn draw_composer(
         .saturating_sub(COMPOSER_VERTICAL_CHROME_ROWS as usize)
         .max(1);
 
-    // Map the caret's byte offset onto the wrapped grid. Each WrappedLine
-    // records its byte range in the original input, so this stays correct for
-    // explicit newlines (whose display width is 0 and would otherwise collapse
-    // a multi-line caret onto the first row).
-    let mut cursor_line = wrapped.len().saturating_sub(1);
-    let mut cursor_col = 0usize;
-    for (i, wl) in wrapped.iter().enumerate() {
-        if byte_cursor <= wl.end_byte {
-            cursor_line = i;
-            // One authoritative byte-offset → screen-column mapping. It walks
-            // the wrapped line's text as graphemes using the same width
-            // primitive the grid paints with, floors a mid-grapheme byte
-            // cursor (a masked `•••` field paired with an unmasked cursor)
-            // down to a safe boundary, and — crucially — keeps
-            // `text.len()` as a valid caret spot so the caret lands flush
-            // against the final glyph instead of one grapheme short.
-            let local_byte = byte_cursor.saturating_sub(wl.start_byte).min(wl.text.len());
-            cursor_col = cursor_column(&wl.text, local_byte);
-            break;
-        }
-    }
-
-    // Keep the cursor line inside the visible window. Clamp to the valid scroll
-    // range so the input box never shows empty padding below the text.
-    let max_scroll = wrapped.len().saturating_sub(visible_rows);
-    let mut scroll = *input_scroll;
-    if wrapped.len() <= visible_rows {
-        scroll = 0;
-    } else {
-        if cursor_line < scroll {
-            scroll = cursor_line;
-        } else if cursor_line >= scroll + visible_rows {
-            scroll = cursor_line.saturating_sub(visible_rows - 1);
-        }
-        scroll = scroll.min(max_scroll);
-    }
-    *input_scroll = scroll;
+    // The caret position (and the scroll clamp that keeps it on screen) is the
+    // single source of truth in [`cursor_screen_pos`]. The draw path reuses it
+    // so the rendered caret and the terminal cursor can never disagree — which
+    // is what previously let the IME composition window drift by a frame.
+    let (cursor_x, cursor_y) =
+        cursor_screen_pos(input_rect, input, byte_cursor, input_scroll).unwrap_or((0, 0));
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_rows + 2);
     let top_edge = Span::styled("▄".repeat(full_w), Style::default().fg(panel_bg).bg(app_bg));
@@ -189,8 +223,8 @@ pub fn draw_composer(
             Span::styled(padded_tail(full_w, used), Style::default().bg(panel_bg)),
         ]));
     } else {
-        let start = scroll;
-        let end = (scroll + visible_rows).min(wrapped.len());
+        let start = *input_scroll;
+        let end = (*input_scroll + visible_rows).min(wrapped.len());
         // Resolve the selection byte range for the whole input box once; each
         // wrapped line intersects it to find its own highlighted slice. The
         // composer records itself as a single block at `INPUT_MSG_IDX` /
@@ -240,8 +274,8 @@ pub fn draw_composer(
     // and copy work on the live input. Skipped when the API-key modal masks
     // the display (byte offsets wouldn't match the real input).
     if record {
-        let start = scroll;
-        let end = (scroll + visible_rows).min(wrapped.len());
+        let start = *input_scroll;
+        let end = (*input_scroll + visible_rows).min(wrapped.len());
         for (i, wl) in wrapped[start..end].iter().enumerate() {
             let row_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + i as u16;
             layout_map.push(BlockRegion {
@@ -260,12 +294,10 @@ pub fn draw_composer(
     // Position the caret relative to the visible slice, after the `> ` /
     // indent prefix. Gated by `show_caret` rather than `focused`: the caret is
     // hidden whenever a modal takes over input or a selection is active, so it
-    // never sits inside a box that doesn't accept keypresses.
+    // never sits inside a box that doesn't accept keypresses. The coordinates
+    // come from the shared [`cursor_screen_pos`] so the rendered caret and the
+    // terminal cursor are always identical.
     if show_caret {
-        let visible_cursor_line = cursor_line.saturating_sub(scroll);
-        let cursor_y = input_rect.y + COMPOSER_TEXT_ROW_OFFSET + visible_cursor_line as u16;
-        let cursor_x =
-            input_rect.x + COMPOSER_PROMPT_PREFIX_COLS as u16 + cursor_col.min(text_width) as u16;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }

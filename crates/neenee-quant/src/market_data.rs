@@ -1,8 +1,7 @@
 //! Market-data tool — fetch quotes / klines / order-book snapshots.
 //!
-//! This is a stub implementation returning placeholder data so the plumbing
-//! (profile isolation, schema, dispatch) can be exercised end-to-end before
-//! a real exchange adapter is wired in.
+//! The default implementation uses the shared paper runtime: deterministic
+//! synthetic data with the same response shape a live adapter will produce.
 
 use std::sync::Arc;
 
@@ -10,17 +9,23 @@ use async_trait::async_trait;
 use neenee_core::Tool;
 use serde_json::json;
 
+use crate::runtime::QuantRuntime;
+
 /// Fetch market data (quotes, klines, depth) for a symbol.
 ///
 /// Read-only by nature: it observes market state and never mutates an account
 /// or the filesystem. A quant agent uses it to inform strategy decisions.
 pub struct MarketDataTool {
-    _private: (),
+    runtime: QuantRuntime,
 }
 
 impl MarketDataTool {
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::with_runtime(QuantRuntime::new())
+    }
+
+    pub fn with_runtime(runtime: QuantRuntime) -> Self {
+        Self { runtime }
     }
 }
 
@@ -72,29 +77,29 @@ impl Tool for MarketDataTool {
             .to_string();
         let kind = args["kind"].as_str().ok_or("Missing 'kind'")?;
         match kind {
-            "quote" => Ok(json!({
-                "symbol": symbol,
-                "price": 0.0,
-                "note": "stub market_data.quote — wire a real exchange adapter",
-            })
-            .to_string()),
+            "quote" => serde_json::to_string(&self.runtime.quote(&symbol)?)
+                .map_err(|e| format!("Serialize quote failed: {e}")),
             "klines" => {
                 let interval = args["interval"].as_str().unwrap_or("1h");
+                let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                let klines = self.runtime.candles(&symbol, interval, limit)?;
+                let source = klines
+                    .first()
+                    .map(|candle| candle.source.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
                 Ok(json!({
                     "symbol": symbol,
                     "interval": interval,
-                    "klines": [],
-                    "note": "stub market_data.klines — wire a real exchange adapter",
+                    "klines": klines,
+                    "source": source,
                 })
                 .to_string())
             }
-            "depth" => Ok(json!({
-                "symbol": symbol,
-                "bids": [],
-                "asks": [],
-                "note": "stub market_data.depth — wire a real exchange adapter",
-            })
-            .to_string()),
+            "depth" => {
+                let limit = args["limit"].as_u64().unwrap_or(10) as usize;
+                serde_json::to_string(&self.runtime.depth(&symbol, limit)?)
+                    .map_err(|e| format!("Serialize depth failed: {e}"))
+            }
             other => Err(format!(
                 "Unknown kind '{other}' (expected quote|klines|depth)"
             )),
@@ -165,6 +170,12 @@ mod tests {
         // Missing `interval` falls back to "1h".
         assert_eq!(v["interval"], "1h", "default interval applied");
         assert_eq!(v["symbol"], "ETHUSDT");
+        assert!(
+            v["klines"]
+                .as_array()
+                .is_some_and(|klines| !klines.is_empty()),
+            "klines present: {v}"
+        );
     }
 
     #[tokio::test]
@@ -178,15 +189,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_depth_returns_empty_books() {
+    async fn call_depth_returns_order_book() {
         let out = tool()
             .call(r#"{"symbol":"AAPL","kind":"depth"}"#)
             .await
             .expect("depth ok");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["symbol"], "AAPL");
-        assert!(v["bids"].is_array());
-        assert!(v["asks"].is_array());
+        assert!(v["bids"].as_array().is_some_and(|bids| !bids.is_empty()));
+        assert!(v["asks"].as_array().is_some_and(|asks| !asks.is_empty()));
     }
 
     #[tokio::test]

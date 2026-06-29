@@ -73,7 +73,9 @@ impl Tool for BashTool {
         on_stream: &mut (dyn FnMut(neenee_core::ToolStream) + Send + 'a),
         stdin_policy: neenee_core::StdinPolicy,
     ) -> Result<neenee_core::ToolOutput, String> {
-        use neenee_core::tool_output::{ShellLine, ShellStream, normalize_carriage_returns, strip_ansi};
+        use neenee_core::tool_output::{
+            ShellLine, ShellStream, normalize_carriage_returns, strip_ansi,
+        };
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let args: serde_json::Value =
@@ -290,7 +292,10 @@ mod tests {
             .expect("ok");
         match out {
             neenee_core::ToolOutput::Shell {
-                stdout, exit, termination, ..
+                stdout,
+                exit,
+                termination,
+                ..
             } => {
                 assert_eq!(stdout, "hello\n");
                 assert_eq!(exit, Some(0));

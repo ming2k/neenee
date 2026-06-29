@@ -5,9 +5,7 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, EnvoyTool};
-use neenee_core::{
-    AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent,
-};
+use neenee_core::{AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent};
 use neenee_store::{
     RepeatStore,
     config::Config,
@@ -287,8 +285,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // agent's shared tool holder as each comes online. The TUI's status
     // snapshot (taken below) reflects this transient state, and the periodic
     // McpCatalog refresh keeps it live thereafter.
-    let mcp_runtime =
-        Arc::new(McpRuntime::start_background(config.mcp.clone(), agent.mcp_tools_holder()));
+    let mcp_runtime = Arc::new(McpRuntime::start_background(
+        config.mcp.clone(),
+        agent.mcp_tools_holder(),
+    ));
     let mcp_runtime_for_bg = Arc::clone(&mcp_runtime);
     tokio::spawn(async move {
         mcp_runtime_for_bg.refresh_all().await;
@@ -310,10 +310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // from `paths::get()` globals and return owned, `Send` data, so a plain
     // `spawn_blocking` closure is self-contained. They are awaited later where
     // their results feed the harness / TUI.
-    let input_history_handle =
-        tokio::task::spawn_blocking(Config::load_history);
-    let provider_usage_handle =
-        tokio::task::spawn_blocking(provider_usage::ProviderUsage::load);
+    let input_history_handle = tokio::task::spawn_blocking(Config::load_history);
+    let provider_usage_handle = tokio::task::spawn_blocking(provider_usage::ProviderUsage::load);
 
     let active_messages = session.model_window().await;
     let restored_messages = session.full_transcript().await;
@@ -389,9 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load per-model usage telemetry (recency signal for the picker,
     // ADR-0002 phase 2). Moved into the agent task so both the startup
     // activation and runtime switches record through one instance.
-    let provider_usage = provider_usage_handle
-        .await
-        .unwrap_or_default();
+    let provider_usage = provider_usage_handle.await.unwrap_or_default();
 
     let current_task_token = Arc::new(AsyncRwLock::new(None::<CancellationToken>));
     let task_generation = Arc::new(AtomicU64::new(0));

@@ -103,7 +103,12 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
         Modal::Provider => fixed(72, 72),
         Modal::HistorySearch => fixed(70, 72),
         Modal::Question => fixed(78, 70),
-        Modal::ModelEditor => fixed(60, 36),
+        Modal::ModelEditor => fixed(60, 30),
+        // Custom-provider editor: tall enough for the form rows plus the
+        // type-to-filter suggestion dropdown below them.
+        Modal::CustomProvider => fixed(66, 66),
+        // Add-model overlay: a filter row plus the suggestion list.
+        Modal::AddModel => fixed(60, 52),
         Modal::Help => fixed(58, 70),
         Modal::Sessions => fixed(80, 64),
         Modal::Permissions => fixed(64, 60),
@@ -700,6 +705,8 @@ mod tests {
             Modal::HistorySearch,
             Modal::Question,
             Modal::ModelEditor,
+            Modal::CustomProvider,
+            Modal::AddModel,
             Modal::Help,
             Modal::Sessions,
             Modal::Session,

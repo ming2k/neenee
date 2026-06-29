@@ -66,9 +66,11 @@ pub(super) fn spawn_clipboard_paste(tx: &mpsc::UnboundedSender<ClipboardRead>) {
 pub(super) fn apply_clipboard_paste(app: &mut App, read: ClipboardRead) {
     match app.active_modal {
         Modal::None => apply_composer_paste(app, read),
-        Modal::HistorySearch | Modal::Provider | Modal::ModelEditor => {
-            apply_modal_field_paste(app, read)
-        }
+        Modal::HistorySearch
+        | Modal::Provider
+        | Modal::ModelEditor
+        | Modal::CustomProvider
+        | Modal::AddModel => apply_modal_field_paste(app, read),
         _ => {}
     }
 }
@@ -133,7 +135,7 @@ fn apply_composer_paste(app: &mut App, read: ClipboardRead) {
                     .nth(app.cursor_position)
                     .unwrap_or(app.input.len());
                 app.input.insert_str(byte_pos, &text);
-                app.cursor_position += chars_to_insert;
+                app.set_cursor(app.cursor_position + chars_to_insert);
                 app.copy_toast_message = format!(
                     "pasted {chars_to_insert} char{}",
                     if chars_to_insert == 1 { "" } else { "s" }
@@ -173,7 +175,7 @@ fn apply_modal_field_paste(app: &mut App, read: ClipboardRead) {
                 .nth(app.cursor_position)
                 .unwrap_or(app.input.len());
             app.input.insert_str(byte_pos, &stripped);
-            app.cursor_position += chars_to_insert;
+            app.set_cursor(app.cursor_position + chars_to_insert);
             app.copy_toast_message = format!(
                 "pasted {chars_to_insert} char{}",
                 if chars_to_insert == 1 { "" } else { "s" }
@@ -213,7 +215,7 @@ fn insert_chip_at_cursor(app: &mut App, chip: &str) {
     spliced.push(' ');
     let extra_chars = spliced.chars().count();
     app.input.insert_str(byte_pos, &spliced);
-    app.cursor_position += extra_chars;
+    app.set_cursor(app.cursor_position + extra_chars);
 }
 
 pub(super) fn set_copy_feedback(app: &mut App, result: Result<CopyOutcome, String>) {

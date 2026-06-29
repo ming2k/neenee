@@ -713,7 +713,11 @@ pub(super) fn draw_message_body(
                     offset += line.len() + 1; // +1 for the '\n'
                 }
 
-                let gutter_width = logical_lines.len().to_string().len().max(CODE_BAND_GUTTER_MIN_WIDTH);
+                let gutter_width = logical_lines
+                    .len()
+                    .to_string()
+                    .len()
+                    .max(CODE_BAND_GUTTER_MIN_WIDTH);
                 // The code band is a uniform background with a line-number
                 // gutter — no left accent bar. Geometry shares the block-level
                 // design contract with tool-step code bands so a code block

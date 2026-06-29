@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use neenee_core::{QUANT, Tool, ToolSelection, ToolSet, resolve_model};
-use neenee_quant::{BacktestTool, ListPositionsTool, MarketDataTool, PlaceOrderTool};
+use neenee_quant::{
+    BacktestTool, CancelOrderTool, ListPositionsTool, MarketDataTool, PlaceOrderTool,
+};
 
 #[test]
 fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
@@ -30,6 +32,7 @@ fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
         Arc::new(BacktestTool::new()),
         Arc::new(ListPositionsTool::new()),
         Arc::new(PlaceOrderTool::new()),
+        Arc::new(CancelOrderTool::new()),
         // Coding domain (would come from neenee-tools in a real binary).
         Arc::new(neenee_tools::ReadTextTool),
         Arc::new(neenee_tools::WriteFileTool),
@@ -53,6 +56,10 @@ fn quant_profile_selects_only_quant_readonly_tools_from_a_mixed_set() {
     assert!(
         !names.contains(&"place_order"),
         "quant analyst must not receive place_order, got: {names:?}"
+    );
+    assert!(
+        !names.contains(&"cancel_order"),
+        "quant analyst must not receive cancel_order, got: {names:?}"
     );
     // Excluded: coding write/edit/exec — domain isolation.
     assert!(

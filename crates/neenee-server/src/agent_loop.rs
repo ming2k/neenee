@@ -255,6 +255,68 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 )
                 .await;
             }
+            AgentRequest::AddProvider {
+                name,
+                protocol,
+                base_url,
+                api_key,
+                model,
+            } => {
+                crate::handlers_provider::add(
+                    &mut config,
+                    &agent,
+                    &provider_for_task,
+                    &resp_tx,
+                    &mut provider_usage,
+                    name,
+                    protocol,
+                    base_url,
+                    api_key,
+                    model,
+                )
+                .await;
+            }
+            AgentRequest::EditProvider {
+                id,
+                name,
+                protocol,
+                base_url,
+                api_key,
+            } => {
+                crate::handlers_provider::edit(
+                    &mut config,
+                    &agent,
+                    &provider_for_task,
+                    &resp_tx,
+                    &mut provider_usage,
+                    id,
+                    name,
+                    protocol,
+                    base_url,
+                    api_key,
+                )
+                .await;
+            }
+            AgentRequest::AddProviderModel { provider_id, model } => {
+                crate::handlers_provider::add_model(
+                    &mut config,
+                    &resp_tx,
+                    &provider_usage,
+                    provider_id,
+                    model,
+                )
+                .await;
+            }
+            AgentRequest::RemoveProviderModel { provider_id, model } => {
+                crate::handlers_provider::remove_model(
+                    &mut config,
+                    &resp_tx,
+                    &provider_usage,
+                    provider_id,
+                    model,
+                )
+                .await;
+            }
             AgentRequest::ToggleFavorite { id } => {
                 crate::handlers_provider::toggle_favorite(
                     &mut config,
