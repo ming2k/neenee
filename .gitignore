@@ -36,3 +36,6 @@
 # Claude Code local settings
 .claude/settings.local.json
 .claude/worktrees/
+
+# Local cargo config (iris path override to sibling optics checkout)
+.cargo/config.toml
