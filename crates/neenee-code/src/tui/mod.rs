@@ -954,8 +954,6 @@ pub async fn run_tui(
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
-        custom_effort: "high".to_string(),
-        custom_thinking: true,
         template_choice: 0,
         model_search: false,
         picker_provider: None,

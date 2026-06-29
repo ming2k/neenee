@@ -48,11 +48,25 @@ pub struct Pursuit {
 ///
 /// Per-turn telemetry only — not booked against any pursuit (ADR-0010 removed
 /// pursuit-level token accounting).
+///
+/// `cache_creation_input_tokens` / `cache_read_input_tokens` carry Anthropic
+/// prompt-caching counts: Anthropic's `input_tokens` reports ONLY the uncached
+/// dynamic suffix, so the cache write/read counts must be tracked separately
+/// (and added into `prompt_tokens`/`total_tokens`) or the context meter would
+/// undercount every cached turn. They stay `0` for providers without caching
+/// (OpenAI-style auto-caching surfaces its discount as `cached_tokens`, not
+/// these fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// Tokens written to the prompt cache this turn (billed at a premium by
+    /// Anthropic; absent on providers without explicit caching).
+    pub cache_creation_input_tokens: i64,
+    /// Tokens served from the prompt cache this turn (billed at a steep
+    /// discount by Anthropic; absent on providers without explicit caching).
+    pub cache_read_input_tokens: i64,
 }
 
 /// Outcome returned by the agent after running one turn.

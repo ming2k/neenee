@@ -271,7 +271,10 @@ fn system_prompt_registry_reproduces_legacy_layout() {
      \n\
      Active harness pursuit (active):\n\
      ship the harness";
-    assert_eq!(prompt, expected, "registry output must match the composed layout");
+    assert_eq!(
+        prompt, expected,
+        "registry output must match the composed layout"
+    );
 
     // Origin is the channel canonical kind, regardless of how many sections
     // composed the message.

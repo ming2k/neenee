@@ -672,8 +672,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
-        custom_effort: "high".to_string(),
-        custom_thinking: true,
         template_choice: 0,
         model_search: false,
         picker_provider: None,

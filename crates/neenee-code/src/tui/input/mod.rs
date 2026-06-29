@@ -152,14 +152,6 @@ pub enum InputAction {
     /// (`Tab` / `BackTab`), wrapping at the ends.
     CustomProviderNextField,
     CustomProviderPrevField,
-    /// Cycle the effort selector (←/→) on the custom-provider editor's Effort
-    /// field (Anthropic only). Carries a delta of ±1; wraps around the levels.
-    CustomProviderEffortCycle {
-        delta: i8,
-    },
-    /// Toggle extended thinking on/off (Space) on the custom-provider editor's
-    /// Thinking field (Anthropic only). Orthogonal to effort.
-    CustomProviderThinkingToggle,
     /// Move the suggestion highlight in the provider editor's Model filter field
     /// with `↑` / `↓`. `forward` = down.
     MoveCustomSuggestion {
@@ -1352,13 +1344,6 @@ pub fn process_event(
                         // Space toggles the key editor's thinking field
                         // (Anthropic, field 2) instead of inserting a space.
                         InputAction::ModelEditorThinkingToggle
-                    } else if c == ' '
-                        && context.active_modal == super::Modal::CustomProvider
-                        && context.custom_thinking_focused
-                    {
-                        // Space toggles the custom-provider editor's Thinking
-                        // field (Anthropic only).
-                        InputAction::CustomProviderThinkingToggle
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionInsertChar(c)
                     } else if context.active_modal == super::Modal::HistorySearch
@@ -1485,12 +1470,6 @@ pub fn process_event(
                     {
                         return InputAction::ModelEditorEffortCycle { delta: -1 };
                     }
-                    // Custom-provider editor effort field: ← cycles down.
-                    if context.active_modal == super::Modal::CustomProvider
-                        && context.custom_effort_focused
-                    {
-                        return InputAction::CustomProviderEffortCycle { delta: -1 };
-                    }
                     // In the nudge sub-page, ← decreases the selected
                     // threshold by 1 (no-op on the enabled row, which is
                     // toggled with Space).
@@ -1529,12 +1508,6 @@ pub fn process_event(
                         && context.editor_field == Some(1)
                     {
                         return InputAction::ModelEditorEffortCycle { delta: 1 };
-                    }
-                    // Custom-provider editor effort field: → cycles up.
-                    if context.active_modal == super::Modal::CustomProvider
-                        && context.custom_effort_focused
-                    {
-                        return InputAction::CustomProviderEffortCycle { delta: 1 };
                     }
                     // In the nudge sub-page, → increases the selected
                     // threshold by 1.
@@ -1812,7 +1785,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -1859,7 +1831,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -1983,7 +1954,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2025,7 +1995,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2066,7 +2035,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2104,7 +2072,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2142,7 +2109,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2184,7 +2150,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2226,7 +2191,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2263,7 +2227,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2341,7 +2304,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -2379,7 +2341,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2413,7 +2374,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2447,7 +2407,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2483,7 +2442,6 @@ mod tests {
                 picker_in_models_stage: true,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2518,7 +2476,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2555,7 +2512,6 @@ mod tests {
                 picker_in_models_stage: true,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2592,7 +2548,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2625,7 +2580,6 @@ mod tests {
             picker_in_models_stage: false,
             editor_field: None,
             custom_provider_field: None,
-            ..Default::default()
         };
         let letter = process_event(
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
@@ -2677,7 +2631,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2707,7 +2660,6 @@ mod tests {
             picker_in_models_stage: false,
             editor_field: None,
             custom_provider_field: None,
-            ..Default::default()
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -2748,7 +2700,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -2780,7 +2731,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -2812,7 +2762,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -3028,7 +2977,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -3187,7 +3135,6 @@ mod tests {
                     picker_in_models_stage: false,
                     editor_field: None,
                     custom_provider_field: None,
-                    ..Default::default()
                 },
                 &mut drag,
             )
@@ -3743,7 +3690,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -3828,7 +3774,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -3949,7 +3894,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -3982,7 +3926,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -4019,7 +3962,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -4075,7 +4017,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );
@@ -4116,7 +4057,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         )
@@ -4244,7 +4184,6 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
-                ..Default::default()
             },
             &mut drag,
         );

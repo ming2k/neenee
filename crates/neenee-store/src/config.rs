@@ -180,16 +180,18 @@ pub struct UserChannelConfig {
     /// `User-Agent` header (OpenAI-compatible only).
     #[serde(default)]
     pub user_agent: Option<String>,
-    /// Preferred reasoning `effort` for an Anthropic-protocol channel — one of
+    /// Reasoning `effort` for an Anthropic-protocol channel — one of
     /// `"low"`/`"medium"`/`"high"`/`"xhigh"`/`"max"` — clamped at request time
-    /// to the resolved model's supported levels. `None` leaves the
-    /// model-derived default in place. Ignored for non-Anthropic transports.
+    /// to the resolved model's supported levels. Setting this (or `thinking`)
+    /// opts the model in to reasoning: thinking defaults on unless `thinking =
+    /// false`. Left unset, the model does not reason (ADR-0046). Ignored for
+    /// non-Anthropic transports.
     #[serde(default)]
     pub effort: Option<String>,
     /// Whether extended thinking is on (`true`) or off (`false`) for this
-    /// Anthropic-protocol channel. **Orthogonal to `effort`** — effort is the
-    /// reasoning-depth throttle, this is the on/off switch. `None` defers to
-    /// the model-derived default. Ignored for non-Anthropic transports.
+    /// Anthropic-protocol channel, once it is opted in (an `effort` value or an
+    /// explicit `thinking` here). Defaults to on when opted in; set `false` to
+    /// reason with depth only. Ignored for non-Anthropic transports.
     #[serde(default)]
     pub thinking: Option<bool>,
 }
@@ -344,19 +346,20 @@ pub struct Config {
     /// Full `/messages` endpoint URL for the `anthropic` provider. Defaults to
     /// Anthropic's official API; override with any relay's `/v1/messages` URL.
     pub anthropic_base_url: Option<String>,
-    /// Preferred reasoning `effort` for the `anthropic` provider — one of
-    /// `"low"`, `"medium"`, `"high"` (default), `"xhigh"`, `"max"`. Clamped to
-    /// the active model's supported levels at request time, so an `xhigh`
-    /// request silently downgrades to `high` on a model that tops out there.
-    /// `None` leaves the provider default (`high` for Claude) in place.
+    /// **Deprecated (ADR-0046).** Formerly the provider-wide reasoning `effort`
+    /// for the `anthropic` provider. Effort is now a per-model setting keyed in
+    /// `[model_reasoning."<model-id>"]` and edited from the model `e` picker, so
+    /// this field is **no longer read** by the catalog. It is kept (and still
+    /// deserializes) only so an existing `config.toml` does not break on load;
+    /// migrate by moving the value into a `[model_reasoning]` entry.
     #[serde(default)]
     pub anthropic_effort: Option<String>,
-    /// Whether extended thinking is on (`true`) or off (`false`) for the
-    /// `anthropic` provider. **Orthogonal to `anthropic_effort`** (effort is
-    /// reasoning depth; this is the on/off switch). `None` defers to the
-    /// model-derived default (on for Claude models that declare effort support,
-    /// off for unknown relays). Setting this lets you express "high effort but
-    /// don't think" or force thinking on a model where the default is off.
+    /// **Deprecated (ADR-0046).** Formerly the provider-wide extended-thinking
+    /// on/off for the `anthropic` provider. Thinking is now opt-in per model via
+    /// `[model_reasoning."<model-id>"]`, so this field is **no longer read** by
+    /// the catalog. It is kept (and still deserializes) only so an existing
+    /// `config.toml` does not break on load; migrate by moving the value into a
+    /// `[model_reasoning]` entry (whose presence opts the model in to thinking).
     #[serde(default)]
     pub anthropic_thinking: Option<bool>,
     /// The model id to use within the active provider. For single-model
@@ -451,7 +454,14 @@ impl ToolVariantsConfig {
 
 /// Per-model Anthropic reasoning settings, deserialized from the
 /// `[model_reasoning]` section of `config.toml`. Maps a model id to its
-/// reasoning `effort` (depth) and `thinking` (on/off) overrides.
+/// reasoning `effort` (depth) and `thinking` (on/off).
+///
+/// **Reasoning is opt-in (ADR-0046).** A model's *presence* in this table opts
+/// it in to extended thinking — thinking defaults **on** unless the entry
+/// explicitly sets `thinking = false`, and a set `effort` applies at the chosen
+/// depth (else the model's default). A model NOT listed here never reasons on
+/// its own (no `thinking` object on the wire). This is the only surface that
+/// controls reasoning for a built-in Anthropic model.
 ///
 /// ```toml
 /// [model_reasoning."claude-opus-4-8"]
@@ -463,33 +473,35 @@ impl ToolVariantsConfig {
 /// thinking = false
 /// ```
 ///
-/// Effort and thinking are **both optional** — an unset field defers to the
-/// model-derived default, exactly as a model with no entry does. Models not
-/// listed use their defaults entirely. Only consulted for Anthropic-protocol
-/// models; ignored for OpenAI/Gemini.
+/// Both fields are optional within an entry; an unset `effort` keeps the model
+/// default (`high`), and an unset `thinking` still opts in (thinking on). Only
+/// consulted for Anthropic-protocol models; ignored for OpenAI/Gemini.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelReasoningConfig(pub HashMap<String, ModelReasoningSettings>);
 
-/// One model's reasoning knobs. Both default to `None` (defer to the model's
-/// own default), so a partial table like `[model_reasoning."m"]` with only
-/// `effort` set is valid.
+/// One model's reasoning knobs. The entry's presence opts the model in to
+/// reasoning; `thinking` defaults to on unless explicitly `false`, and `effort`
+/// is optional (model default when unset).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelReasoningSettings {
     /// Reasoning **depth**: one of `"low"`/`"medium"`/`"high"`/`"xhigh"`/
     /// `"max"`, clamped at request time to the model's supported levels.
-    /// `None` leaves the model default in place.
+    /// `None` keeps the model default (`high`); the request then omits
+    /// `output_config` to stay lean.
     #[serde(default)]
     pub effort: Option<String>,
-    /// Whether extended thinking is on (`true`) or off (`false`). Orthogonal
-    /// to `effort`. `None` defers to the model default.
+    /// Whether extended thinking is on (`true`) or off (`false`) once the model
+    /// is opted in. Defaults to on when the entry exists; set `false` to reason
+    /// with depth only (effort on the wire, no `thinking` object).
     #[serde(default)]
     pub thinking: Option<bool>,
 }
 
 impl ModelReasoningConfig {
     /// Look up the reasoning settings for `model_id`, if any. Returns `None`
-    /// for unknown models so the caller applies the model-derived default.
+    /// for unknown models so the caller applies the opt-in default (thinking
+    /// off, no reasoning).
     pub fn for_model(&self, model_id: &str) -> Option<&ModelReasoningSettings> {
         self.0.get(model_id)
     }

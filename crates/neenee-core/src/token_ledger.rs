@@ -21,6 +21,15 @@ pub struct TokenSourceTotals {
     /// Tokens filled in by the local char-class estimator (provider reported
     /// no usage for those turns).
     pub estimated_tokens: i64,
+    /// Tokens written to a prompt cache (Anthropic `cache_creation_input_tokens`
+    /// — billed at a premium). A subset of `reported_tokens`, broken out so the
+    /// report can show cache write volume and verify the breakpoints are
+    /// creating cache entries.
+    pub cache_write_tokens: i64,
+    /// Tokens served from a prompt cache (Anthropic `cache_read_input_tokens` —
+    /// billed at a ~0.1× discount). A subset of `reported_tokens`, broken out
+    /// so the report can show cache hit volume (the payoff of caching).
+    pub cache_read_tokens: i64,
 }
 
 impl TokenSourceTotals {
@@ -33,6 +42,8 @@ impl TokenSourceTotals {
     fn add(&mut self, other: TokenSourceTotals) {
         self.reported_tokens += other.reported_tokens;
         self.estimated_tokens += other.estimated_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
     }
 }
 
@@ -80,6 +91,32 @@ impl TokenSourceLedger {
         } else {
             totals.estimated_tokens += tokens;
         }
+    }
+
+    /// Book one turn's reported usage, including its prompt-cache split. The
+    /// cache write/read counts are folded into `reported_tokens` (they are real
+    /// billed tokens) and ALSO accumulated into the cache counters so the
+    /// report can surface cache hit-rate separately. `cache_*` are clamped to
+    /// non-negative; callers that have none (no caching, or an estimate) pass
+    /// `0, 0` — the simple [`record`](Self::record) wrapper does exactly that.
+    pub fn record_reported(
+        &self,
+        provider: &str,
+        model: &str,
+        tokens: i64,
+        cache_write: i64,
+        cache_read: i64,
+    ) {
+        if tokens <= 0 {
+            return;
+        }
+        let cw = cache_write.max(0);
+        let cr = cache_read.max(0);
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let totals = entries.entry(key(provider, model)).or_default();
+        totals.reported_tokens += tokens;
+        totals.cache_write_tokens += cw;
+        totals.cache_read_tokens += cr;
     }
 
     /// A snapshot of the ledger suitable for rendering (owned, no lock held).
@@ -180,5 +217,57 @@ mod tests {
         assert_eq!(row.provider, "custom\u{1f}relay");
         assert_eq!(row.model, "model\u{1f}v2");
         assert_eq!(row.totals.reported_tokens, 40);
+    }
+
+    #[test]
+    fn record_reported_books_cache_breakout() {
+        // The cache-aware overload folds write/read into reported_tokens AND
+        // accumulates them as a separate breakout, so the report can show
+        // hit-rate without losing the real billed total.
+        let ledger = TokenSourceLedger::new();
+        // Turn 1: a cache write (the first turn populates the cache).
+        ledger.record_reported("anthropic", "claude-sonnet-4-5", 13200, 5000, 0);
+        // Turn 2: a cache read (subsequent turn hits the cache).
+        ledger.record_reported("anthropic", "claude-sonnet-4-5", 8200, 0, 8000);
+        let row = &ledger.snapshot().rows[0];
+        assert_eq!(row.totals.reported_tokens, 21400, "all reported tokens summed");
+        assert_eq!(row.totals.cache_write_tokens, 5000);
+        assert_eq!(row.totals.cache_read_tokens, 8000);
+        assert_eq!(row.totals.estimated_tokens, 0);
+    }
+
+    #[test]
+    fn record_reported_clamps_negative_cache_counts() {
+        // A malformed usage object shouldn't corrupt the ledger: negative cache
+        // counts are clamped to zero rather than subtracting from the total.
+        let ledger = TokenSourceLedger::new();
+        ledger.record_reported("anthropic", "claude", 1000, -50, -10);
+        let row = &ledger.snapshot().rows[0];
+        assert_eq!(row.totals.reported_tokens, 1000);
+        assert_eq!(row.totals.cache_write_tokens, 0);
+        assert_eq!(row.totals.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn record_reported_ignores_non_positive_total() {
+        // Parity with the plain `record` guard: a zero/negative total is a
+        // no-op even when cache counts are present.
+        let ledger = TokenSourceLedger::new();
+        ledger.record_reported("anthropic", "claude", 0, 100, 200);
+        ledger.record_reported("anthropic", "claude", -5, 100, 200);
+        assert!(ledger.snapshot().rows.is_empty());
+    }
+
+    #[test]
+    fn grand_total_aggregates_cache_counters() {
+        // `snapshot` folds cache counters into the grand total via `add`, so a
+        // multi-provider report surfaces the session-wide cache hit volume.
+        let ledger = TokenSourceLedger::new();
+        ledger.record_reported("anthropic", "claude-opus", 5000, 1000, 3000);
+        ledger.record_reported("openai", "gpt-4o", 2000, 0, 0);
+        let report = ledger.snapshot();
+        assert_eq!(report.grand_total.reported_tokens, 7000);
+        assert_eq!(report.grand_total.cache_write_tokens, 1000);
+        assert_eq!(report.grand_total.cache_read_tokens, 3000);
     }
 }

@@ -1039,16 +1039,16 @@ pub(super) async fn run_app_loop(
                                 .map(|r| r.name.clone())
                                 .unwrap_or_else(|| "model".to_string())
                         };
-                        // The effort row is shown only for the Anthropic
-                        // provider; its live value mirrors app.input when the
-                        // effort field is focused.
-                        let is_anthropic = app.editor_model_settings_only
-                            || app
-                                .editor_target
-                                .as_deref()
-                                .is_some_and(|t| t == "anthropic");
-                        let effort = is_anthropic.then_some(app.editor_effort.as_str());
-                        let thinking = is_anthropic.then_some(app.editor_thinking);
+                        // ADR-0046: the effort/thinking rows belong ONLY to the
+                        // stage-2 per-model editor (`editor_model_settings_only`).
+                        // The stage-1 provider key editor never shows them —
+                        // reasoning is set per model, not per provider.
+                        let effort = app
+                            .editor_model_settings_only
+                            .then_some(app.editor_effort.as_str());
+                        let thinking = app
+                            .editor_model_settings_only
+                            .then_some(app.editor_thinking);
                         Some(render::draw_model_editor(
                             f,
                             &title,
@@ -1393,10 +1393,6 @@ pub(super) async fn run_app_loop(
                 app.completion_kind()
             };
             let in_envoy_view = app.in_envoy_view();
-            let custom_effort_focused = app.active_modal == Modal::CustomProvider
-                && app.current_custom_field() == Some(crate::tui::CustomField::Effort);
-            let custom_thinking_focused = app.active_modal == Modal::CustomProvider
-                && app.current_custom_field() == Some(crate::tui::CustomField::Thinking);
             let action = input::process_event(
                 event,
                 &mut app.input,
@@ -1419,8 +1415,6 @@ pub(super) async fn run_app_loop(
                     picker_in_models_stage: app.picker_provider.is_some(),
                     custom_provider_field: (app.active_modal == Modal::CustomProvider)
                         .then_some(app.custom_field),
-                    custom_effort_focused,
-                    custom_thinking_focused,
                     editor_field: (app.active_modal == Modal::ModelEditor)
                         .then_some(app.editor_field),
                 },
@@ -1439,7 +1433,7 @@ pub(super) async fn run_app_loop(
                     // `q` shortcut was removed to stop accidental first-key exits).
                     tracing::info!(reason = "slash_exit", "app exiting");
                     return Ok(());
-                },
+                }
                 input::InputAction::SendChat(text) => {
                     // Note: history-search selection no longer flows through
                     // here — Enter in `Modal::HistorySearch` emits the dedicated
@@ -1930,21 +1924,6 @@ pub(super) async fn run_app_loop(
                         app.modal_index = 0;
                     }
                 }
-                input::InputAction::CustomProviderEffortCycle { delta } => {
-                    // Mirror of ModelEditorEffortCycle for the custom-provider
-                    // editor's Effort field. Cycles app.custom_effort and the
-                    // mirrored live input.
-                    const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-                    let cur = LEVELS
-                        .iter()
-                        .position(|l| *l == app.custom_effort)
-                        .unwrap_or(2) as isize;
-                    let n = LEVELS.len() as isize;
-                    let next = ((cur + delta as isize).rem_euclid(n)) as usize;
-                    app.custom_effort = LEVELS[next].to_string();
-                    app.input = app.custom_effort.clone();
-                    app.set_cursor_end();
-                }
                 input::InputAction::SubmitCustomProvider => {
                     if app.active_modal == Modal::CustomProvider {
                         // Commit the focused text field's live value first.
@@ -2066,7 +2045,12 @@ pub(super) async fn run_app_loop(
                             app.editor_key.clear();
                             app.editor_effort =
                                 row.effort.clone().unwrap_or_else(|| "high".to_string());
-                            app.editor_thinking = row.thinking.unwrap_or(true);
+                            // ADR-0046: reasoning is opt-in. The model row
+                            // carries its live thinking state (off unless opted
+                            // in); default to off for an unknown row so the
+                            // editor reflects "no reasoning" until the user
+                            // turns it on here.
+                            app.editor_thinking = row.thinking.unwrap_or(false);
                             app.editor_field = 1;
                             app.input = app.editor_effort.clone();
                             app.set_cursor_end();
@@ -2116,59 +2100,30 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ModelEditorNextField => {
-                    // Cycle focus through the editor's fields: API key (0) →
-                    // effort (1) → thinking (2) → key (0). The effort/thinking
-                    // rows only exist for the Anthropic provider; for any other
-                    // target Tab stays on the key field (no-op). The focused
-                    // text field owns the composer line, so swapping focus swaps
-                    // `app.input` with the off-focus buffer. The thinking field
-                    // is a toggle (no text), so it clears the line while focused.
-                    let is_anthropic = app.editor_model_settings_only
-                        || app
-                            .editor_target
-                            .as_deref()
-                            .is_some_and(|t| t == "anthropic");
-                    if is_anthropic {
-                        if app.editor_model_settings_only {
-                            match app.editor_field {
-                                1 => {
-                                    app.editor_effort = app.input.clone();
-                                    app.input.clear();
-                                    app.set_cursor(0);
-                                    app.editor_field = 2;
-                                }
-                                2 => {
-                                    app.input = app.editor_effort.clone();
-                                    app.set_cursor_end();
-                                    app.editor_field = 1;
-                                }
-                                _ => {
-                                    app.input = app.editor_effort.clone();
-                                    app.set_cursor_end();
-                                    app.editor_field = 1;
-                                }
+                    // Cycle focus through the per-model editor's fields: effort
+                    // (1) ↔ thinking (2). ADR-0046: the stage-1 provider key
+                    // editor has only an API-key field, so Tab is a no-op there
+                    // (it never reaches this branch — `editor_model_settings_only`
+                    // gates it). The focused text field owns the composer line;
+                    // the thinking field is a toggle (no text), so it clears the
+                    // line while focused.
+                    if app.editor_model_settings_only {
+                        match app.editor_field {
+                            1 => {
+                                app.editor_effort = app.input.clone();
+                                app.input.clear();
+                                app.set_cursor(0);
+                                app.editor_field = 2;
                             }
-                        } else {
-                            match app.editor_field {
-                                0 => {
-                                    app.editor_key = std::mem::take(&mut app.input);
-                                    app.input = app.editor_effort.clone();
-                                    app.set_cursor_end();
-                                    app.editor_field = 1;
-                                }
-                                1 => {
-                                    app.editor_effort = app.input.clone();
-                                    // Thinking is a toggle, not text: clear the line.
-                                    app.input.clear();
-                                    app.set_cursor(0);
-                                    app.editor_field = 2;
-                                }
-                                2 => {
-                                    app.input = std::mem::take(&mut app.editor_key);
-                                    app.set_cursor_end();
-                                    app.editor_field = 0;
-                                }
-                                _ => {}
+                            2 => {
+                                app.input = app.editor_effort.clone();
+                                app.set_cursor_end();
+                                app.editor_field = 1;
+                            }
+                            _ => {
+                                app.input = app.editor_effort.clone();
+                                app.set_cursor_end();
+                                app.editor_field = 1;
                             }
                         }
                     }
@@ -2194,25 +2149,10 @@ pub(super) async fn run_app_loop(
                     // effort — the two knobs are independent on the wire.
                     app.editor_thinking = !app.editor_thinking;
                 }
-                input::InputAction::CustomProviderThinkingToggle => {
-                    // Toggle extended thinking on/off (Space) for a custom
-                    // Anthropic-protocol provider. Orthogonal to effort.
-                    app.custom_thinking = !app.custom_thinking;
-                }
                 input::InputAction::SubmitModelEditor => {
                     if app.active_modal == Modal::ModelEditor
                         && let Some(id) = app.editor_target.clone()
                     {
-                        // Flush the focused field's live text into its buffer
-                        // before reading, so a submit while effort is focused
-                        // captures the in-progress value. Field 2 (thinking) is
-                        // a toggle with no text, so it needs no flush.
-                        let (key, effort) = if app.editor_field == 1 {
-                            app.editor_effort = app.input.clone();
-                            (app.editor_key.trim().to_string(), app.editor_effort.clone())
-                        } else {
-                            (app.input.trim().to_string(), app.editor_effort.clone())
-                        };
                         let model = if app.editor_model.trim().is_empty() {
                             app.provider_picker
                                 .rows
@@ -2224,6 +2164,14 @@ pub(super) async fn run_app_loop(
                             app.editor_model.trim().to_string()
                         };
                         if app.editor_model_settings_only {
+                            // Stage-2 per-model editor. Flush the focused field's
+                            // live text into its buffer before reading, so a
+                            // submit while effort is focused captures the value.
+                            // Field 2 (thinking) is a toggle with no text.
+                            if app.editor_field == 1 {
+                                app.editor_effort = app.input.clone();
+                            }
+                            let effort = app.editor_effort.clone();
                             // Built-in models persist to `[model_reasoning]` (no
                             // user-editable channel); user-defined models persist
                             // to their channel. ADR-0045.
@@ -2256,6 +2204,7 @@ pub(super) async fn run_app_loop(
                         // effort/thinking from the provider level, so switching
                         // now carries only the key (effort/thinking are set per
                         // model from the stage-2 model `e` editor).
+                        let key = app.input.trim().to_string();
                         let _ = app.tx.send(AgentRequest::SwitchProvider {
                             provider_type: id,
                             model,

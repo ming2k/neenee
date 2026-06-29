@@ -683,13 +683,25 @@ impl Agent {
             state.token_usage.total_tokens += usage.total_tokens;
             state.token_usage.prompt_tokens += usage.prompt_tokens;
             state.token_usage.completion_tokens += usage.completion_tokens;
+            state.token_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+            state.token_usage.cache_read_input_tokens += usage.cache_read_input_tokens;
             if let Some(ledger) = self
                 .token_ledger
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
             {
-                ledger.record(&provider_id, &model, usage.total_tokens.max(1), true);
+                // Use the cache-aware overload so the report can surface cache
+                // hit-rate; the cache write/read counts are already included in
+                // usage.total_tokens (folded in by the provider's usage parser),
+                // so they're tracked here as a *breakout*, not added again.
+                ledger.record_reported(
+                    &provider_id,
+                    &model,
+                    usage.total_tokens.max(1),
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                );
             }
         } else {
             // No upstream usage: fall back to the local estimator and mark the

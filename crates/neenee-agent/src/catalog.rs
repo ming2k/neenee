@@ -29,18 +29,6 @@ pub fn default_provider_id(config: &Config) -> &str {
     &config.default_provider
 }
 
-/// Translate a config `thinking` boolean override into a [`ThinkingMode`].
-/// `true` opts thinking ON (adaptive), `false` opts it OFF — orthogonal to
-/// effort. This is the config↔domain boundary translation, the only place a
-/// bool becomes a `ThinkingMode`.
-fn parse_thinking_override(on: bool) -> ThinkingMode {
-    if on {
-        ThinkingMode::Adaptive
-    } else {
-        ThinkingMode::Off
-    }
-}
-
 /// Convert a user-defined channel config into a resolved [`Channel`].
 ///
 /// Resolution rules mirror the built-in path: an `api_key_env` value wins over
@@ -917,9 +905,11 @@ mod tests {
 
     #[test]
     fn built_in_anthropic_applies_per_model_reasoning_overrides() {
-        // ADR-0045: effort/thinking are per-model. A `[model_reasoning]`
-        // entry keyed by model id overrides the channel transport's value for
-        // that one model only; a sibling model keeps its own value.
+        // ADR-0046: reasoning is opt-in per model. A `[model_reasoning]` entry
+        // keyed by model id opts that model in; an explicit `thinking = false`
+        // keeps it off even with an entry. A sibling model with no entry stays
+        // at the default (thinking off, no explicit effort) — it does not
+        // reason on its own.
         let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("ANTHROPIC_BASE_URL");
@@ -936,7 +926,7 @@ mod tests {
 
         let entries = build_catalog(&config);
         let entry = entries.iter().find(|e| e.id == "anthropic").unwrap();
-        // The overridden model carries max effort + thinking off.
+        // The configured model carries max effort + thinking off (explicit).
         let opus = entry.channel_for_model("claude-opus-4-8").unwrap();
         match &opus.transport {
             Transport::Anthropic {
@@ -951,8 +941,8 @@ mod tests {
             }
             other => panic!("expected Anthropic transport, got {other:?}"),
         }
-        // A sibling model with no entry keeps the legacy flat default
-        // (effort None → High fallback at info time, thinking None).
+        // A sibling model with no entry keeps the opt-in default (effort None,
+        // thinking None → off on the wire).
         let sonnet = entry.channel_for_model("claude-sonnet-4-6").unwrap();
         match &sonnet.transport {
             Transport::Anthropic {
@@ -960,6 +950,61 @@ mod tests {
             } => {
                 assert!(effort.is_none(), "sonnet untouched effort");
                 assert!(thinking.is_none(), "sonnet untouched thinking");
+            }
+            other => panic!("expected Anthropic transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_model_entry_presence_defaults_thinking_on() {
+        // ADR-0046 opt-in contract: a `[model_reasoning]` entry's mere presence
+        // opts the model in to reasoning — thinking defaults ON unless the
+        // entry explicitly sets `thinking = false`. So an entry with only an
+        // effort still turns thinking on. This is "写的默认有 think 且为对应
+        // effort".
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+        let mut config = bare_config();
+        // Entry with effort only (no thinking key) → thinking defaults on.
+        config
+            .model_reasoning
+            .for_model_mut("claude-opus-4-8")
+            .effort = Some("xhigh".to_string());
+
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "anthropic").unwrap();
+        let opus = entry.channel_for_model("claude-opus-4-8").unwrap();
+        match &opus.transport {
+            Transport::Anthropic {
+                effort, thinking, ..
+            } => {
+                assert_eq!(*effort, Some(Effort::Xhigh), "effort honored");
+                assert_eq!(
+                    *thinking,
+                    Some(ThinkingMode::Adaptive),
+                    "entry presence defaults thinking on"
+                );
+            }
+            other => panic!("expected Anthropic transport, got {other:?}"),
+        }
+        // A bare entry with NO knobs at all (an empty `[model_reasoning."m"]`)
+        // still counts as opted in → thinking on, effort None (model default).
+        config.model_reasoning.for_model_mut("claude-sonnet-4-6");
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "anthropic").unwrap();
+        let sonnet = entry.channel_for_model("claude-sonnet-4-6").unwrap();
+        match &sonnet.transport {
+            Transport::Anthropic {
+                effort, thinking, ..
+            } => {
+                assert!(effort.is_none(), "no effort → model default, omitted");
+                assert_eq!(
+                    *thinking,
+                    Some(ThinkingMode::Adaptive),
+                    "bare entry still opts in to thinking"
+                );
             }
             other => panic!("expected Anthropic transport, got {other:?}"),
         }

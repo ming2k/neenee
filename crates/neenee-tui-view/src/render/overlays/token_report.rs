@@ -182,6 +182,93 @@ pub fn draw_token_report_modal(
             "Estimated = local char-class heuristic (provider reported no usage).",
             Style::default().fg(theme.muted()),
         )));
+
+        // ── Prompt-cache hit-rate summary ──────────────────────────────
+        // Only render when caching is in play (Anthropic prompt-cache users).
+        // `cache_read_tokens` is the payoff (served at ~0.1×); `cache_write_tokens`
+        // is the upfront premium. Hit-rate = read / (read + uncached reported
+        // input) shows whether the `cache_control` breakpoints are landing.
+        let any_cache = report.grand_total.cache_read_tokens > 0
+            || report.grand_total.cache_write_tokens > 0;
+        if any_cache {
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "Prompt cache",
+                Style::default()
+                    .fg(theme.brand())
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for row in &report.rows {
+                let read = row.totals.cache_read_tokens;
+                let write = row.totals.cache_write_tokens;
+                if read == 0 && write == 0 {
+                    continue;
+                }
+                let label = format!("{} · {}", row.provider, row.model);
+                let label = truncate_str(&label, name_budget);
+                // Hit-rate denominator = cache-read + reported uncached input
+                // (estimated input never goes through the cache). Reported input
+                // here is the whole reported token total minus the cache
+                // portions, i.e. the dynamic suffix the model actually re-read.
+                let denom = (read
+                    + (row.totals.reported_tokens - read - write).max(0))
+                    .max(1) as f64;
+                let hit = (read as f64 / denom * 100.0).round() as i64;
+                body.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:<w$}", label, w = name_budget),
+                        Style::default().fg(theme.fg()),
+                    ),
+                    Span::styled(
+                        format!("read {:>w$}", fmt_tokens(read), w = 9),
+                        Style::default().fg(theme.ok()),
+                    ),
+                    Span::styled(
+                        format!("  write {:>w$}", fmt_tokens(write), w = 9),
+                        Style::default().fg(theme.warn()),
+                    ),
+                    Span::styled(
+                        format!("  {:>3}% hit", hit),
+                        Style::default()
+                            .fg(if hit >= 50 { theme.ok() } else { theme.muted() }),
+                    ),
+                ]));
+            }
+            let g_read = report.grand_total.cache_read_tokens;
+            let g_write = report.grand_total.cache_write_tokens;
+            let g_denom = (g_read + (report.grand_total.reported_tokens - g_read - g_write).max(0))
+                .max(1) as f64;
+            let g_hit = (g_read as f64 / g_denom * 100.0).round() as i64;
+            body.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<w$}", "Total", w = name_budget),
+                    Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("read {:>w$}", fmt_tokens(g_read), w = 9),
+                    Style::default().fg(theme.ok()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  write {:>w$}", fmt_tokens(g_write), w = 9),
+                    Style::default().fg(theme.warn()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {:>3}% hit", g_hit),
+                    Style::default()
+                        .fg(theme.brand())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            body.push(Line::from(""));
+            body.push(Line::from(Span::styled(
+                "Cache read = served from prompt cache (~0.1× cost); write = first-time premium.",
+                Style::default().fg(theme.muted()),
+            )));
+            body.push(Line::from(Span::styled(
+                "Hit-rate shows whether cache_control breakpoints are landing each turn.",
+                Style::default().fg(theme.muted()),
+            )));
+        }
     }
 
     // ── Size the panel to the content and paint it ──

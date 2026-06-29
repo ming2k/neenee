@@ -42,9 +42,9 @@ pub enum Transport {
     ///
     /// - `effort` — reasoning **depth** (the throttle). Clamped to the
     ///   resolved model's supported levels at request-build time.
-    /// - `thinking` — reasoning **on/off** (the switch). `None` defers to the
-    ///   model-derived default (on for models that declare `effort_levels`,
-    ///   off otherwise); `Some(Off)`/`Some(Adaptive)` are explicit overrides.
+    /// - `thinking` — reasoning **on/off** (the switch). `None` is the opt-in
+    ///   default: the model does NOT reason (ADR-0046). `Some(Adaptive)` opts
+    ///   the model in to extended thinking; `Some(Off)` is an explicit off.
     ///
     /// The two are independent on the wire: a request may carry `effort`
     /// without enabling thinking, or thinking at any depth. They are therefore

@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build/meson-uninstalled` pkg-config files so the quant GUI `gui` feature
   builds from the local optics tree without manual `PKG_CONFIG_PATH`.
 
+### Changed
+
+- **Extended thinking is opt-in and per-model (ADR-0046).** A model no longer
+  reasons on its own: the default for every model is thinking **off**, and
+  extended thinking is opted in per model from the stage-2 model `e` editor (the
+  `[model_reasoning."<model-id>"]` table for built-in models, the channel's
+  `effort`/`thinking` for a custom Anthropic relay). An entry's presence opts a
+  model in — thinking defaults on at the chosen effort unless explicitly set
+  off. The effort/thinking controls have been removed from the provider level:
+  the stage-1 provider key editor and the custom-provider create/edit form no
+  longer show them, and `SwitchProvider`/`AddProvider`/`EditProvider` no longer
+  carry them. The model list now shows a model's effort only when it is actually
+  opted in (`◆ think on · <effort>`); unconfigured models show nothing. The
+  legacy flat `anthropic_effort`/`anthropic_thinking` config keys are deprecated
+  (still load, no longer read) — migrate them into a `[model_reasoning]` entry.
+
 ### Removed
 
 - **Phase 1 session-layout migration code.** The one-shot layout migrations

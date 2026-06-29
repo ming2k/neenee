@@ -112,11 +112,15 @@ fn parse_gemini_usage(usage: &Value) -> Option<TokenUsage> {
             prompt_tokens: p,
             completion_tokens: c,
             total_tokens: total.unwrap_or(p + c),
+            // Gemini has no explicit prompt-cache surface; cache counters stay
+            // zero (no breakout, same as OpenAI's invisible auto-caching).
+            ..Default::default()
         }),
         _ => total.map(|t| TokenUsage {
             prompt_tokens: prompt.unwrap_or(0),
             completion_tokens: completion.unwrap_or(0),
             total_tokens: t,
+            ..Default::default()
         }),
     }
 }

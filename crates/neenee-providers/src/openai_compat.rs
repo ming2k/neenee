@@ -279,11 +279,19 @@ fn parse_openai_usage(usage: &Value) -> Option<TokenUsage> {
             prompt_tokens: p,
             completion_tokens: c,
             total_tokens: total.unwrap_or(p + c),
+            // OpenAI auto-caches without explicit breakpoints and folds its
+            // discount into `prompt_tokens` (reported separately as
+            // `prompt_tokens_details.cached_tokens`, a different shape than
+            // Anthropic's split fields). The Anthropic-style cache counters
+            // stay zero here — the ledger simply has no cache breakout for
+            // OpenAI, which is correct (its caching is invisible by design).
+            ..Default::default()
         }),
         (Some(p), None, Some(t)) => Some(TokenUsage {
             prompt_tokens: p,
             completion_tokens: (t - p).max(0),
             total_tokens: t,
+            ..Default::default()
         }),
         _ => {
             // Fall back to total_tokens only.
@@ -291,6 +299,7 @@ fn parse_openai_usage(usage: &Value) -> Option<TokenUsage> {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: t,
+                ..Default::default()
             })
         }
     }

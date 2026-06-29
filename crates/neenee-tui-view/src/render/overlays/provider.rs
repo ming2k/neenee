@@ -933,11 +933,12 @@ pub fn draw_custom_provider_editor(
     render_body(frame, body_rect, body, &mut 0, None, false, theme);
 
     if let Some(fo) = f.footer {
-        let mut hints: Vec<FooterHint> = Vec::with_capacity(4);
-        hints.push(FooterHint::secondary("Tab", "field"));
-        hints.push(FooterHint::navigation("↑↓", "choose"));
-        hints.push(FooterHint::primary("Enter", "save"));
-        hints.push(FooterHint::always("Esc", "cancel"));
+        let hints: Vec<FooterHint> = vec![
+            FooterHint::secondary("Tab", "field"),
+            FooterHint::navigation("↑↓", "choose"),
+            FooterHint::primary("Enter", "save"),
+            FooterHint::always("Esc", "cancel"),
+        ];
         render_modal_footer(frame, fo, &hints, theme);
     }
 

@@ -505,16 +505,6 @@ pub struct App {
     pub custom_base_url: String,
     pub custom_token: String,
     pub custom_model: String,
-    /// Current reasoning-effort selection in the custom-provider editor, as a
-    /// lowercase wire string. Defaults to `"high"`; cycled with ←/→. Only shown
-    /// for Anthropic-protocol providers; sent as the channel's `effort` on
-    /// submit (clamped to the model's levels at request time).
-    pub custom_effort: String,
-    /// Current extended-thinking on/off selection in the custom-provider
-    /// editor. Defaults to `true`; toggled with Space; orthogonal to effort.
-    /// Only shown for Anthropic-protocol providers; sent as the channel's
-    /// `thinking` on submit.
-    pub custom_thinking: bool,
     /// Selected row of the provider-template chooser ([`Modal::ProviderTemplate`]),
     /// indexing [`crate::tui::PROVIDER_TEMPLATES`]. Cycled with `↑/↓`.
     pub template_choice: usize,
@@ -1138,10 +1128,6 @@ impl App {
         self.custom_name.clear();
         self.custom_base_url.clear();
         self.custom_token.clear();
-        // Effort defaults to `high` (the wire default) for a fresh editor.
-        self.custom_effort = "high".to_string();
-        // Thinking defaults to on (adaptive — the recommended mode for Claude).
-        self.custom_thinking = true;
         // Default the (optional) Model field to the first candidate so the
         // OpenAI-compatible template submits a usable model even if left untouched.
         self.custom_model = self
@@ -1177,12 +1163,6 @@ impl App {
         self.custom_base_url = base_url;
         self.custom_token.clear();
         self.custom_model.clear();
-        // Effort defaults to `high` in edit mode too (the TUI doesn't carry the
-        // channel's stored value on the picker snapshot, so we don't pre-fill
-        // the prior override — submitting re-pins it).
-        self.custom_effort = "high".to_string();
-        // Thinking defaults to on (adaptive) in edit mode too.
-        self.custom_thinking = true;
         self.input = name;
         self.set_cursor_end();
         self.picker_provider = None;
@@ -1278,10 +1258,6 @@ impl App {
             Some(CustomField::Name) => self.custom_name = value,
             Some(CustomField::BaseUrl) => self.custom_base_url = value,
             Some(CustomField::Token) => self.custom_token = value,
-            Some(CustomField::Effort) => self.custom_effort = value,
-            // Thinking is toggled directly (not typed), so it has no text
-            // buffer; nothing to stash.
-            Some(CustomField::Thinking) => {}
             _ => {} // Model filter field: value already committed live.
         }
     }
@@ -1294,10 +1270,6 @@ impl App {
             Some(CustomField::Name) => self.custom_name.clone(),
             Some(CustomField::BaseUrl) => self.custom_base_url.clone(),
             Some(CustomField::Token) => self.custom_token.clone(),
-            Some(CustomField::Effort) => self.custom_effort.clone(),
-            // Thinking has no text buffer (toggled directly); show a blank
-            // line — its value renders from the bool, not the input line.
-            Some(CustomField::Thinking) => String::new(),
             _ => String::new(),
         };
         self.set_cursor_end();

@@ -985,6 +985,7 @@ mod tests {
             prompt_tokens: 1000,
             completion_tokens: 200,
             total_tokens: 1200,
+            ..Default::default()
         };
         let messages = vec![crate::Message::new(crate::Role::Assistant, "internal")];
         let o = ToolOutput::Envoy {
@@ -1003,6 +1004,7 @@ mod tests {
             prompt_tokens: 50,
             completion_tokens: 10,
             total_tokens: 60,
+            ..Default::default()
         };
         let messages = vec![
             crate::Message::new(crate::Role::System, "sys"),

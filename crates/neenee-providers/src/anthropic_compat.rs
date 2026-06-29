@@ -9,9 +9,16 @@
 //! Wire shape:
 //! - Auth: `x-api-key: <key>` + `anthropic-version: 2023-06-01`.
 //! - Request body: `model`, `messages` (each a `{role, content: [blocks]}`),
-//!   `system` (top-level string), `tools` (`[{name, description, input_schema}]`),
-//!   `max_tokens`, `stream`.
-//! - Content blocks: `{type:"text"|"tool_use"|"tool_result", ...}`.
+//!   `system` (a `[{type:"text", text, cache_control?}]` block array — an array
+//!   is required to host a prompt-cache breakpoint), `tools`
+//!   (`[{name, description, input_schema, cache_control?}]`), `max_tokens`,
+//!   `stream`.
+//! - Content blocks: `{type:"text"|"tool_use"|"tool_result", ...}`, any of
+//!   which may carry a `cache_control` breakpoint.
+//! - Prompt caching: up to 4 `cache_control: {"type":"ephemeral"}` breakpoints
+//!   are stamped across `tools → system → messages` (last tool, last system
+//!   block, and the two newest messages) so the stable prefix is cached at
+//!   0.1× input cost instead of re-read at full price every turn.
 //! - Streaming: SSE `event:` + `data:` pairs — `message_start`,
 //!   `content_block_start` (opens a text/tool_use block by index),
 //!   `content_block_delta` (text deltas / `input_json_delta` for tool args /
@@ -333,12 +340,57 @@ impl AnthropicMessagesProvider {
             "max_tokens": self.max_tokens,
             "stream": stream,
         });
-        if !system_text.is_empty() {
-            body["system"] = json!(system_text);
-        }
+
+        // ── Prompt caching (Anthropic prompt-cache API) ──────────────────
+        // Anthropic caches a *prefix* of the rendered prompt
+        // (tools → system → messages) up to a block carrying a
+        // `cache_control: {"type":"ephemeral"}` breakpoint; the next request
+        // whose prefix matches byte-for-byte reuses that cached state at
+        // 0.1× input cost (vs. 1× uncached). Without breakpoints every request
+        // re-reads the large, stable system prompt + tool table + history at
+        // full price — the reason this client previously burned tokens far
+        // faster than the official Claude Code tool, which emits breakpoints.
+        //
+        // Hard cap: 4 breakpoints across tools + system + messages combined (a
+        // 5th returns HTTP 400). Budget in render order:
+        //   #1 last tool           → caches the tool table
+        //   #2 last system block   → caches tool table + system prompt
+        //   #3 second-to-last msg  → guards the ~20-block lookback window so
+        //                            long conversations keep hitting cache
+        //   #4 last message        → rolls the cache boundary to the newest
+        //                            turn so the next request hits in full
+        // Each is skipped when its content is absent, so the count never
+        // exceeds 4. TTL defaults to 5 minutes (write ×1.25, hit ×0.1); the
+        // 1-hour tier (write ×2) is not worth it for a coding agent's frequent
+        // turns. See [`stamp_cache_control`] and friends below.
+        const MAX_BREAKPOINTS: usize = 4;
+        let mut breakpoints = 0usize;
+
         if let Some(specs) = tool_specs {
             body["tools"] = specs;
+            if breakpoints < MAX_BREAKPOINTS && stamp_last_array_element(&mut body["tools"]) {
+                breakpoints += 1;
+            }
         }
+
+        if !system_text.is_empty() {
+            // `system` must be a block *array* to carry a breakpoint; a bare
+            // string cannot. Emit one text block and stamp it within budget.
+            let mut sys_block = json!({"type":"text","text": system_text});
+            if breakpoints < MAX_BREAKPOINTS && stamp_cache_control(&mut sys_block) {
+                breakpoints += 1;
+            }
+            body["system"] = json!([sys_block]);
+        }
+
+        // Mark up to two trailing messages (newest, then second-newest) within
+        // the remaining breakpoint budget, done last so the count of tools +
+        // system markers already placed bounds how many message markers we may
+        // add, keeping the total ≤ 4.
+        stamp_message_history_breakpoints(
+            &mut body["messages"],
+            MAX_BREAKPOINTS.saturating_sub(breakpoints),
+        );
         // Resolve the thinking/effort config against this model's family and
         // stamp it. `adaptive` is the only on-mode for every current model that
         // accepts a `thinking` object at all; the legacy `enabled`+
@@ -375,6 +427,76 @@ impl AnthropicMessagesProvider {
             body["output_config"] = json!({ "effort": effort.as_str() });
         }
         body
+    }
+}
+
+// ── Prompt-caching breakpoint helpers ────────────────────────────────────
+//
+// Anthropic's prompt cache keys the prefix rendered in `tools → system →
+// messages` order. A breakpoint is a `cache_control: {"type":"ephemeral"}` key
+// stamped onto a content block; the cache covers everything from the start of
+// the prompt through that block. At most 4 breakpoints may be active across
+// the whole request, and a `Value::Object` whose top level is a block (tool
+// def, system text block, or message content block) is the only place they
+// may live. The helpers below all no-op on the wrong shape, so a malformed
+// body (e.g. a `system` still serialized as a bare string) degrades safely to
+// "no breakpoint there" rather than panicking.
+
+/// The standard 5-minute breakpoint marker, the cheapest cache tier (write
+/// ×1.25, hit ×0.1). Returns `false` if `block` is not a JSON object, so
+/// callers can short-circuit budget accounting on non-stampable shapes.
+fn stamp_cache_control(block: &mut Value) -> bool {
+    if let Some(obj) = block.as_object_mut() {
+        obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+        true
+    } else {
+        false
+    }
+}
+
+/// Stamp a breakpoint on the last element of a JSON array (e.g. the last tool
+/// definition, or the last content block of a message). Returns `false` if the
+/// value is not a non-empty array, so callers can skip the marker — and keep
+/// their breakpoint budget honest — when there is nothing to stamp.
+fn stamp_last_array_element(arr: &mut Value) -> bool {
+    if let Some(items) = arr.as_array_mut()
+        && let Some(last) = items.last_mut()
+    {
+        stamp_cache_control(last)
+    } else {
+        false
+    }
+}
+
+/// Stamp breakpoints on the trailing messages' last content blocks.
+///
+/// `budget` is how many breakpoints remain after the tools/system markers were
+/// placed; we consume at most that many, newest message first. Marking the
+/// newest message rolls the cache boundary forward each turn (maximizing the
+/// next request's hit); marking the second-newest guards the ~20-block
+/// lookback window so a long conversation does not age its write out of range
+/// before the next request can read it. Each message's last block is used
+/// because the cache covers everything up to it — a breakpoint mid-message
+/// would cache less.
+fn stamp_message_history_breakpoints(messages: &mut Value, budget: usize) {
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+    // Walk from the newest message backwards, stamping the last content block
+    // of each until the budget is spent. `newest then second-newest` is the
+    // only ordering that matters for the lookback-window strategy; beyond two
+    // messages there is no incremental value, so cap at 2 regardless of budget.
+    // (The budget itself already excludes tools+system markers, so respecting
+    // it here keeps the cross-zone total ≤ 4.)
+    let mut stamped = 0usize;
+    let cap = budget.min(2);
+    for msg in msgs.iter_mut().rev() {
+        if stamped >= cap {
+            break;
+        }
+        if stamp_last_array_element(&mut msg["content"]) {
+            stamped += 1;
+        }
     }
 }
 
@@ -490,23 +612,36 @@ fn parse_arguments(arguments: &str) -> Value {
     serde_json::from_str::<Value>(arguments).unwrap_or(json!({}))
 }
 
-/// Parse an Anthropic `usage` object (`input_tokens` / `output_tokens`) into a
-/// [`TokenUsage`]. Returns `None` when the object is absent or has no numeric
-/// fields. `prompt_tokens` ← `input_tokens`, `completion_tokens` ←
-/// `output_tokens`, `total_tokens` ← their sum.
+/// Parse an Anthropic `usage` object into a [`TokenUsage`]. Returns `None`
+/// when the object is absent or has no numeric fields. Field mapping:
+/// - `prompt_tokens` ← `input_tokens` + `cache_creation_input_tokens` +
+///   `cache_read_input_tokens`. Anthropic's `input_tokens` is ONLY the
+///   uncached dynamic suffix; the cache write/read counts must be folded into
+///   the prompt total or every cached turn is undercounted (the whole reason
+///   the context meter was off once `cache_control` breakpoints were added).
+/// - `completion_tokens` ← `output_tokens`.
+/// - `total_tokens` ← prompt + completion.
+/// - `cache_creation_input_tokens` / `cache_read_input_tokens` ← verbatim
+///   (kept for the ledger's separate cache counters + the report's
+///   hit-rate display).
 fn parse_anthropic_usage(usage: &Value) -> Option<TokenUsage> {
     let input = usage["input_tokens"].as_i64();
     let output = usage["output_tokens"].as_i64();
-    let (p, c) = match (input, output) {
+    let cache_creation = usage["cache_creation_input_tokens"].as_i64().unwrap_or(0);
+    let cache_read = usage["cache_read_input_tokens"].as_i64().unwrap_or(0);
+    let (uncached_input, c) = match (input, output) {
         (Some(p), Some(c)) => (p, c),
         (Some(p), None) => (p, 0),
         (None, Some(c)) => (0, c),
         (None, None) => return None,
     };
+    let prompt = uncached_input + cache_creation + cache_read;
     Some(TokenUsage {
-        prompt_tokens: p,
+        prompt_tokens: prompt,
         completion_tokens: c,
-        total_tokens: p + c,
+        total_tokens: prompt + c,
+        cache_creation_input_tokens: cache_creation,
+        cache_read_input_tokens: cache_read,
     })
 }
 
@@ -956,7 +1091,8 @@ mod tests {
             ],
             false,
         );
-        assert_eq!(body["system"], "you are concise");
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "you are concise");
         // No system role remains in the message list.
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -1026,6 +1162,251 @@ mod tests {
         async fn call(&self, _args: &str) -> Result<String, String> {
             Ok("ok".to_string())
         }
+    }
+
+    // ── prompt-caching breakpoints ─────────────────────────────────────
+
+    /// Count every `cache_control` breakpoint across `tools` + `system` +
+    /// `messages`, the same surface Anthropic enforces its 4-breakpoint cap on.
+    fn count_cache_breakpoints(body: &Value) -> usize {
+        let mut n = 0;
+        if let Some(tools) = body["tools"].as_array() {
+            n += tools
+                .iter()
+                .filter(|t| t.get("cache_control").is_some())
+                .count();
+        }
+        if let Some(system) = body["system"].as_array() {
+            n += system
+                .iter()
+                .filter(|b| b.get("cache_control").is_some())
+                .count();
+        }
+        if let Some(msgs) = body["messages"].as_array() {
+            for msg in msgs {
+                if let Some(blocks) = msg["content"].as_array() {
+                    n += blocks
+                        .iter()
+                        .filter(|b| b.get("cache_control").is_some())
+                        .count();
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn cache_breakpoints_hit_all_four_zones() {
+        // A realistic coding-agent turn: system prompt, tool table, and a
+        // multi-message history. We expect a breakpoint on each of the four
+        // zones — last tool, last system block, last two messages — totalling
+        // exactly 4 (the hard cap).
+        let provider =
+            AnthropicMessagesProvider::new("k".to_string(), "minimax-m3".to_string(), "https://x");
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DummyTool)];
+        provider.prepare_tools(&tools);
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::System, "you are a coding agent"),
+                Message::new(Role::User, "do task A"),
+                Message::new(Role::Assistant, "ok"),
+                Message::new(Role::User, "now task B"),
+                Message::new(Role::Assistant, "done"),
+                Message::new(Role::User, "task C"),
+            ],
+            false,
+        );
+        // Last tool definition.
+        assert_eq!(
+            body["tools"][0]["cache_control"]["type"], "ephemeral",
+            "last tool must carry a breakpoint"
+        );
+        // Last system block.
+        assert_eq!(
+            body["system"][0]["cache_control"]["type"], "ephemeral",
+            "last system block must carry a breakpoint"
+        );
+        // Two newest messages: the final "task C" turn and the prior "done".
+        let msgs = body["messages"].as_array().unwrap();
+        let last = &msgs[msgs.len() - 1]["content"][0];
+        let prev = &msgs[msgs.len() - 2]["content"][0];
+        assert_eq!(
+            last["cache_control"]["type"], "ephemeral",
+            "newest message must carry a breakpoint"
+        );
+        assert_eq!(
+            prev["cache_control"]["type"], "ephemeral",
+            "second-newest message must carry a breakpoint"
+        );
+        // No older message is stamped (budget exhausted at 4).
+        let earlier = &msgs[0]["content"][0];
+        assert!(earlier.get("cache_control").is_none());
+        // The four-zone total is exactly at the cap — never over.
+        assert_eq!(count_cache_breakpoints(&body), 4);
+    }
+
+    #[test]
+    fn cache_breakpoints_never_exceed_four_cap() {
+        // Even with many tools + system + a long history, the total must stay
+        // ≤ 4: Anthropic rejects a 5th breakpoint with HTTP 400.
+        let provider =
+            AnthropicMessagesProvider::new("k".to_string(), "minimax-m3".to_string(), "https://x");
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DummyTool), Arc::new(DummyTool2)];
+        provider.prepare_tools(&tools);
+        let history: Vec<Message> = (0..8)
+            .flat_map(|i| {
+                vec![
+                    Message::new(Role::User, format!("u{i}")),
+                    Message::new(Role::Assistant, format!("a{i}")),
+                ]
+            })
+            .collect();
+        let body = provider.request_body(history, false);
+        assert!(
+            count_cache_breakpoints(&body) <= 4,
+            "must not exceed the 4-breakpoint cap"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_use_default_five_minute_ttl() {
+        // Every breakpoint is the bare `{"type":"ephemeral"}` form (5-minute
+        // default TTL) — no `"ttl"` key — so the cheapest write tier applies
+        // and requests stay lean. A `1h` tier would double the write cost for
+        // no gain in a coding agent's frequent-turn workload.
+        let provider =
+            AnthropicMessagesProvider::new("k".to_string(), "minimax-m3".to_string(), "https://x");
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::System, "sys"),
+                Message::new(Role::User, "hi"),
+                Message::new(Role::Assistant, "hey"),
+                Message::new(Role::User, "bye"),
+            ],
+            false,
+        );
+        let breakpoint_with_ttl = ["tools", "system"]
+            .iter()
+            .filter_map(|key| body[*key].as_array())
+            .flatten()
+            .chain(
+                body["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|m| m["content"].as_array().into_iter().flatten()),
+            )
+            .find(|b| b.get("cache_control").is_some() && b["cache_control"].get("ttl").is_some());
+        assert!(
+            breakpoint_with_ttl.is_none(),
+            "no breakpoint should carry a ttl override"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_degrade_when_zones_absent() {
+        // No system prompt and no tools: the tools/system breakpoints are
+        // skipped, leaving breakpoints only on the message history — and the
+        // cap is still respected.
+        let provider =
+            AnthropicMessagesProvider::new("k".to_string(), "minimax-m3".to_string(), "https://x");
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::User, "first"),
+                Message::new(Role::Assistant, "second"),
+                Message::new(Role::User, "third"),
+            ],
+            false,
+        );
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+        // Only the two newest messages get breakpoints.
+        assert_eq!(count_cache_breakpoints(&body), 2);
+    }
+
+    #[test]
+    fn cache_breakpoints_skip_non_stampable_system_shape() {
+        // An empty system message collapses to an empty string, which is *not*
+        // serialized as a block array (and thus no breakpoint is placed on it),
+        // yet the request still carries message breakpoints. Guards the
+        // "degrade safely" contract.
+        let provider =
+            AnthropicMessagesProvider::new("k".to_string(), "minimax-m3".to_string(), "https://x");
+        let body = provider.request_body(
+            vec![
+                Message::new(Role::System, ""),
+                Message::new(Role::User, "hi"),
+                Message::new(Role::Assistant, "yo"),
+            ],
+            false,
+        );
+        // Empty system → no `system` field at all (nothing to cache), so only
+        // the message breakpoints remain.
+        assert!(body.get("system").is_none() || body["system"].as_array().is_none());
+        assert_eq!(count_cache_breakpoints(&body), 2);
+    }
+
+    struct DummyTool2;
+    #[async_trait]
+    impl Tool for DummyTool2 {
+        fn name(&self) -> &str {
+            "dummy2"
+        }
+        fn description(&self) -> &str {
+            "test2"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn call(&self, _args: &str) -> Result<String, String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    // ── usage parsing (prompt-caching fields) ──────────────────────────
+
+    #[test]
+    fn anthropic_usage_folds_cache_tokens_into_prompt_total() {
+        // Anthropic's `input_tokens` is ONLY the uncached suffix; cache
+        // write/read must be folded into the prompt total or a cached turn is
+        // undercounted. Here 200 uncached + 5000 cache write + 8000 cache read
+        // → prompt 13200, total 13250.
+        let usage = json!({
+            "input_tokens": 200,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 5000,
+            "cache_read_input_tokens": 8000,
+        });
+        let parsed = parse_anthropic_usage(&usage).expect("usage parses");
+        assert_eq!(parsed.prompt_tokens, 13200, "cache tokens folded into prompt");
+        assert_eq!(parsed.completion_tokens, 50);
+        assert_eq!(parsed.total_tokens, 13250);
+        assert_eq!(parsed.cache_creation_input_tokens, 5000);
+        assert_eq!(parsed.cache_read_input_tokens, 8000);
+    }
+
+    #[test]
+    fn anthropic_usage_without_cache_fields_defaults_to_zero() {
+        // A provider/relay that never emits cache fields parses fine with both
+        // cache counters at zero — the pre-caching behavior is preserved.
+        let usage = json!({"input_tokens": 100, "output_tokens": 30});
+        let parsed = parse_anthropic_usage(&usage).expect("usage parses");
+        assert_eq!(parsed.prompt_tokens, 100);
+        assert_eq!(parsed.total_tokens, 130);
+        assert_eq!(parsed.cache_creation_input_tokens, 0);
+        assert_eq!(parsed.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn anthropic_usage_absent_returns_none() {
+        // No numeric fields at all → None.
+        assert!(parse_anthropic_usage(&json!({})).is_none());
+        // Only output_tokens (no input) still parses with prompt = 0 + cache
+        // counts, preserving the original lenient-input behavior.
+        let parsed = parse_anthropic_usage(&json!({"output_tokens": 5})).unwrap();
+        assert_eq!(parsed.prompt_tokens, 0);
+        assert_eq!(parsed.completion_tokens, 5);
+        assert_eq!(parsed.total_tokens, 5);
     }
 
     // ── extended-thinking replay ────────────────────────────────────────
@@ -1132,10 +1513,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             "https://x",
         )
-        .with_thinking(
-            ThinkingConfig::default()
-                .with_mode(ThinkingMode::Adaptive),
-        );
+        .with_thinking(ThinkingConfig::default().with_mode(ThinkingMode::Adaptive));
         let body = provider.request_body(vec![Message::new(Role::User, "hi")], false);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], "summarized");

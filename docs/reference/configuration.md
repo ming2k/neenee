@@ -122,17 +122,26 @@ default_channel = 0
 
 ## Per-model reasoning settings
 
-Anthropic reasoning knobs — `effort` (the reasoning-depth throttle) and
-`thinking` (the on/off switch) — are **per model**, not per provider: an Opus
-turn can run at `max` effort while a Haiku turn runs `low`. They live in the
-`[model_reasoning."<model-id>"]` table, keyed by model id (ADR-0045). Both
-fields are optional — an unset one defers to the model's default.
+Extended thinking is **opt-in** (ADR-0046). A model does not reason unless you
+have configured it to. The two reasoning knobs — `effort` (the reasoning-depth
+throttle) and `thinking` (the on/off switch) — are **per model**, not per
+provider: an Opus turn can run at `max` effort while a Haiku turn runs `low`.
+They live in the `[model_reasoning."<model-id>"]` table, keyed by model id.
+
+**Opt-in rule:** a model's *presence* in this table opts it in to thinking.
+Thinking defaults **on** (the recommended Claude mode) unless the entry
+explicitly sets `thinking = false`; a set `effort` applies at that depth (else
+the model's default, and `output_config` is omitted to keep the request lean). A
+model **not** listed here sends no `thinking` object at all — it never reasons on
+its own. Both fields are optional within an entry.
 
 ```toml
+# Opus reasons at max depth (thinking on by default, since the entry exists).
 [model_reasoning."claude-opus-4-8"]
 effort   = "max"     # low | medium | high | xhigh | max (clamped to the model's levels)
-thinking = true      # on/off, orthogonal to effort
+# thinking omitted → defaults on
 
+# Haiku: opted in but kept shallow and with thinking off.
 [model_reasoning."claude-haiku-4-5"]
 effort   = "low"
 thinking = false
@@ -142,11 +151,13 @@ This table applies wherever the named model is served — the built-in
 `anthropic` provider and Anthropic-format relays alike. In the TUI, drilling
 into a provider and pressing `e` on an Anthropic model opens the per-model
 settings popup that edits this table (built-in models) or the channel
-(user-defined models).
+(user-defined models). For a user-defined Anthropic relay, setting the
+channel's `effort` or `thinking` has the same opt-in effect.
 
-The legacy flat fields `anthropic_effort` / `anthropic_thinking` still work as
-a provider-wide default, but a matching `[model_reasoning]` entry takes
-precedence.
+The legacy flat fields `anthropic_effort` / `anthropic_thinking` are
+**deprecated** and no longer read — they only still load so an existing
+`config.toml` does not break. Migrate by moving their values into a
+`[model_reasoning]` entry.
 
 ## Quant runtime
 
