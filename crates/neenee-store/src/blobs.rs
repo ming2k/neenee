@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 const BLOB_PREFIX_LEN: usize = 2;
 
 /// Store for immutable byte blobs keyed by SHA-256.
+#[derive(Clone)]
 pub struct BlobStore {
     root: PathBuf,
 }

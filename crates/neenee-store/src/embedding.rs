@@ -205,11 +205,12 @@ impl EmbeddingStore {
     async fn save(&self) -> Result<(), String> {
         // Serialise against other `neenee` instances in the same project so
         // concurrent saves don't interleave temp-file writes or lose updates
-        // (ADR-0018). The index is per-project and shared across instances, so
-        // the last writer would otherwise erase entries another process just
-        // added. The lock wraps the whole rewrite window; reload-merge is not
-        // needed here because the in-memory index already accumulates every
-        // `upsert` this process has done and is the union to persist.
+        // (ADR-0018). But serialisation alone is not enough: the in-memory
+        // index only contains *this* process's upserts, so a naive
+        // last-writer-wins save would erase entries a sibling process added
+        // between this process's open and its save. So under the lock we
+        // re-read the on-disk index and merge by `content_hash` (union), then
+        // write the union — every process's contributions survive.
         let _lock = crate::fsutil::FileLock::acquire(&self.path)
             .map_err(|e| format!("could not lock embedding index: {e}"))?;
         if let Some(parent) = self.path.parent() {
@@ -217,11 +218,65 @@ impl EmbeddingStore {
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        let raw = serde_json::to_string_pretty(&self.index).map_err(|e| e.to_string())?;
+        // Re-load whatever a sibling process committed since we opened, then
+        // union with our in-memory entries. Keyed by `content_hash` so a
+        // re-index of the same text is idempotent and neither side's distinct
+        // entry is dropped.
+        let merged = merge_with_disk(&self.path, &self.index).await?;
+        let raw = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
         tokio::fs::write(&self.path, raw)
             .await
             .map_err(|e| format!("could not write embedding index: {e}"))
     }
+}
+
+/// Re-read the on-disk index and union its entries with `ours`, keyed by
+/// `content_hash`. On-disk entries win on a hash collision (they were written
+/// by the process that has the most complete picture for that hash). If the
+/// disk file is missing or unparseable, `ours` is returned unchanged — losing
+/// the sibling-merge is better than failing the save.
+async fn merge_with_disk(path: &Path, ours: &IndexFile) -> Result<IndexFile, String> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ours.clone());
+        }
+        Err(e) => return Err(format!("could not re-read embedding index: {e}")),
+    };
+    let Ok(theirs) = serde_json::from_str::<IndexFile>(&raw) else {
+        // A corrupt sibling file: preserve ours rather than abort the save.
+        return Ok(ours.clone());
+    };
+    let mut by_hash: std::collections::HashMap<&str, &Entry> =
+        std::collections::HashMap::with_capacity(theirs.entries.len() + ours.entries.len());
+    // Insert ours first, then theirs overwrites on collision (their write is
+    // canonical for the shared hash). Order within each side is preserved.
+    for entry in &ours.entries {
+        by_hash.insert(entry.content_hash.as_str(), entry);
+    }
+    for entry in &theirs.entries {
+        by_hash.insert(entry.content_hash.as_str(), entry);
+    }
+    // Deterministic output order: theirs (oldest-on-disk) then our new entries,
+    // so the file grows append-like across saves and diffs stay readable.
+    let mut entries: Vec<Entry> = Vec::with_capacity(by_hash.len());
+    for entry in &theirs.entries {
+        if std::ptr::eq(
+            by_hash
+                .get(entry.content_hash.as_str())
+                .copied()
+                .unwrap_or(entry),
+            entry,
+        ) {
+            entries.push(entry.clone());
+        }
+    }
+    for entry in &ours.entries {
+        if !entries.iter().any(|e| e.content_hash == entry.content_hash) {
+            entries.push(entry.clone());
+        }
+    }
+    Ok(IndexFile { entries })
 }
 
 fn content_hash(text: &str) -> String {

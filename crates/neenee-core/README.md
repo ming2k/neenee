@@ -1,12 +1,12 @@
 # neenee-core
 
-Pure domain vocabulary for the coding-agent stack.
+Pure domain vocabulary for the neenee agent stack.
 
 This crate is the **zero-I/O domain core** (ADR-0005): no `rusqlite`, no
 filesystem, no network. It holds only the domain shapes and traits the rest of
 the stack is built on:
 
-- the [`Provider`](src/provider.rs) and [`Tool`](src/tool.rs) capability traits;
+- the [`Provider`] and [`Tool`] capability traits (in [`capability.rs`][cap]);
 - conversation and tool-output types, the context-pressure model;
 - pursuit / repeat / todo domain types, envoy profiles, skills/MCP config
   schemas;
@@ -18,3 +18,7 @@ network belongs in [`neenee-store`](../neenee-store) instead.
 
 See the architecture overview in [`docs/`](../../docs/) and ADR-0005 for the
 zero-I/O boundary rationale.
+
+[`Provider`]: src/capability.rs
+[`Tool`]: src/capability.rs
+[cap]: src/capability.rs

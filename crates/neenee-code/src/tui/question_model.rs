@@ -171,6 +171,17 @@ impl QuestionModel {
         &self.other_text
     }
 
+    /// Whether the synthetic "Other" free-text row is the highlighted row for
+    /// the active question. This is the *only* state in which the modal has a
+    /// text-input surface, so it is the one condition under which the modal
+    /// owns the terminal cursor — `App::caret_owner` reads this to decide
+    /// whether to keep the real cursor visible (so the host IME can anchor its
+    /// composition window to the field) or hide it (a plain option pick has no
+    /// text surface). See [`QuestionModel::other_index_of`].
+    pub fn is_other_highlighted(&self) -> bool {
+        self.highlight == self.other_index_of(self.current)
+    }
+
     /// The active question, or `None` if the model is somehow empty. The
     /// renderer and update logic treat the non-empty case as the norm.
     fn active_question(&self) -> Option<&UserQuestion> {

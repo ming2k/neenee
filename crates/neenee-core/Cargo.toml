@@ -10,17 +10,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
 async-trait = { workspace = true }
 glob = { workspace = true }
-walkdir = { workspace = true }
-dirs = { workspace = true }
 uuid = { workspace = true }
-httpdate = { workspace = true }
 chrono = { workspace = true }
-sha2 = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 

@@ -7,11 +7,12 @@
 //! context from live agent state each round and asks the registry to compose
 //! the active system sections in rank order.
 //!
-//! The six default sections ([`IdentityPreamble`], [`ToneGuidance`],
-//! [`TodoGuidance`], [`PursuitObjective`], [`AskUserGuidance`],
-//! [`SkillsIndex`]) reproduce the legacy `parts.join("\n")` output byte-for-
-//! byte: sections that need a visual gap include a leading `\n` in their own
-//! `render`, so joining on a single `\n` preserves the prior layout.
+//! The default system sections ([`IdentityPreamble`], [`ConcisenessGuidance`],
+//! [`ToneGuidance`], [`TodoGuidance`], [`PersistenceGuidance`],
+//! [`PursuitObjective`], [`AskUserGuidance`], [`DelegationGuidance`],
+//! [`SkillsIndex`]) compose the system message in rank order: sections that
+//! need a visual gap include a leading `\n` in their own `render`, so joining
+//! on a single `\n` preserves a stable layout.
 //!
 //! [`Agent::inject_implicit_skills`] stays here for now (it is a user-channel
 //! injection); ADR-0039 stage 4 will fold it into a user-channel section.
@@ -79,6 +80,37 @@ impl PromptSection for ToneGuidance {
     }
 }
 
+/// Output-length guidance. Always active: applies to every turn of the
+/// principal and every envoy. Fuses opencode's "minimize tokens, no
+/// preamble/postamble" with codex's "scale depth to change size, never paste
+/// whole files / before-after blocks" into one tight paragraph. Leading `\n`
+/// separates it from the identity preamble.
+struct ConcisenessGuidance;
+
+const CONCISENESS: &str = "\nBe concise. Address only the task at hand; skip tangents, greetings, \
+                           and recaps of what you just did. Scale depth to change size — a \
+                           one-line answer for a small fix, a short bullet list for a multi-file \
+                           change. Never paste whole files or before/after blocks; cite file \
+                           paths and symbol names instead.";
+
+impl PromptSection for ConcisenessGuidance {
+    fn id(&self) -> &'static str {
+        "system.conciseness"
+    }
+    fn channel(&self) -> PromptChannel {
+        PromptChannel::System
+    }
+    fn kind(&self) -> InjectionKind {
+        InjectionKind::SystemPrompt
+    }
+    fn rank(&self) -> u32 {
+        15
+    }
+    fn render(&self, _ctx: &PromptContext) -> Option<String> {
+        Some(String::from(CONCISENESS))
+    }
+}
+
 /// Model-specific guidance. Each model behaves differently, so the resolved
 /// model's `Model::model_guidance` is the per-model hook for whatever
 /// behavioral nudge it needs (e.g. GLM's anti-loop instructions). Renders it
@@ -137,6 +169,36 @@ impl PromptSection for TodoGuidance {
     }
     fn render(&self, _ctx: &PromptContext) -> Option<String> {
         Some(String::from(TODO))
+    }
+}
+
+/// Task-completion ethos: see the work through to a real result in one turn
+/// instead of stopping at analysis or a partial fix. Always active. Mirrors
+/// codex's "Autonomy and Persistence" section, condensed. Leading `\n`
+/// separates it from the todo paragraph above.
+struct PersistenceGuidance;
+
+const PERSISTENCE: &str = "\nSee the task through to a real result in this turn. Don't stop at \
+                           analysis or a partial fix — carry the work through implementation and \
+                           verification. If a tool call fails or you hit a blocker, try to resolve \
+                           it yourself before yielding; only hand back to the user when the work \
+                           is actually done or you genuinely need their input.";
+
+impl PromptSection for PersistenceGuidance {
+    fn id(&self) -> &'static str {
+        "system.persistence"
+    }
+    fn channel(&self) -> PromptChannel {
+        PromptChannel::System
+    }
+    fn kind(&self) -> InjectionKind {
+        InjectionKind::SystemPrompt
+    }
+    fn rank(&self) -> u32 {
+        35
+    }
+    fn render(&self, _ctx: &PromptContext) -> Option<String> {
+        Some(String::from(PERSISTENCE))
     }
 }
 
@@ -207,6 +269,42 @@ impl PromptSection for AskUserGuidance {
     }
 }
 
+/// Guidance for delegating read-only exploration to the `envoy` tool. Active
+/// only when a dispatch tool is admitted this turn, so identity-less / tool-
+/// less test agents are unaffected. Leading `\n` separates it from the
+/// paragraphs above.
+struct DelegationGuidance;
+
+const DELEGATION: &str = "\nFor codebase exploration that is not a needle query for a specific file \
+                          or symbol, prefer the `envoy` tool over running search commands yourself \
+                          — it returns a concise answer without flooding your context with raw file \
+                          contents, and multiple envoys can run in parallel. Skip the envoy for \
+                          needle queries (a known file path, a specific class/function name): read \
+                          or grep directly.";
+
+impl PromptSection for DelegationGuidance {
+    fn id(&self) -> &'static str {
+        "system.delegation_guidance"
+    }
+    fn channel(&self) -> PromptChannel {
+        PromptChannel::System
+    }
+    fn kind(&self) -> InjectionKind {
+        InjectionKind::SystemPrompt
+    }
+    fn rank(&self) -> u32 {
+        55
+    }
+    fn is_active(&self, ctx: &PromptContext) -> bool {
+        ctx.tool_names
+            .iter()
+            .any(|name| name == "envoy" || name == "task")
+    }
+    fn render(&self, _ctx: &PromptContext) -> Option<String> {
+        Some(String::from(DELEGATION))
+    }
+}
+
 /// The skills catalog, when any skills are registered. Leading `\n`
 /// separates it from the paragraphs above.
 struct SkillsIndex;
@@ -239,11 +337,14 @@ impl PromptSection for SkillsIndex {
 pub(crate) fn default_prompt_registry() -> PromptRegistry {
     let mut registry = PromptRegistry::new();
     registry.register(IdentityPreamble);
+    registry.register(ConcisenessGuidance);
     registry.register(ToneGuidance);
     registry.register(ModelGuidance);
     registry.register(TodoGuidance);
+    registry.register(PersistenceGuidance);
     registry.register(PursuitObjective);
     registry.register(AskUserGuidance);
+    registry.register(DelegationGuidance);
     registry.register(SkillsIndex);
     registry
 }

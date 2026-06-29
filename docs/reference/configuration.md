@@ -120,6 +120,81 @@ default_channel = 0
 |-----|---------|---------|
 | `favorites` | `[]` | Provider ids pinned for quick access in the picker |
 
+## Per-model reasoning settings
+
+Anthropic reasoning knobs — `effort` (the reasoning-depth throttle) and
+`thinking` (the on/off switch) — are **per model**, not per provider: an Opus
+turn can run at `max` effort while a Haiku turn runs `low`. They live in the
+`[model_reasoning."<model-id>"]` table, keyed by model id (ADR-0045). Both
+fields are optional — an unset one defers to the model's default.
+
+```toml
+[model_reasoning."claude-opus-4-8"]
+effort   = "max"     # low | medium | high | xhigh | max (clamped to the model's levels)
+thinking = true      # on/off, orthogonal to effort
+
+[model_reasoning."claude-haiku-4-5"]
+effort   = "low"
+thinking = false
+```
+
+This table applies wherever the named model is served — the built-in
+`anthropic` provider and Anthropic-format relays alike. In the TUI, drilling
+into a provider and pressing `e` on an Anthropic model opens the per-model
+settings popup that edits this table (built-in models) or the channel
+(user-defined models).
+
+The legacy flat fields `anthropic_effort` / `anthropic_thinking` still work as
+a provider-wide default, but a matching `[model_reasoning]` entry takes
+precedence.
+
+## Quant runtime
+
+`neenee-quant` reads a JSON config from `NEENEE_QUANT_CONFIG`, then applies
+environment overrides. Missing values keep the defaults.
+
+### Market data
+
+| Environment variable | Default | Meaning |
+|----------------------|---------|---------|
+| `NEENEE_QUANT_MARKET_DATA` | `synthetic` | Market-data adapter: `synthetic`, `synthetic-paper`, `binance`, or `binance-http` |
+| `NEENEE_QUANT_BINANCE_BASE_URL` | `https://api.binance.com` | Binance-compatible HTTP base URL |
+
+### Broker
+
+| Environment variable | Default | Meaning |
+|----------------------|---------|---------|
+| `NEENEE_QUANT_BROKER` | `paper` | Broker adapter: `paper`, `paper-trading`, or `live-http` |
+| `NEENEE_QUANT_LIVE_BROKER_URL` | empty | HTTPS broker gateway base URL for `live-http`. Local development may use `http://localhost:*`, `http://127.0.0.1:*`, or `http://[::1]:*` |
+| `NEENEE_QUANT_LIVE_BROKER_TOKEN_ENV` | `NEENEE_QUANT_LIVE_BROKER_TOKEN` | Environment variable that contains the live broker bearer token |
+| `NEENEE_QUANT_LIVE_BROKER_TOKEN` | empty | Direct live broker bearer token override |
+
+`live-http` never enables implicitly. It fails startup unless a non-empty
+token and an accepted gateway URL are present.
+
+The live broker gateway contract is:
+
+| Method | Path | Request | Response |
+|--------|------|---------|----------|
+| `GET` | `/portfolio` | Optional `symbol` query parameter | `PortfolioSnapshot` JSON |
+| `POST` | `/orders` | Order request plus `client_order_id` and `quote` | `OrderDecision` JSON |
+| `POST` | `/orders/{order_id}/cancel` | `order_id` and `client_cancel_id` | `OrderDecision` JSON |
+
+`neenee-quant` fetches `/portfolio` and applies local risk checks before
+posting to `/orders`. A local risk rejection does not call the gateway.
+
+### Paper account and risk
+
+| Environment variable | Default | Meaning |
+|----------------------|---------|---------|
+| `NEENEE_QUANT_PAPER_STARTING_CASH` | `100000` | Starting cash for the paper account |
+| `NEENEE_QUANT_PAPER_COMMISSION_BPS` | `0` | Paper commission in basis points |
+| `NEENEE_QUANT_PAPER_STATE` | empty | Optional JSON state file for persistent paper account state |
+| `NEENEE_QUANT_AUDIT_LOG` | empty | Optional JSONL audit log for order decisions |
+| `NEENEE_QUANT_RISK_MAX_ORDER_NOTIONAL` | `50000` | Per-order notional ceiling |
+| `NEENEE_QUANT_RISK_MAX_GROSS_EXPOSURE` | `100000` | Gross exposure ceiling |
+| `NEENEE_QUANT_RISK_ALLOW_SHORT_SELLING` | `false` | Whether sell orders may open short exposure |
+
 ## TUI presentation
 
 The optional `[tui]` table. `default_expanded` maps a tool name (or `thinking`

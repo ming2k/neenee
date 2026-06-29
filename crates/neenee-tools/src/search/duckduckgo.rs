@@ -194,24 +194,32 @@ fn decode_ddg_redirect(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Percent-decode a URL component (`%xx` → bytes, `+` → space).
+///
+/// Accumulates into a `Vec<u8>` so multi-byte UTF-8 sequences are reassembled
+/// correctly — pushing each decoded byte through `String::push(byte as char)`
+/// would split a multi-byte sequence into individual Latin-1 chars and corrupt
+/// internationalized URLs. The bytes are validated as UTF-8 once at the end.
 fn url_decode(value: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(value.len());
     let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => out.push(' '),
+            b'+' => out.push(b' '),
+            // A `%` must be followed by two hex digits; a stray `%` at the tail
+            // (`i + 2 >= len`) is copied literally rather than truncated.
             b'%' if i + 2 < bytes.len() => {
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).map_err(|e| e.to_string())?;
                 let byte = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
-                out.push(byte as char);
+                out.push(byte);
                 i += 2;
             }
-            c => out.push(c as char),
+            b => out.push(b),
         }
         i += 1;
     }
-    Ok(out)
+    String::from_utf8(out).map_err(|e| format!("decoded URL was not valid UTF-8: {e}"))
 }
 
 fn decode_entities(text: &str) -> String {
@@ -422,5 +430,34 @@ mod tests {
         let msg = compose_ddg_failure("rust async", &lite, &html);
         assert!(msg.contains("dns error"), "{msg}");
         assert!(msg.contains("429"), "{msg}");
+    }
+
+    #[test]
+    fn url_decode_reassembles_multibyte_utf8() {
+        // "中文" is six UTF-8 bytes when percent-encoded; decoding must yield
+        // the original string, not mojibake. Regression test for the byte→char
+        // corruption that pushed each decoded byte as a Latin-1 char.
+        let encoded = "%E4%B8%AD%E6%96%87";
+        assert_eq!(url_decode(encoded).unwrap(), "中文");
+    }
+
+    #[test]
+    fn url_decode_handles_plus_and_ascii() {
+        assert_eq!(url_decode("a+b").unwrap(), "a b");
+        assert_eq!(url_decode("hello").unwrap(), "hello");
+        assert_eq!(url_decode("%20").unwrap(), " ");
+    }
+
+    #[test]
+    fn url_decode_copies_stray_percent_literally() {
+        // A trailing `%` with no digits after it (`i + 2 >= len`) is copied
+        // literally rather than truncating or erroring.
+        assert_eq!(url_decode("100%").unwrap(), "100%");
+    }
+
+    #[test]
+    fn url_decode_rejects_invalid_utf8() {
+        // Lone continuation byte is not valid UTF-8.
+        assert!(url_decode("%80").is_err());
     }
 }

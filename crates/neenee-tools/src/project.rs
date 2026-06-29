@@ -13,6 +13,8 @@ use neenee_core::Tool;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+use crate::helpers::save_file_atomic;
+
 const MAX_PROJECT_NAME: usize = 64;
 
 /// Create and scaffold a new project directory.
@@ -297,16 +299,19 @@ fn generic_template(name: &str) -> Template {
 fn write_files(project_dir: &Path, files: &[(String, String)]) -> Result<(), String> {
     for (relative, content) in files {
         let path = project_dir.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create '{}': {}", parent.display(), e))?;
-        }
-        std::fs::write(&path, content)
+        save_file_atomic(&path, content.as_bytes())
             .map_err(|e| format!("Failed to write '{}': {}", path.display(), e))?;
     }
     Ok(())
 }
 
+/// Run `git init` in the new project.
+///
+/// Git is optional, so a missing `git` binary (`NotFound`) is tolerated and
+/// the project is left without a repo — but a *different* spawn error (a
+/// permissions failure, `EACCES`, an I/O fault) is reported, not silently
+/// turned into a false success. Previously *every* spawn error mapped to
+/// `Ok(())`, so a broken environment told the user "done" with no repo.
 fn init_git(project_dir: &Path) -> Result<(), String> {
     let result = std::process::Command::new("git")
         .arg("init")
@@ -318,7 +323,11 @@ fn init_git(project_dir: &Path) -> Result<(), String> {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(format!("git init failed: {}", stderr.trim()))
         }
-        Err(_) => Ok(()),
+        // `git` not installed: skip repo creation. The rest of the project is
+        // still fully scaffolded and usable.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Any other spawn failure (e.g. permission denied) is a real error.
+        Err(error) => Err(format!("could not run git init: {}", error)),
     }
 }
 

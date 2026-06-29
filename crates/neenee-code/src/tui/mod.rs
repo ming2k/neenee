@@ -10,27 +10,28 @@ pub mod clipboard_ops;
 pub mod completion;
 pub mod composer_attachments;
 pub mod config;
-pub mod document;
 mod event_loop;
-pub mod fuzzy;
 pub mod input;
 pub mod interaction;
-pub mod layout;
-pub mod providers;
 pub mod question_model;
-pub mod render;
-pub mod selection;
 pub mod step_interaction;
 mod terminal;
 mod transcript;
 mod versioned;
 
-pub(crate) use app::{ActivityTab, App, CaretOwner, Modal, Recess};
-pub(crate) use completion::{Completion, CompletionKind};
-pub(crate) use providers::{
-    CustomField, PROVIDER_TEMPLATES, RankedModel, RankedProvider, model_context_window,
-    model_display_name, protocol_model_candidates, provider_template_label_for,
-    providers_filtered_from,
+// The view layer (widgets + document model) lives in the `neenee-tui-view`
+// crate. Re-export its modules at their historical `crate::tui::*` paths so the
+// app shell keeps referring to `crate::tui::render`, `crate::tui::document`,
+// etc. unchanged. The seam between shell and view is the borrowed
+// `render::TranscriptView` the event loop fills in each frame.
+pub(crate) use neenee_tui_view::{document, fuzzy, layout, providers, render, selection};
+
+pub(crate) use app::{App, CaretOwner};
+pub(crate) use neenee_tui_view::completion::CompletionKind;
+pub(crate) use neenee_tui_view::modal::{ActivityTab, Modal, Recess};
+pub(crate) use neenee_tui_view::providers::{
+    CustomField, PROVIDER_TEMPLATES, model_display_name, protocol_model_candidates,
+    provider_template_label_for, providers_filtered_from,
 };
 
 use crossterm::{
@@ -44,7 +45,7 @@ use crossterm::{
 use neenee_core::{
     AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
     ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
-    TurnEvent, UserQuestionRequest, mcp::McpConnectionStatus,
+    TurnEvent, UserQuestionRequest,
 };
 use neenee_tui::{Backend, Terminal};
 use std::{
@@ -75,7 +76,6 @@ pub async fn run_tui(
     input_history: Vec<String>,
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
-    mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
     session: Arc<SessionStore>,
     token_ledger: Arc<neenee_core::TokenSourceLedger>,
@@ -178,10 +178,11 @@ pub async fn run_tui(
     let sessions_overview_clone = sessions_overview.clone();
     let open_sessions = Arc::new(AtomicBool::new(false));
     let open_sessions_clone = open_sessions.clone();
-    // Latest session-context snapshot for the session modal (model / tools /
-    // permissions / skills / mcp). Refreshed whenever the modal opens (the
-    // event loop sends `QuerySessionContext`) and after any mutation the
-    // harness applies (revoke / toggle). `None` until the first response lands.
+    // Latest session-context snapshot for the Tools / Mcp / Skills /
+    // Permissions managers (model / tools / permissions / skills / mcp).
+    // Refreshed whenever a manager opens (the event loop sends
+    // `QuerySessionContext`) and after any mutation the harness applies
+    // (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
     // Live nudge config snapshot, mirrored from the harness whenever
@@ -878,6 +879,7 @@ pub async fn run_tui(
         session_modal_follow: true,
         permissions_scroll: 0,
         config_scroll: 0,
+        skills_expanded: None,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -937,6 +939,10 @@ pub async fn run_tui(
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
+        editor_model_settings_only: false,
+        editor_target_is_builtin: false,
+        editor_effort: "high".to_string(),
+        editor_thinking: true,
         custom_field: 0,
         custom_fields: Vec::new(),
         custom_protocol_wire: String::new(),
@@ -948,6 +954,8 @@ pub async fn run_tui(
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
+        custom_effort: "high".to_string(),
+        custom_thinking: true,
         template_choice: 0,
         model_search: false,
         picker_provider: None,
@@ -959,7 +967,6 @@ pub async fn run_tui(
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
         logo: load_user_logo(),
-        mcp_statuses,
     };
 
     // Run app
@@ -1025,7 +1032,6 @@ pub async fn start_tui(
     input_history: Vec<String>,
     initial_messages: Vec<Message>,
     custom_commands: Vec<(String, String)>,
-    mcp_statuses: Vec<(String, McpConnectionStatus)>,
     tui_config: config::TuiConfig,
     session: Arc<SessionStore>,
     token_ledger: Arc<neenee_core::TokenSourceLedger>,
@@ -1038,7 +1044,6 @@ pub async fn start_tui(
         input_history,
         initial_messages,
         custom_commands,
-        mcp_statuses,
         tui_config,
         session,
         token_ledger,

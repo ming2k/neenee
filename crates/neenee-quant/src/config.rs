@@ -4,14 +4,16 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BinanceMarketData, DefaultRiskPolicy, JsonlAuditSink, PaperBroker, QuantRuntime, RiskLimits,
-    SyntheticMarketData, default_paper_starting_cash,
+    BinanceMarketData, DefaultRiskPolicy, JsonlAuditSink, LiveHttpBroker, PaperBroker,
+    QuantRuntime, RiskLimits, SyntheticMarketData, default_paper_starting_cash,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuantConfig {
     #[serde(default)]
     pub market_data: MarketDataConfig,
+    #[serde(default)]
+    pub broker: BrokerRuntimeConfig,
     #[serde(default)]
     pub paper: PaperRuntimeConfig,
 }
@@ -43,6 +45,22 @@ impl QuantConfig {
         }
         if let Some(base_url) = get("NEENEE_QUANT_BINANCE_BASE_URL") {
             self.market_data.binance_base_url = base_url;
+        }
+        if let Some(mode) = get("NEENEE_QUANT_BROKER") {
+            self.broker.mode = mode;
+        }
+        if let Some(base_url) = get("NEENEE_QUANT_LIVE_BROKER_URL") {
+            self.broker.live_http.base_url = base_url;
+        }
+        if let Some(token_env) = get("NEENEE_QUANT_LIVE_BROKER_TOKEN_ENV") {
+            self.broker.live_http.token_env = token_env;
+        }
+        if let Some(token) = get("NEENEE_QUANT_LIVE_BROKER_TOKEN") {
+            self.broker.live_http.token = non_empty_string(token);
+        } else if !self.broker.live_http.token_env.trim().is_empty()
+            && let Some(token) = get(&self.broker.live_http.token_env)
+        {
+            self.broker.live_http.token = non_empty_string(token);
         }
         if let Some(path) = get("NEENEE_QUANT_AUDIT_LOG") {
             self.paper.audit_log = non_empty_path(path);
@@ -97,22 +115,41 @@ impl QuantConfig {
             .as_ref()
             .map(|path| Arc::new(JsonlAuditSink::new(path.clone())) as Arc<dyn crate::AuditSink>)
             .unwrap_or_else(|| Arc::new(crate::NoopAuditSink::default()));
-        let broker = match &self.paper.state_path {
-            Some(path) => Arc::new(
-                PaperBroker::new_with_audit_starting_cash_state_and_commission(
+        let broker = match self.broker.mode.as_str() {
+            "paper" | "paper-trading" => match &self.paper.state_path {
+                Some(path) => Arc::new(
+                    PaperBroker::new_with_audit_starting_cash_state_and_commission(
+                        risk,
+                        audit,
+                        self.paper.starting_cash,
+                        path.clone(),
+                        self.paper.commission_bps,
+                    )?,
+                ) as Arc<dyn crate::BrokerAdapter>,
+                None => Arc::new(PaperBroker::new_with_audit_starting_cash_and_commission(
                     risk,
                     audit,
                     self.paper.starting_cash,
-                    path.clone(),
                     self.paper.commission_bps,
-                )?,
-            ),
-            None => Arc::new(PaperBroker::new_with_audit_starting_cash_and_commission(
-                risk,
-                audit,
-                self.paper.starting_cash,
-                self.paper.commission_bps,
-            )),
+                )) as Arc<dyn crate::BrokerAdapter>,
+            },
+            "live-http" => {
+                let token = self
+                    .broker
+                    .live_http
+                    .token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .ok_or_else(|| "live broker token is required".to_string())?;
+                Arc::new(LiveHttpBroker::new(
+                    self.broker.live_http.base_url.clone(),
+                    token.to_string(),
+                    risk,
+                    audit,
+                )?) as Arc<dyn crate::BrokerAdapter>
+            }
+            other => return Err(format!("unknown quant broker mode '{other}'")),
         };
         Ok(QuantRuntime::with_adapters(market_data, broker))
     }
@@ -138,8 +175,9 @@ impl QuantConfig {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "memory".to_string());
         format!(
-            "market={}, paper_cash={}, commission_bps={}, state={}, audit={}, max_order_notional={}, max_gross_exposure={}, short_selling={}",
+            "market={}, broker={}, paper_cash={}, commission_bps={}, state={}, audit={}, max_order_notional={}, max_gross_exposure={}, short_selling={}",
             self.market_data_source_label(),
+            self.broker.mode,
             self.paper.starting_cash,
             self.paper.commission_bps,
             state,
@@ -164,6 +202,43 @@ impl Default for MarketDataConfig {
         Self {
             source: default_market_data_source(),
             binance_base_url: default_binance_base_url(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerRuntimeConfig {
+    #[serde(default = "default_broker_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub live_http: LiveHttpBrokerConfig,
+}
+
+impl Default for BrokerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_broker_mode(),
+            live_http: LiveHttpBrokerConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveHttpBrokerConfig {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default = "default_live_broker_token_env")]
+    pub token_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+impl Default for LiveHttpBrokerConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            token_env: default_live_broker_token_env(),
+            token: None,
         }
     }
 }
@@ -198,8 +273,25 @@ fn default_market_data_source() -> String {
     "synthetic".to_string()
 }
 
+fn default_broker_mode() -> String {
+    "paper".to_string()
+}
+
 fn default_binance_base_url() -> String {
     "https://api.binance.com".to_string()
+}
+
+fn default_live_broker_token_env() -> String {
+    "NEENEE_QUANT_LIVE_BROKER_TOKEN".to_string()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn non_empty_path(path: String) -> Option<PathBuf> {
@@ -253,6 +345,7 @@ mod tests {
 
         assert_eq!(config.market_data.source, "synthetic");
         assert_eq!(config.market_data_source_label(), "synthetic-paper");
+        assert_eq!(config.broker.mode, "paper");
         assert!(config.paper.audit_log.is_none());
         assert_eq!(config.paper.starting_cash, 100_000.0);
         assert_eq!(config.paper.commission_bps, 0.0);
@@ -314,6 +407,9 @@ mod tests {
             .apply_env_lookup(|key| match key {
                 "NEENEE_QUANT_MARKET_DATA" => Some("binance".to_string()),
                 "NEENEE_QUANT_BINANCE_BASE_URL" => Some("https://example.test".to_string()),
+                "NEENEE_QUANT_BROKER" => Some("live-http".to_string()),
+                "NEENEE_QUANT_LIVE_BROKER_URL" => Some("https://broker.test".to_string()),
+                "NEENEE_QUANT_LIVE_BROKER_TOKEN" => Some("secret-token".to_string()),
                 "NEENEE_QUANT_AUDIT_LOG" => Some("/tmp/audit.jsonl".to_string()),
                 "NEENEE_QUANT_PAPER_STATE" => Some("/tmp/state.json".to_string()),
                 "NEENEE_QUANT_PAPER_STARTING_CASH" => Some("789".to_string()),
@@ -327,6 +423,12 @@ mod tests {
 
         assert_eq!(config.market_data.source, "binance");
         assert_eq!(config.market_data.binance_base_url, "https://example.test");
+        assert_eq!(config.broker.mode, "live-http");
+        assert_eq!(config.broker.live_http.base_url, "https://broker.test");
+        assert_eq!(
+            config.broker.live_http.token.as_deref(),
+            Some("secret-token")
+        );
         assert_eq!(
             config.paper.audit_log.as_deref(),
             Some(Path::new("/tmp/audit.jsonl"))
@@ -340,6 +442,52 @@ mod tests {
         assert_eq!(config.paper.risk.max_order_notional, 123.0);
         assert_eq!(config.paper.risk.max_gross_exposure, 456.0);
         assert!(config.paper.risk.allow_short_selling);
+    }
+
+    #[test]
+    fn env_lookup_can_resolve_live_broker_token_from_custom_env_name() {
+        let mut config = QuantConfig::default();
+        config
+            .apply_env_lookup(|key| match key {
+                "NEENEE_QUANT_BROKER" => Some("live-http".to_string()),
+                "NEENEE_QUANT_LIVE_BROKER_URL" => Some("https://broker.test".to_string()),
+                "NEENEE_QUANT_LIVE_BROKER_TOKEN_ENV" => Some("BROKER_TOKEN".to_string()),
+                "BROKER_TOKEN" => Some("from-custom-env".to_string()),
+                _ => None,
+            })
+            .expect("env override");
+
+        assert_eq!(config.broker.mode, "live-http");
+        assert_eq!(
+            config.broker.live_http.token.as_deref(),
+            Some("from-custom-env")
+        );
+    }
+
+    #[test]
+    fn live_http_broker_requires_explicit_gateway_and_token() {
+        let mut config = QuantConfig::default();
+        config.broker.mode = "live-http".to_string();
+
+        let err = match config.build_runtime() {
+            Ok(_) => panic!("missing token and url should fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("live broker token"), "err: {err}");
+
+        config.broker.live_http.token = Some("secret".to_string());
+        let err = match config.build_runtime() {
+            Ok(_) => panic!("missing url should fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("gateway URL"), "err: {err}");
+
+        config.broker.live_http.base_url = "http://broker.test".to_string();
+        let err = match config.build_runtime() {
+            Ok(_) => panic!("non-https broker url should fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("https"), "err: {err}");
     }
 
     #[test]

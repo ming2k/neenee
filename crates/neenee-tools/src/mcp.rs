@@ -3,6 +3,17 @@
 //! Each configured server is initialized once at startup. Its advertised tools
 //! are adapted to neenee's `Tool` trait and use the same agent execution path
 //! as built-in tools.
+//!
+//! # Error model
+//!
+//! `McpError` separates **transport** failures (the stdio pipe broke — the
+//! server crashed or the child process died) from **protocol** failures (the
+//! server replied with a JSON-RPC `error` object, or a well-formed but useless
+//! response). This distinction is load-bearing for retry safety: only a
+//! transport error justifies a reconnect-and-retry, because a protocol error is
+//! a deterministic, server-side result that re-sending the same call would
+//! reproduce identically — and for a *non-idempotent* MCP tool re-sending it
+//! would repeat a side effect.
 
 use async_trait::async_trait;
 use neenee_core::Tool;
@@ -21,6 +32,48 @@ use tokio::time::{Duration, timeout};
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Per-call timeout for a single JSON-RPC request over an established
+/// connection. A server that accepts the request but never responds (or streams
+/// nothing forever) is released instead of pinning the agent indefinitely.
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A typed MCP error: either a broken transport (retry-safe) or a protocol
+/// result (never retry a protocol error — re-sending an already-applied
+/// non-idempotent call would double a side effect).
+#[derive(Debug)]
+enum McpError {
+    /// The stdio pipe broke: a failed write/read, the child exited, or a
+    /// request timed out. The connection is unusable and a reconnect may help.
+    Transport(String),
+    /// The server replied with a JSON-RPC `error` object (or a malformed
+    /// response). This is a deterministic server-side result — retrying the
+    /// *same* call yields the *same* outcome, so never reconnect on it.
+    Protocol(String),
+}
+
+impl McpError {
+    /// True only for transport-level failures, where reconnecting and retrying
+    /// once could plausibly succeed.
+    fn is_transport(&self) -> bool {
+        matches!(self, McpError::Transport(_))
+    }
+}
+
+impl std::fmt::Display for McpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            McpError::Transport(msg) | McpError::Protocol(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for McpError {}
+
+impl From<McpError> for String {
+    fn from(error: McpError) -> Self {
+        error.to_string()
+    }
+}
 
 pub struct McpLoadResult {
     pub tools: Vec<Arc<dyn Tool>>,
@@ -96,7 +149,7 @@ impl McpClient {
         Ok(client)
     }
 
-    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let payload = json!({
             "jsonrpc": "2.0",
@@ -106,31 +159,57 @@ impl McpClient {
         });
 
         let mut transport = self.transport.lock().await;
-        write_message(&mut transport.stdin, &payload).await?;
+        write_message(&mut transport.stdin, &payload)
+            .await
+            .map_err(|msg| McpError::Transport(format!("MCP {method} write failed: {msg}")))?;
 
-        loop {
-            let response = read_message(&mut transport.stdout).await?;
-            if response.get("id").and_then(Value::as_u64) != Some(id) {
-                continue;
+        // Bound how long a single request can hang the agent: a server that
+        // keeps the pipe open without answering is released rather than
+        // pinning the transport lock forever.
+        let response = timeout(MCP_REQUEST_TIMEOUT, async {
+            loop {
+                let response = read_message(&mut transport.stdout).await.map_err(|msg| {
+                    McpError::Transport(format!("MCP {method} read failed: {msg}"))
+                })?;
+                if response.get("id").and_then(Value::as_u64) != Some(id) {
+                    // An unrelated notification/async reply: skip, keep reading
+                    // for *our* id.
+                    continue;
+                }
+                // Our reply — break out of the async block with it.
+                break Ok(response);
             }
-            if let Some(error) = response.get("error") {
-                return Err(format!("MCP {} error: {}", method, error));
-            }
-            return response
-                .get("result")
-                .cloned()
-                .ok_or_else(|| format!("MCP {} response has no result", method));
+        })
+        .await
+        .map_err(|_| {
+            McpError::Transport(format!(
+                "MCP {method} timed out after {}s",
+                MCP_REQUEST_TIMEOUT.as_secs()
+            ))
+        })??;
+
+        // At this point the response is well-formed and carries our id: a
+        // JSON-RPC `error` object is a *protocol* result, not a transport
+        // failure — the caller must NOT reconnect-and-retry it.
+        if let Some(error) = response.get("error") {
+            return Err(McpError::Protocol(format!("MCP {method} error: {error}")));
         }
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| McpError::Protocol(format!("MCP {method} response has no result")))
     }
 
-    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
         let payload = json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
         });
         let mut transport = self.transport.lock().await;
-        write_message(&mut transport.stdin, &payload).await
+        write_message(&mut transport.stdin, &payload)
+            .await
+            .map_err(|msg| McpError::Transport(format!("MCP {method} notify failed: {msg}")))
     }
 }
 
@@ -215,23 +294,30 @@ impl Tool for McpTool {
             "name": self.original_name,
             "arguments": arguments,
         });
-        // Try with the current (possibly cached) connection. If it fails — the
-        // server may have crashed since the last call — reset the connection,
-        // reconnect, and retry once.
+        // Try with the current (possibly cached) connection. Only a *transport*
+        // failure (the pipe broke — the server crashed) warrants a reconnect
+        // and a single retry. A *protocol* error (a JSON-RPC `error` object) is
+        // a deterministic server-side result: re-sending an already-applied
+        // non-idempotent tool call would repeat its side effect, so it is
+        // returned to the caller verbatim and never retried.
         let client = self.server.ensure_connected().await?;
         match client.request("tools/call", payload.clone()).await {
             Ok(result) => Ok(render_tool_result(&result)),
-            Err(error) => {
+            Err(error) if error.is_transport() => {
                 tracing::warn!(
                     server = %self.server.name(),
                     tool = %self.original_name,
                     %error,
-                    "MCP tool call failed, reconnecting and retrying"
+                    "MCP transport error, reconnecting and retrying once"
                 );
                 self.server.reset().await;
                 let client = self.server.ensure_connected().await?;
                 let result = client.request("tools/call", payload).await?;
                 Ok(render_tool_result(&result))
+            }
+            Err(error) => {
+                // Protocol error: surface it to the caller; do not reconnect.
+                Err(error.to_string())
             }
         }
     }

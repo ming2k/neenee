@@ -19,14 +19,17 @@ impl Tool for BashTool {
     /// file-writing tools. The broker still gates it (`Execute > Read`). See
     /// ADR-0012.
     fn description(&self) -> &str {
-        "Execute a shell command. Use for git, build, test, or any system operation."
+        "Execute a shell command. Use for git, build, test, or any system operation. \
+         A command that produces no output for 10 seconds is treated as blocked \
+         (e.g. waiting on stdin) and is killed early even if `timeout` is longer; \
+         long but healthy commands keep producing output and are not affected."
     }
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to execute" },
-                "timeout": { "type": "integer", "description": "Timeout in seconds (default 30)" }
+                "timeout": { "type": "integer", "description": "Overall timeout in seconds (default 30). A command producing no output for 10s is still killed early as a blocked-command guard." }
             },
             "required": ["command"]
         })
@@ -258,7 +261,7 @@ impl Tool for BashTool {
             };
             let truncated =
                 neenee_core::tool_output::shell_inner_text(&stdout_buf, &stderr_buf, exit).len()
-                    > 8000;
+                    > neenee_core::tool_output::SHELL_MAX_OUTPUT_CHARS;
             Ok(neenee_core::ToolOutput::Shell {
                 command: command.to_string(),
                 stdout: stdout_buf,

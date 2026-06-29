@@ -149,6 +149,25 @@ pub trait Provider: Send + Sync {
     fn take_last_usage(&self) -> Option<TokenUsage> {
         None
     }
+
+    /// Drain and return any **provider-opaque wire credential** the last turn
+    /// accumulated and that the harness should persist on the assistant message
+    /// for faithful multi-turn replay, as a `provider_meta` sidecar map.
+    ///
+    /// The contract mirrors [`Provider::take_last_usage`]: consume-once. A
+    /// provider that needs to round-trip protocol detail across turns (e.g.
+    /// the Anthropic `thinking` block signature, which the upstream requires
+    /// verbatim to reconstruct prior reasoning) overrides this, returning a map
+    /// whose keys it also reads when re-serializing that message. The keys are
+    /// provider-private — `core`/`agent` never inspect them; they are written
+    /// verbatim into the message's `provider_meta` and read back by the same
+    /// provider family on the next request.
+    ///
+    /// Returns `None` (the default) for providers that carry no such detail;
+    /// the harness then leaves `provider_meta` unset.
+    fn take_last_provider_meta(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        None
+    }
 }
 
 /// Mid-turn model-context projection hook. After each tool round, when context
@@ -470,33 +489,90 @@ impl OperationScope {
 
 /// Resolve a (relative or absolute) path for a prefix-containment check: join
 /// to the cwd, canonicalize the parent directory and re-append the file name
-/// so a new file that does not exist yet still resolves. Mirrors the
-/// plan-path resolver in `plan.rs`.
+/// so a new file that does not exist yet still resolves. Mirrors the plan-path
+/// resolver in `plan.rs`.
+///
+/// **Symlink / traversal hardening.** Two failure modes must not let a path
+/// escape a granted prefix:
+/// 1. A lexical traversal like `granted/../../etc/passwd`. We normalize `.` and
+///    `..` lexically *before* the prefix check (via [`lexically_normalized`]),
+///    so the comparison sees `etc/passwd`, not the spoofed prefix.
+/// 2. A symlink inside a granted dir pointing outside. We canonicalize the
+///    *existing* parent (which follows symlinks) when present, so the resolved
+///    target reflects the real on-disk location.
+///
+/// The previous implementation fell back to the **un-normalized** joined path
+/// when `canonicalize` failed, so a `..` component could defeat the prefix
+/// match.
 fn resolve_for_check(path: &str) -> Option<std::path::PathBuf> {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     let p = Path::new(path);
     let cwd = std::env::current_dir().ok()?;
     // Path::join with an absolute path replaces the base, so absolute inputs
-    // are handled correctly too.
-    let parent = p.parent();
-    let file_name = p.file_name();
-    let resolved = match (parent, file_name) {
+    // are handled correctly too. Start from a lexical absolute path, then
+    // normalize `.`/`..` so the prefix check cannot be spoofed by a traversal.
+    let abs = cwd.join(p);
+    let lexical = lexically_normalized(&abs);
+
+    let parent = lexical.parent();
+    let file_name = lexical.file_name();
+    match (parent, file_name) {
         (Some(parent), Some(file_name)) if !parent.as_os_str().is_empty() => {
-            let abs_parent = cwd.join(parent);
-            let canon_parent = abs_parent.canonicalize().unwrap_or(abs_parent);
-            canon_parent.join(file_name)
+            // Canonicalize the parent (following symlinks) only if it exists;
+            // otherwise fall back to the *already-normalized* lexical parent —
+            // never the raw joined path.
+            let canon_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
+            Some(canon_parent.join(file_name))
         }
-        _ => {
-            let abs: PathBuf = cwd.join(p);
-            abs.canonicalize().unwrap_or(abs)
+        _ => Some(lexical.canonicalize().unwrap_or(lexical)),
+    }
+}
+
+/// Lexically normalize `.` and `..` components in a path without touching the
+/// filesystem. `..` pops the last component (but cannot escape an absolute
+/// root), and consecutive separators are collapsed. This makes a prefix check
+/// robust against `granted/../../secret`-style escapes.
+///
+/// Symlinks are *not* resolved here — that is intentionally left to
+/// `canonicalize` on the existing parent in [`resolve_for_check`].
+fn lexically_normalized(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => match out.last() {
+                // Pop a normal component (e.g. `/a/..` → `/`).
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // Below an absolute root or a prefix, `..` is a no-op: it
+                // cannot escape the root, so drop it rather than keeping a
+                // dangling `..` that would corrupt the path.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                // An earlier unresolved `..` (relative path climbing past its
+                // start) is preserved so the result still has meaning.
+                _ => out.push(component),
+            },
+            Component::CurDir => { /* `.` is a no-op */ }
+            other => out.push(other),
         }
-    };
-    Some(resolved)
+    }
+    let mut normalized = PathBuf::new();
+    for component in out {
+        normalized.push(component.as_os_str());
+    }
+    // A path of only `.`/`..` collapses to empty — refer to ".".
+    if normalized.as_os_str().is_empty() {
+        normalized.push(".");
+    }
+    normalized
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandScope, OperationScope, ScopeTarget, Tool};
+    use super::{CommandScope, OperationScope, ScopeTarget, Tool, lexically_normalized};
     use std::path::PathBuf;
 
     #[test]
@@ -522,6 +598,38 @@ mod tests {
         assert!(scope.allows(&ScopeTarget::Path(granted.join("result.md"))));
         // A path outside the granted dir is blocked.
         assert!(!scope.allows(&ScopeTarget::Path(cwd.join("src/main.rs"))));
+    }
+
+    #[test]
+    fn scoped_paths_block_dotdot_traversal_escape() {
+        // A path that lexically starts with the granted dir but escapes via
+        // `..` must NOT pass the prefix check. Regression test: the old
+        // `canonicalize().unwrap_or(raw_join)` fallback left the `..`
+        // components intact, so `granted/../../etc/passwd` started with
+        // `granted` and was admitted.
+        let cwd = std::env::current_dir().unwrap();
+        let granted: PathBuf = cwd.join("sandbox");
+        let scope = OperationScope {
+            paths: Some(vec![granted.clone()]),
+            commands: None,
+        };
+        let escape = granted.join("../../etc/passwd");
+        assert!(
+            !scope.allows(&ScopeTarget::Path(escape)),
+            "traversal escape must be blocked"
+        );
+        // And a genuine child (with an internal `.`) is still allowed.
+        assert!(scope.allows(&ScopeTarget::Path(granted.join("./notes.md"))));
+    }
+
+    #[test]
+    fn lexically_normalized_collapses_dotdot() {
+        use std::path::PathBuf;
+        let n = lexically_normalized(&PathBuf::from("/a/b/../c/./d"));
+        assert_eq!(n, PathBuf::from("/a/c/d"));
+        // `..` that would escape the root stays clamped at the root.
+        let clamped = lexically_normalized(&PathBuf::from("/../etc"));
+        assert_eq!(clamped, PathBuf::from("/etc"));
     }
 
     #[test]

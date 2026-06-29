@@ -1,6 +1,6 @@
 # neenee-tools
 
-Built-in tools for the coding-agent stack: filesystem, shell, web, and
+Built-in tools for the neenee agent stack: filesystem, shell, web, and
 ask-user.
 
 Each tool lives in its own module and self-registers via

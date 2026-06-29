@@ -16,7 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
 use neenee_core::{
     AgentRequest, AgentResponse, ImagePart, ParentStatus, PermissionRequest,
-    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList, mcp::McpConnectionStatus,
+    ProviderPickerSnapshot, Pursuit, Role, SessionOverview, TodoList,
 };
 
 use crate::tui::completion::PathScan;
@@ -31,6 +31,7 @@ use crate::tui::providers::{
 };
 use crate::tui::render::Theme;
 use crate::tui::selection::{SelectionDrag, SelectionState};
+use crate::tui::{ActivityTab, Modal};
 
 use std::collections::{HashMap, VecDeque};
 
@@ -62,132 +63,6 @@ pub struct QueuedDispatch {
     pub text_pastes: Vec<String>,
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum Modal {
-    None,
-    /// Two-stage provider/model picker (`Ctrl+P` / `/model`). **Stage 1** is a
-    /// ranked *provider* list ([`App::providers_filtered`]); **stage 2**
-    /// ([`App::picker_provider`] = `Some`) is the model sub-list for a
-    /// drilled-into multi-model provider ([`App::provider_models_filtered`]).
-    /// Enter on a multi-model provider drills into stage 2; on a single-model
-    /// provider (or any stage-2 row) it activates that (provider, model). Each
-    /// stage mirrors the input-history modal's two-mode design: it opens in
-    /// **browse** mode (composer line not borrowed, typing inert) and `/` drops
-    /// into a **search** sub-layer that borrows the line as a live fuzzy query
-    /// (`App::model_search` distinguishes the two). Esc in search returns to
-    /// browse; Esc in stage 2 returns to stage 1; Esc in stage 1 (or an outside
-    /// click) closes and restores the draft.
-    Provider,
-    /// Input-history recall (Ctrl+R). A two-mode surface: it opens in **browse**
-    /// mode — a plain reverse-chronological list (newest first, top-focused)
-    /// where the composer line is not borrowed and typing is inert — and `/`
-    /// drops into a **search** sub-layer that borrows the line as a live fuzzy
-    /// query (`App::history_search` distinguishes the two). The name is kept for
-    /// continuity even though browsing, not searching, is now the default.
-    /// Rows come from [`App::history_rows`]; Enter inserts the focused entry into
-    /// the composer for editing (never sends). The first Esc in search returns to
-    /// browse, the second (or an outside click) closes and restores the draft.
-    HistorySearch,
-    Permission,
-    Question,
-    /// Unified provider editor: edit the API key and model-id
-    /// of a catalog entry in one place. Reached via `e` in the picker or
-    /// `Enter` on a no-key model. Replaces the sequential ApiKey / Endpoint /
-    /// ModelName modal chain.
-    ModelEditor,
-    /// Provider-template chooser: a short list of curated templates (Custom
-    /// Anthropic relay / OpenAI-compatible / Gemini) shown when adding a provider.
-    /// Reached from the "＋ Add provider" row at the bottom of the picker's stage-1
-    /// list. `↑/↓` move; `Enter` opens the [`Self::CustomProvider`] editor seeded
-    /// from the chosen template; `Esc` returns to the picker. See
-    /// [`App::template_choice`] and [`crate::tui::PROVIDER_TEMPLATES`].
-    ProviderTemplate,
-    /// Provider editor: a per-template form (Name, Base URL, Token, and — for the
-    /// OpenAI-compatible template — Model) for defining a user provider without
-    /// editing config.toml by hand. The protocol and seeded models come from the
-    /// template chosen in [`Self::ProviderTemplate`]; `Tab`/`BackTab` cycle the
-    /// visible fields, and the focused field borrows the composer line (like
-    /// [`Self::ModelEditor`]). `Enter` saves (→ `AgentRequest::AddProvider`) and
-    /// activates; `Esc` returns to the picker. See [`App::custom_field`] and
-    /// friends.
-    CustomProvider,
-    /// Add-model overlay for a custom provider: pick a model from the provider's
-    /// protocol candidates (cycled with `←/→`) or the synthetic "Custom…" slot
-    /// (free-text id in the borrowed input line). `Enter` sends
-    /// `AgentRequest::AddProviderModel`; `Esc` returns to the stage-2 model list.
-    /// Reached from the "＋ Add model" row in a custom provider's stage-2 list.
-    AddModel,
-    Help,
-    Sessions,
-    /// Session context modal: a single scrollable **read-only** dashboard of
-    /// the live session's model, MCP servers, and skills. Opened with the
-    /// `/session` slash command. The dashboard's `TOOLS` line is a one-row
-    /// summary (count) whose `t`/Enter action hands off to [`Modal::Tools`] for
-    /// the interactive toggle surface — tools no longer live inline here.
-    Session,
-    /// Tools manager modal: a centered, dismissable, selectable list of every
-    /// session tool — builtins, `mcp:<server>`, `pursuit`, `plan` — each with a
-    /// `Space` toggle to enable/disable it. Opened with the `/tools` slash
-    /// command (and via `t`/Enter from the session dashboard's TOOLS line).
-    /// [`App::modal_index`] is its selection cursor; data comes from the same
-    /// session-context snapshot `/session` uses.
-    Tools,
-    /// MCP manager modal: a centered, dismissable, selectable list of every
-    /// configured MCP server with its connection status (connected / disabled /
-    /// failed) and tool count. Opened with the `/mcp` slash command. `Space`
-    /// toggles a server on/off for the session (connect/disconnect, applied
-    /// live without rewriting config.toml); `r` reconnects the selected server.
-    /// [`App::modal_index`] is its selection cursor; data comes from the same
-    /// session-context snapshot `/session` uses (its `mcp` pane).
-    Mcp,
-    /// Permissions manager modal: a centered, dismissable overlay listing the
-    /// session's cached "always allow" rules with per-row revoke and a
-    /// clear-all action. Opened with the `/permissions` slash command. This
-    /// is the management surface — distinct from [`Modal::Permission`] (the
-    /// inline real-time approval sheet).
-    Permissions,
-    /// Config manager modal: a centered, dismissable overlay listing the
-    /// configurable categories (Nudge, …). Opened with the `/config` slash
-    /// command (intercepted locally, never sent to the backend). `Enter` /
-    /// `Space` drills into a category's sub-page ([`Modal::ConfigNudge`]);
-    /// `Esc` closes.
-    Config,
-    /// Nudge sub-page of the config manager. Reached from [`Modal::Config`]
-    /// by selecting the "Nudge" row. Shows the master `enabled` switch and
-    /// the four tunable thresholds (`window`, `threshold`, `escalate_at`,
-    /// `path_threshold`). `Space` toggles the enabled flag; `←`/`→` adjust
-    /// the selected threshold; `Esc` returns to the config root. Edits are
-    /// sent as `AgentRequest::UpdateNudgeConfig` and the harness replies with
-    /// `AgentResponse::NudgeConfigUpdated`, which re-seeds the snapshot.
-    ConfigNudge,
-    /// Transcript layout sub-page of the config manager. Reached from
-    /// [`Modal::Config`] by selecting the "Layout" row. Lists the layout
-    /// strategies (Compact / Round-band); `Space` or `Enter` applies the
-    /// selected strategy, which is sent as `AgentRequest::UpdateTuiLayout`
-    /// and persisted to `config.toml`. The harness replies with
-    /// [`AgentResponse::TuiLayoutUpdated`], which re-seeds
-    /// [`App::transcript_layout`]. `Esc` returns to the config root.
-    ConfigLayout,
-    /// Activity overview: the current pursuit (objective + checklist), the live
-    /// plan-progress breakdown, and the running turn/round/model/elapsed/
-    /// status. Opened by clicking the activity bar. The body scrolls via
-    /// [`App::activity_scroll`].
-    Activity,
-    /// Token-source report: a read-only breakdown of how many tokens each
-    /// provider+model reported authoritatively (upstream `usage`) vs. how many
-    /// were filled in by the local char-class estimator. Opened by clicking
-    /// the context meter in the hint bar. Esc / outside-click closes.
-    TokenReport,
-    /// Interactive-input injection panel (L3.5 β): shown when a `bash` command
-    /// is classified interactive and the agent cannot supply its own input.
-    /// Borrows the composer input line (like `Provider`/`ModelEditor`) for
-    /// free-text entry; masks the typed text when the request is `secret`
-    /// (password/passphrase). `Enter` submits (→ `AgentRequest::InputReply`),
-    /// `Esc` cancels (→ empty reply → command runs with closed stdin and fails
-    /// fast with a non-interactive remedy hint).
-    InputInjection,
-}
-
 /// Which surface owns the terminal cursor right now — the single source of
 /// truth that the event loop's hide/show state machine, the immediate
 /// pre-draw cursor re-sync, and the composer's `show_caret` flag all derive
@@ -210,118 +85,6 @@ pub enum CaretOwner {
     Modal,
     /// No text-input surface is active — the cursor must be hidden.
     None,
-}
-
-/// How the live surface recedes while a modal owns the foreground.
-///
-/// A terminal cannot alpha-blend, so a modal expresses "the background has
-/// receded" in one of three ways instead of painting a translucent veil. This
-/// is the single source of truth that both the footer-collapse decision
-/// ([`App`]/event loop) and the per-frame recess pass (`render::recess_backdrop`)
-/// consult, so layout and paint can never disagree about what a modal does to
-/// the surface beneath it.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum Recess {
-    /// The modal floats on the fully-live surface. No dimming, no occlusion —
-    /// used by lightweight overlays that never take over (Question, Permission).
-    None,
-    /// The surface stays mounted and is darkened in place so the centered modal
-    /// reads as the focal layer while context (transcript, input, hint bar,
-    /// activity bar) remains visible. The brightness factor comes from
-    /// [`Theme::modal_dim_factor`](crate::tui::render::Theme::modal_dim_factor).
-    Dim,
-    /// Full takeover: the footer collapses to zero height and the surface is
-    /// occluded with a solid fill. Reserved for context-switching flows
-    /// (session selection) where a clean slate is the intent.
-    Takeover,
-}
-
-impl Modal {
-    /// The recess policy for this modal — the single source of truth that the
-    /// footer-collapse flag and the per-frame recess pass both key off.
-    pub fn recess(self) -> Recess {
-        match self {
-            // Float: lightweight overlays that never touch the surface.
-            Modal::None | Modal::Question | Modal::Permission => Recess::None,
-            // Context switch: the one modal that fully owns the screen.
-            Modal::Sessions => Recess::Takeover,
-            // Everything else recedes the surface for focus while keeping it
-            // visible (transcript, chrome, and all).
-            _ => Recess::Dim,
-        }
-    }
-
-    /// Whether this modal closes when the user clicks outside its rect
-    /// (click-outside-to-dismiss). True for the read-only / info overlays
-    /// (Help, Session, Sessions, Activity) and for the history
-    /// modal and the model picker: their filter query is ephemeral and the real
-    /// composer draft is safely parked in `stashed_input`, so an outside click
-    /// closes them and restores the draft (via [`App::restore_history_draft`]) —
-    /// exactly like Esc. Entry modals that hold precious in-progress input
-    /// (ModelEditor, Question) and the permission sheet stay open so an
-    /// accidental click never discards an API key or a pending decision.
-    ///
-    /// This is the single source of truth for *which* modals are
-    /// click-dismissable; the event loop records the renderer's actual panel
-    /// rect for these modals and leaves every other modal without an
-    /// outside-click target.
-    pub fn dismissable_by_outside_click(self) -> bool {
-        matches!(
-            self,
-            Modal::Help
-                | Modal::Session
-                | Modal::Tools
-                | Modal::Mcp
-                | Modal::Sessions
-                | Modal::Permissions
-                | Modal::Config
-                | Modal::ConfigNudge
-                | Modal::ConfigLayout
-                | Modal::Activity
-                | Modal::HistorySearch
-                | Modal::Provider
-                | Modal::TokenReport
-        )
-    }
-
-    /// Whether this modal renders its own text caret (and thus owns the
-    /// terminal cursor while active) — the modals that borrow the composer
-    /// input line as a free-text field. Read-only / info overlays (Help,
-    /// Session, Activity, …) and the decision sheets (Question, Permission)
-    /// do not own a caret; while they are open the terminal cursor is hidden
-    /// so the host IME has no stale anchor to bind to. This is the modal half
-    /// of [`App::caret_owner`]; the composer half is decided there from
-    /// `focused_target` / `in_envoy_view`.
-    pub fn owns_caret(self) -> bool {
-        matches!(
-            self,
-            Modal::Provider
-                | Modal::ModelEditor
-                | Modal::AddModel
-                | Modal::CustomProvider
-                | Modal::HistorySearch
-        )
-    }
-}
-
-/// Which section the Activity modal is showing. Each section is opened
-/// independently by clicking the corresponding segment on the activity bar,
-/// so there is no tab strip or Left/Right cycling — the variant simply
-/// controls which content the modal body renders.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum ActivityTab {
-    Activity,
-    Todos,
-}
-
-impl ActivityTab {
-    /// Modal title shown in the header.
-    pub fn title(self) -> &'static str {
-        match self {
-            ActivityTab::Activity => "Activity",
-            ActivityTab::Todos => "Todos",
-        }
-    }
 }
 
 /// Capturable snapshot of the main transcript's scroll position, saved when
@@ -469,14 +232,15 @@ pub struct App {
     /// transition (escape codes emitted only on an edge) driven by
     /// [`App::caret_visible`], not a per-frame guess.
     pub cursor_visible: bool,
-    /// Body scroll offset of the session-context dashboard ([`Modal::Session`]).
-    /// Reset to 0 on open. Clamped (and, when `session_modal_follow` is set,
-    /// auto-followed to the tool selection) by the renderer each frame.
+    /// Body scroll offset shared by the Tools / Mcp / Skills managers
+    /// ([`Modal::Tools`] / [`Modal::Mcp`] / [`Modal::Skills`]). Reset to 0 on
+    /// open. Clamped (and, when `session_modal_follow` is set, auto-followed to
+    /// the selection cursor) by the renderer each frame.
     pub session_scroll: usize,
-    /// When true, the session dashboard's body scroll follows the ↑/↓ tool
-    /// selection cursor (the default after open / navigation). Cleared the
-    /// moment the user scrolls manually (wheel / page keys) so they can browse
-    /// freely, and re-set the moment they navigate again.
+    /// When true, the Tools/Mcp/Skills body scroll follows the ↑/↓ selection
+    /// cursor (the default after open / navigation). Cleared the moment the
+    /// user scrolls manually (wheel / page keys) so they can browse freely, and
+    /// re-set the moment they navigate again.
     pub session_modal_follow: bool,
     /// Body scroll offset of the permissions manager modal. Reset to 0 each
     /// time the modal opens; clamped and auto-followed to the selection by the
@@ -486,6 +250,12 @@ pub struct App {
     /// the modal opens; clamped each frame by the renderer. Selection cursor
     /// for the config root and nudge sub-page reuses [`Self::modal_index`].
     pub config_scroll: usize,
+    /// Index of the skills-modal row whose detail block is expanded
+    /// ([`Modal::Skills`]), or `None` when every row is collapsed. `Enter`
+    /// toggles the selected row; reset to `None` each time the modal opens.
+    /// The skills modal reuses [`Self::modal_index`] for its selection cursor
+    /// and [`Self::session_scroll`] for its body scroll.
+    pub skills_expanded: Option<usize>,
     /// Body scroll offset of the history modal (Ctrl+R). Reset to 0 each time
     /// the modal opens (and when toggling browse/search/preview); clamped and
     /// auto-followed to the selection by the renderer each frame.
@@ -516,9 +286,9 @@ pub struct App {
     /// a restart. `None` = not scanned yet.
     pub path_scan_cache: Option<PathScan>,
     pub current_pursuit: Option<Pursuit>,
-    /// Latest session-context snapshot for the session modal, or `None` before
-    /// the first `QuerySessionContext` round-trip completes. Refreshed each
-    /// frame from the response listener.
+    /// Latest session-context snapshot for the Tools / Mcp / Skills /
+    /// Permissions managers, or `None` before the first `QuerySessionContext`
+    /// round-trip completes. Refreshed each frame from the response listener.
     pub session_context: Option<neenee_core::SessionContextSnapshot>,
     /// Live nudge config snapshot, mirrored from
     /// `AgentResponse::NudgeConfigUpdated` each frame. The `/config` modal
@@ -669,8 +439,10 @@ pub struct App {
     pub stashed_input: String,
     /// Provider id targeted by the unified key editor ([`Modal::ModelEditor`]).
     pub editor_target: Option<String>,
-    /// Which editor field is focused. The key editor now has a single field
-    /// (API key), so this stays `0`; retained for caret/field plumbing symmetry.
+    /// Which editor field is focused. `0` = API key (text entry); `1` = effort
+    /// (←/→ cycling, Anthropic only); `2` = thinking (Space toggle, Anthropic
+    /// only). The effort/thinking rows are only shown for the Anthropic
+    /// provider, so `editor_field` is clamped to `0` otherwise.
     pub editor_field: u8,
     /// API-key buffer for the editor (the input line is borrowed for the
     /// focused field).
@@ -678,6 +450,28 @@ pub struct App {
     /// Wire model id the key editor will activate once a key is entered (carried
     /// from the stage-2 selection or the provider's default; not user-editable).
     pub editor_model: String,
+    /// When true, [`Modal::ModelEditor`] edits the selected provider model's
+    /// channel settings only (currently Anthropic effort/thinking), not the
+    /// provider API key or active provider.
+    pub editor_model_settings_only: bool,
+    /// When `editor_model_settings_only` is true, whether the edited model is
+    /// **built-in** (served by a built-in provider like `anthropic`). A built-in
+    /// model's per-model reasoning knobs persist to the `[model_reasoning]`
+    /// table via `EditModelReasoning`; a user-defined model's knobs persist to
+    /// its channel via `EditProviderModel` (ADR-0045).
+    pub editor_target_is_builtin: bool,
+    /// Current reasoning-effort selection in the key editor, as a lowercase wire
+    /// string (`"low"`/`"medium"`/`"high"`/`"xhigh"`/`"max"`). Defaults to
+    /// `"high"` (the upstream wire default); cycled with ←/→. Only meaningful
+    /// when [`Self::editor_target`] is `"anthropic"`. Sent as `SwitchProvider`'s
+    /// `effort` on submit.
+    pub editor_effort: String,
+    /// Current extended-thinking on/off selection in the key editor. Defaults
+    /// to `true` (adaptive thinking on — the recommended mode for Claude).
+    /// Toggled with Space; orthogonal to effort. Only meaningful when
+    /// [`Self::editor_target`] is `"anthropic"`. Sent as `SwitchProvider`'s
+    /// `thinking` on submit.
+    pub editor_thinking: bool,
     /// Focused field of the provider editor ([`Modal::CustomProvider`]) as an
     /// index into [`Self::custom_fields`] — the per-template visible field set
     /// (Name / Base URL / Token / Model). The focused field always borrows the
@@ -705,11 +499,22 @@ pub struct App {
     /// stage-2 list). `None` is create mode.
     pub custom_edit_id: Option<String>,
     /// Provider-editor buffers holding the unfocused text fields (the focused one
-    /// lives in the borrowed composer line). Name / Base URL / Token / Model.
+    /// lives in the borrowed composer line). Name / Base URL / Token / Model /
+    /// Effort.
     pub custom_name: String,
     pub custom_base_url: String,
     pub custom_token: String,
     pub custom_model: String,
+    /// Current reasoning-effort selection in the custom-provider editor, as a
+    /// lowercase wire string. Defaults to `"high"`; cycled with ←/→. Only shown
+    /// for Anthropic-protocol providers; sent as the channel's `effort` on
+    /// submit (clamped to the model's levels at request time).
+    pub custom_effort: String,
+    /// Current extended-thinking on/off selection in the custom-provider
+    /// editor. Defaults to `true`; toggled with Space; orthogonal to effort.
+    /// Only shown for Anthropic-protocol providers; sent as the channel's
+    /// `thinking` on submit.
+    pub custom_thinking: bool,
     /// Selected row of the provider-template chooser ([`Modal::ProviderTemplate`]),
     /// indexing [`crate::tui::PROVIDER_TEMPLATES`]. Cycled with `↑/↓`.
     pub template_choice: usize,
@@ -718,7 +523,7 @@ pub struct App {
     /// with no query field. Pressing `/` enters search (`true`), which borrows
     /// the composer line as a live fuzzy query; the first Esc returns to browse
     /// and the second closes the modal. Mirrors [`Self::history_search`]. See
-    /// [`Self::models_filtered`].
+    /// [`Self::provider_models_filtered`].
     pub model_search: bool,
     /// The two-stage provider picker's current stage. `None` is **stage 1**, the
     /// provider list; `Some(row_idx)` is **stage 2**, the model sub-list for the
@@ -755,9 +560,6 @@ pub struct App {
     /// box). `None` when no user logo is present → built-in wordmark is used.
     /// Passed into the empty-state hero via `TranscriptView::logo`.
     pub logo: Option<Vec<String>>,
-    /// MCP server statuses loaded at startup. Mirrored into the header as a
-    /// compact right-aligned summary.
-    pub mcp_statuses: Vec<(String, McpConnectionStatus)>,
 }
 
 impl App {
@@ -820,6 +622,20 @@ impl App {
     pub fn caret_owner(&self) -> CaretOwner {
         if self.active_modal != Modal::None {
             return if self.active_modal.owns_caret() {
+                CaretOwner::Modal
+            } else if self.active_modal == Modal::Question
+                && self
+                    .question
+                    .as_ref()
+                    .is_some_and(|q| q.is_other_highlighted())
+            {
+                // The Question modal is normally a decision sheet (no caret).
+                // But when the synthetic "Other" free-text row is highlighted
+                // it becomes a real text-input surface, so it must own the
+                // terminal cursor for that one state — otherwise the host IME
+                // has no coordinate to anchor its composition window to. This
+                // is the only state-dependent ownership; every other modal's
+                // ownership is static via `Modal::owns_caret`.
                 CaretOwner::Modal
             } else {
                 CaretOwner::None
@@ -1322,6 +1138,10 @@ impl App {
         self.custom_name.clear();
         self.custom_base_url.clear();
         self.custom_token.clear();
+        // Effort defaults to `high` (the wire default) for a fresh editor.
+        self.custom_effort = "high".to_string();
+        // Thinking defaults to on (adaptive — the recommended mode for Claude).
+        self.custom_thinking = true;
         // Default the (optional) Model field to the first candidate so the
         // OpenAI-compatible template submits a usable model even if left untouched.
         self.custom_model = self
@@ -1357,6 +1177,12 @@ impl App {
         self.custom_base_url = base_url;
         self.custom_token.clear();
         self.custom_model.clear();
+        // Effort defaults to `high` in edit mode too (the TUI doesn't carry the
+        // channel's stored value on the picker snapshot, so we don't pre-fill
+        // the prior override — submitting re-pins it).
+        self.custom_effort = "high".to_string();
+        // Thinking defaults to on (adaptive) in edit mode too.
+        self.custom_thinking = true;
         self.input = name;
         self.set_cursor_end();
         self.picker_provider = None;
@@ -1452,6 +1278,10 @@ impl App {
             Some(CustomField::Name) => self.custom_name = value,
             Some(CustomField::BaseUrl) => self.custom_base_url = value,
             Some(CustomField::Token) => self.custom_token = value,
+            Some(CustomField::Effort) => self.custom_effort = value,
+            // Thinking is toggled directly (not typed), so it has no text
+            // buffer; nothing to stash.
+            Some(CustomField::Thinking) => {}
             _ => {} // Model filter field: value already committed live.
         }
     }
@@ -1464,6 +1294,10 @@ impl App {
             Some(CustomField::Name) => self.custom_name.clone(),
             Some(CustomField::BaseUrl) => self.custom_base_url.clone(),
             Some(CustomField::Token) => self.custom_token.clone(),
+            Some(CustomField::Effort) => self.custom_effort.clone(),
+            // Thinking has no text buffer (toggled directly); show a blank
+            // line — its value renders from the bool, not the input line.
+            Some(CustomField::Thinking) => String::new(),
             _ => String::new(),
         };
         self.set_cursor_end();
@@ -1659,7 +1493,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Number of selectable rows in the session dashboard — the tool list, the
+    /// Number of selectable rows in the Tools modal — the tool list, the
     /// only interactive surface. Used to clamp the Up/Down selection cursor.
     pub fn session_tools_len(&self) -> usize {
         self.session_context
@@ -1669,9 +1503,9 @@ impl App {
     }
 
     /// Build the mutation request implied by toggling the selected tool in the
-    /// session dashboard, or `None` when there is no snapshot or the selection
+    /// Tools modal, or `None` when there is no snapshot or the selection
     /// is out of range. The harness applies it and replies with a fresh
-    /// snapshot that re-renders the dashboard.
+    /// snapshot that re-renders the modal.
     pub fn session_activate_request(&self) -> Option<AgentRequest> {
         let tool = self.session_context.as_ref()?.tools.get(self.modal_index)?;
         Some(AgentRequest::ToggleTool {

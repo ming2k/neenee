@@ -31,6 +31,7 @@ fn enter(input: &mut String, exact: bool) -> InputAction {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -73,6 +74,7 @@ fn enter_with_completion(
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -192,6 +194,7 @@ fn esc_closes_slash_completion_menu() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -229,6 +232,7 @@ fn esc_closes_path_completion_menu() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -265,6 +269,7 @@ fn esc_falls_through_when_no_completion_is_open() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -298,6 +303,7 @@ fn typing_in_compose_returns_insert_char() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -331,6 +337,7 @@ fn backspace_in_compose_returns_backspace_action() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -368,6 +375,7 @@ fn backspace_atomically_deletes_an_image_chip() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -405,6 +413,7 @@ fn backspace_atomically_deletes_a_paste_chip_without_trailing_space() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -437,6 +446,7 @@ fn backspace_falls_through_to_single_char_outside_a_chip() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -510,6 +520,7 @@ fn enter_shell(input: &mut String) -> InputAction {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -543,6 +554,7 @@ fn escape_returns_from_always_confirmation() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -572,6 +584,7 @@ fn plain_ctrl_c_maps_to_semantic_ctrl_c() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -601,6 +614,7 @@ fn star_in_models_modal_toggles_favorite() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -632,6 +646,7 @@ fn letter_in_models_modal_feeds_the_fuzzy_filter() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -665,6 +680,7 @@ fn ctrl_t_toggles_tool_steps() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -726,6 +742,7 @@ fn ctrl_m_opens_models_modal_when_no_modal_is_open() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -753,6 +770,7 @@ fn key_in_view(code: KeyCode, in_envoy_view: bool, input: &mut String) -> InputA
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -780,6 +798,7 @@ fn key_with_focus(code: KeyCode) -> InputAction {
             has_focused_target: true,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -988,6 +1007,7 @@ fn run_key(
             has_focused_target: has_focus,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -1699,6 +1719,7 @@ fn run_history_key(
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -1788,6 +1809,7 @@ fn ctrl_r_opens_history_modal_when_no_modal_is_open() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -1816,6 +1838,7 @@ fn ctrl_r_opens_history_modal_when_no_modal_is_open() {
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -1848,6 +1871,7 @@ fn up_with_queued(has_queued: bool) -> InputAction {
             has_focused_target: false,
             has_queued,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -1899,6 +1923,7 @@ fn up_arrow_in_browse_does_not_recall_queued() {
             has_focused_target: true,
             has_queued: true,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );
@@ -1933,6 +1958,7 @@ fn run_paste(
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     )
@@ -2056,6 +2082,7 @@ fn multiline_arrow(seed: &str, cursor: usize, code: KeyCode) -> (InputAction, us
             has_focused_target: false,
             has_queued: false,
             history_searching: false,
+        ..Default::default()
         },
         &mut drag,
     );

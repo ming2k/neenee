@@ -43,8 +43,12 @@ pub enum ToolOutput {
     PermissionDenied { tool: String },
     /// A shell command execution. Carries stdout/stderr/exit separately so the
     /// UI never has to string-sniff for `Exit N` / `STDOUT:` / `STDERR:`
-    /// markers. `truncated` records whether the composed output exceeded the
-    /// tool's size cap and was cut.
+    /// markers. `truncated` is a **size hint**: `true` means the composed
+    /// output crosses [`crate::tool_output::SHELL_MAX_OUTPUT_CHARS`] and text
+    /// consumers will cut it. The structured fields themselves are *not*
+    /// pre-cut — they carry the full output so a UI can render/paginate the
+    /// complete step; the hint just lets a text-based caller truncate without
+    /// recomputing the length.
     ///
     /// `lines` is the **TUI-authoritative** view: stdout and stderr lines in
     /// their true interleaved arrival order, each tagged with its source
@@ -623,21 +627,28 @@ pub fn shell_inner_text(stdout: &str, stderr: &str, exit: Option<i32>) -> String
     }
 }
 
+/// The composed shell output is "large" once it crosses this many bytes. Both
+/// the producer (`BashTool`, which pre-computes the `truncated` hint from the
+/// same length) and the consumer (`shell_to_text`, which performs the actual
+/// cut for text-based callers) read this single source of truth so the two
+/// cannot drift apart.
+pub const SHELL_MAX_OUTPUT_CHARS: usize = 8000;
+/// When the output is large, the text path keeps this many leading characters.
+pub const SHELL_TRUNCATED_CHARS: usize = 4000;
+
 /// Reconstruct the legacy bash-tool display string from structured fields.
 /// Mirrors `BashTool::call` byte-for-byte so migrating to [`ToolOutput::Shell`]
-/// changes nothing for text-based consumers. The truncation policy (8000-char
-/// threshold, 4000-char cut) lives here as the back-compat bridge; structured
-/// consumers read the raw fields directly and bypass this.
+/// changes nothing for text-based consumers. The truncation policy
+/// ([`SHELL_MAX_OUTPUT_CHARS`] threshold, [`SHELL_TRUNCATED_CHARS`] cut) lives
+/// here as the back-compat bridge; structured consumers read the raw fields
+/// directly and bypass this.
 fn shell_to_text(stdout: &str, stderr: &str, exit: Option<i32>, truncated: bool) -> String {
-    const MAX_OUTPUT_CHARS: usize = 8000;
-    const TRUNCATED_CHARS: usize = 4000;
-
     let inner = shell_inner_text(stdout, stderr, exit);
-    if truncated || inner.len() > MAX_OUTPUT_CHARS {
+    if truncated || inner.len() > SHELL_MAX_OUTPUT_CHARS {
         format!(
             "[Output truncated: {} chars total]\n{}\n\n[Output was large — use grep or read_text if you need specific parts]",
             inner.len(),
-            truncate_utf8(&inner, TRUNCATED_CHARS)
+            truncate_utf8(&inner, SHELL_TRUNCATED_CHARS)
         )
     } else {
         inner

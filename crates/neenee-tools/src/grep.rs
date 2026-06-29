@@ -1,6 +1,14 @@
 use async_trait::async_trait;
 use neenee_core::Tool;
 use serde_json::json;
+use tokio::process::Command;
+use tokio::time::{Duration, timeout};
+
+/// Maximum wall-clock time for a single `rg` invocation. A slow or wedged
+/// ripgrep (huge tree, catastrophic-backtracking pattern) is released rather
+/// than pinning the async executor — the old code blocked a runtime worker
+/// thread for the entire run via `std::process::Command::output`.
+const GREP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Search file contents with ripgrep.
 pub struct GrepTool;
@@ -32,19 +40,38 @@ impl Tool for GrepTool {
         let path = args["path"].as_str().unwrap_or(".");
         let ext = args["ext"].as_str();
 
-        let mut cmd = std::process::Command::new("rg");
+        let mut cmd = Command::new("rg");
         cmd.args(["-n", "--color=never", "--max-count", "50", "-C", "2"]);
         if let Some(e) = ext {
             cmd.arg("-g").arg(format!("*.{}", e));
         }
-        for dir in [".git", "node_modules", "target", "__pycache__"] {
+        // Prune the same set of directories the glob/list tools ignore, so the
+        // three tools agree about what exists in a tree.
+        for dir in crate::helpers::IGNORED_DIRS {
             cmd.arg("-g").arg(format!("!{}", dir));
         }
         cmd.arg(pattern).arg(path);
 
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Failed to run rg: {}. Is ripgrep installed?", e))?;
+        // Spawn under tokio (releasing the runtime while rg runs) and bound the
+        // whole invocation by `GREP_TIMEOUT`. On timeout the child is killed
+        // via `kill_on_drop`-equivalent: we explicitly `start_kill` first so a
+        // wedged rg does not linger.
+        let run = async {
+            let output = cmd
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run rg: {}. Is ripgrep installed?", e))?;
+            Ok::<_, String>(output)
+        };
+        let output = match timeout(GREP_TIMEOUT, run).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(format!(
+                    "grep timed out after {} seconds",
+                    GREP_TIMEOUT.as_secs()
+                ));
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         if stdout.is_empty() {

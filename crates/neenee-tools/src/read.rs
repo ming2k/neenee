@@ -52,15 +52,34 @@ impl Tool for ReadTextTool {
             ));
         }
 
-        let bytes = std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
-
         let lang = std::path::Path::new(path)
             .extension()
             .map(|e| e.to_string_lossy().to_string());
 
-        if is_binary_extension(path) || is_binary_content(&bytes[..bytes.len().min(4096)]) {
+        // Binary rejection happens *before* reading the whole file. The old
+        // code did `std::fs::read(path)` (loading the entire file into memory)
+        // and only then sniffed the first 4 KB — so a multi-gigabyte binary was
+        // fully read just to be refused. Now:
+        //   1. A known binary extension refuses immediately (no read at all).
+        //   2. Otherwise read only the leading 4 KB to sniff for NUL/control
+        //      bytes; only if that looks textual do we read the full file.
+        if is_binary_extension(path) {
             return Err(format!("Cannot read binary file: {}", path));
         }
+        {
+            use std::io::Read;
+            let mut head = [0u8; 4096];
+            let mut file = std::fs::File::open(path)
+                .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+            let n = file
+                .read(&mut head)
+                .map_err(|e| format!("Failed to read '{}': {}", path, e))?;
+            if is_binary_content(&head[..n]) {
+                return Err(format!("Cannot read binary file: {}", path));
+            }
+        }
+
+        let bytes = std::fs::read(path).map_err(|e| format!("Failed to read '{}': {}", path, e))?;
 
         let content =
             String::from_utf8(bytes).map_err(|_| format!("File '{}' is not valid UTF-8", path))?;

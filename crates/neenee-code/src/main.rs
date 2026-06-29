@@ -412,7 +412,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_m_name = catalog::resolved_model_name(&config, &initial_p_name);
 
     // Spawn Agent Background Task
-    let mcp_statuses_for_tui = mcp_runtime.statuses_snapshot();
     // The agent background task takes ownership of `config`; pull the TUI
     // presentation config out first so it can be handed to the TUI later.
     let tui_config = config.tui.clone();
@@ -461,7 +460,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_history,
         restored_messages,
         custom_command_suggestions,
-        mcp_statuses_for_tui,
         tui_config,
         session.clone(),
         token_ledger.clone(),

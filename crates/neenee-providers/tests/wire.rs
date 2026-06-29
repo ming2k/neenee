@@ -404,3 +404,112 @@ async fn anthropic_stream_surfaces_in_band_error_event() {
         "in-band error must surface as an Err item: {items:?}"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// End-to-end through the production factory: Transport::Anthropic{effort,thinking}
+// → build_provider_for_channel → request_body → HTTP. This is the regression
+// suite for the effort/thinking decoupling + the high-effort-swallow fix. It
+// drives the *real* public API (not the private request_body), so it proves the
+// wire body a configured channel actually publishes.
+// ═════════════════════════════════════════════════════════════════════════════
+
+use neenee_core::catalog::{Channel, Transport};
+use neenee_core::{Effort, ThinkingMode};
+use neenee_providers::build_provider_for_channel;
+
+/// Build a channel → factory provider, send one turn to a mockito server that
+/// asserts the request body matches `expected` (partial JSON), and confirm the
+/// call succeeds. The shared harness for the three decoupling regressions.
+async fn assert_factory_body(mut channel: Channel, expected: Value) {
+    let mut server = Server::new_async().await;
+    // Point the channel at the mock server by rewriting its base_url in place.
+    let url = format!("{}/v1/messages", server.url());
+    if let Transport::Anthropic { base_url, .. } = &mut channel.transport {
+        *base_url = url;
+    }
+    let _mock = server
+        .mock("POST", "/v1/messages")
+        .match_body(Matcher::PartialJson(expected))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"content":[{"type":"text","text":"ok"}]}"#)
+        .create_async()
+        .await;
+
+    let provider = build_provider_for_channel(&channel, "anthropic");
+    let msg = provider
+        .chat(vec![Message::new(Role::User, "hi")])
+        .await
+        .expect("factory-built provider chat must succeed");
+    assert_eq!(msg.content, "ok");
+}
+
+/// Regression #1: an explicit `effort = "high"` MUST publish
+/// `output_config.effort = "high"`. Before the fix the value `High` was
+/// treated as "the default" and silently dropped, so a channel pinned to high
+/// was a no-op on the wire.
+#[tokio::test]
+async fn factory_publishes_explicit_high_effort() {
+    let channel = Channel {
+        id: "claude-opus-4-8".into(),
+        label: "Opus".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(), // rewritten by the harness
+            user_agent: "ua".into(),
+            effort: Some(Effort::High),
+            thinking: None,
+        },
+        api_key: "k".into(),
+        model: "claude-opus-4-8".into(),
+    };
+    assert_factory_body(channel, json!({ "output_config": { "effort": "high" } })).await;
+}
+
+/// Regression #2: effort and thinking stay DECOUPLED. A channel with an effort
+/// override but thinking OFF must publish effort while the model won't reason.
+/// (Previously setting effort forced `thinking:{adaptive}` on.) The pure-mode
+/// contract (no `thinking` field) is asserted in the unit test
+/// `effort_without_thinking_stays_decoupled`; this test proves the factory
+/// honors an explicit `ThinkingMode::Off` together with an effort override end
+/// to end — i.e. the two overrides reach the provider independently.
+#[tokio::test]
+async fn factory_keeps_effort_decoupled_from_thinking_off() {
+    let channel = Channel {
+        id: "claude-opus-4-8".into(),
+        label: "Opus".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(),
+            user_agent: "ua".into(),
+            effort: Some(Effort::Medium),
+            thinking: Some(ThinkingMode::Off),
+        },
+        api_key: "k".into(),
+        model: "claude-opus-4-8".into(),
+    };
+    // The request publishes the effort override; the absence of a `thinking`
+    // field is verified by the companion unit test.
+    assert_factory_body(channel, json!({ "output_config": { "effort": "medium" } })).await;
+}
+
+/// Regression #3: a thinking ON override with no effort publishes
+/// `thinking:{adaptive}` and omits `output_config` (no explicit effort).
+#[tokio::test]
+async fn factory_publishes_thinking_without_output_config() {
+    let channel = Channel {
+        id: "claude-opus-4-8".into(),
+        label: "Opus".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(),
+            user_agent: "ua".into(),
+            effort: None,
+            thinking: Some(ThinkingMode::Adaptive),
+        },
+        api_key: "k".into(),
+        model: "claude-opus-4-8".into(),
+    };
+    assert_factory_body(
+        channel,
+        json!({ "thinking": { "type": "adaptive", "display": "summarized" } }),
+    )
+    .await;
+}

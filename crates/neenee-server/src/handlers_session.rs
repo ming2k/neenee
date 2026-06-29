@@ -37,7 +37,8 @@ pub async fn delete(
 }
 
 /// `AgentRequest::QuerySessionContext` — build and push the
-/// model/tools/permissions/skills/mcp snapshot for the session modal.
+/// model/tools/permissions/skills/mcp snapshot for the Tools / Mcp / Skills /
+/// Permissions manager modals.
 pub fn query_context(
     agent: &Agent,
     skills_registry: &Arc<SkillRegistry>,

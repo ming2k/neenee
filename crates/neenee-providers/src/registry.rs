@@ -5,7 +5,10 @@ use neenee_core::Provider;
 use neenee_core::catalog::{Channel, Transport};
 use std::sync::Arc;
 
-use crate::{AnthropicMessagesProvider, GeminiProvider, NEENEE_USER_AGENT, OpenAiCompatProvider};
+use crate::{
+    AnthropicMessagesProvider, GeminiProvider, NEENEE_USER_AGENT, OpenAiCompatProvider,
+    ThinkingConfig,
+};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // OpenAI-compatible provider wrappers for popular Chinese & global services
@@ -185,6 +188,8 @@ pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn 
         Transport::Anthropic {
             base_url,
             user_agent,
+            effort,
+            thinking,
         } => {
             let mut provider = AnthropicMessagesProvider::with_user_agent(
                 channel.api_key.clone(),
@@ -198,6 +203,22 @@ pub fn build_provider_for_channel(channel: &Channel, entry_id: &str) -> Arc<dyn 
             if let Some(max_tokens) = anthropic_model_max_tokens(&channel.model) {
                 provider = provider.with_max_tokens(max_tokens);
             }
+            // Apply the two reasoning knobs INDEPENDENTLY. effort (depth) and
+            // thinking (on/off) are orthogonal on the wire, so we never couple
+            // them: setting effort must not implicitly turn thinking on, and an
+            // explicit thinking override must not change effort. Each is an
+            // optional override layered onto the model-derived default
+            // (`for_model`: thinking **off** unless the user opts in — ADR-0046);
+            // anything unset keeps that default. Effort is clamped to the
+            // model's registered levels at request-build time.
+            let mut cfg = ThinkingConfig::for_model(&neenee_core::model::resolve(&channel.model));
+            if let Some(mode) = thinking {
+                cfg = cfg.with_mode(*mode);
+            }
+            if let Some(effort) = effort {
+                cfg = cfg.with_effort(*effort);
+            }
+            provider = provider.with_thinking(cfg);
             Arc::new(provider)
         }
         Transport::OpenAiCompat {
@@ -296,6 +317,8 @@ mod build_tests {
             transport: Transport::Anthropic {
                 base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
                 user_agent: "agent".to_string(),
+                effort: None,
+                thinking: None,
             },
             api_key: "go-key".to_string(),
             model: "minimax-m3".to_string(),

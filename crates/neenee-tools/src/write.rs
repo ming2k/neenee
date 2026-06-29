@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use neenee_core::Tool;
 use serde_json::json;
 
-use crate::helpers::json_string;
+use crate::helpers::{json_string, save_file_atomic};
 
 /// Write content to a file (overwrites).
 pub struct WriteFileTool;
@@ -38,13 +38,10 @@ impl Tool for WriteFileTool {
         let path = args["path"].as_str().ok_or("Missing 'path'")?;
         let content = args["content"].as_str().ok_or("Missing 'content'")?;
 
-        // Create parent directories if needed
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create dirs for '{}': {}", path, e))?;
-        }
-
-        std::fs::write(path, content).map_err(|e| format!("Failed to write '{}': {}", path, e))?;
+        // Write atomically (temp file + fsync + rename) so an interrupted write
+        // never leaves a half-written, corrupt file in place of the original.
+        save_file_atomic(std::path::Path::new(path), content.as_bytes())
+            .map_err(|e| format!("Failed to write '{}': {}", path, e))?;
         Ok(neenee_core::ToolOutput::Patch {
             path: path.to_string(),
             op: neenee_core::PatchOp::Create,

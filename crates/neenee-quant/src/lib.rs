@@ -35,14 +35,16 @@ pub mod orders;
 pub mod runtime;
 
 pub use backtest::BacktestTool;
-pub use config::{MarketDataConfig, PaperRuntimeConfig, QuantConfig};
+pub use config::{
+    BrokerRuntimeConfig, LiveHttpBrokerConfig, MarketDataConfig, PaperRuntimeConfig, QuantConfig,
+};
 pub use market_data::MarketDataTool;
 pub use orders::{CancelOrderTool, ListPositionsTool, PlaceOrderTool};
 pub use runtime::{
     AuditSink, BinanceMarketData, BrokerAdapter, CancelOrderRequest, DefaultRiskPolicy,
-    JsonHttpTransport, JsonlAuditSink, MarketDataAdapter, NoopAuditSink, OrderDecision,
-    OrderRequest, OrderSide, OrderType, PaperBroker, QuantRuntime, ReqwestJsonTransport,
-    RiskLimits, RiskPolicy, SyntheticMarketData, default_paper_starting_cash,
+    JsonHttpTransport, JsonlAuditSink, LiveHttpBroker, MarketDataAdapter, NoopAuditSink,
+    OrderDecision, OrderRequest, OrderSide, OrderType, PaperBroker, QuantRuntime,
+    ReqwestJsonTransport, RiskLimits, RiskPolicy, SyntheticMarketData, default_paper_starting_cash,
 };
 
 /// Every quant tool, constructed with defaults. A convenience for a binary

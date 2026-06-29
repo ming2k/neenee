@@ -402,7 +402,7 @@ impl Agent {
         let turn_counter = Arc::new(std::sync::Mutex::new(0u64));
         let todos = Arc::new(std::sync::Mutex::new(neenee_core::TodoList::default()));
         let todo_context =
-            neenee_core::TodoToolContext::shared(Arc::clone(&todos), Arc::clone(&turn_counter));
+            neenee_core::TodoToolContext::new(Arc::clone(&todos), Arc::clone(&turn_counter));
         toolset.insert(Arc::new(crate::todo_tools::TodoWriteTool::new(
             todo_context.clone(),
         )));
@@ -596,16 +596,14 @@ impl Agent {
     /// [`NudgeConfig::disabled`] on envoys and the review diagnostic so they
     /// run unobstructed regardless of user settings.
     pub fn set_nudge_config(&self, config: neenee_core::NudgeConfig) {
-        if let Ok(mut guard) = self.nudge_config.write() {
-            *guard = config;
-        }
+        *self.nudge_config.write().unwrap_or_else(|e| e.into_inner()) = config;
     }
 
     /// Snapshot of the live nudge configuration. The `/config` modal reads
     /// this to render the current values; the round boundary reads
     /// `enabled` to gate [`Self::apply_guard_actions`].
     pub fn nudge_config(&self) -> neenee_core::NudgeConfig {
-        self.nudge_config.read().map(|g| *g).unwrap_or_default()
+        *self.nudge_config.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Whether the deterministic read-loop guard is currently armed (allowed
@@ -850,15 +848,11 @@ impl Agent {
     }
 
     pub fn set_thread_id(&self, thread_id: impl Into<String>) {
-        if let Ok(mut guard) = self.thread_id.lock() {
-            *guard = Some(thread_id.into());
-        }
+        *self.thread_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread_id.into());
     }
 
     pub fn clear_thread_id(&self) {
-        if let Ok(mut guard) = self.thread_id.lock() {
-            *guard = None;
-        }
+        *self.thread_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Current task list snapshot. Read by the harness to mirror into the
@@ -869,16 +863,12 @@ impl Agent {
 
     /// Replace the task list. Used by session-restore paths on resume.
     pub fn set_todos(&self, todos: neenee_core::TodoList) {
-        if let Ok(mut guard) = self.todos.lock() {
-            *guard = todos;
-        }
+        *self.todos.lock().unwrap_or_else(|e| e.into_inner()) = todos;
     }
 
     /// Drop the task list.
     pub fn clear_todos(&self) {
-        if let Ok(mut guard) = self.todos.lock() {
-            *guard = neenee_core::TodoList::default();
-        }
+        *self.todos.lock().unwrap_or_else(|e| e.into_inner()) = neenee_core::TodoList::default();
     }
 
     /// Current harness turn counter — bumped at the start of every
@@ -886,15 +876,14 @@ impl Agent {
     /// whose `updated_at_turn` lags the current turn by more than
     /// `TODO_STALE_TURN_THRESHOLD`).
     pub fn turn_count(&self) -> u64 {
-        self.turn_counter.lock().map(|g| *g).unwrap_or(0)
+        *self.turn_counter.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Advance the turn counter. Called once per `execute_turn`. The TUI
     /// reads the resulting value to compute "not updated for N turns".
     pub fn bump_turn(&self) {
-        if let Ok(mut g) = self.turn_counter.lock() {
-            *g = g.saturating_add(1);
-        }
+        let mut g = self.turn_counter.lock().unwrap_or_else(|e| e.into_inner());
+        *g = g.saturating_add(1);
     }
 
     pub fn get_unattended(&self) -> bool {
@@ -1215,9 +1204,7 @@ impl Agent {
     /// after reconnecting servers and re-discovering their tools. The built-in
     /// built-in capabilities are untouched.
     pub fn replace_mcp_tools(&self, tools: Vec<Arc<dyn Tool>>) {
-        if let Ok(mut guard) = self.mcp_tools.write() {
-            *guard = tools;
-        }
+        *self.mcp_tools.write().unwrap_or_else(|e| e.into_inner()) = tools;
     }
 
     /// A clone of the shared MCP-tools holder, for passing to a
@@ -1674,6 +1661,11 @@ impl Agent {
                 // provider delegates to whichever concrete provider is active.
                 provider: Some(self.provider.provider_id()),
                 model: Some(self.provider.model()),
+                // Drain any provider-opaque wire credential the turn
+                // accumulated (e.g. the Anthropic thinking signature) so the
+                // next replay re-emits it verbatim. None for providers that
+                // carry none; the map is opaque to this layer.
+                provider_meta: self.provider.take_last_provider_meta(),
                 hidden: false,
                 children: None,
                 envoy_meta: None,
@@ -2584,7 +2576,7 @@ impl Agent {
         if !self.is_tool_enabled(call.name.as_str()) {
             tracing::warn!(tool = %call.name, "tool disabled this session");
             return ToolOutput::Text(format!(
-                "Tool '{}' is disabled for this session. Re-enable it in the session modal (Ctrl+I).",
+                "Tool '{}' is disabled for this session. Re-enable it in the Tools modal (/tools).",
                 call.name
             ));
         }

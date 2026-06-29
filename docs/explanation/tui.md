@@ -88,6 +88,48 @@ interval; any further events the terminal has already queued are read
 with a zero-timeout poll and share a single redraw. Pasting a paragraph
 therefore repaints once instead of once per character.
 
+## Three layers, one-way seam
+
+`neenee-tui` is the *bottom* of a three-layer stack. Each layer is its own
+crate, and dependencies point strictly downward — the compiler enforces
+that no higher layer's types leak into a lower one:
+
+```text
+neenee-tui          engine: retained cell grid, back/front diff, crossterm
+                    (ADR-0038). Knows nothing about neenee.
+      ▲  widgets render into the grid
+neenee-tui-view     view: the widget tree + the semantic document model
+                    (ADR-0045). Renders neenee-core domain types, so it
+                    depends on neenee-core — but never on the shell.
+      ▲  the shell hands it borrowed data each frame
+neenee-code::tui    app shell: App state, the event loop, input→action
+                    mapping, terminal lifecycle. Owns the data.
+```
+
+The split exists so the rendering engine, the widgets, and the application
+wiring can be reasoned about (and tested) in isolation — and so the widget
+layer can never reach back into application state. The middle layer,
+**`neenee-tui-view`**, owns everything that is a *pure function of borrowed
+data*: the transcript and tool-step widgets, the modal sheets, the document
+model, the layout/hit-testing map, and the text-selection state.
+
+The shell and the view never share a mutable `App`. They communicate
+through one borrowed struct, `render::TranscriptView<'a>`, that the event
+loop fills in each frame from its snapshot — `&[TranscriptMessage]`,
+`&SelectionState`, `&Theme`, plus activity/pursuit/todo snapshots — and
+hands to `render::draw_transcript`. It carries **no reference to `App`**,
+which is what keeps the view layer a pure rendering function: there is no
+back-channel into application state, so a widget can only draw what the
+shell chose to hand it. The per-modal overlays (`draw_models_modal`,
+`draw_permission_sheet`, …) take their own small borrowed view structs the
+same way. The reference page
+[TUI architecture](../reference/tui/architecture.md) maps every module to
+its layer.
+
+This is why the two channels below can run freely: the producer writes the
+document model the view renders, and the view never needs to know how that
+model got there.
+
 ## Two channels: streaming producer, frame consumer
 
 Provider streaming and rendering run on separate tasks so streaming

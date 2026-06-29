@@ -12,6 +12,7 @@ pub mod commands;
 pub mod mcp;
 pub mod project;
 pub mod search;
+mod ssrf;
 
 mod abort;
 mod ask_user;

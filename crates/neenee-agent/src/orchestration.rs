@@ -42,7 +42,7 @@ use neenee_store::{
     config::Config,
     session::{
         ContextProjectionCheckpoint, ContextProjectionResult, PursuitCheckpoint, SessionStore,
-        UNCAPPED_ITERATIONS, estimate_chars, estimate_tokens, run_compaction,
+        UNCAPPED_ITERATIONS, estimate_bytes, estimate_tokens, run_compaction,
     },
 };
 
@@ -251,6 +251,13 @@ impl Provider for ProxyProvider {
             .unwrap_or_else(|error| error.into_inner())
             .take_last_usage()
     }
+
+    fn take_last_provider_meta(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        self.holder
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .take_last_provider_meta()
+    }
 }
 
 // ── /debug network capture ────────────────────────────────────────────
@@ -404,7 +411,7 @@ impl neenee_core::ContextProjectionGate for MidTurnPruneProjectionGate {
             self.prune_protect_chars,
             ContextProjectionSettings::PRUNE_MIN_RECLAIM_CHARS,
         )?;
-        let after_chars = estimate_chars(&messages);
+        let after_chars = estimate_bytes(&messages);
         let checkpoint = ContextProjectionCheckpoint {
             operation: neenee_store::session::ContextProjectionKind::Prune,
             archived_messages: outcome.originals.len(),
@@ -1092,7 +1099,7 @@ pub async fn prune_and_commit(
     session: &SessionStore,
     settings: &ContextProjectionSettings,
 ) -> Result<(), String> {
-    let before_chars = estimate_chars(history);
+    let before_chars = estimate_bytes(history);
     let Some(outcome) = neenee_core::prune_tool_results(
         history,
         settings.prune_protect_chars,
@@ -1100,7 +1107,7 @@ pub async fn prune_and_commit(
     ) else {
         return Ok(());
     };
-    let after_chars = estimate_chars(history);
+    let after_chars = estimate_bytes(history);
     let checkpoint = ContextProjectionCheckpoint {
         operation: neenee_store::session::ContextProjectionKind::Prune,
         archived_messages: outcome.originals.len(),

@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::sync::mpsc;
 
-use crate::tui::app::{ActivityTab, App, CaretOwner, Modal};
+use crate::tui::app::{App, CaretOwner};
 use crate::tui::completion::CompletionKind;
 use crate::tui::completion::{manual_walk, mention_range_at, path_query_match};
 use crate::tui::config;
@@ -17,6 +17,7 @@ use crate::tui::selection::{SelectionDrag, SelectionState};
 use crate::tui::transcript::{
     finalize_streaming_reasoning, transcript_message_from_core, transcript_messages_from_core,
 };
+use crate::tui::{ActivityTab, Modal};
 use neenee_core::{AgentRequest, ProviderPickerSnapshot};
 
 use std::collections::HashMap;
@@ -95,6 +96,7 @@ fn restored_reasoning_is_not_shown_as_running() {
         content_blob: None,
         display_content: None,
         reasoning_content: Some("step-by-step reasoning".to_string()),
+        provider_meta: None,
         tool_calls: None,
         tool_call_id: None,
         images: None,
@@ -184,6 +186,7 @@ fn restored_native_tool_calls_are_visible() {
         content_blob: None,
         display_content: None,
         reasoning_content: None,
+        provider_meta: None,
         tool_calls: Some(vec![ToolCall {
             id: "call".to_string(),
             name: "read_text".to_string(),
@@ -212,6 +215,7 @@ fn restored_tool_results_merge_into_steps_in_fifo_order() {
             content_blob: None,
             display_content: None,
             reasoning_content: None,
+            provider_meta: None,
             tool_calls: Some(vec![
                 ToolCall {
                     id: "one".to_string(),
@@ -506,7 +510,7 @@ fn history_rows_browses_reverse_then_ranks_search() {
 
 #[test]
 fn history_modal_is_click_dismissable_and_restores_draft() {
-    use crate::tui::app::Modal;
+    use crate::tui::Modal;
     // The history modal and the flat model picker join the click-outside-to-
     // dismiss set (their filter is ephemeral, the draft is parked); entry modals
     // that hold precious input (the editor) stay non-dismissable.
@@ -595,6 +599,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         session_modal_follow: true,
         permissions_scroll: 0,
         config_scroll: 0,
+        skills_expanded: None,
         history_scroll: 0,
         history_modal_follow: true,
         history_preview: false,
@@ -652,6 +657,10 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         editor_field: 0,
         editor_key: String::new(),
         editor_model: String::new(),
+        editor_model_settings_only: false,
+        editor_target_is_builtin: false,
+        editor_effort: "high".to_string(),
+        editor_thinking: true,
         custom_field: 0,
         custom_fields: Vec::new(),
         custom_protocol_wire: String::new(),
@@ -663,6 +672,8 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         custom_base_url: String::new(),
         custom_token: String::new(),
         custom_model: String::new(),
+        custom_effort: "high".to_string(),
+        custom_thinking: true,
         template_choice: 0,
         model_search: false,
         picker_provider: None,
@@ -674,7 +685,6 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         provider_picker: ProviderPickerSnapshot::default(),
         theme: Theme::default(),
         logo: None,
-        mcp_statuses: Vec::new(),
     };
     (app, tmp)
 }
@@ -830,6 +840,7 @@ fn picker_add_row_is_the_trailing_stage1_row() {
         name: id.to_string(),
         model: "m".to_string(),
         models: vec!["m".to_string()],
+        model_info: Vec::new(),
         builtin: true,
         protocol: String::new(),
         base_url: String::new(),
@@ -1515,12 +1526,14 @@ fn caret_owner_none_for_read_only_and_decision_modals() {
     let (mut app, _tmp) = app_in_tempdir(&[], &[]);
     for modal in [
         Modal::Help,
-        Modal::Session,
         Modal::Sessions,
         Modal::Tools,
         Modal::Mcp,
         Modal::Permissions,
         Modal::Activity,
+        // `Question` is listed here to cover the *default* state — any option
+        // but "Other" highlighted (or no question model at all). Its caret
+        // ownership is conditional: see `caret_owner_question_owns_caret_only_on_other`.
         Modal::Question,
         Modal::Permission,
         Modal::InputInjection,
@@ -1536,6 +1549,74 @@ fn caret_owner_none_for_read_only_and_decision_modals() {
             "{modal:?} must hide the terminal cursor",
         );
     }
+}
+
+#[test]
+fn caret_owner_question_owns_caret_only_on_other() {
+    // The Question modal is a decision sheet (no caret) EXCEPT while the
+    // synthetic "Other" free-text row is highlighted — then it is a real
+    // text-input surface and must own the terminal cursor so the host IME can
+    // anchor its composition window. Navigating to/from "Other" flips
+    // ownership, so the IME anchor appears exactly when there is a field to
+    // type into and never when there is not.
+    use crate::tui::question_model::{QuestionAction, QuestionModel};
+    use neenee_core::{UserQuestion, UserQuestionOption, UserQuestionRequest};
+
+    let (mut app, _tmp) = app_in_tempdir(&[], &[]);
+    let req = UserQuestionRequest {
+        id: "q".into(),
+        questions: vec![UserQuestion {
+            header: None,
+            question: "pick".into(),
+            options: vec![
+                UserQuestionOption {
+                    label: "a".into(),
+                    description: None,
+                },
+                UserQuestionOption {
+                    label: "b".into(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }],
+    };
+    // Open: highlight on row 0 (a real option) → no caret, cursor hidden.
+    let model = QuestionModel::open(req);
+    app.active_modal = Modal::Question;
+    app.question = Some(model.clone());
+    assert_eq!(
+        app.caret_owner(),
+        CaretOwner::None,
+        "real option → no caret"
+    );
+    assert!(
+        !app.caret_visible(),
+        "a non-Other option must hide the cursor so the IME has no stale anchor",
+    );
+
+    // Navigate down to "Other" (index 2) → caret owned, cursor visible.
+    let model = model.update(QuestionAction::Down).0; // -> b (1)
+    let model = model.update(QuestionAction::Down).0; // -> Other (2)
+    app.question = Some(model);
+    assert_eq!(
+        app.caret_owner(),
+        CaretOwner::Modal,
+        "Other highlighted → modal owns the caret for the IME",
+    );
+    assert!(
+        app.caret_visible(),
+        "the Other field must keep the cursor visible so the IME anchors to it",
+    );
+
+    // Navigate back to a real option → ownership reverts to None.
+    let model = app.question.take().unwrap().update(QuestionAction::Up).0;
+    app.question = Some(model);
+    assert_eq!(
+        app.caret_owner(),
+        CaretOwner::None,
+        "leaving Other must drop caret ownership again",
+    );
 }
 
 #[test]
@@ -1561,6 +1642,13 @@ fn modal_owns_caret_matches_renderer_set_cursor_sites() {
     // Every modal that calls `set_cursor_position` in its renderer must be
     // declared in `Modal::owns_caret`, and vice versa — the two lists must
     // stay in lockstep so visibility and paint never disagree.
+    //
+    // The one deliberate exception is `Modal::Question`: its renderer places
+    // the real cursor only while the "Other" free-text row is highlighted, and
+    // ownership is decided *state-dependently* in `App::caret_owner` (which
+    // consults `QuestionModel::is_other_highlighted`) rather than by the static
+    // `owns_caret()`. It therefore appears in neither list here — it is tested
+    // separately by `caret_owner_question_owns_caret_only_on_other`.
     let owns = [
         Modal::Provider,
         Modal::ModelEditor,
@@ -1574,7 +1662,6 @@ fn modal_owns_caret_matches_renderer_set_cursor_sites() {
     let not_owns = [
         Modal::None,
         Modal::Help,
-        Modal::Session,
         Modal::Sessions,
         Modal::Tools,
         Modal::Mcp,

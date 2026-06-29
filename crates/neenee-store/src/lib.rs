@@ -1,4 +1,4 @@
-//! Durable state and configuration for the coding-agent stack.
+//! Durable state and configuration for the neenee agent stack.
 //!
 //! `neenee-core` holds the pure domain (types & traits), zero I/O. This
 //! crate sits one layer above it: the durable state and configuration a
@@ -11,7 +11,7 @@
 //! so core stays free of `rusqlite`. The shared migration helpers (`db`)
 //! moved with it.
 //!
-//! This is the **local coding-agent** persistence layer. It assumes a
+//! This is the **local agent** persistence layer. It assumes a
 //! single-user workstation: paths resolve via XDG `ProjectDirs`, sessions
 //! are keyed by project root, and a process-level `flock` enforces
 //! single-instance-per-project. Other scenarios the project may grow

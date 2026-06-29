@@ -157,7 +157,7 @@ impl Tool for ListPositionsTool {
             .map(str::trim)
             .filter(|symbol| !symbol.is_empty());
         self.runtime.sync_portfolio_market(symbol)?;
-        serde_json::to_string(&self.runtime.portfolio(symbol))
+        serde_json::to_string(&self.runtime.try_portfolio(symbol)?)
             .map_err(|e| format!("Serialize portfolio failed: {e}"))
     }
 }
@@ -319,6 +319,23 @@ mod tests {
         // A sell surfaces as `trade:sell`.
         let sell = t.scope_target(r#"{"side":"sell"}"#);
         assert!(matches!(sell, ScopeTarget::Command(ref c) if c == "trade:sell"));
+    }
+
+    #[test]
+    fn place_order_is_never_unscoped() {
+        // Safety invariant: an account-mutating order must ALWAYS surface as a
+        // `Command` scope target so an operation-scope gate can restrain live
+        // trading — even on missing/malformed arguments. This test locks that
+        // invariant against a future refactor that might switch the default to
+        // `Unspecified`/`None` and silently un-gate trading.
+        let t = PlaceOrderTool::new();
+        for args in ["{}", "", "not json", r#"{"side":"buy"}"#] {
+            let target = t.scope_target(args);
+            assert!(
+                matches!(target, ScopeTarget::Command(_)),
+                "place_order({args:?}) must be gated as a Command, got {target:?}"
+            );
+        }
     }
 
     #[test]

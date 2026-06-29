@@ -128,8 +128,8 @@ pub fn build_session_context(
     }
 }
 
-/// Heuristic model-capability hints for the session modal. Per-model capability
-/// data is resolved from the [`neenee_core::model`] registry; the harness
+/// Heuristic model-capability hints for the Tools / Mcp / Skills / Permissions
+/// managers. Per-model capability data is resolved from the [`neenee_core::model`] registry; the harness
 /// depends on tool calling for every provider, so it is always advertised.
 pub fn derive_capabilities(model: &str) -> Vec<String> {
     let mut caps = vec!["tool calling".to_string()];

@@ -59,11 +59,20 @@ pub struct Model {
     /// Model-specific prompt guidance injected into the system prompt as a
     /// `ModelGuidance` section. Because each model behaves differently,
     /// this is the per-model hook for any behavioral nudge a model needs
-    /// (e.g. GLM's anti-loop / one-tool-per-turn instructions). Empty when
+    /// (e.g. GLM's throughput / anti-loop instructions). Empty when
     /// the model needs none (Claude, GPT, Gemini). The model entry is the
     /// single source of truth; the prompt engine just renders whatever the
     /// resolved model carries.
     pub model_guidance: &'static str,
+    /// The reasoning-effort levels this model honors, ascending. Used as the
+    /// clamp range when a user requests an effort the model doesn't support.
+    /// `&[]` means effort control does not apply (non-reasoning models, or
+    /// protocols without an effort field). First-party Claude models carry
+    /// [`crate::effort::EFFORT_CLAUDE_FULL`]; models behind
+    /// Anthropic-compatible relays with unknown effort support carry
+    /// [`crate::effort::EFFORT_COMMON`] (conservative); non-reasoning / non-
+    /// Anthropic-protocol models carry `&[]`.
+    pub effort_levels: &'static [crate::effort::Effort],
 }
 
 /// The canonical registry of known models. Add a model here when it is
@@ -72,18 +81,24 @@ pub struct Model {
 ///
 /// `fallback_model` is defined in this module.
 ///
-/// Model-specific guidance for the GLM family. Because these models can get
-/// stuck re-issuing identical tool calls without making progress, their
-/// [`Model::model_guidance`] carries explicit anti-loop / one-tool-per-turn
-/// instructions. The prompt engine injects it via `ModelGuidance` when
-/// the resolved model carries a non-empty value.
+/// Model-specific guidance for the GLM family. GLM models historically get
+/// stuck re-issuing identical tool calls without making progress; that is now
+/// caught deterministically by the read-loop guard (`nudge`), so the prompt
+/// guidance focuses on throughput instead: batch independent calls, don't
+/// re-read freshly-edited files, and keep answers short. The prompt engine
+/// injects it via `ModelGuidance` when the resolved model carries a non-empty
+/// value.
 pub const GLM_GUIDANCE: &str = "\
 # Tool usage policy\n\
-- Use exactly one tool per assistant message. After each tool call, wait \
-for the result before continuing.\n\
+- Batch independent tool calls in a single assistant message — e.g. read \
+several files at once, or run `git status` and `git diff` together. Only \
+wait for a result when a later call needs an earlier one's output.\n\
 - Avoid repeating the same tool with the same parameters once you have \
 useful results. Use the result to take the next step (e.g. pick one match, \
-read that file, then act); do not search again in a loop.";
+read that file, then act); do not search again in a loop.\n\
+- Do not re-read a file you just edited — the edit tool already verified it.\n\
+- Keep final answers short: a few lines for a small change, a brief list \
+for a larger one.";
 
 pub const KNOWN_MODELS: &[Model] = &[
     // ── GLM family (Zhipu / Z.AI / opencode-go) ───────────────────────────
@@ -97,6 +112,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: GLM_GUIDANCE,
+        effort_levels: &[],
     },
     Model {
         id: "glm-5.1",
@@ -108,6 +124,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: GLM_GUIDANCE,
+        effort_levels: &[],
     },
     Model {
         id: "glm-5",
@@ -119,6 +136,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: GLM_GUIDANCE,
+        effort_levels: &[],
     },
     Model {
         id: "glm-4.7",
@@ -130,6 +148,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: GLM_GUIDANCE,
+        effort_levels: &[],
     },
     // ── Kimi (Moonshot / opencode-go) ─────────────────────────────────────
     Model {
@@ -142,6 +161,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "kimi-k2.6",
@@ -153,6 +173,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "kimi-k2.5",
@@ -164,6 +185,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     // ── Claude (Anthropic, via the hihusky relay / any Anthropic relay) ─────
     // Served over the Anthropic Messages wire format. The relay forwards to
@@ -179,6 +201,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
     },
     Model {
         id: "claude-sonnet-4-6",
@@ -190,6 +213,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
     },
     Model {
         id: "claude-haiku-4-5-20251001",
@@ -201,6 +225,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
@@ -213,6 +238,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "gpt-4o-mini",
@@ -224,6 +250,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     // ── Gemini (Google) ────────────────────────────────────────────────────
     Model {
@@ -236,6 +263,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::Gemini,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "gemini-2.0-flash",
@@ -247,6 +275,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: true,
         format: WireFormat::Gemini,
         model_guidance: "",
+        effort_levels: &[],
     },
     // ── DeepSeek (opencode-go / direct) ────────────────────────────────────
     Model {
@@ -259,6 +288,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "deepseek-v4-pro",
@@ -270,6 +300,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     // ── MiMo (Xiaomi / opencode-go, OpenAI format) ─────────────────────────
     Model {
@@ -282,6 +313,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "mimo-v2.5-pro",
@@ -293,6 +325,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "mimo-v2-pro",
@@ -304,6 +337,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     Model {
         id: "mimo-v2-omni",
@@ -315,6 +349,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     },
     // ── MiniMax (opencode-go, Anthropic /messages format) ──────────────────
     Model {
@@ -327,6 +362,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     Model {
         id: "minimax-m2.7",
@@ -338,6 +374,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     Model {
         id: "minimax-m2.5",
@@ -349,6 +386,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     // ── Qwen (opencode-go, OpenAI /chat/completions format) ────────────────
     // models.dev records qwen3.* as `@ai-sdk/openai-compatible` under
@@ -364,6 +402,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     Model {
         id: "qwen3.7-plus",
@@ -375,6 +414,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     Model {
         id: "qwen3.6-plus",
@@ -386,6 +426,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
     Model {
         id: "qwen3.5-plus",
@@ -397,6 +438,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: crate::effort::EFFORT_COMMON,
     },
 ];
 
@@ -420,6 +462,7 @@ pub fn fallback_model(_id: &str) -> Model {
         vision: false,
         format: WireFormat::OpenAiCompat,
         model_guidance: "",
+        effort_levels: &[],
     }
 }
 

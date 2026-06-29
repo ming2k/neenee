@@ -111,14 +111,14 @@ one-line header (the summary, colored by run state) with no marker glyph.
 
 ## Source
 
-`draw_tool_step` in `crates/neenee-code/src/tui/render/step/renderers.rs`. Shared
+`draw_tool_step` in `crates/neenee-tui-view/src/render/disclosure/renderers.rs`. Shared
 header via `draw_expandable_step_header` (from
-`crates/neenee-code/src/tui/render/step/mod.rs`). Expanded content dispatched by
+`crates/neenee-tui-view/src/render/disclosure/mod.rs`). Expanded content dispatched by
 `draw_tool_result` to `draw_listing_content`, `draw_grep_content`,
 `draw_bash_content` (which renders the `$ command` line + the structured
 `Shell` payload), `draw_diff_content`, or `draw_code_content`. The bash command
 is resolved by `bash_command_for`. Presenters (summary / `result_kind` /
-`arg_layout`) live in `crates/neenee-code/src/tui/render/tools/`. The structured
+`arg_layout`) live in `crates/neenee-tui-view/src/render/tools/`. The structured
 payload comes from `ToolOutput`
 ([ADR-0001](../../adr/0001-tool-rendering-redesign.md)); header data from
 `tool_step_header()` and `parse_arguments_kv()` in `document.rs`.

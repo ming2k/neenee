@@ -232,9 +232,9 @@ impl Dirs {
         self.project_dir(project_root).join("permissions.json")
     }
 
-    /// Structured log directory with rolling appender output. Test-only today
-    /// (only [`Self::ensure`] references it); production logs to stderr.
-    #[cfg(test)]
+    /// Structured log directory for the rolling appender, under
+    /// `$XDG_STATE_HOME/neenee/log`. Used by `init_tracing` at startup
+    /// and by [`Self::ensure`] in tests.
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("log")
     }

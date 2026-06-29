@@ -26,7 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Nothing yet.
+- **`neenee-quant` live HTTP broker mode.** Quant now defaults to paper trading
+  but can be explicitly switched to `NEENEE_QUANT_BROKER=live-http`, sending
+  account-mutating orders through an HTTPS broker gateway after fetching the
+  live portfolio and applying local risk checks. Missing live broker URL/token
+  fails startup instead of silently falling back, risk rejections do not call
+  the gateway, and the GUI labels live accounts as pending refresh instead of
+  paper. The `../optics` Rust bindings now auto-discover the checkout's
+  `build/meson-uninstalled` pkg-config files so the quant GUI `gui` feature
+  builds from the local optics tree without manual `PKG_CONFIG_PATH`.
 
 ### Removed
 

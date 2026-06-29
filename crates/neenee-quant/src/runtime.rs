@@ -119,7 +119,7 @@ impl QuantRuntime {
         let symbols = match symbol.map(str::trim).filter(|s| !s.is_empty()) {
             Some(symbol) => {
                 let symbol = normalize_symbol(symbol);
-                let portfolio = self.portfolio(Some(&symbol));
+                let portfolio = self.try_portfolio(Some(&symbol))?;
                 if portfolio.positions.is_empty() && portfolio.open_orders.is_empty() {
                     Vec::new()
                 } else {
@@ -127,7 +127,7 @@ impl QuantRuntime {
                 }
             }
             None => {
-                let portfolio = self.portfolio(None);
+                let portfolio = self.try_portfolio(None)?;
                 let mut symbols = BTreeSet::new();
                 for position in portfolio.positions {
                     symbols.insert(position.symbol);
@@ -148,6 +148,10 @@ impl QuantRuntime {
 
     pub fn portfolio(&self, symbol: Option<&str>) -> PortfolioSnapshot {
         self.inner.broker.portfolio(symbol)
+    }
+
+    pub fn try_portfolio(&self, symbol: Option<&str>) -> MarketDataResult<PortfolioSnapshot> {
+        self.inner.broker.try_portfolio(symbol)
     }
 }
 
@@ -355,6 +359,15 @@ impl MarketDataAdapter for SyntheticMarketData {
 
 pub trait JsonHttpTransport: Send + Sync {
     fn get_json(&self, url: &str) -> MarketDataResult<Value>;
+
+    fn post_json(
+        &self,
+        _url: &str,
+        _body: &Value,
+        _bearer_token: Option<&str>,
+    ) -> MarketDataResult<Value> {
+        Err("HTTP POST is not supported by this transport".to_string())
+    }
 }
 
 #[derive(Default)]
@@ -370,6 +383,29 @@ impl JsonHttpTransport for ReqwestJsonTransport {
             .map_err(|e| format!("HTTP client setup failed: {e}"))?;
         client
             .get(url)
+            .send()
+            .map_err(|e| format!("HTTP request failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("HTTP status error: {e}"))?
+            .json::<Value>()
+            .map_err(|e| format!("Decode JSON failed: {e}"))
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        body: &Value,
+        bearer_token: Option<&str>,
+    ) -> MarketDataResult<Value> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("HTTP client setup failed: {e}"))?;
+        let mut request = client.post(url).json(body);
+        if let Some(token) = bearer_token.filter(|token| !token.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        request
             .send()
             .map_err(|e| format!("HTTP request failed: {e}"))?
             .error_for_status()
@@ -467,6 +503,10 @@ pub trait BrokerAdapter: Send + Sync {
     fn cancel_order(&self, req: CancelOrderRequest) -> OrderDecision;
     fn apply_quote(&self, quote: Quote) -> Vec<OrderDecision>;
     fn portfolio(&self, symbol: Option<&str>) -> PortfolioSnapshot;
+
+    fn try_portfolio(&self, symbol: Option<&str>) -> MarketDataResult<PortfolioSnapshot> {
+        Ok(self.portfolio(symbol))
+    }
 }
 
 pub struct PaperBroker {
@@ -475,6 +515,94 @@ pub struct PaperBroker {
     audit: Arc<dyn AuditSink>,
     state_path: Option<PathBuf>,
     commission_bps: f64,
+}
+
+/// Broker adapter for a production broker gateway.
+///
+/// The adapter deliberately talks to a broker-neutral HTTPS gateway instead of
+/// embedding exchange credentials in the agent process. The gateway owns
+/// exchange-specific signing and account credentials; neenee owns tool
+/// admission, local risk pre-checks, audit recording, and a stable JSON
+/// contract:
+///
+/// - `GET /portfolio` or `GET /portfolio?symbol=BTCUSDT` returns
+///   [`PortfolioSnapshot`].
+/// - `POST /orders` accepts the order request plus `client_order_id` and
+///   `quote`, and returns [`OrderDecision`].
+/// - `POST /orders/{id}/cancel` returns [`OrderDecision`].
+pub struct LiveHttpBroker<T: JsonHttpTransport = ReqwestJsonTransport> {
+    base_url: String,
+    bearer_token: String,
+    risk: Arc<dyn RiskPolicy>,
+    audit: Arc<dyn AuditSink>,
+    transport: T,
+}
+
+impl LiveHttpBroker<ReqwestJsonTransport> {
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        risk: Arc<dyn RiskPolicy>,
+        audit: Arc<dyn AuditSink>,
+    ) -> Result<Self, String> {
+        Self::with_transport(
+            base_url,
+            bearer_token,
+            risk,
+            audit,
+            ReqwestJsonTransport::default(),
+        )
+    }
+}
+
+impl<T: JsonHttpTransport> LiveHttpBroker<T> {
+    pub fn with_transport(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        risk: Arc<dyn RiskPolicy>,
+        audit: Arc<dyn AuditSink>,
+        transport: T,
+    ) -> Result<Self, String> {
+        let base_url = normalize_live_gateway_url(base_url.into())?;
+        let bearer_token = bearer_token.into();
+        if bearer_token.trim().is_empty() {
+            return Err("live broker token is required".to_string());
+        }
+        Ok(Self {
+            base_url,
+            bearer_token,
+            risk,
+            audit,
+            transport,
+        })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    fn fetch_portfolio(&self, symbol: Option<&str>) -> MarketDataResult<PortfolioSnapshot> {
+        let url = match symbol.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(symbol) => format!(
+                "{}/portfolio?symbol={}",
+                self.base_url,
+                percent_encode_component(&normalize_symbol(symbol))
+            ),
+            None => self.url("/portfolio"),
+        };
+        let value = self.transport.get_json(&url)?;
+        let mut snapshot = serde_json::from_value::<PortfolioSnapshot>(value)
+            .map_err(|e| format!("decode live portfolio failed: {e}"))?;
+        snapshot.account_mode = "live-http".to_string();
+        Ok(snapshot)
+    }
+
+    fn finalize_decision(&self, mut decision: OrderDecision) -> OrderDecision {
+        if let Err(err) = self.audit.record(&decision) {
+            decision.audit_error = Some(err);
+        }
+        decision
+    }
 }
 
 impl PaperBroker {
@@ -581,6 +709,155 @@ impl PaperBroker {
 impl Default for PaperBroker {
     fn default() -> Self {
         Self::new(Arc::new(DefaultRiskPolicy::default()))
+    }
+}
+
+impl<T: JsonHttpTransport> BrokerAdapter for LiveHttpBroker<T> {
+    fn place_order(&self, req: OrderRequest, quote: Quote) -> OrderDecision {
+        let decision_id = client_order_id(&req);
+        let risk_price = match risk_price_for_request(&req, &quote) {
+            Ok(price) => price,
+            Err(reason) => {
+                return self.finalize_decision(OrderDecision {
+                    decision_id,
+                    status: "rejected_invalid".to_string(),
+                    order: None,
+                    rejection_reason: Some(reason),
+                    risk_checks: Vec::new(),
+                    account: unavailable_account("live-http"),
+                    audit_error: None,
+                    persistence_error: None,
+                });
+            }
+        };
+
+        let portfolio = match self.fetch_portfolio(Some(&req.symbol)) {
+            Ok(portfolio) => portfolio,
+            Err(err) => {
+                return self.finalize_decision(OrderDecision {
+                    decision_id,
+                    status: "rejected_gateway".to_string(),
+                    order: None,
+                    rejection_reason: Some(format!("portfolio_unavailable: {err}")),
+                    risk_checks: Vec::new(),
+                    account: unavailable_account("live-http"),
+                    audit_error: None,
+                    persistence_error: None,
+                });
+            }
+        };
+
+        let account_snapshot = PaperAccountSnapshot {
+            cash: portfolio.account.cash,
+            positions: portfolio.positions.clone(),
+            open_orders: portfolio.open_orders.clone(),
+            gross_exposure: portfolio.account.gross_exposure,
+        };
+        let risk = self.risk.assess(&account_snapshot, &req, risk_price, 0.0);
+        if let Some(reason) = risk.rejection_reason {
+            return self.finalize_decision(OrderDecision {
+                decision_id,
+                status: "rejected_risk".to_string(),
+                order: None,
+                rejection_reason: Some(reason),
+                risk_checks: risk.checks,
+                account: portfolio.account,
+                audit_error: None,
+                persistence_error: None,
+            });
+        }
+
+        let body = serde_json::json!({
+            "client_order_id": decision_id.clone(),
+            "symbol": normalize_symbol(&req.symbol),
+            "side": req.side,
+            "type": req.order_type,
+            "quantity": req.quantity,
+            "price": req.price,
+            "quote": quote,
+        });
+        let decision = match self.transport.post_json(
+            &self.url("/orders"),
+            &body,
+            Some(self.bearer_token.as_str()),
+        ) {
+            Ok(value) => serde_json::from_value::<OrderDecision>(value)
+                .map_err(|e| format!("decode live order decision failed: {e}")),
+            Err(err) => Err(err),
+        };
+        match decision {
+            Ok(mut decision) => {
+                decision.risk_checks = risk.checks;
+                self.finalize_decision(decision)
+            }
+            Err(err) => self.finalize_decision(OrderDecision {
+                decision_id,
+                status: "rejected_gateway".to_string(),
+                order: None,
+                rejection_reason: Some(format!("order_gateway_error: {err}")),
+                risk_checks: risk.checks,
+                account: portfolio.account,
+                audit_error: None,
+                persistence_error: None,
+            }),
+        }
+    }
+
+    fn cancel_order(&self, req: CancelOrderRequest) -> OrderDecision {
+        let decision_id = format!("CANCEL-{}", now_ms());
+        let order_id = req.order_id.trim();
+        if order_id.is_empty() {
+            return self.finalize_decision(OrderDecision {
+                decision_id,
+                status: "rejected_invalid".to_string(),
+                order: None,
+                rejection_reason: Some("order_id is required".to_string()),
+                risk_checks: Vec::new(),
+                account: unavailable_account("live-http"),
+                audit_error: None,
+                persistence_error: None,
+            });
+        }
+        let value = self.transport.post_json(
+            &self.url(&format!(
+                "/orders/{}/cancel",
+                percent_encode_component(order_id)
+            )),
+            &serde_json::json!({ "order_id": order_id, "client_cancel_id": decision_id }),
+            Some(self.bearer_token.as_str()),
+        );
+        match value.and_then(|value| {
+            serde_json::from_value::<OrderDecision>(value)
+                .map_err(|e| format!("decode live cancel decision failed: {e}"))
+        }) {
+            Ok(decision) => self.finalize_decision(decision),
+            Err(err) => self.finalize_decision(OrderDecision {
+                decision_id,
+                status: "rejected_gateway".to_string(),
+                order: None,
+                rejection_reason: Some(format!("cancel_gateway_error: {err}")),
+                risk_checks: Vec::new(),
+                account: self
+                    .fetch_portfolio(None)
+                    .map(|portfolio| portfolio.account)
+                    .unwrap_or_else(|_| unavailable_account("live-http")),
+                audit_error: None,
+                persistence_error: None,
+            }),
+        }
+    }
+
+    fn apply_quote(&self, _quote: Quote) -> Vec<OrderDecision> {
+        Vec::new()
+    }
+
+    fn portfolio(&self, symbol: Option<&str>) -> PortfolioSnapshot {
+        self.fetch_portfolio(symbol)
+            .unwrap_or_else(|_| unavailable_portfolio("live-http"))
+    }
+
+    fn try_portfolio(&self, symbol: Option<&str>) -> MarketDataResult<PortfolioSnapshot> {
+        self.fetch_portfolio(symbol)
     }
 }
 
@@ -820,6 +1097,98 @@ fn validate_quote(quote: &Quote) -> MarketDataResult<()> {
         return Err("invalid_market_quote".to_string());
     }
     Ok(())
+}
+
+fn risk_price_for_request(req: &OrderRequest, quote: &Quote) -> MarketDataResult<f64> {
+    validate_quote(quote)?;
+    if req.quantity <= 0.0 || !req.quantity.is_finite() {
+        return Err("quantity must be a positive finite number".to_string());
+    }
+    match req.order_type {
+        OrderType::Market => Ok(match req.side {
+            OrderSide::Buy => quote.ask,
+            OrderSide::Sell => quote.bid,
+        }),
+        OrderType::Limit => {
+            let limit_price = req
+                .price
+                .ok_or_else(|| "limit order requires price".to_string())?;
+            if limit_price <= 0.0 || !limit_price.is_finite() {
+                return Err("limit price must be a positive finite number".to_string());
+            }
+            Ok(limit_price)
+        }
+    }
+}
+
+fn client_order_id(req: &OrderRequest) -> String {
+    format!(
+        "NEENEE-{}-{}-{}",
+        now_ms(),
+        normalize_symbol(&req.symbol),
+        match req.side {
+            OrderSide::Buy => "BUY",
+            OrderSide::Sell => "SELL",
+        }
+    )
+}
+
+fn normalize_live_gateway_url(raw: String) -> Result<String, String> {
+    let url = raw.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err("live broker gateway URL is required".to_string());
+    }
+    let is_https = url.starts_with("https://");
+    let is_local_http = url.starts_with("http://127.0.0.1:")
+        || url.starts_with("http://localhost:")
+        || url.starts_with("http://[::1]:");
+    if !is_https && !is_local_http {
+        return Err(
+            "live broker gateway URL must be https://, except localhost development gateways"
+                .to_string(),
+        );
+    }
+    Ok(url)
+}
+
+fn percent_encode_component(raw: &str) -> String {
+    raw.bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn unavailable_account(currency: &str) -> AccountSummary {
+    AccountSummary {
+        currency: currency.to_string(),
+        cash: 0.0,
+        available_cash: 0.0,
+        equity: 0.0,
+        realized_pnl: 0.0,
+        total_commission: 0.0,
+        net_pnl: 0.0,
+        gross_exposure: 0.0,
+        projected_gross_exposure: 0.0,
+        reserved_buy_notional: 0.0,
+        reserved_buy_commission: 0.0,
+        reserved_sell_notional: 0.0,
+        buying_power: 0.0,
+    }
+}
+
+fn unavailable_portfolio(mode: &str) -> PortfolioSnapshot {
+    PortfolioSnapshot {
+        positions: Vec::new(),
+        open_orders: Vec::new(),
+        account_mode: format!("{mode}_unavailable"),
+        account: unavailable_account(mode),
+        risk_limits: RiskLimits::default(),
+        order_history: Vec::new(),
+    }
 }
 
 fn order_is_marketable(order: &Order, quote: &Quote) -> bool {
@@ -1955,7 +2324,10 @@ fn now_ms() -> u128 {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Read as _;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2124,6 +2496,247 @@ mod tests {
                 Err(format!("unexpected url: {url}"))
             }
         }
+    }
+
+    type BrokerPostRecord = (String, Value, Option<String>);
+
+    #[derive(Clone)]
+    struct FakeBrokerTransport {
+        portfolio: Value,
+        order_decision: Value,
+        cancel_decision: Value,
+        posts: Arc<Mutex<Vec<BrokerPostRecord>>>,
+    }
+
+    impl FakeBrokerTransport {
+        fn new(portfolio: Value, order_decision: Value) -> Self {
+            Self {
+                portfolio,
+                order_decision,
+                cancel_decision: json!({
+                    "decision_id": "gateway-cancel-1",
+                    "status": "cancelled_live",
+                    "order": null,
+                    "rejection_reason": null,
+                    "risk_checks": [],
+                    "account": live_account_json(),
+                    "audit_error": null,
+                    "persistence_error": null
+                }),
+                posts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn posts(&self) -> Vec<BrokerPostRecord> {
+            self.posts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl JsonHttpTransport for FakeBrokerTransport {
+        fn get_json(&self, url: &str) -> MarketDataResult<Value> {
+            if url.contains("/portfolio") {
+                Ok(self.portfolio.clone())
+            } else {
+                Err(format!("unexpected broker GET url: {url}"))
+            }
+        }
+
+        fn post_json(
+            &self,
+            url: &str,
+            body: &Value,
+            bearer_token: Option<&str>,
+        ) -> MarketDataResult<Value> {
+            self.posts.lock().unwrap_or_else(|e| e.into_inner()).push((
+                url.to_string(),
+                body.clone(),
+                bearer_token.map(str::to_string),
+            ));
+            if url.ends_with("/cancel") {
+                Ok(self.cancel_decision.clone())
+            } else if url.ends_with("/orders") {
+                Ok(self.order_decision.clone())
+            } else {
+                Err(format!("unexpected broker POST url: {url}"))
+            }
+        }
+    }
+
+    struct FailingBrokerTransport;
+
+    impl JsonHttpTransport for FailingBrokerTransport {
+        fn get_json(&self, _url: &str) -> MarketDataResult<Value> {
+            Err("gateway offline".to_string())
+        }
+
+        fn post_json(
+            &self,
+            _url: &str,
+            _body: &Value,
+            _bearer_token: Option<&str>,
+        ) -> MarketDataResult<Value> {
+            Err("gateway offline".to_string())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct HttpRequestRecord {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    fn spawn_live_gateway_server() -> (
+        String,
+        Arc<Mutex<Vec<HttpRequestRecord>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local gateway");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let server_records = records.clone();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let record = read_http_request(&mut stream);
+                let response = if record.method == "GET" && record.path.starts_with("/portfolio") {
+                    live_portfolio_json()
+                } else if record.method == "POST" && record.path == "/orders" {
+                    live_order_decision_json()
+                } else {
+                    json!({"error": "unexpected request"})
+                };
+                server_records
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(record);
+                write_json_response(&mut stream, &response);
+            }
+        });
+        (base_url, records, handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> HttpRequestRecord {
+        let mut bytes = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).expect("read request");
+            assert!(n > 0, "client closed before headers");
+            bytes.extend_from_slice(&buf[..n]);
+            if let Some(header_end) = find_header_end(&bytes) {
+                let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find_map(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim())
+                    })
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or_default();
+                let body_start = header_end + 4;
+                while bytes.len() < body_start + content_length {
+                    let n = stream.read(&mut buf).expect("read body");
+                    assert!(n > 0, "client closed before body");
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                let mut lines = headers.lines();
+                let request_line = lines.next().expect("request line");
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().expect("method").to_string();
+                let path = parts.next().expect("path").to_string();
+                let authorization = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find_map(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    });
+                let body = String::from_utf8_lossy(&bytes[body_start..body_start + content_length])
+                    .to_string();
+                return HttpRequestRecord {
+                    method,
+                    path,
+                    authorization,
+                    body,
+                };
+            }
+        }
+    }
+
+    fn find_header_end(bytes: &[u8]) -> Option<usize> {
+        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn write_json_response(stream: &mut TcpStream, value: &Value) {
+        let body = value.to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write response");
+        stream.flush().expect("flush response");
+    }
+
+    fn live_account_json() -> Value {
+        json!({
+            "currency": "USD",
+            "cash": 100000.0,
+            "available_cash": 100000.0,
+            "equity": 100000.0,
+            "realized_pnl": 0.0,
+            "total_commission": 0.0,
+            "net_pnl": 0.0,
+            "gross_exposure": 0.0,
+            "projected_gross_exposure": 0.0,
+            "reserved_buy_notional": 0.0,
+            "reserved_buy_commission": 0.0,
+            "reserved_sell_notional": 0.0,
+            "buying_power": 100000.0
+        })
+    }
+
+    fn live_portfolio_json() -> Value {
+        json!({
+            "positions": [],
+            "open_orders": [],
+            "account_mode": "live-http",
+            "account": live_account_json(),
+            "risk_limits": {
+                "max_order_notional": 100000.0,
+                "max_gross_exposure": 100000.0,
+                "allow_short_selling": false
+            },
+            "order_history": []
+        })
+    }
+
+    fn live_order_decision_json() -> Value {
+        json!({
+            "decision_id": "gateway-order-1",
+            "status": "accepted_live",
+            "order": {
+                "order_id": "LIVE-000001",
+                "status": "accepted_live",
+                "symbol": "AAPL",
+                "side": "buy",
+                "type": "market",
+                "quantity": 1.0,
+                "limit_price": null,
+                "fill_price": null,
+                "filled_quantity": 0.0,
+                "commission": 0.0,
+                "timestamp_ms": 1
+            },
+            "rejection_reason": null,
+            "risk_checks": [],
+            "account": live_account_json(),
+            "audit_error": null,
+            "persistence_error": null
+        })
     }
 
     struct RejectAllRisk;
@@ -2635,6 +3248,170 @@ mod tests {
 
         let err = adapter.depth("btcusdt", 5).expect_err("bad depth");
         assert!(err.contains("bids"), "err: {err}");
+    }
+
+    #[test]
+    fn live_http_broker_posts_order_after_local_risk_passes() {
+        let transport = FakeBrokerTransport::new(live_portfolio_json(), live_order_decision_json());
+        let broker = LiveHttpBroker::with_transport(
+            "https://broker.test",
+            "secret-token",
+            Arc::new(DefaultRiskPolicy::new(RiskLimits {
+                max_order_notional: 10_000.0,
+                max_gross_exposure: 100_000.0,
+                allow_short_selling: false,
+            })),
+            Arc::new(NoopAuditSink::default()),
+            transport.clone(),
+        )
+        .expect("live broker");
+        let runtime = QuantRuntime::with_adapters(Arc::new(FixedMarketData), Arc::new(broker));
+
+        let decision = runtime
+            .place_order(OrderRequest {
+                symbol: "AAPL".to_string(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Market,
+                quantity: 1.0,
+                price: None,
+            })
+            .expect("quote available");
+
+        assert_eq!(decision.status, "accepted_live");
+        assert!(
+            decision
+                .risk_checks
+                .iter()
+                .any(|check| check.name == "max_order_notional" && check.passed)
+        );
+        let posts = transport.posts();
+        assert_eq!(posts.len(), 1, "posts: {posts:?}");
+        assert_eq!(posts[0].0, "https://broker.test/orders");
+        assert_eq!(posts[0].2.as_deref(), Some("secret-token"));
+        assert_eq!(posts[0].1["symbol"], "AAPL");
+        assert_eq!(posts[0].1["side"], "buy");
+        assert_eq!(posts[0].1["type"], "market");
+        assert_eq!(posts[0].1["quantity"], 1.0);
+        assert_eq!(posts[0].1["quote"]["source"], "fixed-test");
+        assert!(
+            posts[0].1["client_order_id"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("NEENEE-")
+        );
+    }
+
+    #[test]
+    fn live_http_broker_rejects_locally_before_gateway_order_post() {
+        let transport = FakeBrokerTransport::new(live_portfolio_json(), live_order_decision_json());
+        let broker = LiveHttpBroker::with_transport(
+            "https://broker.test",
+            "secret-token",
+            Arc::new(DefaultRiskPolicy::new(RiskLimits {
+                max_order_notional: 10.0,
+                max_gross_exposure: 100_000.0,
+                allow_short_selling: false,
+            })),
+            Arc::new(NoopAuditSink::default()),
+            transport.clone(),
+        )
+        .expect("live broker");
+        let runtime = QuantRuntime::with_adapters(Arc::new(FixedMarketData), Arc::new(broker));
+
+        let decision = runtime
+            .place_order(OrderRequest {
+                symbol: "AAPL".to_string(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Market,
+                quantity: 1.0,
+                price: None,
+            })
+            .expect("quote available");
+
+        assert_eq!(decision.status, "rejected_risk");
+        assert!(
+            decision
+                .rejection_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("order_notional_exceeds_limit")
+        );
+        assert!(transport.posts().is_empty());
+    }
+
+    #[test]
+    fn live_http_broker_reports_portfolio_gateway_errors() {
+        let broker = LiveHttpBroker::with_transport(
+            "https://broker.test",
+            "secret-token",
+            Arc::new(DefaultRiskPolicy::default()),
+            Arc::new(NoopAuditSink::default()),
+            FailingBrokerTransport,
+        )
+        .expect("live broker");
+        let runtime = QuantRuntime::with_adapters(Arc::new(FixedMarketData), Arc::new(broker));
+
+        let err = runtime
+            .try_portfolio(None)
+            .expect_err("portfolio failure should surface");
+        assert!(err.contains("gateway offline"), "err: {err}");
+
+        let err = runtime
+            .sync_portfolio_market(None)
+            .expect_err("sync failure should surface");
+        assert!(err.contains("gateway offline"), "err: {err}");
+    }
+
+    #[test]
+    fn live_http_broker_uses_real_http_transport_contract() {
+        let (base_url, records, handle) = spawn_live_gateway_server();
+        let broker = LiveHttpBroker::new(
+            base_url,
+            "secret-token",
+            Arc::new(DefaultRiskPolicy::new(RiskLimits {
+                max_order_notional: 10_000.0,
+                max_gross_exposure: 100_000.0,
+                allow_short_selling: false,
+            })),
+            Arc::new(NoopAuditSink::default()),
+        )
+        .expect("live broker");
+        let runtime = QuantRuntime::with_adapters(Arc::new(FixedMarketData), Arc::new(broker));
+
+        let decision = runtime
+            .place_order(OrderRequest {
+                symbol: "AAPL".to_string(),
+                side: OrderSide::Buy,
+                order_type: OrderType::Market,
+                quantity: 1.0,
+                price: None,
+            })
+            .expect("live order");
+
+        assert_eq!(decision.status, "accepted_live");
+        handle.join().expect("gateway thread");
+        let records = records.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(records.len(), 2, "records: {records:?}");
+        assert_eq!(records[0].method, "GET");
+        assert_eq!(records[0].path, "/portfolio?symbol=AAPL");
+        assert_eq!(records[1].method, "POST");
+        assert_eq!(records[1].path, "/orders");
+        assert_eq!(
+            records[1].authorization.as_deref(),
+            Some("Bearer secret-token")
+        );
+        let body: Value = serde_json::from_str(&records[1].body).expect("order body");
+        assert_eq!(body["symbol"], "AAPL");
+        assert_eq!(body["side"], "buy");
+        assert_eq!(body["type"], "market");
+        assert_eq!(body["quantity"], 1.0);
+        assert_eq!(body["quote"]["source"], "fixed-test");
+        assert!(
+            body["client_order_id"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("NEENEE-")
+        );
     }
 
     #[test]

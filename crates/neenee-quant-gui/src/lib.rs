@@ -100,6 +100,21 @@ impl AppState {
         let market_data_source = market_data_source.into();
         let config_summary = config_summary.into();
         let starting_cash = config.paper.starting_cash;
+        let (risk_status, account_summary) = if config.broker.mode == "live-http" {
+            (
+                "Live account: refresh positions before trading".to_string(),
+                "Live account: pending refresh".to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "Paper account: cash {starting_cash:.2}, available {starting_cash:.2}, equity {starting_cash:.2}"
+                ),
+                format!(
+                    "Cash {starting_cash:.2} · Available {starting_cash:.2} · Equity {starting_cash:.2}"
+                ),
+            )
+        };
         Ok(Self {
             runtime: Builder::new_current_thread().enable_all().build()?,
             market_data: neenee_quant::MarketDataTool::with_runtime(runtime.clone()),
@@ -116,12 +131,8 @@ impl AppState {
             last_result: format!(
                 "Select a workspace action to call a quant tool. Market data source: {market_data_source}."
             ),
-            risk_status: format!(
-                "Paper account: cash {starting_cash:.2}, available {starting_cash:.2}, equity {starting_cash:.2}"
-            ),
-            account_summary: format!(
-                "Cash {starting_cash:.2} · Available {starting_cash:.2} · Equity {starting_cash:.2}"
-            ),
+            risk_status,
+            account_summary,
             positions_summary: "Positions: 0".to_string(),
             open_orders_summary: "Open orders: 0 · Reserved buy 0.00 · Reserved sell 0.00"
                 .to_string(),
@@ -659,6 +670,20 @@ mod tests {
         );
         assert!(state.config_summary.contains("audit=/tmp/audit.jsonl"));
         let _ = std::fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn live_http_config_initial_state_is_not_labeled_paper() {
+        let mut config = neenee_quant::QuantConfig::default();
+        config.broker.mode = "live-http".to_string();
+        config.broker.live_http.base_url = "https://broker.test".to_string();
+        config.broker.live_http.token = Some("secret-token".to_string());
+
+        let state = AppState::from_config(config).expect("state");
+
+        assert!(state.risk_status.contains("Live account"));
+        assert_eq!(state.account_summary, "Live account: pending refresh");
+        assert!(state.config_summary.contains("broker=live-http"));
     }
 
     #[test]

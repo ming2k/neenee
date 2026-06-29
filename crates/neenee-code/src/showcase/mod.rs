@@ -32,7 +32,6 @@ pub fn run(component: &str) -> Result<(), Box<dyn std::error::Error>> {
         "model-editor" => simple::model_editor().map_err(Into::into),
         "history" => simple::history().map_err(Into::into),
         "sessions" => simple::sessions().map_err(Into::into),
-        "session" => simple::session().map_err(Into::into),
         "activity" => simple::activity().map_err(Into::into),
         "help" => simple::help().map_err(Into::into),
         "toast" => simple::toast().map_err(Into::into),
@@ -49,7 +48,6 @@ pub fn run(component: &str) -> Result<(), Box<dyn std::error::Error>> {
                  model-editor the API-key / model-id editor\n  \
                  history      the Ctrl+R input-history search\n  \
                  sessions     the session picker\n  \
-                 session      the session-context tabbed modal\n  \
                  activity     the activity / pursuit / tasks modal\n  \
                  help         the keybindings help modal\n  \
                  toast        copy / armed toasts\n\n\

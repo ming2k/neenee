@@ -34,7 +34,7 @@ mod openai_compat;
 mod registry;
 mod sse;
 
-pub use anthropic_compat::AnthropicMessagesProvider;
+pub use anthropic_compat::{AnthropicMessagesProvider, Effort, ThinkingConfig, ThinkingMode};
 pub use gemini::GeminiProvider;
 pub use mock::MockProvider;
 pub use openai_compat::OpenAiCompatProvider;

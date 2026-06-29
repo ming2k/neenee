@@ -325,6 +325,42 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
                 )
                 .await;
             }
+            AgentRequest::EditProviderModel {
+                provider_id,
+                model,
+                effort,
+                thinking,
+            } => {
+                crate::handlers_provider::edit_model(
+                    &mut config,
+                    &agent,
+                    &provider_for_task,
+                    &resp_tx,
+                    &mut provider_usage,
+                    provider_id,
+                    model,
+                    effort,
+                    thinking,
+                )
+                .await;
+            }
+            AgentRequest::EditModelReasoning {
+                model,
+                effort,
+                thinking,
+            } => {
+                crate::handlers_provider::edit_model_reasoning(
+                    &mut config,
+                    &agent,
+                    &provider_for_task,
+                    &resp_tx,
+                    &mut provider_usage,
+                    model,
+                    effort,
+                    thinking,
+                )
+                .await;
+            }
             AgentRequest::DeleteProvider { id } => {
                 crate::handlers_provider::delete(
                     &mut config,

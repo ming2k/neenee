@@ -5,6 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind
 use crate::tui::layout::{LayoutMap, SemanticCursor};
 use crate::tui::selection::SelectionDrag;
 
+#[derive(Default)]
 pub struct InputContext {
     pub active_modal: super::Modal,
     pub is_responding: bool,
@@ -61,12 +62,17 @@ pub struct InputContext {
     /// it. Mirrors `App::custom_field` while [`Self::active_modal`] is
     /// [`super::Modal::CustomProvider`].
     pub custom_provider_field: Option<u8>,
+    /// Focused field of the key editor (`Modal::ModelEditor`): `0` = API key,
+    /// `1` = effort selector, `2` = thinking toggle. `None` when that modal is
+    /// not open. Drives ←/→ effort cycling (field 1) and Space thinking toggle
+    /// (field 2). Mirrors `App::editor_field` while the key editor is open.
+    pub editor_field: Option<u8>,
 }
 
 impl InputContext {
     /// Whether any provider-editor field is focused. Every visible field borrows
-    /// the composer line: Name / Base URL / Token as plain text, Model as a live
-    /// filter query.
+    /// the composer line (Name / Base URL / Token as plain text, Model as a live
+    /// filter), so all are text fields now (ADR-0046 removed the Thinking toggle).
     fn custom_text_field_focused(&self) -> bool {
         self.custom_provider_field.is_some()
     }
@@ -128,8 +134,16 @@ pub enum InputAction {
     /// Submit the unified provider editor: persist the entered key / model-id and
     /// activate the target model.
     SubmitModelEditor,
-    /// Cycle focus between the editor's fields (API key ↔ model id).
+    /// Cycle focus between the editor's fields (API key ↔ effort).
     ModelEditorNextField,
+    /// Cycle the effort selector (←/→) on the Anthropic key editor's effort
+    /// field. Carries a delta of ±1; wraps around the five effort levels.
+    ModelEditorEffortCycle {
+        delta: i8,
+    },
+    /// Toggle extended thinking on/off (Space) on the Anthropic key editor's
+    /// thinking field. Orthogonal to effort.
+    ModelEditorThinkingToggle,
     /// Submit the custom-provider editor → `AgentRequest::AddProvider`.
     SubmitCustomProvider,
     /// Cancel the custom-provider editor and return to the provider picker.
@@ -138,6 +152,14 @@ pub enum InputAction {
     /// (`Tab` / `BackTab`), wrapping at the ends.
     CustomProviderNextField,
     CustomProviderPrevField,
+    /// Cycle the effort selector (←/→) on the custom-provider editor's Effort
+    /// field (Anthropic only). Carries a delta of ±1; wraps around the levels.
+    CustomProviderEffortCycle {
+        delta: i8,
+    },
+    /// Toggle extended thinking on/off (Space) on the custom-provider editor's
+    /// Thinking field (Anthropic only). Orthogonal to effort.
+    CustomProviderThinkingToggle,
     /// Move the suggestion highlight in the provider editor's Model filter field
     /// with `↑` / `↓`. `forward` = down.
     MoveCustomSuggestion {
@@ -175,9 +197,6 @@ pub enum InputAction {
     OpenCommands,
     /// Open the help / keybindings modal.
     OpenHelp,
-    /// Open the session-context modal (Ctrl+I): tabbed overview of the live
-    /// session's model, MCP servers, and (later) permissions / tools / skills.
-    OpenSession,
     /// Open the permissions manager modal: a centered list of cached "always
     /// allow" rules with per-row revoke and clear-all. Reached via the
     /// `/permissions` slash command (intercepted locally, never sent to the
@@ -185,15 +204,26 @@ pub enum InputAction {
     OpenPermissions,
     /// Open the tools manager modal: a centered, selectable list of every
     /// session tool with a `Space` toggle. Reached via the `/tools` slash
-    /// command (intercepted locally, never sent to the backend), and via `t` /
-    /// Enter from the session dashboard's TOOLS line. The request is never
-    /// forwarded — it only opens the overlay.
+    /// command (intercepted locally, never sent to the backend). The request is
+    /// never forwarded — it only opens the overlay.
     OpenTools,
     /// Open the MCP manager modal: a centered, selectable list of every
     /// configured MCP server with `Space` toggle and `r` reconnect. Reached via
     /// the `/mcp` slash command (intercepted locally, never sent to the
     /// backend). The request is never forwarded — it only opens the overlay.
     OpenMcp,
+    /// Open the skills modal: a centered, selectable list of every loaded
+    /// skill with a per-row detail expansion and an `r` reload. Reached via
+    /// the `/skills` slash command (intercepted locally, never sent to the
+    /// backend; `/skills list` / `/skills reload` with args still forward).
+    /// The request is never forwarded — it only opens the overlay.
+    OpenSkills,
+    /// Toggle the detail expansion of the selected skill row in the skills
+    /// modal. Bound to `Enter`.
+    SkillsToggleDetail,
+    /// Reload the skill registry from the skills modal by forwarding
+    /// `/skills reload` to the backend. Bound to `r`.
+    SkillsReload,
     /// Open the config manager modal: a centered list of configurable
     /// categories (Nudge, …). Reached via the `/config` slash command
     /// (intercepted locally, never sent to the backend). `Enter` / `Space`
@@ -211,7 +241,7 @@ pub enum InputAction {
     /// permissions manager modal.
     PermissionsClearAll,
     /// Drill into the selected config category's sub-page (from
-    /// [`Modal::Config`]). Bound to `Enter` / `Space`.
+    /// [`Modal::Config`](super::Modal::Config)). Bound to `Enter` / `Space`.
     ConfigActivate,
     /// Return from a config sub-page to the config root. Bound to `Esc`
     /// inside a sub-page (a second `Esc` closes the modal).
@@ -236,8 +266,8 @@ pub enum InputAction {
     SessionSelect {
         forward: bool,
     },
-    /// Toggle the selected tool's enabled flag in the session dashboard or
-    /// tools manager modal. Bound to `Space`.
+    /// Toggle the selected tool's enabled flag in the tools manager modal.
+    /// Bound to `Space`.
     SessionActivate,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
@@ -847,11 +877,6 @@ pub fn process_event(
                         InputAction::None
                     }
                 }
-                // Note: the session-context modal is opened via the
-                // `/session` slash command (see the Enter submit path), not a
-                // Ctrl+ combo — Ctrl+I collides byte-for-byte with Tab on most
-                // terminals, so a Ctrl+I binding would fire as Tab (completion
-                // accept or no-op) on terminals without Kitty protocol support.
                 // Ctrl+M: open the models modal. In a raw terminal Ctrl+M is
                 // byte-identical to Enter, so this only fires when the Kitty
                 // enhanced-keyboard protocol is active (enabled in `run_tui`).
@@ -863,13 +888,6 @@ pub fn process_event(
                     } else {
                         InputAction::None
                     }
-                }
-                KeyCode::Char('q')
-                    if input.is_empty()
-                        && context.active_modal == super::Modal::None
-                        && !context.has_focused_target =>
-                {
-                    InputAction::Quit
                 }
                 // Alt+Enter / Ctrl+J: insert a literal newline so the input
                 // box supports multi-line drafting. Plain Enter sends the
@@ -890,9 +908,9 @@ pub fn process_event(
                     super::Modal::Question => InputAction::QuestionSubmit,
                     super::Modal::InputInjection => InputAction::InputSubmit,
                     super::Modal::Help => InputAction::CloseModal,
-                    super::Modal::Session => InputAction::CloseModal,
                     super::Modal::Tools => InputAction::CloseModal,
                     super::Modal::Mcp => InputAction::CloseModal,
+                    super::Modal::Skills => InputAction::SkillsToggleDetail,
                     super::Modal::Permissions => InputAction::CloseModal,
                     super::Modal::Config => InputAction::ConfigActivate,
                     super::Modal::ConfigNudge => InputAction::ConfigNudgeToggle,
@@ -937,10 +955,10 @@ pub fn process_event(
                             // exact-match arm instead of silently no-op'ing.
                             match text.trim() {
                                 "/provider" => InputAction::OpenProvider,
-                                "/session" => InputAction::OpenSession,
                                 "/permissions" => InputAction::OpenPermissions,
                                 "/tools" => InputAction::OpenTools,
                                 "/mcp" => InputAction::OpenMcp,
+                                "/skills" => InputAction::OpenSkills,
                                 "/config" => InputAction::OpenConfig,
                                 "/exit" => InputAction::Quit,
                                 _ => InputAction::SendSlash(text),
@@ -1234,9 +1252,7 @@ pub fn process_event(
                         return InputAction::QuestionToggle;
                     }
                     // Space inside the tools manager toggles the selected
-                    // tool's enabled flag. (The session dashboard used to host
-                    // this, but is now read-only; the toggle surface lives in
-                    // the dedicated Tools modal.)
+                    // tool's enabled flag.
                     if context.active_modal == super::Modal::Tools && c == ' ' {
                         return InputAction::SessionActivate;
                     }
@@ -1247,6 +1263,10 @@ pub fn process_event(
                     }
                     if context.active_modal == super::Modal::Mcp && c == 'r' {
                         return InputAction::McpReconnect;
+                    }
+                    // `r` in the skills modal reloads the skill registry.
+                    if context.active_modal == super::Modal::Skills && c == 'r' {
+                        return InputAction::SkillsReload;
                     }
                     // Space inside the permissions manager revokes the
                     // selected rule.
@@ -1298,12 +1318,10 @@ pub fn process_event(
                         InputAction::ProviderPickerToggleFavorite
                     } else if context.active_modal == super::Modal::Provider
                         && !context.model_searching
-                        && !context.picker_in_models_stage
                         && c == 'e'
                     {
-                        // Stage-1 browse mode only: `e` opens the editor for the
-                        // highlighted provider (key + model id). In search mode `e`
-                        // is a query char; editing is provider-level.
+                        // Stage 1: edit the highlighted provider. Stage 2:
+                        // edit the highlighted model/channel settings.
                         InputAction::OpenModelEditor
                     } else if context.active_modal == super::Modal::Provider
                         && !context.model_searching
@@ -1325,12 +1343,22 @@ pub fn process_event(
                         InputAction::DeleteProvider
                     } else if context.active_modal == super::Modal::Sessions && c == 'd' {
                         InputAction::DeleteSelectedSession
-                    } else if context.active_modal == super::Modal::Session && c == 't' {
-                        // The dashboard's TOOLS line is read-only; `t` hands off
-                        // to the dedicated tools manager for toggling.
-                        InputAction::OpenTools
                     } else if context.active_modal == super::Modal::Permissions && c == 'c' {
                         InputAction::PermissionsClearAll
+                    } else if c == ' '
+                        && context.active_modal == super::Modal::ModelEditor
+                        && context.editor_field == Some(2)
+                    {
+                        // Space toggles the key editor's thinking field
+                        // (Anthropic, field 2) instead of inserting a space.
+                        InputAction::ModelEditorThinkingToggle
+                    } else if c == ' '
+                        && context.active_modal == super::Modal::CustomProvider
+                        && context.custom_thinking_focused
+                    {
+                        // Space toggles the custom-provider editor's Thinking
+                        // field (Anthropic only).
+                        InputAction::CustomProviderThinkingToggle
                     } else if context.active_modal == super::Modal::Question {
                         InputAction::QuestionInsertChar(c)
                     } else if context.active_modal == super::Modal::HistorySearch
@@ -1347,7 +1375,12 @@ pub fn process_event(
                         context.history_searching,
                         context.model_searching,
                         context.custom_text_field_focused(),
-                    ) {
+                    ) && !(context.active_modal == super::Modal::ModelEditor
+                        && context.editor_field == Some(2))
+                    {
+                        // The key editor's thinking field (2) is a toggle, not
+                        // a text field — don't let printable chars mutate the
+                        // borrowed input line while it's focused.
                         let byte_pos = input
                             .char_indices()
                             .map(|(i, _)| i)
@@ -1445,6 +1478,19 @@ pub fn process_event(
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalUp;
                     }
+                    // In the model editor's effort field, ← cycles the effort
+                    // level down (wrapping). Only when field 1 is focused.
+                    if context.active_modal == super::Modal::ModelEditor
+                        && context.editor_field == Some(1)
+                    {
+                        return InputAction::ModelEditorEffortCycle { delta: -1 };
+                    }
+                    // Custom-provider editor effort field: ← cycles down.
+                    if context.active_modal == super::Modal::CustomProvider
+                        && context.custom_effort_focused
+                    {
+                        return InputAction::CustomProviderEffortCycle { delta: -1 };
+                    }
                     // In the nudge sub-page, ← decreases the selected
                     // threshold by 1 (no-op on the enabled row, which is
                     // toggled with Space).
@@ -1477,6 +1523,18 @@ pub fn process_event(
                 KeyCode::Right => {
                     if context.active_modal == super::Modal::Permission {
                         return InputAction::ModalDown;
+                    }
+                    // Effort field: → cycles the level up (wrapping).
+                    if context.active_modal == super::Modal::ModelEditor
+                        && context.editor_field == Some(1)
+                    {
+                        return InputAction::ModelEditorEffortCycle { delta: 1 };
+                    }
+                    // Custom-provider editor effort field: → cycles up.
+                    if context.active_modal == super::Modal::CustomProvider
+                        && context.custom_effort_focused
+                    {
+                        return InputAction::CustomProviderEffortCycle { delta: 1 };
                     }
                     // In the nudge sub-page, → increases the selected
                     // threshold by 1.
@@ -1540,11 +1598,9 @@ pub fn process_event(
                         }
                     }
                     super::Modal::Activity => InputAction::ScrollUp,
-                    // The session dashboard is now read-only; Up/Down scroll its
-                    // body. Tool selection lives in the Tools modal.
-                    super::Modal::Session => InputAction::ScrollUp,
                     super::Modal::Tools => InputAction::SessionSelect { forward: false },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: false },
+                    super::Modal::Skills => InputAction::SessionSelect { forward: false },
                     super::Modal::Permissions => InputAction::ModalUp,
                     super::Modal::Config => InputAction::ModalUp,
                     super::Modal::ConfigNudge => InputAction::ModalUp,
@@ -1598,10 +1654,9 @@ pub fn process_event(
                         }
                     }
                     super::Modal::Activity => InputAction::ScrollDown,
-                    // Read-only dashboard: Up/Down scroll, not select.
-                    super::Modal::Session => InputAction::ScrollDown,
                     super::Modal::Tools => InputAction::SessionSelect { forward: true },
                     super::Modal::Mcp => InputAction::SessionSelect { forward: true },
+                    super::Modal::Skills => InputAction::SessionSelect { forward: true },
                     super::Modal::Permissions => InputAction::ModalDown,
                     super::Modal::Config => InputAction::ModalDown,
                     super::Modal::ConfigNudge => InputAction::ModalDown,
@@ -1755,7 +1810,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -1800,7 +1857,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -1922,7 +1981,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -1962,7 +2023,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2001,7 +2064,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2037,7 +2102,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2073,7 +2140,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2113,7 +2182,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2153,7 +2224,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2188,7 +2261,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2264,7 +2339,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -2300,7 +2377,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2332,7 +2411,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2364,7 +2445,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2398,7 +2481,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: true,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2431,7 +2516,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2466,7 +2553,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: true,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2501,7 +2590,9 @@ mod tests {
                 history_searching: false,
                 model_searching: true,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2532,7 +2623,9 @@ mod tests {
             history_searching: false,
             model_searching: false,
             picker_in_models_stage: false,
+            editor_field: None,
             custom_provider_field: None,
+            ..Default::default()
         };
         let letter = process_event(
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
@@ -2582,7 +2675,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2610,7 +2705,9 @@ mod tests {
             history_searching: false,
             model_searching: false,
             picker_in_models_stage: false,
+            editor_field: None,
             custom_provider_field: None,
+            ..Default::default()
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -2649,7 +2746,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -2679,7 +2778,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -2709,7 +2810,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -2923,7 +3026,9 @@ mod tests {
                 history_searching: modal == crate::tui::Modal::HistorySearch,
                 model_searching: modal == crate::tui::Modal::Provider,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -3080,7 +3185,9 @@ mod tests {
                     history_searching: false,
                     model_searching: false,
                     picker_in_models_stage: false,
+                    editor_field: None,
                     custom_provider_field: None,
+                    ..Default::default()
                 },
                 &mut drag,
             )
@@ -3634,7 +3741,9 @@ mod tests {
                 history_searching: true,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -3717,7 +3826,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -3836,7 +3947,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -3867,7 +3980,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -3902,7 +4017,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -3956,7 +4073,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );
@@ -3995,7 +4114,9 @@ mod tests {
                 history_searching: modal == crate::tui::Modal::HistorySearch,
                 model_searching: modal == crate::tui::Modal::Provider,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         )
@@ -4121,7 +4242,9 @@ mod tests {
                 history_searching: false,
                 model_searching: false,
                 picker_in_models_stage: false,
+                editor_field: None,
                 custom_provider_field: None,
+                ..Default::default()
             },
             &mut drag,
         );

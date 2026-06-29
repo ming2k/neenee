@@ -1,5 +1,5 @@
 //! Simpler showcases: provider picker, model editor, history search, sessions
-//! picker, session-context modal, activity modal, help, and toasts.
+//! picker, activity modal, help, and toasts.
 //!
 //! These share the [`common::run_showcase`] runner; each is its own small
 //! state struct + key handler. Several are navigation-only (up/down/tab).
@@ -10,10 +10,7 @@ use std::io;
 
 use crossterm::event::KeyCode;
 
-use neenee_core::{
-    McpServerInfo, ModelInfo, PermissionRuleInfo, ProviderPickerRow, ProviderPickerSnapshot,
-    SessionContextSnapshot, SessionOverview, SkillInfo, ToolInfo, mcp::McpConnectionStatus,
-};
+use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot, SessionOverview};
 use neenee_core::{Pursuit, TodoId, TodoItem, TodoList, TodoStatus};
 
 use crate::showcase::common::{self, ShowAction};
@@ -23,8 +20,7 @@ use crate::tui::layout::LayoutMap;
 use crate::tui::render::Theme;
 use crate::tui::render::{
     ActivityModalView, draw_activity_modal, draw_armed_toast, draw_copy_toast, draw_help_modal,
-    draw_history_modal, draw_model_editor, draw_models_modal, draw_session_modal,
-    draw_sessions_modal,
+    draw_history_modal, draw_model_editor, draw_models_modal, draw_sessions_modal,
 };
 
 // ─────────────────────────── provider picker ──────────────────────────────
@@ -46,6 +42,7 @@ pub fn provider() -> io::Result<()> {
         name: name.to_string(),
         model: models.first().copied().unwrap_or("").to_string(),
         models: models.iter().map(|m| m.to_string()).collect(),
+        model_info: Vec::new(),
         builtin: true,
         protocol: String::new(),
         base_url: String::new(),
@@ -189,7 +186,7 @@ pub fn model_editor() -> io::Result<()> {
             let title = " key editor · API key · q/Ctrl+C=quit".to_string();
             let hint = " type to edit · Enter save · Esc quit ";
             common::draw_with_chrome(f, &title, hint, &theme, |f| {
-                draw_model_editor(f, "OpenAI", &s.input, s.cursor, &theme);
+                draw_model_editor(f, "OpenAI", &s.input, s.cursor, true, 0, None, None, &theme);
             });
         },
         |s, key| -> ShowAction {
@@ -372,122 +369,6 @@ pub fn sessions() -> io::Result<()> {
                 }
                 KeyCode::Down => {
                     s.index += 1;
-                    ShowAction::Continue
-                }
-                _ => ShowAction::Continue,
-            }
-        },
-    )
-}
-
-// ──────────────────────── session-context modal ───────────────────────────
-
-struct SessionState {
-    snapshot: SessionContextSnapshot,
-    scroll: Cell<usize>,
-    key_status: HashMap<String, bool>,
-    mcp_statuses: Vec<(String, McpConnectionStatus)>,
-}
-
-pub fn session() -> io::Result<()> {
-    let theme = Theme::default();
-    let snapshot = SessionContextSnapshot {
-        model: ModelInfo {
-            provider: "anthropic".into(),
-            model: "claude-sonnet-4-5".into(),
-            display_name: "Claude Sonnet 4.5".into(),
-            context_window: 200_000,
-            api_key_ready: true,
-            description: "Anthropic Claude Sonnet 4.5".into(),
-            capabilities: vec!["tool calling".into(), "vision".into()],
-        },
-        tools: vec![
-            ToolInfo {
-                name: "bash".into(),
-                description: "run a shell command".into(),
-                enabled: true,
-                source: "builtin".into(),
-            },
-            ToolInfo {
-                name: "edit".into(),
-                description: "edit a file".into(),
-                enabled: true,
-                source: "builtin".into(),
-            },
-            ToolInfo {
-                name: "mcp__fs__read_file".into(),
-                description: "read a file (MCP)".into(),
-                enabled: false,
-                source: "mcp:fs".into(),
-            },
-        ],
-        permissions: vec![
-            PermissionRuleInfo {
-                tool: "bash".into(),
-                scope: "*".into(),
-            },
-            PermissionRuleInfo {
-                tool: "read".into(),
-                scope: "src/**".into(),
-            },
-        ],
-        skills: vec![SkillInfo {
-            name: "rust-expert".into(),
-            description: "Rust development help".into(),
-            version: Some("1.0.0".into()),
-            enabled: true,
-            source: "repo".into(),
-            tags: vec!["rust".into()],
-        }],
-        mcp: vec![McpServerInfo {
-            name: "fs".into(),
-            connected: true,
-            disabled: false,
-            failure: None,
-            tool_names: vec!["read_text".into(), "write_file".into()],
-        }],
-    };
-    let mut state = SessionState {
-        snapshot,
-        scroll: Cell::new(0),
-        key_status: HashMap::new(),
-        mcp_statuses: vec![("fs".into(), McpConnectionStatus::Connected { tools: 2 })],
-    };
-
-    common::run_showcase(
-        &mut state,
-        |f, s| {
-            let title = " session-context dashboard · q/Ctrl+C=quit";
-            let hint = " ↑↓ select tool · Space toggle · Esc quit ";
-            common::draw_with_chrome(f, title, hint, &theme, |f| {
-                let mut scroll = s.scroll.get();
-                draw_session_modal(
-                    f,
-                    "anthropic",
-                    "claude-sonnet-4-5",
-                    &s.key_status,
-                    &s.mcp_statuses,
-                    Some(&s.snapshot),
-                    &mut scroll,
-                    &theme,
-                );
-                s.scroll.set(scroll);
-            });
-        },
-        |s, key| -> ShowAction {
-            // The session dashboard is read-only; Up/Down scroll its body.
-            match key.code {
-                KeyCode::Esc => ShowAction::Exit,
-                KeyCode::Up => {
-                    let mut scroll = s.scroll.get();
-                    scroll = scroll.saturating_sub(1);
-                    s.scroll.set(scroll);
-                    ShowAction::Continue
-                }
-                KeyCode::Down => {
-                    let mut scroll = s.scroll.get();
-                    scroll = scroll.saturating_add(1);
-                    s.scroll.set(scroll);
                     ShowAction::Continue
                 }
                 _ => ShowAction::Continue,

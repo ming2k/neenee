@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use neenee_core::Tool;
 use serde_json::json;
 
+use crate::helpers::should_skip_path;
+
 /// List directory contents.
 pub struct ListDirTool;
 
@@ -63,18 +65,18 @@ impl Tool for ListDirTool {
             for entry in walkdir::WalkDir::new(path)
                 .max_depth(10)
                 .into_iter()
+                // Prune ignored dirs (build output / deps) the same way grep and
+                // glob do, so the three tools agree about the tree.
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    !name.starts_with('.') && !should_skip_path(e.path())
+                })
                 .filter_map(|e| e.ok())
             {
                 if results.len() >= max_results {
                     break;
                 }
                 let p = entry.path();
-                if p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with('.'))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
                 let display = p
                     .strip_prefix(std::env::current_dir().unwrap_or_default())
                     .unwrap_or(p);

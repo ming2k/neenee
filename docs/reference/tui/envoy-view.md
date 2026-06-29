@@ -120,7 +120,7 @@ storage. See `document.rs` for both entry points.
 
 | File | Responsibility |
 |------|----------------|
-| `render/step/renderers.rs` | `draw_envoy_inline_step`, `draw_envoy_bar` |
+| `render/disclosure/renderers.rs` | `draw_envoy_inline_step`, `draw_envoy_bar` |
 | `render/mod.rs` | `EnvoyBarInfo`, wiring the bar into `draw_transcript` when `view.envoy_bar` is `Some` |
 | `app.rs` | `focus_stack`, `in_envoy_view`, `focused_messages`, `reset_view_state` |
 | `document.rs` | `is_envoy_task`, `tool_step_call_id`, `envoy_children`, `envoy_children_mut`, `attach_envoy_children`, `envoy_status_line` |

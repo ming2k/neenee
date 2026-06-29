@@ -16,6 +16,7 @@ impl Provider for MockProvider {
             content_blob: None,
             display_content: None,
             reasoning_content: None,
+            provider_meta: None,
             tool_calls: None,
             tool_call_id: None,
             images: None,

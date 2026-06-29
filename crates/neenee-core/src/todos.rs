@@ -311,14 +311,6 @@ impl TodoToolContext {
         }
     }
 
-    /// Build a context that shares state with cells owned by the `Agent`.
-    pub fn shared(todos: Arc<Mutex<TodoList>>, turn_counter: Arc<Mutex<u64>>) -> Self {
-        Self {
-            todos,
-            turn_counter,
-        }
-    }
-
     pub fn todos(&self) -> TodoList {
         self.todos.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -329,7 +321,7 @@ impl TodoToolContext {
     }
 
     pub fn current_turn(&self) -> u64 {
-        self.turn_counter.lock().map(|g| *g).unwrap_or(0)
+        *self.turn_counter.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

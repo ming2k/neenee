@@ -17,6 +17,7 @@ neenee-tools = { path = "../neenee-tools" }
 neenee-agent = { path = "../neenee-agent" }
 neenee-server = { path = "../neenee-server" }
 neenee-tui = { path = "../neenee-tui" }
+neenee-tui-view = { path = "../neenee-tui-view" }
 async-trait = { workspace = true }
 crossterm = { workspace = true }
 arboard = "3.6"

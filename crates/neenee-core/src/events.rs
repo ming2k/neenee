@@ -58,6 +58,10 @@ pub enum AgentRequest {
     /// `models` is the provider's seeded model list — one channel per model,
     /// the first becoming the default/active model. A template that seeds the
     /// whole Claude family lands all of them in the picker's stage-2 list.
+    ///
+    /// Per ADR-0046, reasoning (effort/thinking) is no longer set at provider
+    /// creation — it is opted in per model via the stage-2 model `e` editor
+    /// (`EditProviderModel`). New channels start with thinking off.
     AddProvider {
         name: String,
         protocol: String,
@@ -70,6 +74,9 @@ pub enum AgentRequest {
     /// its model id, so a multi-model custom provider is not collapsed. An empty
     /// `api_key` leaves the existing key untouched. Built-in providers are not
     /// editable this way (their `e` editor only sets the API key).
+    ///
+    /// Per ADR-0046, this no longer carries reasoning knobs — effort/thinking
+    /// are per-model (`EditProviderModel`), not provider-wide.
     EditProvider {
         id: String,
         name: String,
@@ -90,6 +97,26 @@ pub enum AgentRequest {
     RemoveProviderModel {
         provider_id: String,
         model: String,
+    },
+    /// Edit settings for one model/channel of a user-defined provider. This is
+    /// intentionally channel-scoped: Anthropic effort/thinking can vary by
+    /// model even when the provider endpoint/key are shared.
+    EditProviderModel {
+        provider_id: String,
+        model: String,
+        effort: Option<String>,
+        thinking: Option<bool>,
+    },
+    /// Edit the per-model reasoning settings (Anthropic effort/thinking) for a
+    /// **built-in** model, persisted into the `[model_reasoning."<model-id>"]`
+    /// table. This is the model-level counterpart to `EditProviderModel`:
+    /// built-in providers (e.g. `anthropic`) have no user-editable channels, so
+    /// their per-model reasoning knobs live in this shared table keyed by model
+    /// id rather than on a channel. ADR-0045.
+    EditModelReasoning {
+        model: String,
+        effort: Option<String>,
+        thinking: Option<bool>,
     },
     /// Delete a user-defined provider entirely: drop the entry from
     /// `config.providers`, remove it from `favorites`, and persist. If the
@@ -117,7 +144,7 @@ pub enum AgentRequest {
     },
     /// Request a fresh session-context snapshot (model / tools / permissions /
     /// skills / mcp). The harness replies with [`AgentResponse::SessionContext`].
-    /// Sent by the TUI when the session modal opens.
+    /// Sent by the TUI when a manager modal opens.
     QuerySessionContext,
     /// Revoke a single cached "always allow" permission rule. The harness
     /// removes it from the in-memory allowlist and replies with an updated
@@ -512,6 +539,11 @@ pub struct ProviderPickerRow {
     /// Every model id this provider serves, in catalog order. A single-model
     /// provider lists exactly one; multi-model providers list all of them.
     pub models: Vec<String>,
+    /// Per-model/channel settings in the same order as `models`. Newer TUIs use
+    /// this to render and edit model-specific controls such as Anthropic
+    /// effort/thinking. `models` stays as the simple compatibility list.
+    #[serde(default)]
+    pub model_info: Vec<ProviderModelInfo>,
     /// `true` for built-in presets, `false` for user-defined providers. The TUI
     /// only offers add/remove-model (and full meta editing) on user-defined
     /// providers.
@@ -528,6 +560,21 @@ pub struct ProviderPickerRow {
     /// Unix epoch milliseconds of the last activation. `None` if the provider
     /// has never been activated, which the picker sorts as "oldest".
     pub last_used_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderModelInfo {
+    /// Wire model id. Mirrors an entry in [`ProviderPickerRow::models`].
+    pub model: String,
+    /// Wire protocol id of the channel serving this model (`"openai"` |
+    /// `"anthropic"` | `"gemini"`).
+    pub protocol: String,
+    /// Effective reasoning effort for Anthropic-protocol channels. `None` for
+    /// protocols that do not expose an effort knob.
+    pub effort: Option<String>,
+    /// Effective extended-thinking state for Anthropic-protocol channels.
+    /// `None` for protocols that do not expose a thinking knob.
+    pub thinking: Option<bool>,
 }
 
 /// Full snapshot of provider-picker state: which provider is the current

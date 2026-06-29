@@ -90,11 +90,19 @@ pub struct EventEnvelope {
 /// Append-only event log for one project.
 pub struct EventLog {
     path: PathBuf,
+    /// Cached next sequence number. Populated lazily from the highest existing
+    /// `seq` on the first append, then bumped monotonically so `append` is O(1)
+    /// instead of re-reading and re-parsing the entire log on every event (the
+    /// old behaviour was O(n) per append — quadratic over a long session).
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl EventLog {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            next_seq: std::sync::atomic::AtomicU64::new(u64::MAX),
+        }
     }
 
     /// Read all events in log order.
@@ -133,7 +141,32 @@ impl EventLog {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let next_seq = self.load()?.last().map(|e| e.seq + 1).unwrap_or(0);
+        // Lazily seed the cached seq counter from the log on first use, then
+        // bump it in place. The sentinel `u64::MAX` means "not yet seeded".
+        // After the first append this is an O(1) fetch_add instead of the
+        // previous O(n) full-log re-read.
+        //
+        // Invariant: after this block the counter holds the next seq *after*
+        // `next_seq`, i.e. ready for a future append to reserve.
+        let next_seq = match self.next_seq.compare_exchange(
+            u64::MAX,
+            u64::MAX, // never observably used as a real seq
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            // First append: seed from the log's high-water mark, then reserve
+            // `base` and leave the counter at `base + 1`.
+            Ok(_) => {
+                let base = self.load()?.last().map(|e| e.seq + 1).unwrap_or(0);
+                self.next_seq
+                    .store(base + 1, std::sync::atomic::Ordering::Release);
+                base
+            }
+            // Already seeded: atomically reserve the next id (counter advances).
+            Err(_) => self
+                .next_seq
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+        };
         let envelope = EventEnvelope {
             seq: next_seq,
             timestamp: crate::session::unix_timestamp(),
@@ -193,6 +226,36 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].seq, 0);
         assert_eq!(loaded[1].seq, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn event_log_seq_increments_monotonically() {
+        let dir = std::env::temp_dir().join(format!("neenee-events-seq-{}", uuid::Uuid::new_v4()));
+        let log = EventLog::new(dir.join("events.jsonl"));
+
+        // Three appends must yield seq 0, 1, 2 — the cached counter, not a
+        // per-append full-log re-read (regression: O(n) re-read still produced
+        // correct ids, this just locks the contract in).
+        for _ in 0..3 {
+            log.append(SessionEvent::Reset {
+                id: "x".to_string(),
+            })
+            .unwrap();
+        }
+        let loaded = log.load().unwrap();
+        let seqs: Vec<u64> = loaded.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![0, 1, 2]);
+
+        // A fresh EventLog over the *same* file must seed from the existing
+        // high-water mark, not restart at 0.
+        let log2 = EventLog::new(dir.join("events.jsonl"));
+        log2.append(SessionEvent::Reset {
+            id: "y".to_string(),
+        })
+        .unwrap();
+        let loaded2 = log2.load().unwrap();
+        assert_eq!(loaded2.last().unwrap().seq, 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 

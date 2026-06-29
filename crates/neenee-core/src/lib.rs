@@ -1,4 +1,4 @@
-//! Pure domain vocabulary for the coding-agent stack: the `Provider` and
+//! Pure domain vocabulary for the neenee agent stack: the `Provider` and
 //! `Tool` capability traits, conversation and tool-output types, the
 //! context-pressure model, pursuit/repeat/todo domain types, envoy
 //! profiles, skills/MCP config schemas, and the wire events the harness and
@@ -42,6 +42,10 @@ pub use tool_output::{
 
 pub mod capability;
 pub mod catalog;
+pub mod effort;
+pub use effort::{EFFORT_CLAUDE_FULL, EFFORT_COMMON, Effort};
+pub mod thinking;
+pub use thinking::ThinkingMode;
 pub mod dynamic;
 pub mod events;
 pub mod hooks;
@@ -72,8 +76,9 @@ pub use events::{
     AgentEvent, AgentNotice, AgentOp, AgentRequest, AgentResponse, EnvoyEvent, HarnessSnapshot,
     InputReply, InputRequest, McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource,
     NoticeSurface, ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo,
-    ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot, SessionOverview, SkillInfo,
-    ToolInfo, TurnEvent, UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest,
+    ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot,
+    SessionOverview, SkillInfo, ToolInfo, TurnEvent, UserQuestion, UserQuestionOption,
+    UserQuestionReply, UserQuestionRequest,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
@@ -81,7 +86,7 @@ pub use model::{KNOWN_MODELS, Model, WireFormat, model_by_id, resolve as resolve
 pub use nudgeconfig::NudgeConfig;
 pub use pressure::{
     CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
-    PruneOutcome, count_tokens, estimate_chars, estimate_tokens, prune_tool_results,
+    PruneOutcome, count_tokens, estimate_bytes, estimate_tokens, prune_tool_results,
 };
 pub use prompt::{PromptChannel, PromptContext, PromptRegistry, PromptSection};
 pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};

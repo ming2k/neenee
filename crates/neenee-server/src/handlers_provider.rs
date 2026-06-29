@@ -67,6 +67,10 @@ pub async fn switch(
     {
         config.anthropic_base_url = Some(url);
     }
+    // ADR-0046: reasoning (effort/thinking) is no longer set on provider
+    // switch — it is opted in per model via `[model_reasoning]`
+    // (`EditModelReasoning`) / a channel's reasoning fields
+    // (`EditProviderModel`). Switching just selects the provider + model.
     // Persist the chosen model and default-provider pointer before
     // building so the catalog reads them back. The key/url writes
     // above already landed in `config`.
@@ -131,9 +135,12 @@ pub async fn add(
         let trimmed = base_url.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
-    // One channel per seeded model — a template that seeds the whole Claude
-    // family lands every model in the picker's stage-2 list, all sharing the
-    // provider's transport/endpoint/key. Empty/whitespace model ids are dropped.
+    // ADR-0046: reasoning is opt-in per model. New channels are created with no
+    // effort/thinking — the user opts a model in from the stage-2 model `e`
+    // editor (`EditProviderModel`). One channel per seeded model — a template
+    // that seeds the whole Claude family lands every model in the picker's
+    // stage-2 list, all sharing the provider's transport/endpoint/key. Empty/
+    // whitespace model ids are dropped.
     let channels: Vec<UserChannelConfig> = models
         .iter()
         .map(|m| m.trim())
@@ -146,6 +153,8 @@ pub async fn add(
             model: Some(model.to_string()),
             base_url: base_url.clone(),
             user_agent: None,
+            effort: None,
+            thinking: None,
         })
         .collect();
     // A provider must serve at least one model; a template with no usable model
@@ -224,6 +233,9 @@ pub async fn edit(
         if !trimmed_key.is_empty() {
             channel.api_key = Some(trimmed_key.to_string());
         }
+        // ADR-0046: reasoning (effort/thinking) is no longer edited here — it
+        // is per-model, via `EditProviderModel`. Editing provider metadata
+        // leaves each channel's reasoning knobs untouched.
     }
     let _ = config.save();
     // Only rebuild the live provider when editing the active one (so a new
@@ -323,6 +335,125 @@ pub async fn remove_model(
         config,
         provider_usage,
     )));
+}
+
+/// `AgentRequest::EditProviderModel` — update settings for one channel of a
+/// user-defined provider. Provider metadata (name/base URL/key) is untouched.
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_model(
+    config: &mut Config,
+    agent: &Agent,
+    provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    provider_usage: &mut ProviderUsage,
+    provider_id: String,
+    model: String,
+    effort: Option<String>,
+    thinking: Option<bool>,
+) {
+    let valid_effort = effort.and_then(|e| {
+        let t = e.trim();
+        (!t.is_empty())
+            .then(|| t.to_ascii_lowercase())
+            .filter(|s| neenee_core::effort::Effort::parse(s).is_some())
+    });
+
+    let Some(provider) = config.providers.iter_mut().find(|p| p.id == provider_id) else {
+        return;
+    };
+    let Some(channel) = provider
+        .channels
+        .iter_mut()
+        .find(|c| c.model.as_deref() == Some(model.as_str()))
+    else {
+        return;
+    };
+
+    if matches!(
+        channel.transport,
+        neenee_store::config::UserTransport::Anthropic
+    ) {
+        channel.effort = valid_effort;
+        channel.thinking = thinking;
+    }
+
+    if let Err(error) = config.save() {
+        tracing::warn!(?error, "could not persist provider model settings");
+    }
+
+    let active_model = catalog::resolved_model_name(config, &provider_id);
+    if config.default_provider == provider_id && active_model == model {
+        activate(
+            config,
+            agent,
+            provider_for_task,
+            resp_tx,
+            provider_usage,
+            provider_id,
+            model,
+        )
+        .await;
+    } else {
+        let _ = resp_tx.send(AgentResponse::ProviderPicker(catalog::build_picker_state(
+            config,
+            provider_usage,
+        )));
+    }
+}
+
+/// `AgentRequest::EditModelReasoning` — update the per-model reasoning
+/// settings (Anthropic effort/thinking) persisted in the
+/// `[model_reasoning."<model-id>"]` table. This serves the **built-in**
+/// `anthropic` provider (and any built-in Anthropic-format model), which has
+/// no user-editable channels: its per-model knobs live in this shared table
+/// keyed by model id (ADR-0045). If the edited model is the active one, the
+/// live provider is re-activated so the new settings take effect at once.
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_model_reasoning(
+    config: &mut Config,
+    agent: &Agent,
+    provider_for_task: &Arc<RwLock<Arc<dyn Provider>>>,
+    resp_tx: &mpsc::UnboundedSender<AgentResponse>,
+    provider_usage: &mut ProviderUsage,
+    model: String,
+    effort: Option<String>,
+    thinking: Option<bool>,
+) {
+    let valid_effort = effort.and_then(|e| {
+        let t = e.trim();
+        (!t.is_empty())
+            .then(|| t.to_ascii_lowercase())
+            .filter(|s| neenee_core::effort::Effort::parse(s).is_some())
+    });
+
+    let settings = config.model_reasoning.for_model_mut(&model);
+    settings.effort = valid_effort;
+    settings.thinking = thinking;
+
+    if let Err(error) = config.save() {
+        tracing::warn!(?error, "could not persist per-model reasoning settings");
+    }
+
+    // Re-activate if this model is the live one so the change applies now.
+    let provider_id = &config.default_provider;
+    let active_model = catalog::resolved_model_name(config, provider_id);
+    if active_model == model {
+        activate(
+            config,
+            agent,
+            provider_for_task,
+            resp_tx,
+            provider_usage,
+            provider_id.clone(),
+            model,
+        )
+        .await;
+    } else {
+        let _ = resp_tx.send(AgentResponse::ProviderPicker(catalog::build_picker_state(
+            config,
+            provider_usage,
+        )));
+    }
 }
 
 /// `AgentRequest::DeleteProvider` — remove a user-defined provider entry

@@ -290,7 +290,7 @@ mod tests {
     fn ctx() -> (TodoToolContext, Arc<Mutex<TodoList>>) {
         let list = Arc::new(Mutex::new(TodoList::new()));
         let turn = Arc::new(Mutex::new(5u64));
-        (TodoToolContext::shared(Arc::clone(&list), turn), list)
+        (TodoToolContext::new(Arc::clone(&list), turn), list)
     }
 
     #[tokio::test]

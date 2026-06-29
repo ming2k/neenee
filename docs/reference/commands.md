@@ -101,8 +101,7 @@ Opens a centered, scrollable list of every tool available to the live session �
 builtins, `mcp:<server>`, `pursuit`, and `plan` — each with its source and an
 `[on]`/`[off]` badge. `↑`/`↓` move the selection, `Space` toggles a tool on or
 off (the harness applies it and replies with a fresh snapshot), and `Esc`
-closes. The same list is reachable from the `/session` dashboard's `TOOLS` line
-via `t`. `/tools` is handled entirely in the TUI and is never forwarded to the
+closes. `/tools` is handled entirely in the TUI and is never forwarded to the
 backend.
 
 ### `/unattended`

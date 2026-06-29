@@ -9,6 +9,8 @@
 use std::path::PathBuf;
 use tracing_appender::non_blocking::WorkerGuard;
 
+use neenee_store::paths;
+
 /// Single source of truth for the built-in slash-command vocabulary.
 ///
 /// Each entry `Variant = "/name" : "description"` generates a [`BuiltinCmd`]
@@ -142,28 +144,63 @@ pub fn parse_args(args: Vec<String>) -> (StartupMode, Option<PathBuf>, bool, boo
     (mode, project, unattended, single_instance)
 }
 
-/// Initialise file-based tracing when `NEENEE_LOG` names a log file.
+/// Initialise file-based tracing for the process.
 ///
-/// A TUI cannot log to stdout (it would corrupt the display), so tracing is
-/// opt-in and always writes to a file. Verbosity comes from `RUST_LOG`,
-/// defaulting to `info` for the neenee crates. The returned guard flushes the
-/// non-blocking writer on drop and must live for the whole process.
+/// A TUI cannot log to stdout (it would corrupt the display), so tracing
+/// always writes to a **file** under the XDG state directory:
+/// `$XDG_STATE_HOME/neenee/log/neenee.log` (daily-rotated, so each calendar
+/// day rolls into its own file).
+///
+/// # Verbosity
+///
+/// `NEENEE_LOG` controls the level. Recognised values:
+/// - `off` — disable tracing entirely (no file, no guard).
+/// - `error` / `warn` / `info` / `debug` / `trace` — global level.
+/// - _unrecognised / unset_ — defaults to `info`.
+///
+/// `RUST_LOG` still takes precedence per-target when set (e.g.
+/// `RUST_LOG=neenee_code=debug,neenee_server=trace`), because
+/// `EnvFilter::try_from_default_env` is consulted first. This keeps the
+/// familiar `RUST_LOG` ergonomics for fine-grained filtering while giving a
+/// sane always-on default out of the box.
+///
+/// The returned guard flushes the non-blocking writer on drop and must live
+/// for the whole process (main binds it to a local).
 pub fn init_tracing() -> Option<WorkerGuard> {
-    let path = PathBuf::from(std::env::var_os("NEENEE_LOG")?);
-    let dir = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let file_name = path.file_name()?.to_owned();
+    // Level via NEENEE_LOG; "off" disables tracing entirely.
+    let level = std::env::var("NEENEE_LOG").unwrap_or_else(|_| String::from("info"));
+    if level.eq_ignore_ascii_case("off") {
+        return None;
+    }
+
+    // Resolve the XDG state log directory and create it lazily.
+    let dir = paths::get().log_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        // Last-resort: never block startup over logging. Drop to stderr-free
+        // no-op by returning None; diagnostics are impossible from a TUI anyway.
+        eprintln!("neenee: could not create log dir {}: {e}", dir.display());
+        return None;
+    }
+
     let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::never(dir, file_name));
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("neenee=info,neenee_core=info"));
+        tracing_appender::non_blocking(tracing_appender::rolling::daily(&dir, "neenee.log"));
+
+    // Per-target RUST_LOG wins; otherwise apply the NEENEE_LOG level to the
+    // neenee crates and keep everything else quiet.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let l = level.to_ascii_lowercase();
+        let lvl = matches!(l.as_str(), "error" | "warn" | "info" | "debug" | "trace")
+            .then_some(l.as_str())
+            .unwrap_or("info");
+        tracing_subscriber::EnvFilter::new(format!(
+            "neenee={lvl},neenee_core={lvl},neenee_server={lvl}"
+        ))
+    });
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(writer)
         .with_ansi(false)
         .init();
-    tracing::info!("neenee tracing initialised");
+    tracing::info!(log_dir = %dir.display(), level = %level, "neenee tracing initialised");
     Some(guard)
 }

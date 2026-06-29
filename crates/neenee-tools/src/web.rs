@@ -1,24 +1,31 @@
 use async_trait::async_trait;
 use neenee_core::{Tool, WebSearchConfig, truncate_utf8};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::search::SearchProvider;
 
 /// Fetch a URL and return its text content (HTML stripped to text).
 pub struct WebFetchTool {
     config: Arc<WebSearchConfig>,
+    /// Cached HTTP client, built once from `config` on first use so repeated
+    /// fetches reuse the connection pool and keep-alive. Rebuilding a
+    /// `reqwest::Client` per call (the old behaviour) pays a fresh TLS
+    /// handshake and defeats pooling.
+    client: OnceLock<Result<reqwest::Client, String>>,
 }
 
 impl WebFetchTool {
     pub fn new() -> Self {
         Self {
             config: Arc::new(WebSearchConfig::default()),
+            client: OnceLock::new(),
         }
     }
     pub fn with_config(config: WebSearchConfig) -> Self {
         Self {
             config: Arc::new(config),
+            client: OnceLock::new(),
         }
     }
 }
@@ -29,10 +36,26 @@ impl Default for WebFetchTool {
     }
 }
 
+impl WebFetchTool {
+    /// Lazily build (once) and return the shared HTTP client for this tool's
+    /// config. A build failure is remembered and replayed on every call so the
+    /// caller sees a consistent error instead of retrying the bad config.
+    fn client(&self) -> Result<&reqwest::Client, String> {
+        let built = self.client.get_or_init(|| http_client(&self.config));
+        built.as_ref().map_err(|e| e.clone())
+    }
+}
+
 /// Build the shared HTTP client honoring the web tools' proxy and timeout.
+///
+/// Redirects are capped at a small, fixed number. The SSRF guard runs on the
+/// *initial* URL (see [`crate::ssrf::assert_public_url`]); bounding redirects is
+/// defense-in-depth against a server bouncing the request across many internal
+/// hops.
 fn http_client(config: &WebSearchConfig) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config.timeout_secs.max(1)))
+        .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent("neenee/0.1 (+ai-coding-agent)");
     if let Some(proxy_url) = config
         .proxy
@@ -150,8 +173,11 @@ impl Tool for WebFetchTool {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err("URL must start with http:// or https://".to_string());
         }
+        // SSRF pre-flight: resolve the host and reject any non-public address
+        // (metadata endpoint, loopback, RFC1918, link-local) before sending.
+        crate::ssrf::assert_public_url(url).await?;
         let raw = args["raw"].as_bool().unwrap_or(false);
-        let client = http_client(&self.config)?;
+        let client = self.client()?;
         let response = client
             .get(url)
             .send()
@@ -236,6 +262,9 @@ pub struct WebSearchTool {
     primary: Box<dyn SearchProvider>,
     fallback: Option<Box<dyn SearchProvider>>,
     description: String,
+    /// Cached HTTP client, built once from `config` (see [`WebFetchTool`]'s
+    /// rationale: connection pooling and keep-alive across searches).
+    client: OnceLock<Result<reqwest::Client, String>>,
 }
 
 impl WebSearchTool {
@@ -256,7 +285,15 @@ impl WebSearchTool {
             primary,
             fallback,
             description: build_description(),
+            client: OnceLock::new(),
         }
+    }
+
+    /// Lazily build (once) and return the shared HTTP client. Mirrors
+    /// [`WebFetchTool::client`].
+    fn client(&self) -> Result<&reqwest::Client, String> {
+        let built = self.client.get_or_init(|| http_client(&self.config));
+        built.as_ref().map_err(|e| e.clone())
     }
 }
 
@@ -287,12 +324,12 @@ impl Tool for WebSearchTool {
         let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON: {}", e))?;
         let query = args["query"].as_str().ok_or("Missing 'query'")?;
-        let client = http_client(&self.config)?;
+        let client = self.client()?;
 
-        match self.primary.search(&client, query).await {
+        match self.primary.search(client, query).await {
             Ok(text) => Ok(text),
             Err(primary_err) => match &self.fallback {
-                Some(fallback) => match fallback.search(&client, query).await {
+                Some(fallback) => match fallback.search(client, query).await {
                     Ok(text) => Ok(text),
                     Err(fallback_err) => Err(format!(
                         "Primary backend {} failed: {}\nFallback backend {} also failed: {}",

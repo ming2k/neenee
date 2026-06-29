@@ -19,7 +19,7 @@ expressed in one of three ways:
 ## Shared chrome
 
 Every centered modal goes through the same primitives in
-`crates/neenee-code/src/tui/render/primitives.rs`:
+`crates/neenee-tui-view/src/render/primitives.rs`:
 
 - `recess_backdrop(frame, modal.recess(), theme)` is called once per frame by
   the event loop *after* the transcript and chrome are drawn and *before* the
@@ -57,7 +57,6 @@ The two [toasts](#toasts) are non-modal and use a different `toast` helper.
 | [Models](#models-modal) | `Ctrl+M` / `/provider` | 72 × 60 | `draw_models_modal` |
 | [Model editor](#model-editor) | Models modal `e` | 60 × 36 | `draw_model_editor` |
 | [Sessions](#sessions-modal) | `/sessions` | 80 × 64 | `draw_sessions_modal` |
-| [Session](#session-modal) | `/session` | 76 × content | `draw_session_modal` |
 | [Tools](#tools-modal) | `/tools` | 64 × content | `draw_tools_modal` |
 | [History search](#history-search-modal) | `Ctrl+R` | 70 × 72 | `draw_history_modal` |
 | [Question](#question-modal) | `ask_user` tool | 78 × 70 | `draw_question_modal` |
@@ -74,7 +73,7 @@ The two [toasts](#toasts) are non-modal and use a different `toast` helper.
   configuration flow.
 
 **Click-outside-to-dismiss.** Read-only / info modals — Help, Tool-step
-detail, Session, Tools, Sessions, Permissions, Activity, and History — close when
+detail, Tools, Sessions, Permissions, Activity, and History — close when
 the user clicks outside their panel, mirroring `Esc`. Entry modals that
 hold precious in-progress input (Models, Model editor) and the decision
 modals (Question, Permission sheet) stay open so an accidental click never
@@ -159,46 +158,6 @@ times; `Enter` resumes the selected session.
 The `●` badge marks the currently active session. Overview text is
 truncated with `…` when it would collide with the meta column.
 
-## Session modal
-
-Read-only live-session dashboard, opened by `/session`. Four stacked sections
-— **Model**, **Mcp**, **Skills**, **Tools** — each a brand-colored heading with
-a count, so the whole session reads at a glance instead of hiding most of it
-behind tab switches. The panel is content-sized (clamped to the viewport) and
-scrolls when the body overflows.
-
-```text
-╭──────────────────────────────────────────────────────╮
-│ Session                                               │
-│                                                       │
-│ MODEL                                                 │
-│   GPT-4o  ·  openai                                   │
-│   128K context  ·  ✓ key ready  ·  tools · vision     │
-│                                                       │
-│ MCP  ·  2                                             │
-│   ●  fs          connected (+2 more)                  │
-│                                                       │
-│ SKILLS  ·  3                                          │
-│   ●  pdf           Read and manipulate PDF files      │
-│                                                       │
-│ TOOLS  ·  18                                          │
-│   16 of 18 enabled                                    │
-│   press t to manage →                                 │
-│                                                       │
-│ ↑↓ scroll · t tools · Esc close                       │
-╰──────────────────────────────────────────────────────╯
-```
-
-The `TOOLS` line is a one-row summary (enabled/total) plus a hint; interactive
-toggling lives in the dedicated [Tools modal](#tools-modal), reached via `t`
-(or `/tools`). Until the snapshot arrives, Skills/Tools show `Loading…`.
-
-| Key | Effect |
-|-----|--------|
-| `↑` / `↓` | Scroll the body |
-| `t` | Open the Tools modal (when tools exist) |
-| `Esc` | Close |
-
 ## Tools modal
 
 Interactive tool manager, opened by `/tools` (or `t`/`Enter` from the Session
@@ -206,7 +165,7 @@ dashboard's `TOOLS` line). A centered, scrollable list of every tool available
 to the live session — builtins, `mcp:<server>`, `pursuit`, `plan` — each with
 its source, a short description, and an `[on]`/`[off]` badge. `Space` toggles a
 tool; the harness applies it and replies with a fresh snapshot that re-renders
-the list. Data comes from the same session-context snapshot `/session` uses.
+the list. Data comes from the session-context snapshot.
 
 ```text
 ╭────────────────────────────────────────────────────────╮
@@ -445,10 +404,10 @@ left+right borders colored by variant.
 
 ## Source
 
-All modals live in `crates/neenee-code/src/tui/render/overlays/` (one
+All modals live in `crates/neenee-tui-view/src/render/overlays/` (one
 renderer file per modal: `provider`, `permission`, `history`, `help`,
 `session`, `tools`, `permissions_manager`, `activity`, `tool_step_detail`, `toast`,
 plus shared `common`). Shared primitives (`recess_backdrop`, `centered_rect`,
 `modal_frame`, `panel_block`, `toast`) are in
-`crates/neenee-code/src/tui/render/primitives.rs`. The chrome-hiding flag is
-read by `draw_transcript` in `crates/neenee-code/src/tui/render/mod.rs`.
+`crates/neenee-tui-view/src/render/primitives.rs`. The chrome-hiding flag is
+read by `draw_transcript` in `crates/neenee-tui-view/src/render/mod.rs`.

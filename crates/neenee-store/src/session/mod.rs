@@ -23,8 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 // Re-export the cheap context estimators so callers keep using
-// `session::estimate_chars` / `session::estimate_tokens`.
-pub use neenee_core::{estimate_chars, estimate_tokens};
+// `session::estimate_bytes` / `session::estimate_tokens`.
+pub use neenee_core::{estimate_bytes, estimate_tokens};
 
 /// C2 (ADR-0022): added `title` and `title_manual`. C3 (ADR-0032): added
 /// `pursuit`. C4 (ADR-0034): added `Message::origin` (`Option<InjectionOrigin>`)
@@ -186,19 +186,18 @@ fn migrate_session_data(mut data: SessionData) -> SessionData {
 /// covers the canonical JSON representation of all fields except `checksum`,
 /// which is set to `null` during computation so later verification can read
 /// the stored value and compare against the same payload.
-fn compute_checksum(data: &SessionData) -> u32 {
-    let mut value = match serde_json::to_value(data) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
+///
+/// Returns `Err` on serialization failure rather than a sentinel `0`. The
+/// previous code returned `0` on a serialization error, which would *appear*
+/// to be a valid checksum and let `verify_checksum` accept corrupt data — a
+/// fail-open failure mode for an integrity check.
+fn compute_checksum(data: &SessionData) -> Result<u32, String> {
+    let mut value = serde_json::to_value(data).map_err(|e| e.to_string())?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("checksum".to_string(), serde_json::Value::Null);
     }
-    let bytes = match serde_json::to_vec(&value) {
-        Ok(b) => b,
-        Err(_) => return 0,
-    };
-    crc32c::crc32c(&bytes)
+    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    Ok(crc32c::crc32c(&bytes))
 }
 
 /// Verify the stored checksum on `data`, if present. Returns `Ok(())` when the
@@ -208,7 +207,7 @@ fn verify_checksum(data: &SessionData) -> Result<(), String> {
     let Some(stored) = data.checksum else {
         return Ok(());
     };
-    let expected = compute_checksum(data);
+    let expected = compute_checksum(data)?;
     if expected == stored {
         Ok(())
     } else {
@@ -230,7 +229,7 @@ fn write_session_file(
 ) -> Result<(), String> {
     let mut data = data.clone();
     offload_session_blobs(&mut data, blob_store)?;
-    data.checksum = Some(compute_checksum(&data));
+    data.checksum = Some(compute_checksum(&data)?);
     fsutil::atomic_write_json(path, &data)
 }
 
@@ -611,12 +610,16 @@ impl SessionStore {
     /// resume restores the same list (and so per-item history is retained in
     /// the log).
     pub async fn set_todos(&self, todos: neenee_core::TodoList) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.todos = todos.clone();
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state.event_log.append(SessionEvent::TodosSet { todos })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state.data.todos = todos.clone();
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state.event_log.append(SessionEvent::TodosSet { todos })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     pub async fn last_projection(&self) -> Option<ContextProjectionCheckpoint> {
@@ -639,15 +642,19 @@ impl SessionStore {
     /// `manual = false` to clear. Persists both the snapshot and the event log
     /// so resume restores the same title.
     pub async fn set_title(&self, title: Option<String>, manual: bool) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.title = title.clone();
-        state.data.title_manual = manual;
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state
-            .event_log
-            .append(SessionEvent::TitleSet { title, manual })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state.data.title = title.clone();
+            state.data.title_manual = manual;
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state
+                .event_log
+                .append(SessionEvent::TitleSet { title, manual })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     pub async fn archived_transcript_count(&self) -> usize {
@@ -670,14 +677,18 @@ impl SessionStore {
     /// single write path for the pursuit primitive; `mark_pursuit_complete`
     /// and `update_pursuit_objective` delegate here.
     pub async fn set_pursuit(&self, pursuit: Option<Pursuit>) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.pursuit = pursuit.clone();
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state
-            .event_log
-            .append(SessionEvent::PursuitSet { pursuit })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state.data.pursuit = pursuit.clone();
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state
+                .event_log
+                .append(SessionEvent::PursuitSet { pursuit })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     /// Flip `is_complete = true` on the current pursuit, if any. Returns the
@@ -720,14 +731,18 @@ impl SessionStore {
     }
 
     pub async fn replace_messages(&self, messages: Vec<Message>) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.model_window = messages;
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state.event_log.append(SessionEvent::MessagesReplaced {
-            messages: state.data.model_window.clone(),
-        })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state.data.model_window = messages;
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state.event_log.append(SessionEvent::MessagesReplaced {
+                messages: state.data.model_window.clone(),
+            })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     /// Incrementally persist new messages appended since the last durable
@@ -747,12 +762,27 @@ impl SessionStore {
     /// durable prefix (e.g. a compaction already replaced messages) this is a
     /// no-op.
     pub async fn append_round(&self, current: &[Message]) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        let baseline = state.data.model_window.len();
-        // Only the strictly-new tail is the delta. If `current` is shorter or
-        // equal (compaction rewrote the window, or nothing changed), there is
-        // nothing to append.
-        let delta: Vec<Message> = if current.len() > baseline {
+        // Collect any persistence work to do *outside* the lock. The lock is
+        // held only for the in-memory mutation + the (O(1)) event-log append;
+        // the full snapshot persistence is deferred to `persist_off_runtime`.
+        // The variants differ in size, but this enum is a short-lived stack
+        // value used only to shuttle the snapshot out of the locked scope —
+        // boxing the `Snapshot` payload to equalize variants would add an
+        // allocation on the hot path for no benefit, so the lint is allowed.
+        #[allow(clippy::large_enum_variant)]
+        enum Persist {
+            None,
+            Snapshot { path: PathBuf, data: SessionData },
+        }
+        let persist = {
+            let mut state = self.state.lock().await;
+            let baseline = state.data.model_window.len();
+            // Only the strictly-new tail is the delta. If `current` is shorter
+            // or equal (compaction rewrote the window, or nothing changed),
+            // there is nothing to append.
+            if current.len() <= baseline {
+                return Ok(());
+            }
             // Guard against a divergent history: the durable prefix must match
             // the incoming prefix. A mismatch means the caller and the store
             // disagree on state (a bug, or a compaction rewrote the window
@@ -779,58 +809,75 @@ impl SessionStore {
                 state.event_log.append(SessionEvent::MessagesReplaced {
                     messages: state.data.model_window.clone(),
                 })?;
-                return self.persist_locked(&state);
+                Persist::Snapshot {
+                    path: state.path.clone(),
+                    data: state.data.clone(),
+                }
+            } else {
+                // Advance the in-memory state and append the delta event. The
+                // snapshot cache is not touched (stays at the turn boundary).
+                let delta = current[baseline..].to_vec();
+                state.data.model_window.extend(delta.clone());
+                state.data.updated_at = unix_timestamp();
+                ensure_event_log_started(&state.event_log, &state.data)?;
+                state
+                    .event_log
+                    .append(SessionEvent::MessagesAppended { messages: delta })?;
+                Persist::None
             }
-            current[baseline..].to_vec()
-        } else {
-            return Ok(());
         };
-        // Advance the in-memory state and append the delta event. The snapshot
-        // cache is not touched (stays at the turn boundary).
-        state.data.model_window.extend(delta.clone());
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state
-            .event_log
-            .append(SessionEvent::MessagesAppended { messages: delta })?;
-        Ok(())
+        match persist {
+            Persist::None => Ok(()),
+            Persist::Snapshot { path, data } => {
+                self.persist_off_runtime(path, data, self.blob_store.clone())
+                    .await
+            }
+        }
     }
 
     pub async fn set_checkpoint(
         &self,
         checkpoint: Option<PursuitCheckpoint>,
     ) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state.data.loop_checkpoint = checkpoint;
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state.event_log.append(SessionEvent::CheckpointSet {
-            checkpoint: state.data.loop_checkpoint.clone(),
-        })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state.data.loop_checkpoint = checkpoint;
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state.event_log.append(SessionEvent::CheckpointSet {
+                checkpoint: state.data.loop_checkpoint.clone(),
+            })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     pub async fn commit_context_projection(
         &self,
         result: ContextProjectionResult,
     ) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        state
-            .data
-            .archived_transcript
-            .extend(result.archived_originals.clone());
-        state.data.model_window = result.model_window.clone();
-        state.data.last_projection = Some(result.checkpoint.clone());
-        state.data.updated_at = unix_timestamp();
-        ensure_event_log_started(&state.event_log, &state.data)?;
-        state
-            .event_log
-            .append(SessionEvent::ContextProjectionCommitted {
-                archived_originals: result.archived_originals,
-                model_window: result.model_window,
-                checkpoint: result.checkpoint,
-            })?;
-        self.persist_locked(&state)
+        let (path, data) = {
+            let mut state = self.state.lock().await;
+            state
+                .data
+                .archived_transcript
+                .extend(result.archived_originals.clone());
+            state.data.model_window = result.model_window.clone();
+            state.data.last_projection = Some(result.checkpoint.clone());
+            state.data.updated_at = unix_timestamp();
+            ensure_event_log_started(&state.event_log, &state.data)?;
+            state
+                .event_log
+                .append(SessionEvent::ContextProjectionCommitted {
+                    archived_originals: result.archived_originals,
+                    model_window: result.model_window,
+                    checkpoint: result.checkpoint,
+                })?;
+            (state.path.clone(), state.data.clone())
+        };
+        self.persist_off_runtime(path, data, self.blob_store.clone())
+            .await
     }
 
     /// Start a brand-new session and repoint this store at it. The previous
@@ -982,21 +1029,32 @@ impl SessionStore {
     /// prefix). The session's state is reloaded from its own event log (the
     /// durable authority), so `open` always reflects the latest on-disk
     /// content — even if another process wrote it.
+    ///
+    /// The resolve → load → swap is performed under a single held lock so two
+    /// concurrent `open`/`reset` calls cannot interleave and drop each other's
+    /// repoint (the previous implementation released the lock between resolve
+    /// and swap, a lost-update TOCTOU window). The blocking `load_or_seed` runs
+    /// on a `spawn_blocking` thread, but the lock guard is awaited across it,
+    /// so the critical section stays atomic.
     pub async fn open(&self, id: &str) -> Result<(), String> {
-        let (resolved, path) = {
-            let state = self.state.lock().await;
-            self.resolve_session(id, &state)?
-        };
+        let mut state = self.state.lock().await;
+        let (resolved, path) = self.resolve_session(id, &state)?;
         // No-op when the caller asks for the session we already hold.
-        let already_active = self.state.lock().await.data.id == resolved;
-        if already_active {
+        if state.data.id == resolved {
             return Ok(());
         }
-
         let event_log_path = path.with_extension("jsonl");
         let project_root = self.project_root.clone();
-        let data = load_or_seed(&path, &event_log_path, &self.blob_store, &project_root);
-        let mut state = self.state.lock().await;
+        let blob_store = self.blob_store.clone();
+        // Blocking load on a worker thread; the lock is held across the await
+        // so the swap below is atomic with the resolve above.
+        let load_path = path.clone();
+        let load_event_log_path = event_log_path.clone();
+        let data = tokio::task::spawn_blocking(move || {
+            load_or_seed(&load_path, &load_event_log_path, &blob_store, &project_root)
+        })
+        .await
+        .map_err(|e| format!("session open task failed: {e}"))?;
         state.path = path;
         state.event_log = EventLog::new(event_log_path);
         state.data = data;
@@ -1056,10 +1114,30 @@ impl SessionStore {
         Ok(summaries)
     }
 
-    /// Persist the in-memory state to its pinned snapshot path. Assumes the
-    /// caller already holds the state lock.
-    fn persist_locked(&self, state: &SessionState) -> Result<(), String> {
-        persist_to(&state.path, &state.data, &self.blob_store)
+    /// Run the snapshot persistence off the async runtime.
+    ///
+    /// `persist_to` does blocking filesystem I/O (write the JSON snapshot,
+    /// `fsync`, hash + spill large tool payloads to the blob store). Doing that
+    /// work while holding the session `Mutex` blocks the async executor for the
+    /// duration of every `fsync` (commonly 5–50 ms, far worse over NFS / slow
+    /// disks), which stalls every concurrent reader and writer. Instead the
+    /// caller mutates the in-memory `data` under the lock, clones the
+    /// snapshot and path, drops the guard, and hands the blocking work to
+    /// [`spawn_blocking`] so it runs on a dedicated thread and never pins the
+    /// executor.
+    async fn persist_off_runtime(
+        &self,
+        path: PathBuf,
+        data: SessionData,
+        blob_store: BlobStore,
+    ) -> Result<(), String> {
+        // `spawn_blocking` is the right primitive: this is real blocking I/O,
+        // not async work. `BlockingError` only occurs at runtime shutdown, in
+        // which case the session is tearing down anyway — surface it as a
+        // plain error.
+        tokio::task::spawn_blocking(move || persist_to(&path, &data, &blob_store))
+            .await
+            .map_err(|e| format!("session persist task failed: {e}"))?
     }
 
     /// Write `data` to `sessions_dir/<data.id>.json`. Used to materialise a
@@ -1351,7 +1429,7 @@ pub fn build_compaction_result(
     let mut model_window = Vec::with_capacity(tail.len() + 1);
     model_window.push(checkpoint_message(&summary));
     model_window.extend(tail);
-    let after_chars = estimate_chars(&model_window);
+    let after_chars = estimate_bytes(&model_window);
     ContextProjectionResult {
         checkpoint: ContextProjectionCheckpoint {
             operation: ContextProjectionKind::Compact,
@@ -1437,7 +1515,7 @@ pub fn compact_messages(
     target_tokens: usize,
     preserve_turns: usize,
 ) -> Option<ContextProjectionResult> {
-    let before_chars = estimate_chars(messages);
+    let before_chars = estimate_bytes(messages);
     let selection = select_compaction(messages, preserve_turns)?;
     let budget_chars = summary_char_budget(target_tokens);
     let summary = build_excerpt_summary(
@@ -1698,7 +1776,7 @@ pub async fn run_compaction(
     provider: Option<Arc<dyn Provider>>,
     extra_context: Vec<String>,
 ) -> Result<Option<ContextProjectionResult>, String> {
-    let before_chars = estimate_chars(history);
+    let before_chars = estimate_bytes(history);
     let before_tokens = estimate_tokens(history);
     let Some(selection) = select_compaction(history, preserve_turns) else {
         return Ok(None);
@@ -1941,7 +2019,7 @@ mod tests {
     fn checksum_computes_and_verifies() {
         let mut data = SessionData::default();
         data.model_window = vec![Message::new(neenee_core::Role::User, "hello")];
-        data.checksum = Some(compute_checksum(&data));
+        data.checksum = Some(compute_checksum(&data).unwrap());
         assert!(verify_checksum(&data).is_ok());
 
         // Tamper with a field: verification must fail.

@@ -36,12 +36,13 @@ impl TokenSourceTotals {
     }
 }
 
-/// The key under which a provider+model's totals are accumulated.
-///
-/// Stored as `(provider_id, model)` so a session that switches providers or
-/// models keeps each one's accuracy picture separate.
-fn key(provider: &str, model: &str) -> String {
-    format!("{provider}\u{1f}{model}")
+/// The key under which a provider+model's totals are accumulated: a
+/// `(provider_id, model)` tuple so a session that switches providers or models
+/// keeps each one's accuracy picture separate. Using a tuple (rather than a
+/// `\u{1f}`-joined string) sidesteps any ambiguity when a provider/model value
+/// happens to contain the separator.
+fn key(provider: &str, model: &str) -> (String, String) {
+    (provider.to_string(), model.to_string())
 }
 
 /// A thread-safe running ledger of token counts split by source (reported vs.
@@ -49,9 +50,9 @@ fn key(provider: &str, model: &str) -> String {
 /// writer — books each turn) and the TUI (the reader — renders the report).
 #[derive(Debug, Default)]
 pub struct TokenSourceLedger {
-    /// `(provider \u{1f} model)` → accumulated totals. A [`BTreeMap`] so the
-    /// report iterates in a stable order.
-    entries: Mutex<BTreeMap<String, TokenSourceTotals>>,
+    /// `(provider, model)` → accumulated totals. A [`BTreeMap`] so the report
+    /// iterates in a stable order.
+    entries: Mutex<BTreeMap<(String, String), TokenSourceTotals>>,
 }
 
 impl TokenSourceLedger {
@@ -86,13 +87,10 @@ impl TokenSourceLedger {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let rows: Vec<TokenSourceRow> = entries
             .iter()
-            .map(|(k, totals)| {
-                let (provider, model) = k.split_once('\u{1f}').unwrap_or((k, ""));
-                TokenSourceRow {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    totals: *totals,
-                }
+            .map(|((provider, model), totals)| TokenSourceRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                totals: *totals,
             })
             .collect();
         let grand_total =
@@ -169,5 +167,18 @@ mod tests {
         // BTreeMap keeps alphabetical order by the composite key.
         assert_eq!(report.rows[0].provider, "alpha");
         assert_eq!(report.rows[1].provider, "zeta");
+    }
+
+    #[test]
+    fn round_trips_provider_model_containing_the_old_separator() {
+        // Regression: the old `\u{1f}`-joined string key would mis-split a
+        // provider/model that itself contained the separator byte. A tuple key
+        // makes the boundary structural and unambiguous.
+        let ledger = TokenSourceLedger::new();
+        ledger.record("custom\u{1f}relay", "model\u{1f}v2", 40, true);
+        let row = &ledger.snapshot().rows[0];
+        assert_eq!(row.provider, "custom\u{1f}relay");
+        assert_eq!(row.model, "model\u{1f}v2");
+        assert_eq!(row.totals.reported_tokens, 40);
     }
 }

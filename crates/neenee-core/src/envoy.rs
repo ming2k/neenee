@@ -578,6 +578,7 @@ mod tests {
             vision: true,
             format: crate::WireFormat::OpenAiCompat,
             model_guidance: "",
+            effort_levels: &[],
         }
     }
 

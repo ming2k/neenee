@@ -7,25 +7,7 @@ pub struct GlobTool;
 
 const GLOB_MAX_RESULTS: usize = 200;
 
-fn glob_should_skip(path: &std::path::Path) -> bool {
-    path.components().any(|component| {
-        matches!(
-            component.as_os_str().to_str(),
-            Some(
-                ".git"
-                    | "node_modules"
-                    | "target"
-                    | "__pycache__"
-                    | ".next"
-                    | "dist"
-                    | "build"
-                    | ".venv"
-                    | "venv"
-                    | ".cache"
-            )
-        )
-    })
-}
+use crate::helpers::should_skip_path;
 
 #[async_trait]
 impl Tool for GlobTool {
@@ -74,7 +56,7 @@ impl Tool for GlobTool {
                     Ok(path) => path,
                     Err(_) => continue,
                 };
-                if glob_should_skip(&path) {
+                if should_skip_path(&path) {
                     continue;
                 }
                 let display = path

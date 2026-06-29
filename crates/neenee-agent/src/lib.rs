@@ -76,7 +76,7 @@ pub use neenee_core::{
     ShellTermination, SkillsConfig, StdinPolicy, TITLE, ThreadPursuit, TokenUsage, Tool, ToolCall,
     ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
     UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
-    estimate_chars, estimate_tokens, is_context_overflow, is_interactive_command,
+    estimate_bytes, estimate_tokens, is_context_overflow, is_interactive_command,
     parse_retryable_error, prune_tool_results, public_error_message, retryable_error,
     truncate_utf8,
 };

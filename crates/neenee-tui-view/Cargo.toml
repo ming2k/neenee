@@ -1,0 +1,25 @@
+[package]
+name = "neenee-tui-view"
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[dependencies]
+neenee-tui = { path = "../neenee-tui" }
+neenee-core = { path = "../neenee-core" }
+neenee-providers = { path = "../neenee-providers" }
+unicode-width = "0.2"
+unicode-segmentation.workspace = true
+similar = { version = "2", features = ["unicode"] }
+serde_json = { workspace = true }
+
+# NOTE: this crate intentionally does NOT set `[lints] workspace = true`. It
+# was carved out of the binary crate `neenee-code`, which also opts out of the
+# workspace `unwrap_used` / `expect_used` lints: the modal-geometry renderers
+# rely on structurally-guaranteed `expect`s ("modal has fixed geometry") that
+# the policy would flag. Matching `neenee-code` keeps that code warning-free
+# under CI's `-D warnings`.
+
+[dev-dependencies]
+insta = "1.48"

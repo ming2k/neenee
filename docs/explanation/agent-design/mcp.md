@@ -160,8 +160,8 @@ Two per-row actions drive the runtime live, without rewriting `config.toml`:
   the configured `enabled` state.
 - **`r`** reconnects the selected server (recovery path 3 above).
 
-The read-only session modal (`Ctrl+I`) shows the same per-server data inline as
-a glanceable summary; `/mcp` is the surface for acting on it.
+`/mcp` shows each server's status and tool count as a glanceable list, and is
+the surface for acting on it.
 
 ## Access tier and envoy admission
 

@@ -10,6 +10,7 @@ members = [
     "crates/neenee-code",
     "crates/neenee-server",
     "crates/neenee-tui",
+    "crates/neenee-tui-view",
 ]
 resolver = "2"
 

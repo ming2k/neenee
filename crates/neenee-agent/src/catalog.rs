@@ -12,7 +12,9 @@
 //! layered on top via the provider-usage telemetry.
 
 use neenee_core::catalog::{Channel, ProviderEntry, Transport, builtin_provider_metadata};
-use neenee_core::{ProviderPickerRow, ProviderPickerSnapshot, WireFormat};
+use neenee_core::{
+    Effort, ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, ThinkingMode, WireFormat,
+};
 use neenee_providers::{
     ANTHROPIC_BUILTIN_MODELS, DEEPSEEK_BUILTIN_MODELS, GOOGLE_BUILTIN_MODELS, NEENEE_USER_AGENT,
     OPENAI_BUILTIN_MODELS, OPENAI_PROVIDER_SPECS, OpenAiProviderSpec,
@@ -25,6 +27,18 @@ use crate::modelsdev::{self, ModelsDevProvider};
 /// The effective default provider id from `config.default_provider`.
 pub fn default_provider_id(config: &Config) -> &str {
     &config.default_provider
+}
+
+/// Translate a config `thinking` boolean override into a [`ThinkingMode`].
+/// `true` opts thinking ON (adaptive), `false` opts it OFF — orthogonal to
+/// effort. This is the config↔domain boundary translation, the only place a
+/// bool becomes a `ThinkingMode`.
+fn parse_thinking_override(on: bool) -> ThinkingMode {
+    if on {
+        ThinkingMode::Adaptive
+    } else {
+        ThinkingMode::Off
+    }
 }
 
 /// Convert a user-defined channel config into a resolved [`Channel`].
@@ -42,16 +56,37 @@ fn user_channel_to_channel(uc: &UserChannelConfig, fallback_model: &str) -> Chan
         .unwrap_or_else(|| fallback_model.to_string());
     let transport = match uc.transport {
         UserTransport::GeminiNative => Transport::GeminiNative,
-        UserTransport::Anthropic => Transport::Anthropic {
-            base_url: uc
-                .base_url
-                .clone()
-                .unwrap_or_else(|| "http://localhost:8080/v1/messages".to_string()),
-            user_agent: uc
-                .user_agent
-                .clone()
-                .unwrap_or_else(|| NEENEE_USER_AGENT.to_string()),
-        },
+        UserTransport::Anthropic => {
+            // ADR-0046: reasoning is opt-in. A custom Anthropic relay channel
+            // opts the model in to reasoning when the user has configured an
+            // effort or an explicit thinking value for it: thinking defaults ON
+            // (the recommended Claude mode) unless `thinking = false`, and a
+            // set effort is parsed into the typed `Effort`. An untouched
+            // channel (no effort, no thinking) stays off — same contract as a
+            // built-in model with no `[model_reasoning]` entry.
+            let effort = uc.effort.as_deref().and_then(Effort::parse);
+            let configured = effort.is_some() || uc.thinking.is_some();
+            let thinking = if configured {
+                Some(match uc.thinking {
+                    Some(false) => ThinkingMode::Off,
+                    _ => ThinkingMode::Adaptive,
+                })
+            } else {
+                None
+            };
+            Transport::Anthropic {
+                base_url: uc
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "http://localhost:8080/v1/messages".to_string()),
+                user_agent: uc
+                    .user_agent
+                    .clone()
+                    .unwrap_or_else(|| NEENEE_USER_AGENT.to_string()),
+                effort,
+                thinking,
+            }
+        }
         UserTransport::OpenAiCompat => Transport::OpenAiCompat {
             base_url: uc
                 .base_url
@@ -240,6 +275,51 @@ fn multi_model_builtin_entry(
 /// the same preset serves the official API or any relay with no code change. One
 /// key (`ANTHROPIC_API_KEY` then `config.anthropic_api_key`) authenticates every
 /// Claude model.
+/// Apply per-model reasoning settings (`[model_reasoning."<model-id>"]`) to
+/// every Anthropic-protocol channel in `entry`. A per-model entry is the
+/// **only** source of effort/thinking now (ADR-0046: reasoning is opt-in, and
+/// the per-model `[model_reasoning]` table is the single surface for it).
+///
+/// Opt-in semantics — "what you write is what you think":
+/// - No entry at all → the channel keeps its default (thinking **off**, no
+///   explicit effort). The model does not reason on its own.
+/// - An entry exists → reasoning is opted in: thinking defaults **on** (the
+///   recommended mode for Claude) unless the entry explicitly sets
+///   `thinking = false`. Effort, if set, is applied; otherwise the model's
+///   default (`high`) is used and `output_config` is omitted on the wire.
+///   This is the "写的默认有 think 且为对应 effort" contract.
+///
+/// Non-Anthropic channels are left untouched. ADR-0045: Anthropic effort/
+/// thinking are model-level properties, not provider-level.
+///
+/// This is the single point the built-in `anthropic` provider and the
+/// catalog-driven Anthropic relays route through, so a setting keyed by model
+/// id applies wherever that model is served.
+fn apply_per_model_reasoning(entry: &mut ProviderEntry, config: &Config) {
+    for channel in &mut entry.channels {
+        let model_id = channel.model.as_str();
+        let Some(settings) = config.model_reasoning.for_model(model_id) else {
+            continue;
+        };
+        if let Transport::Anthropic {
+            effort, thinking, ..
+        } = &mut channel.transport
+        {
+            // A per-model entry opts the model in to reasoning. Thinking
+            // defaults ON (the recommended Claude mode); an explicit
+            // `thinking = false` keeps it off. Effort applies only if set,
+            // else the model default stands.
+            *thinking = Some(match settings.thinking {
+                Some(false) => ThinkingMode::Off,
+                _ => ThinkingMode::Adaptive,
+            });
+            if let Some(eff) = settings.effort.as_deref().and_then(Effort::parse) {
+                *effort = Some(eff);
+            }
+        }
+    }
+}
+
 fn anthropic_builtin_entry(config: &Config) -> ProviderEntry {
     let api_key = env_or_config(Some("ANTHROPIC_API_KEY"), config.anthropic_api_key.clone())
         .unwrap_or_default();
@@ -248,16 +328,28 @@ fn anthropic_builtin_entry(config: &Config) -> ProviderEntry {
         config.anthropic_base_url.clone(),
     )
     .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_string());
-    multi_model_builtin_entry(
+    // ADR-0046: reasoning is opt-in per model. The built-in `anthropic` provider
+    // no longer carries provider-wide effort/thinking defaults — every channel
+    // starts with thinking off and no explicit effort, and a per-model
+    // `[model_reasoning]` entry is the single way to turn it on (handled by
+    // `apply_per_model_reasoning` below). The legacy flat `anthropic_effort`/
+    // `anthropic_thinking` config keys are no longer read here.
+    let mut entry = multi_model_builtin_entry(
         config,
         "anthropic",
         api_key,
         ANTHROPIC_BUILTIN_MODELS,
-        || Transport::Anthropic {
+        move || Transport::Anthropic {
             base_url: base_url.clone(),
             user_agent: NEENEE_USER_AGENT.to_string(),
+            effort: None,
+            thinking: None,
         },
-    )
+    );
+    // Per-model `[model_reasoning]` entries are now the ONLY source of effort/
+    // thinking for the built-in provider.
+    apply_per_model_reasoning(&mut entry, config);
+    entry
 }
 
 /// The `google` provider: the Gemini family over the native Gemini API, one key
@@ -330,6 +422,8 @@ fn catalog_driven_entry(config: &Config, provider: &ModelsDevProvider) -> Provid
                 WireFormat::AnthropicCompat => Transport::Anthropic {
                     base_url: full_url,
                     user_agent: user_agent.clone(),
+                    effort: None,
+                    thinking: None,
                 },
                 WireFormat::Gemini => Transport::GeminiNative,
                 _ => Transport::OpenAiCompat {
@@ -354,14 +448,18 @@ fn catalog_driven_entry(config: &Config, provider: &ModelsDevProvider) -> Provid
     let (name, description) = builtin_provider_metadata(&provider.id)
         .map(|(n, d)| (n.to_string(), d.to_string()))
         .unwrap_or_else(|| (provider.name.clone(), String::new()));
-    ProviderEntry {
+    let mut entry = ProviderEntry {
         id: provider.id.clone(),
         name,
         description,
         channels,
         default_channel,
         builtin: true,
-    }
+    };
+    // Per-model `[model_reasoning]` applies to catalog-driven Anthropic models
+    // (e.g. MiniMax/Qwen behind opencode-go) too.
+    apply_per_model_reasoning(&mut entry, config);
+    entry
 }
 
 /// A compiled-in fallback for a catalog-driven provider when the models.dev
@@ -400,6 +498,8 @@ fn fallback_catalog_driven_entry(config: &Config, provider_id: &str) -> Provider
                 WireFormat::AnthropicCompat => Transport::Anthropic {
                     base_url: full_url,
                     user_agent: user_agent.clone(),
+                    effort: None,
+                    thinking: None,
                 },
                 _ => Transport::OpenAiCompat {
                     base_url: full_url,
@@ -423,14 +523,18 @@ fn fallback_catalog_driven_entry(config: &Config, provider_id: &str) -> Provider
     let (name, description) = builtin_provider_metadata(provider_id)
         .map(|(n, d)| (n.to_string(), d.to_string()))
         .unwrap_or_else(|| (provider_id.to_string(), String::new()));
-    ProviderEntry {
+    let mut entry = ProviderEntry {
         id: provider_id.to_string(),
         name,
         description,
         channels,
         default_channel,
         builtin: true,
-    }
+    };
+    // Apply per-model reasoning on the offline fallback path too, for parity
+    // with the online catalog-driven entry.
+    apply_per_model_reasoning(&mut entry, config);
+    entry
 }
 
 /// Build the catalog by materializing every known provider from `config`.
@@ -604,6 +708,7 @@ pub fn build_picker_state(config: &Config, usage: &ProviderUsage) -> ProviderPic
                 name: entry.name.clone(),
                 model: active_model_id_for_entry(config, entry),
                 models: entry.channels.iter().map(|c| c.model.clone()).collect(),
+                model_info: entry.channels.iter().map(channel_model_info).collect(),
                 builtin: entry.builtin,
                 protocol,
                 base_url,
@@ -624,6 +729,38 @@ fn channel_protocol_and_base_url(channel: &Channel) -> (String, String) {
         Transport::OpenAiCompat { base_url, .. } => ("openai".to_string(), base_url.clone()),
         Transport::Anthropic { base_url, .. } => ("anthropic".to_string(), base_url.clone()),
         Transport::GeminiNative => ("gemini".to_string(), String::new()),
+    }
+}
+
+fn channel_model_info(channel: &Channel) -> ProviderModelInfo {
+    match &channel.transport {
+        Transport::Anthropic {
+            effort, thinking, ..
+        } => {
+            // ADR-0046: reasoning is opt-in. A channel's effective thinking
+            // state is off unless it has an explicit on override. The info
+            // surfaces both knobs so the picker can show a model's effort only
+            // when it is actually opted in to reasoning (thinking on).
+            let thinking_on = matches!(thinking, Some(ThinkingMode::Adaptive));
+            ProviderModelInfo {
+                model: channel.model.clone(),
+                protocol: "anthropic".to_string(),
+                effort: Some((*effort).unwrap_or(Effort::High).as_str().to_string()),
+                thinking: Some(thinking_on),
+            }
+        }
+        Transport::OpenAiCompat { .. } => ProviderModelInfo {
+            model: channel.model.clone(),
+            protocol: "openai".to_string(),
+            effort: None,
+            thinking: None,
+        },
+        Transport::GeminiNative => ProviderModelInfo {
+            model: channel.model.clone(),
+            protocol: "gemini".to_string(),
+            effort: None,
+            thinking: None,
+        },
     }
 }
 
@@ -741,6 +878,88 @@ mod tests {
         match &channel.transport {
             Transport::Anthropic { base_url, .. } => {
                 assert_eq!(base_url, "https://ai.hihusky.com/v1/messages");
+            }
+            other => panic!("expected Anthropic transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_anthropic_model_rows_carry_channel_settings() {
+        let mut config = bare_config();
+        config
+            .providers
+            .push(neenee_store::config::UserProviderConfig {
+                id: "hihu".to_string(),
+                name: Some("hihusky claude".to_string()),
+                channels: vec![neenee_store::config::UserChannelConfig {
+                    label: "claude-sonnet-4-6".to_string(),
+                    transport: neenee_store::config::UserTransport::Anthropic,
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    base_url: Some("https://ai.hihusky.com/v1/messages".to_string()),
+                    effort: Some("high".to_string()),
+                    thinking: Some(true),
+                    ..Default::default()
+                }],
+                default_channel: 0,
+            });
+
+        let picker = build_picker_state(&config, &ProviderUsage::default());
+        let row = picker.rows.iter().find(|row| row.id == "hihu").unwrap();
+        let info = row
+            .model_info
+            .iter()
+            .find(|info| info.model == "claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(info.protocol, "anthropic");
+        assert_eq!(info.effort.as_deref(), Some("high"));
+        assert_eq!(info.thinking, Some(true));
+    }
+
+    #[test]
+    fn built_in_anthropic_applies_per_model_reasoning_overrides() {
+        // ADR-0045: effort/thinking are per-model. A `[model_reasoning]`
+        // entry keyed by model id overrides the channel transport's value for
+        // that one model only; a sibling model keeps its own value.
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
+        let mut config = bare_config();
+        config
+            .model_reasoning
+            .for_model_mut("claude-opus-4-8")
+            .effort = Some("max".to_string());
+        config
+            .model_reasoning
+            .for_model_mut("claude-opus-4-8")
+            .thinking = Some(false);
+
+        let entries = build_catalog(&config);
+        let entry = entries.iter().find(|e| e.id == "anthropic").unwrap();
+        // The overridden model carries max effort + thinking off.
+        let opus = entry.channel_for_model("claude-opus-4-8").unwrap();
+        match &opus.transport {
+            Transport::Anthropic {
+                effort, thinking, ..
+            } => {
+                assert_eq!(*effort, Some(Effort::Max), "opus per-model effort");
+                assert_eq!(
+                    *thinking,
+                    Some(ThinkingMode::Off),
+                    "opus per-model thinking off"
+                );
+            }
+            other => panic!("expected Anthropic transport, got {other:?}"),
+        }
+        // A sibling model with no entry keeps the legacy flat default
+        // (effort None → High fallback at info time, thinking None).
+        let sonnet = entry.channel_for_model("claude-sonnet-4-6").unwrap();
+        match &sonnet.transport {
+            Transport::Anthropic {
+                effort, thinking, ..
+            } => {
+                assert!(effort.is_none(), "sonnet untouched effort");
+                assert!(thinking.is_none(), "sonnet untouched thinking");
             }
             other => panic!("expected Anthropic transport, got {other:?}"),
         }

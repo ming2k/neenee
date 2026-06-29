@@ -1599,6 +1599,7 @@ dependencies = [
  "neenee-store",
  "neenee-tools",
  "neenee-tui",
+ "neenee-tui-view",
  "serde",
  "serde_json",
  "similar",
@@ -1620,21 +1621,14 @@ version = "0.11.0"
 dependencies = [
  "async-trait",
  "chrono",
- "dirs",
  "futures",
  "glob",
- "httpdate",
  "inventory",
- "reqwest",
  "serde",
  "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
  "toml",
  "tracing",
  "uuid",
- "walkdir",
  "yaml_serde",
 ]
 
@@ -1762,6 +1756,20 @@ version = "0.11.0"
 dependencies = [
  "bitflags",
  "crossterm",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "neenee-tui-view"
+version = "0.11.0"
+dependencies = [
+ "insta",
+ "neenee-core",
+ "neenee-providers",
+ "neenee-tui",
+ "serde_json",
+ "similar",
  "unicode-segmentation",
  "unicode-width",
 ]

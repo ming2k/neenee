@@ -119,20 +119,22 @@ pub struct ContextBudget {
     pub target_tokens: usize,
 }
 
-/// Character-size estimate of a message list: byte length of `content` +
+/// Byte-size estimate of a message list: byte length of `content` +
 /// tool-call `name`+`arguments`. A cheap context-pressure proxy used when a
 /// provider does not report token usage. `reasoning_content` is **not**
 /// included because it is never sent to providers and therefore does not
 /// consume the context window.
 ///
-/// Note: this is **bytes**, not tokens. Callers that need a token estimate
-/// should use [`estimate_tokens`] instead, which classifies characters. This
-/// function is retained because the pruning/compaction pipeline measures its
-/// *character budgets* (summary budget, reclaim thresholds) in bytes — see
-/// [`summary_char_budget`] — and the token↔byte conversion constant
-/// [`CHARS_PER_TOKEN`] anchors that direction.
-pub fn estimate_chars(messages: &[Message]) -> usize {
-    messages.iter().map(message_chars).sum()
+/// This counts **bytes**, not characters or tokens (the name is explicit about
+/// that now — previously it was `estimate_chars`, which was misleading since
+/// `str::len()` returns bytes and a multi-byte glyph counts several times).
+/// Callers that need a token estimate should use [`estimate_tokens`] instead,
+/// which classifies characters. The pruning/compaction pipeline measures its
+/// *character budgets* (summary budget, reclaim thresholds) in this same byte
+/// space — see [`summary_char_budget`] — and the token↔byte conversion
+/// constant [`CHARS_PER_TOKEN`] anchors that direction.
+pub fn estimate_bytes(messages: &[Message]) -> usize {
+    messages.iter().map(message_bytes).sum()
 }
 
 /// Token estimate of a message list using the char-class estimator
@@ -141,7 +143,7 @@ pub fn estimate_chars(messages: &[Message]) -> usize {
 /// it stays accurate for mixed Chinese + code conversations.
 ///
 /// `reasoning_content` is excluded (never sent to providers), mirroring
-/// [`message_chars`].
+/// [`message_bytes`].
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     let mut tokens: i64 = 0;
     for m in messages {
@@ -153,7 +155,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
             }
         }
         // Nested envoy transcripts are real session weight (persisted, replayed
-        // on resume) so they count, just like `message_chars` does.
+        // on resume) so they count, just like `message_bytes` does.
         if let Some(children) = m.children.as_ref() {
             tokens += estimate_tokens(children) as i64;
         }
@@ -169,7 +171,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 // policy here once a provider actually reports `prompt_tokens`. See the deferral
 // note in docs/adr/0023-relevance-aware-tiered-pruning-and-layered-token-accounting.md.
 
-pub(crate) fn message_chars(message: &Message) -> usize {
+pub(crate) fn message_bytes(message: &Message) -> usize {
     let own = message.content.len()
         + message
             .tool_calls
@@ -190,7 +192,7 @@ pub(crate) fn message_chars(message: &Message) -> usize {
     let nested = message
         .children
         .as_ref()
-        .map(|children| children.iter().map(message_chars).sum::<usize>())
+        .map(|children| children.iter().map(message_bytes).sum::<usize>())
         .unwrap_or(0);
     own + nested
 }
@@ -324,7 +326,7 @@ fn plan_prune(messages: &[Message], protect_recent_chars: usize) -> Vec<PrunePla
         if protected_chars >= protect_recent_chars {
             break;
         }
-        protected_chars += message_chars(&messages[i]);
+        protected_chars += message_bytes(&messages[i]);
         protected.insert(i);
     }
 

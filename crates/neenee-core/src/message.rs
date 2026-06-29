@@ -115,6 +115,21 @@ pub struct Message {
     pub display_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Provider-opaque sidecar for **wire-protocol detail that does not map to
+    /// a cross-provider semantic concept** and therefore has no business as a
+    /// named field on this struct. The canonical example is Anthropic's
+    /// extended-thinking `signature` — a cryptographic credential the server
+    /// requires to reconstruct a prior `thinking` block on multi-turn replay.
+    /// It is meaningless to OpenAI/Gemini, so instead of a named
+    /// `thinking_signature` field (which would pollute this provider-agnostic
+    /// type with one protocol's transport detail), Anthropic-specific values
+    /// live under a `"thinking_signature"` key inside this map. Each concrete
+    /// provider owns the contract for the keys it reads/writes here; `core`
+    /// treats the whole map as an opaque blob that round-trips through
+    /// `session.json` (so a resumed session replays thinking correctly) but is
+    /// never inspected outside the provider that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_meta: Option<serde_json::Map<String, serde_json::Value>>,
     /// Optional tool calls attached to an assistant message. Marked
     /// `#[serde(default)]` so hand-written or stripped JSON messages (e.g. test
     /// fixtures, externally generated snapshots) can omit the key entirely
@@ -228,6 +243,7 @@ impl Message {
             content_blob: None,
             display_content: None,
             reasoning_content: None,
+            provider_meta: None,
             tool_calls: None,
             tool_call_id: None,
             images: None,
@@ -297,6 +313,7 @@ impl Message {
             content_blob: None,
             display_content: None,
             reasoning_content: None,
+            provider_meta: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
             images: None,
@@ -393,6 +410,7 @@ mod tests {
                 content_blob: None,
                 display_content: None,
                 reasoning_content: None,
+                provider_meta: None,
                 tool_calls: Some(vec![nested_call]),
                 tool_call_id: None,
                 images: None,

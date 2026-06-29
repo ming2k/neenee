@@ -2,7 +2,7 @@
 
 Every collapsible transcript entry — a [tool step](tool-step.md), a
 [thinking step](thinking-step.md), or an envoy task step — is presented
-through one shared state model in `crates/neenee-code/src/tui/render/step/`.
+through one shared state model in `crates/neenee-tui-view/src/render/disclosure/`.
 This page documents that model: its three orthogonal axes, the two
 presentation channels they reduce to, and the transitions each axis allows.
 Per-tool body content lives on the [tool step](tool-step.md) page; the shared
@@ -184,9 +184,9 @@ one of the historical bugs the state machine was introduced to fix:
 
 | File | Responsibility |
 |------|----------------|
-| `render/step/state.rs` | `Disclosure`, `Interaction`, `summary_weight`, `summary_text_color`. Pure functions, unit-tested in isolation from rendering |
-| `render/step/mod.rs` | The three-axes architectural overview and the public re-exports |
-| `render/step/renderers.rs` | Concrete step renderers that feed the axes in: `draw_tool_step`, `draw_reasoning_trace`, `draw_envoy_bar`, `draw_envoy_inline_step` |
+| `render/disclosure/state.rs` | `Disclosure`, `Interaction`, `summary_weight`, `summary_text_color`. Pure functions, unit-tested in isolation from rendering |
+| `render/disclosure/mod.rs` | The three-axes architectural overview and the public re-exports |
+| `render/disclosure/renderers.rs` | Concrete step renderers that feed the axes in: `draw_tool_step`, `draw_reasoning_trace`, `draw_envoy_bar`, `draw_envoy_inline_step` |
 | `render/tools/mod.rs` | `ToolStatus` (5 states), `ToolStatus::color` |
 | `step_interaction.rs` | `default_tool_expanded`, summary-at-pointer classification (`summary_at`, `hovered_summary`) |
 | `document.rs` | `set_*_expanded` (auto, no-op if pinned) and `pin_*_expanded` (user, sets `user_pinned`); the `user_pinned` field on `MessageKind::ToolStep` / `MessageKind::Thinking` |

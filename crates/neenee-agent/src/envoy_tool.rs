@@ -39,11 +39,12 @@ impl EnvoyRegistry {
     /// Register a steering handle for the envoy spawned by the
     /// `parent_call_id` tool call. Replaces any prior entry for that id.
     pub fn register(&self, parent_call_id: &str, handle: EnvoyHandle) {
-        #[allow(clippy::expect_used)]
-        // lock poisoning means a panic already occurred in another holder
+        // Poison-recovery idiom (codebase convention): a panic in another
+        // holder poisoned the lock; recover the inner data rather than
+        // panicking on a second, downstream error.
         self.map
             .lock()
-            .expect("EnvoyRegistry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(parent_call_id.to_string(), handle);
     }
 
@@ -51,11 +52,9 @@ impl EnvoyRegistry {
     /// Returns a cloned handle (cheap) so the caller can reply without holding
     /// the lock.
     pub fn get(&self, parent_call_id: &str) -> Option<EnvoyHandle> {
-        #[allow(clippy::expect_used)]
-        // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
-            .expect("EnvoyRegistry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(parent_call_id)
             .cloned()
     }
@@ -64,11 +63,9 @@ impl EnvoyRegistry {
     /// returns, so the registry never accumulates dead handles for completed
     /// calls (a handle whose `Weak` already expired is harmless but useless).
     pub fn remove(&self, parent_call_id: &str) {
-        #[allow(clippy::expect_used)]
-        // lock poisoning means a panic already occurred in another holder
         self.map
             .lock()
-            .expect("EnvoyRegistry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .remove(parent_call_id);
     }
 }

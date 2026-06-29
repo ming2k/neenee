@@ -34,9 +34,26 @@ pub enum Transport {
     /// Auth uses the `x-api-key` header plus `anthropic-version`. Models served
     /// in this format (e.g. MiniMax/Qwen behind opencode-go's `/v1/messages`)
     /// speak the Anthropic Messages wire protocol, not OpenAI chat-completions.
+    ///
+    /// Two orthogonal reasoning knobs ride on the transport, both optional and
+    /// both typed (they live in this crate — [`Effort`] and
+    /// [`crate::ThinkingMode`] — so there is no string↔enum shuffle at the
+    /// factory layer):
+    ///
+    /// - `effort` — reasoning **depth** (the throttle). Clamped to the
+    ///   resolved model's supported levels at request-build time.
+    /// - `thinking` — reasoning **on/off** (the switch). `None` defers to the
+    ///   model-derived default (on for models that declare `effort_levels`,
+    ///   off otherwise); `Some(Off)`/`Some(Adaptive)` are explicit overrides.
+    ///
+    /// The two are independent on the wire: a request may carry `effort`
+    /// without enabling thinking, or thinking at any depth. They are therefore
+    /// modeled and surfaced as separate controls — never coupled.
     Anthropic {
         base_url: String,
         user_agent: String,
+        effort: Option<crate::Effort>,
+        thinking: Option<crate::ThinkingMode>,
     },
     /// Google Gemini native API (`generativelanguage.googleapis.com`). The model
     /// id and API key are read from the owning [`Channel`].
@@ -237,6 +254,8 @@ mod tests {
         let needs_key = Transport::Anthropic {
             base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
             user_agent: "agent".to_string(),
+            effort: None,
+            thinking: None,
         }
         .needs_api_key();
         assert!(needs_key, "Anthropic transport must require an API key");
@@ -247,6 +266,8 @@ mod tests {
             transport: Transport::Anthropic {
                 base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
                 user_agent: "agent".to_string(),
+                effort: None,
+                thinking: None,
             },
             api_key: "  ".to_string(),
             model: "minimax-m3".to_string(),
@@ -280,6 +301,8 @@ mod tests {
                     transport: Transport::Anthropic {
                         base_url: "https://opencode.ai/zen/go/v1/messages".to_string(),
                         user_agent: "agent".to_string(),
+                        effort: None,
+                        thinking: None,
                     },
                     api_key: "k".to_string(),
                     model: "minimax-m3".to_string(),

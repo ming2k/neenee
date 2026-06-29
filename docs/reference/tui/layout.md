@@ -28,7 +28,7 @@ only cells kept as pure `app_bg` on every frame.
 ```
 
 The viewport rect itself comes from `viewport_rect(frame)` in
-`crates/neenee-code/src/tui/render/primitives.rs`.
+`crates/neenee-tui-view/src/render/primitives.rs`.
 
 ## Root conversation view
 
@@ -240,5 +240,5 @@ the transcript content above.
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop` |
 | `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
-| `render/step/renderers.rs` | `draw_envoy_bar`, `draw_sticky_summary_if_needed` |
+| `render/disclosure/renderers.rs` | `draw_envoy_bar`, `draw_sticky_summary_if_needed` |
 | `app.rs` | `in_envoy_view`, `focus_stack`, `follow_bottom`, scroll clamping |

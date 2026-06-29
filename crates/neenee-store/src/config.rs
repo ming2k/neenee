@@ -180,6 +180,18 @@ pub struct UserChannelConfig {
     /// `User-Agent` header (OpenAI-compatible only).
     #[serde(default)]
     pub user_agent: Option<String>,
+    /// Preferred reasoning `effort` for an Anthropic-protocol channel — one of
+    /// `"low"`/`"medium"`/`"high"`/`"xhigh"`/`"max"` — clamped at request time
+    /// to the resolved model's supported levels. `None` leaves the
+    /// model-derived default in place. Ignored for non-Anthropic transports.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Whether extended thinking is on (`true`) or off (`false`) for this
+    /// Anthropic-protocol channel. **Orthogonal to `effort`** — effort is the
+    /// reasoning-depth throttle, this is the on/off switch. `None` defers to
+    /// the model-derived default. Ignored for non-Anthropic transports.
+    #[serde(default)]
+    pub thinking: Option<bool>,
 }
 
 /// A user-defined model entry. When its `id` matches a built-in, the user entry
@@ -332,6 +344,21 @@ pub struct Config {
     /// Full `/messages` endpoint URL for the `anthropic` provider. Defaults to
     /// Anthropic's official API; override with any relay's `/v1/messages` URL.
     pub anthropic_base_url: Option<String>,
+    /// Preferred reasoning `effort` for the `anthropic` provider — one of
+    /// `"low"`, `"medium"`, `"high"` (default), `"xhigh"`, `"max"`. Clamped to
+    /// the active model's supported levels at request time, so an `xhigh`
+    /// request silently downgrades to `high` on a model that tops out there.
+    /// `None` leaves the provider default (`high` for Claude) in place.
+    #[serde(default)]
+    pub anthropic_effort: Option<String>,
+    /// Whether extended thinking is on (`true`) or off (`false`) for the
+    /// `anthropic` provider. **Orthogonal to `anthropic_effort`** (effort is
+    /// reasoning depth; this is the on/off switch). `None` defers to the
+    /// model-derived default (on for Claude models that declare effort support,
+    /// off for unknown relays). Setting this lets you express "high effort but
+    /// don't think" or force thinking on a model where the default is off.
+    #[serde(default)]
+    pub anthropic_thinking: Option<bool>,
     /// The model id to use within the active provider. For single-model
     /// providers this mirrors the provider's pinned model; for multi-model
     /// providers (opencode-go) it selects which of the provider's models is
@@ -378,6 +405,14 @@ pub struct Config {
     /// [`ToolVariantsConfig`].
     #[serde(default)]
     pub tool_variants: ToolVariantsConfig,
+    /// Per-model reasoning settings (`[model_reasoning."<model-id>"]` table)
+    /// for Anthropic-protocol models: the reasoning `effort` (depth) and
+    /// `thinking` (on/off) knobs. These are *model-level* properties
+    /// (ADR-0045: Anthropic granularity is per model, not per provider) —
+    /// e.g. Opus at `max` effort while Haiku runs `low`. See
+    /// [`ModelReasoningConfig`].
+    #[serde(default)]
+    pub model_reasoning: ModelReasoningConfig,
 }
 
 /// Per-model tool-variant selection, deserialized from the `[tool_variants]`
@@ -411,6 +446,58 @@ impl ToolVariantsConfig {
             .get(model_id)
             .map(|m| &m.0)
             .unwrap_or_else(|| neenee_core::empty_variant_selection())
+    }
+}
+
+/// Per-model Anthropic reasoning settings, deserialized from the
+/// `[model_reasoning]` section of `config.toml`. Maps a model id to its
+/// reasoning `effort` (depth) and `thinking` (on/off) overrides.
+///
+/// ```toml
+/// [model_reasoning."claude-opus-4-8"]
+/// effort   = "max"
+/// thinking = true
+///
+/// [model_reasoning."claude-haiku-4-5"]
+/// effort   = "low"
+/// thinking = false
+/// ```
+///
+/// Effort and thinking are **both optional** — an unset field defers to the
+/// model-derived default, exactly as a model with no entry does. Models not
+/// listed use their defaults entirely. Only consulted for Anthropic-protocol
+/// models; ignored for OpenAI/Gemini.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModelReasoningConfig(pub HashMap<String, ModelReasoningSettings>);
+
+/// One model's reasoning knobs. Both default to `None` (defer to the model's
+/// own default), so a partial table like `[model_reasoning."m"]` with only
+/// `effort` set is valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelReasoningSettings {
+    /// Reasoning **depth**: one of `"low"`/`"medium"`/`"high"`/`"xhigh"`/
+    /// `"max"`, clamped at request time to the model's supported levels.
+    /// `None` leaves the model default in place.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Whether extended thinking is on (`true`) or off (`false`). Orthogonal
+    /// to `effort`. `None` defers to the model default.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+}
+
+impl ModelReasoningConfig {
+    /// Look up the reasoning settings for `model_id`, if any. Returns `None`
+    /// for unknown models so the caller applies the model-derived default.
+    pub fn for_model(&self, model_id: &str) -> Option<&ModelReasoningSettings> {
+        self.0.get(model_id)
+    }
+
+    /// Borrow the entry for `model_id` mutably, inserting a default if absent,
+    /// so a caller can set a single field without rebuilding the whole struct.
+    pub fn for_model_mut(&mut self, model_id: &str) -> &mut ModelReasoningSettings {
+        self.0.entry(model_id.to_string()).or_default()
     }
 }
 
@@ -463,6 +550,8 @@ impl Default for Config {
             opencode_go_api_key: None,
             anthropic_api_key: None,
             anthropic_base_url: Some("https://api.anthropic.com/v1/messages".to_string()),
+            anthropic_effort: None,
+            anthropic_thinking: None,
             default_model: None,
             favorites: Vec::new(),
             providers: Vec::new(),
@@ -473,6 +562,7 @@ impl Default for Config {
             principal: PrincipalConfig::default(),
             hooks: Vec::new(),
             tool_variants: ToolVariantsConfig::default(),
+            model_reasoning: ModelReasoningConfig::default(),
         }
     }
 }
@@ -726,6 +816,53 @@ mod tests {
         let resolved = parsed.tool_variants.for_model("kimi-k2.7-code");
         assert_eq!(resolved.get("read_text").map(String::as_str), Some("terse"));
         assert_eq!(resolved.get("bash").map(String::as_str), Some("strict"));
+    }
+
+    #[test]
+    fn model_reasoning_parses_and_round_trips() {
+        // Deserialise a TOML table keyed by model id, ADR-0045.
+        let toml_src = r#"
+            [model_reasoning."claude-opus-4-8"]
+            effort   = "max"
+            thinking = true
+
+            [model_reasoning."claude-haiku-4-5"]
+            effort   = "low"
+            thinking = false
+        "#;
+        let cfg: Config = toml::from_str(toml_src).unwrap();
+        let opus = cfg.model_reasoning.for_model("claude-opus-4-8").unwrap();
+        assert_eq!(opus.effort.as_deref(), Some("max"));
+        assert_eq!(opus.thinking, Some(true));
+        let haiku = cfg.model_reasoning.for_model("claude-haiku-4-5").unwrap();
+        assert_eq!(haiku.effort.as_deref(), Some("low"));
+        assert_eq!(haiku.thinking, Some(false));
+        // Unknown model → None (defer to model default).
+        assert!(cfg.model_reasoning.for_model("does-not-exist").is_none());
+
+        // Round-trip through serialise.
+        let serialised = toml::to_string(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialised).unwrap();
+        assert_eq!(
+            reparsed
+                .model_reasoning
+                .for_model("claude-opus-4-8")
+                .unwrap()
+                .effort
+                .as_deref(),
+            Some("max")
+        );
+
+        // A partial entry (only one knob set) is valid; the other defers.
+        let mut cfg2 = Config::default();
+        cfg2.model_reasoning.for_model_mut("claude-opus-4-8").effort = Some("high".to_string());
+        assert_eq!(
+            cfg2.model_reasoning
+                .for_model("claude-opus-4-8")
+                .unwrap()
+                .thinking,
+            None
+        );
     }
 
     /// Tests that mutate the process-wide paths override (`set_test_default`)

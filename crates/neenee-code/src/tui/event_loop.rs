@@ -98,9 +98,10 @@ pub(super) struct UiRuntime {
     /// Sessions picker rows + a one-shot request to open the picker modal.
     pub sessions_overview: Arc<Mutex<Vec<SessionOverview>>>,
     pub open_sessions: Arc<AtomicBool>,
-    /// Latest session-context snapshot for the session modal, or `None` before
-    /// the first `QuerySessionContext` round-trip completes. The modal renders
-    /// a lightweight placeholder while this is `None`.
+    /// Latest session-context snapshot for the Tools / Mcp / Skills /
+    /// Permissions managers, or `None` before the first `QuerySessionContext`
+    /// round-trip completes. Each manager renders a lightweight placeholder
+    /// while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
     /// Live nudge config snapshot, mirrored from
     /// `AgentResponse::NudgeConfigUpdated`. The `/config` modal reads this
@@ -321,6 +322,7 @@ pub(super) async fn run_app_loop(
 
     loop {
         if app.should_quit.load(Ordering::SeqCst) {
+            tracing::info!(reason = "should_quit_flag", "app exiting");
             return Ok(());
         }
 
@@ -1028,17 +1030,34 @@ pub(super) async fn run_app_loop(
                         }
                     }
                     Modal::ModelEditor => {
-                        let title = app
-                            .editor_target
-                            .as_deref()
-                            .and_then(|id| app.provider_picker.rows.iter().find(|r| r.id == id))
-                            .map(|r| r.name.clone())
-                            .unwrap_or_else(|| "model".to_string());
+                        let title = if app.editor_model_settings_only {
+                            crate::tui::model_display_name(&app.editor_model)
+                        } else {
+                            app.editor_target
+                                .as_deref()
+                                .and_then(|id| app.provider_picker.rows.iter().find(|r| r.id == id))
+                                .map(|r| r.name.clone())
+                                .unwrap_or_else(|| "model".to_string())
+                        };
+                        // The effort row is shown only for the Anthropic
+                        // provider; its live value mirrors app.input when the
+                        // effort field is focused.
+                        let is_anthropic = app.editor_model_settings_only
+                            || app
+                                .editor_target
+                                .as_deref()
+                                .is_some_and(|t| t == "anthropic");
+                        let effort = is_anthropic.then_some(app.editor_effort.as_str());
+                        let thinking = is_anthropic.then_some(app.editor_thinking);
                         Some(render::draw_model_editor(
                             f,
                             &title,
                             &app.input,
                             app.cursor_position,
+                            !app.editor_model_settings_only,
+                            app.editor_field,
+                            effort,
+                            thinking,
                             &app.theme,
                         ))
                     }
@@ -1121,16 +1140,6 @@ pub(super) async fn run_app_loop(
                             .min(app.sessions_overview.len().saturating_sub(1)),
                         &app.theme,
                     )),
-                    Modal::Session => Some(render::draw_session_modal(
-                        f,
-                        &app.current_provider,
-                        &app.current_model,
-                        &app.key_status,
-                        &app.mcp_statuses,
-                        app.session_context.as_ref(),
-                        &mut app.session_scroll,
-                        &app.theme,
-                    )),
                     Modal::TokenReport => {
                         // Snapshot the shared ledger; render an empty report
                         // when no ledger is installed (tests).
@@ -1160,6 +1169,14 @@ pub(super) async fn run_app_loop(
                         app.modal_index,
                         &mut app.session_scroll,
                         app.session_modal_follow,
+                        &app.theme,
+                    )),
+                    Modal::Skills => Some(render::draw_skills_modal(
+                        f,
+                        app.session_context.as_ref(),
+                        app.modal_index,
+                        app.skills_expanded,
+                        &mut app.session_scroll,
                         &app.theme,
                     )),
                     Modal::Permissions => Some(render::draw_permissions_manager(
@@ -1376,6 +1393,10 @@ pub(super) async fn run_app_loop(
                 app.completion_kind()
             };
             let in_envoy_view = app.in_envoy_view();
+            let custom_effort_focused = app.active_modal == Modal::CustomProvider
+                && app.current_custom_field() == Some(crate::tui::CustomField::Effort);
+            let custom_thinking_focused = app.active_modal == Modal::CustomProvider
+                && app.current_custom_field() == Some(crate::tui::CustomField::Thinking);
             let action = input::process_event(
                 event,
                 &mut app.input,
@@ -1398,6 +1419,10 @@ pub(super) async fn run_app_loop(
                     picker_in_models_stage: app.picker_provider.is_some(),
                     custom_provider_field: (app.active_modal == Modal::CustomProvider)
                         .then_some(app.custom_field),
+                    custom_effort_focused,
+                    custom_thinking_focused,
+                    editor_field: (app.active_modal == Modal::ModelEditor)
+                        .then_some(app.editor_field),
                 },
                 &mut app.drag,
             );
@@ -1409,7 +1434,12 @@ pub(super) async fn run_app_loop(
 
             match action {
                 input::InputAction::None => {}
-                input::InputAction::Quit => return Ok(()),
+                input::InputAction::Quit => {
+                    // Now reachable only via the `/exit` slash command (the bare
+                    // `q` shortcut was removed to stop accidental first-key exits).
+                    tracing::info!(reason = "slash_exit", "app exiting");
+                    return Ok(());
+                },
                 input::InputAction::SendChat(text) => {
                     // Note: history-search selection no longer flows through
                     // here — Enter in `Modal::HistorySearch` emits the dedicated
@@ -1745,6 +1775,10 @@ pub(super) async fn run_app_loop(
                                     app.editor_field = 0;
                                     app.editor_key.clear();
                                     app.editor_model = model;
+                                    app.editor_model_settings_only = false;
+                                    app.editor_target_is_builtin = false;
+                                    app.editor_effort = "high".to_string();
+                                    app.editor_thinking = true;
                                     app.input.clear();
                                     app.set_cursor(0);
                                     app.model_search = false;
@@ -1896,6 +1930,21 @@ pub(super) async fn run_app_loop(
                         app.modal_index = 0;
                     }
                 }
+                input::InputAction::CustomProviderEffortCycle { delta } => {
+                    // Mirror of ModelEditorEffortCycle for the custom-provider
+                    // editor's Effort field. Cycles app.custom_effort and the
+                    // mirrored live input.
+                    const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+                    let cur = LEVELS
+                        .iter()
+                        .position(|l| *l == app.custom_effort)
+                        .unwrap_or(2) as isize;
+                    let n = LEVELS.len() as isize;
+                    let next = ((cur + delta as isize).rem_euclid(n)) as usize;
+                    app.custom_effort = LEVELS[next].to_string();
+                    app.input = app.custom_effort.clone();
+                    app.set_cursor_end();
+                }
                 input::InputAction::SubmitCustomProvider => {
                     if app.active_modal == Modal::CustomProvider {
                         // Commit the focused text field's live value first.
@@ -1906,7 +1955,8 @@ pub(super) async fn run_app_loop(
                         let api_key = app.custom_token.trim().to_string();
                         if let Some(id) = app.custom_edit_id.clone() {
                             // Edit mode: update meta (models stay managed in
-                            // stage 2). A name is still required.
+                            // stage 2). A name is still required. ADR-0046:
+                            // effort/thinking are no longer provider-level.
                             if name.is_empty() {
                                 app.load_custom_field();
                             } else {
@@ -1927,6 +1977,8 @@ pub(super) async fn run_app_loop(
                             // Create mode: the model list comes from the template's
                             // seeded models, or the single typed Model field when
                             // the template exposes one (OpenAI-compatible).
+                            // ADR-0046: new channels start with thinking off;
+                            // reasoning is opted in per model from stage 2.
                             let models: Vec<String> =
                                 if app.custom_fields.contains(&crate::tui::CustomField::Model) {
                                     vec![app.custom_model.trim().to_string()]
@@ -1993,12 +2045,40 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::OpenModelEditor => {
-                    // `e` in stage-1 browse mode. A built-in provider opens the
-                    // API-key editor (only its auth changes; the model is chosen
-                    // from the stage-2 list). A user-defined provider opens the
-                    // full meta edit form (Name/Protocol/Base URL/Token); its
-                    // models stay managed in the stage-2 list.
-                    if app.active_modal == Modal::Provider && app.picker_provider.is_none() {
+                    if app.active_modal == Modal::Provider
+                        && app.picker_provider.is_some()
+                        && !app.picker_on_add_model_row()
+                    {
+                        // Stage-2, on a model row. The per-model settings popup
+                        // opens for any Anthropic-protocol model — user-defined
+                        // OR built-in (ADR-0045: effort/thinking are model-level,
+                        // so a built-in Claude model is edited here too, not at
+                        // the provider level).
+                        let rows = app.provider_models_filtered();
+                        if let Some(row) = rows.get(app.modal_index).or_else(|| rows.first())
+                            && row.protocol == "anthropic"
+                        {
+                            let is_builtin = !app.picker_provider_is_custom();
+                            app.editor_target = Some(row.provider_id.clone());
+                            app.editor_model = row.model.clone();
+                            app.editor_model_settings_only = true;
+                            app.editor_target_is_builtin = is_builtin;
+                            app.editor_key.clear();
+                            app.editor_effort =
+                                row.effort.clone().unwrap_or_else(|| "high".to_string());
+                            app.editor_thinking = row.thinking.unwrap_or(true);
+                            app.editor_field = 1;
+                            app.input = app.editor_effort.clone();
+                            app.set_cursor_end();
+                            app.model_search = false;
+                            app.active_modal = Modal::ModelEditor;
+                        }
+                    } else if app.active_modal == Modal::Provider && app.picker_provider.is_none() {
+                        // `e` in stage-1 browse mode. A built-in provider opens the
+                        // API-key editor (only its auth changes; the model is chosen
+                        // from the stage-2 list). A user-defined provider opens the
+                        // full meta edit form (Name/Protocol/Base URL/Token); its
+                        // models stay managed in the stage-2 list.
                         let ranked = app.providers_filtered();
                         let target = ranked
                             .get(app.modal_index)
@@ -2010,6 +2090,10 @@ pub(super) async fn run_app_loop(
                                 app.editor_field = 0;
                                 app.editor_key.clear();
                                 app.editor_model = model;
+                                app.editor_model_settings_only = false;
+                                app.editor_target_is_builtin = false;
+                                app.editor_effort = "high".to_string();
+                                app.editor_thinking = true;
                                 app.input.clear();
                                 app.set_cursor(0);
                                 app.model_search = false;
@@ -2032,16 +2116,103 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ModelEditorNextField => {
-                    // The key editor now has a single field (API key); Tab is a
-                    // no-op (kept so the binding is harmless).
+                    // Cycle focus through the editor's fields: API key (0) →
+                    // effort (1) → thinking (2) → key (0). The effort/thinking
+                    // rows only exist for the Anthropic provider; for any other
+                    // target Tab stays on the key field (no-op). The focused
+                    // text field owns the composer line, so swapping focus swaps
+                    // `app.input` with the off-focus buffer. The thinking field
+                    // is a toggle (no text), so it clears the line while focused.
+                    let is_anthropic = app.editor_model_settings_only
+                        || app
+                            .editor_target
+                            .as_deref()
+                            .is_some_and(|t| t == "anthropic");
+                    if is_anthropic {
+                        if app.editor_model_settings_only {
+                            match app.editor_field {
+                                1 => {
+                                    app.editor_effort = app.input.clone();
+                                    app.input.clear();
+                                    app.set_cursor(0);
+                                    app.editor_field = 2;
+                                }
+                                2 => {
+                                    app.input = app.editor_effort.clone();
+                                    app.set_cursor_end();
+                                    app.editor_field = 1;
+                                }
+                                _ => {
+                                    app.input = app.editor_effort.clone();
+                                    app.set_cursor_end();
+                                    app.editor_field = 1;
+                                }
+                            }
+                        } else {
+                            match app.editor_field {
+                                0 => {
+                                    app.editor_key = std::mem::take(&mut app.input);
+                                    app.input = app.editor_effort.clone();
+                                    app.set_cursor_end();
+                                    app.editor_field = 1;
+                                }
+                                1 => {
+                                    app.editor_effort = app.input.clone();
+                                    // Thinking is a toggle, not text: clear the line.
+                                    app.input.clear();
+                                    app.set_cursor(0);
+                                    app.editor_field = 2;
+                                }
+                                2 => {
+                                    app.input = std::mem::take(&mut app.editor_key);
+                                    app.set_cursor_end();
+                                    app.editor_field = 0;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                input::InputAction::ModelEditorEffortCycle { delta } => {
+                    // Cycle the effort selector through the five wire levels,
+                    // wrapping at both ends. Only meaningful for the Anthropic
+                    // provider (the row isn't shown otherwise); mirrored into
+                    // app.input so the renderer shows the live value.
+                    const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+                    let cur = LEVELS
+                        .iter()
+                        .position(|l| *l == app.editor_effort)
+                        .unwrap_or(2) as isize;
+                    let n = LEVELS.len() as isize;
+                    let next = ((cur + delta as isize).rem_euclid(n)) as usize;
+                    app.editor_effort = LEVELS[next].to_string();
+                    app.input = app.editor_effort.clone();
+                    app.set_cursor_end();
+                }
+                input::InputAction::ModelEditorThinkingToggle => {
+                    // Toggle extended thinking on/off (Space). Orthogonal to
+                    // effort — the two knobs are independent on the wire.
+                    app.editor_thinking = !app.editor_thinking;
+                }
+                input::InputAction::CustomProviderThinkingToggle => {
+                    // Toggle extended thinking on/off (Space) for a custom
+                    // Anthropic-protocol provider. Orthogonal to effort.
+                    app.custom_thinking = !app.custom_thinking;
                 }
                 input::InputAction::SubmitModelEditor => {
                     if app.active_modal == Modal::ModelEditor
                         && let Some(id) = app.editor_target.clone()
                     {
-                        // The single editor field is the API key; the model was
-                        // carried in from the picker selection / provider default.
-                        let key = app.input.trim().to_string();
+                        // Flush the focused field's live text into its buffer
+                        // before reading, so a submit while effort is focused
+                        // captures the in-progress value. Field 2 (thinking) is
+                        // a toggle with no text, so it needs no flush.
+                        let (key, effort) = if app.editor_field == 1 {
+                            app.editor_effort = app.input.clone();
+                            (app.editor_key.trim().to_string(), app.editor_effort.clone())
+                        } else {
+                            (app.input.trim().to_string(), app.editor_effort.clone())
+                        };
                         let model = if app.editor_model.trim().is_empty() {
                             app.provider_picker
                                 .rows
@@ -2052,6 +2223,39 @@ pub(super) async fn run_app_loop(
                         } else {
                             app.editor_model.trim().to_string()
                         };
+                        if app.editor_model_settings_only {
+                            // Built-in models persist to `[model_reasoning]` (no
+                            // user-editable channel); user-defined models persist
+                            // to their channel. ADR-0045.
+                            if app.editor_target_is_builtin {
+                                let _ = app.tx.send(AgentRequest::EditModelReasoning {
+                                    model,
+                                    effort: Some(effort),
+                                    thinking: Some(app.editor_thinking),
+                                });
+                            } else {
+                                let _ = app.tx.send(AgentRequest::EditProviderModel {
+                                    provider_id: id,
+                                    model,
+                                    effort: Some(effort),
+                                    thinking: Some(app.editor_thinking),
+                                });
+                            }
+                            app.input.clear();
+                            app.set_cursor(0);
+                            app.editor_target = None;
+                            app.editor_model_settings_only = false;
+                            app.editor_target_is_builtin = false;
+                            app.model_search = false;
+                            app.model_modal_follow = true;
+                            app.active_modal = Modal::Provider;
+                            continue;
+                        }
+                        // Stage-1 key editor (not model-settings-only): this is
+                        // a built-in provider's API-key edit. ADR-0046 removed
+                        // effort/thinking from the provider level, so switching
+                        // now carries only the key (effort/thinking are set per
+                        // model from the stage-2 model `e` editor).
                         let _ = app.tx.send(AgentRequest::SwitchProvider {
                             provider_type: id,
                             model,
@@ -2062,6 +2266,8 @@ pub(super) async fn run_app_loop(
                         app.input = std::mem::take(&mut app.stashed_input);
                         app.set_cursor_end();
                         app.editor_target = None;
+                        app.editor_model_settings_only = false;
+                        app.editor_target_is_builtin = false;
                         app.active_modal = Modal::None;
                     }
                 }
@@ -2196,20 +2402,6 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                     app.help_scroll = 0;
                 }
-                input::InputAction::OpenSession => {
-                    // The session-context modal is a tabbed overview. It does
-                    // not borrow the input box, so unlike Models/History there
-                    // is no stash to save. Reached via the `/session` slash
-                    // command (intercepted locally in input.rs, never sent to
-                    // the backend). Kick off a snapshot request so the panes
-                    // populate as soon as the harness replies; until then the
-                    // modal renders a lightweight placeholder.
-                    app.active_modal = Modal::Session;
-                    app.modal_index = 0;
-                    app.session_scroll = 0;
-                    app.session_modal_follow = true;
-                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
-                }
                 input::InputAction::OpenPermissions => {
                     // The permissions manager modal. Reached via the
                     // `/permissions` slash command (intercepted locally, never
@@ -2222,11 +2414,9 @@ pub(super) async fn run_app_loop(
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
                 input::InputAction::OpenTools => {
-                    // The tools manager modal. Reached via `/tools` (intercepted
-                    // locally) or `t`/Enter from the session dashboard's TOOLS
-                    // line. It shares the session-context snapshot, so (re)kick
-                    // a query so the list is fresh — the prior modal may have
-                    // been the read-only session dashboard.
+                    // The tools manager modal. Reached via `/tools`
+                    // (intercepted locally). It shares the session-context
+                    // snapshot, so (re)kick a query so the list is fresh.
                     app.active_modal = Modal::Tools;
                     app.modal_index = 0;
                     app.session_scroll = 0;
@@ -2241,6 +2431,36 @@ pub(super) async fn run_app_loop(
                     app.modal_index = 0;
                     app.session_scroll = 0;
                     app.session_modal_follow = true;
+                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::OpenSkills => {
+                    // The skills modal. Reached via `/skills` (intercepted
+                    // locally). Shares the session-context snapshot, so kick a
+                    // fresh query and let the modal populate from its `skills`
+                    // pane. Detail expansions start collapsed.
+                    app.active_modal = Modal::Skills;
+                    app.modal_index = 0;
+                    app.session_scroll = 0;
+                    app.session_modal_follow = true;
+                    app.skills_expanded = None;
+                    let _ = app.tx.send(AgentRequest::QuerySessionContext);
+                }
+                input::InputAction::SkillsToggleDetail => {
+                    // Toggle the detail block of the selected skill row. Re-pressing
+                    // Enter on an already-expanded row collapses it.
+                    app.skills_expanded = if app.skills_expanded == Some(app.modal_index) {
+                        None
+                    } else {
+                        Some(app.modal_index)
+                    };
+                    app.session_modal_follow = true;
+                }
+                input::InputAction::SkillsReload => {
+                    // Reload the skill registry. The harness replies with a fresh
+                    // snapshot reflecting the reloaded skills.
+                    let _ = app
+                        .tx
+                        .send(AgentRequest::SlashCommand("/skills reload".to_string()));
                     let _ = app.tx.send(AgentRequest::QuerySessionContext);
                 }
                 input::InputAction::OpenConfig => {
@@ -2374,6 +2594,11 @@ pub(super) async fn run_app_loop(
                             .as_ref()
                             .map(|s| s.mcp.len())
                             .unwrap_or(0)
+                    } else if app.active_modal == Modal::Skills {
+                        app.session_context
+                            .as_ref()
+                            .map(|s| s.skills.len())
+                            .unwrap_or(0)
                     } else {
                         app.session_tools_len()
                     };
@@ -2448,6 +2673,8 @@ pub(super) async fn run_app_loop(
                         // stays in stashed_input for when the picker itself
                         // closes.
                         app.editor_target = None;
+                        app.editor_model_settings_only = false;
+                        app.editor_target_is_builtin = false;
                         app.input.clear();
                         app.set_cursor(0);
                         app.model_search = false;
@@ -2475,9 +2702,6 @@ pub(super) async fn run_app_loop(
                         app.activity_scroll = app.activity_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_sub(1);
-                    } else if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = app.session_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = app.permissions_scroll.saturating_sub(1);
                     } else if app.active_modal == Modal::HistorySearch {
@@ -2507,9 +2731,6 @@ pub(super) async fn run_app_loop(
                         app.activity_scroll = app.activity_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Help {
                         app.help_scroll = app.help_scroll.saturating_add(1);
-                    } else if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = app.session_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = app.permissions_scroll.saturating_add(1);
                     } else if app.active_modal == Modal::HistorySearch {
@@ -2533,10 +2754,7 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::ScrollPageUp => {
                     let step = app.view_height.saturating_sub(1).max(1);
-                    if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = app.session_scroll.saturating_sub(step as usize);
-                    } else if app.active_modal == Modal::Permissions {
+                    if app.active_modal == Modal::Permissions {
                         app.permissions_scroll =
                             app.permissions_scroll.saturating_sub(step as usize);
                     } else if app.active_modal == Modal::HistorySearch {
@@ -2560,10 +2778,7 @@ pub(super) async fn run_app_loop(
                 }
                 input::InputAction::ScrollPageDown => {
                     let step = app.view_height.saturating_sub(1).max(1);
-                    if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = app.session_scroll.saturating_add(step as usize);
-                    } else if app.active_modal == Modal::Permissions {
+                    if app.active_modal == Modal::Permissions {
                         app.permissions_scroll =
                             app.permissions_scroll.saturating_add(step as usize);
                     } else if app.active_modal == Modal::HistorySearch {
@@ -2588,10 +2803,7 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::ScrollTop => {
-                    if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = 0;
-                    } else if app.active_modal == Modal::Permissions {
+                    if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = 0;
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
@@ -2615,10 +2827,7 @@ pub(super) async fn run_app_loop(
                 input::InputAction::ScrollBottom => {
                     // Modal scroll bounds are clamped by render_body each
                     // frame, so a large number here just means "go to end".
-                    if app.active_modal == Modal::Session {
-                        app.session_modal_follow = false;
-                        app.session_scroll = usize::MAX;
-                    } else if app.active_modal == Modal::Permissions {
+                    if app.active_modal == Modal::Permissions {
                         app.permissions_scroll = usize::MAX;
                     } else if app.active_modal == Modal::HistorySearch {
                         app.history_modal_follow = false;
@@ -2710,6 +2919,7 @@ pub(super) async fn run_app_loop(
                         );
                         app.ctrl_c_armed_ticks = 20;
                     } else if app.ctrl_c_armed_ticks > 0 {
+                        tracing::info!(reason = "ctrl_c_double_press", "app exiting");
                         return Ok(());
                     } else {
                         // Arm a ~2s window in which a second Ctrl+C quits.
@@ -3085,9 +3295,9 @@ pub(super) async fn run_app_loop(
                     | Modal::CustomProvider
                     | Modal::AddModel
                     | Modal::InputInjection
-                    | Modal::Session
                     | Modal::Tools
                     | Modal::Mcp
+                    | Modal::Skills
                     | Modal::Activity
                     | Modal::TokenReport
                     | Modal::None => {}
@@ -3144,9 +3354,9 @@ pub(super) async fn run_app_loop(
                     | Modal::CustomProvider
                     | Modal::AddModel
                     | Modal::InputInjection
-                    | Modal::Session
                     | Modal::Tools
                     | Modal::Mcp
+                    | Modal::Skills
                     | Modal::Activity
                     | Modal::TokenReport
                     | Modal::None => {}

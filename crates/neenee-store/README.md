@@ -1,6 +1,6 @@
 # neenee-store
 
-Durable state and configuration for the coding-agent stack.
+Durable state and configuration for the neenee agent stack.
 
 `neenee-core` holds the pure domain (types & traits), zero I/O. This crate sits
 one layer above it: the durable state and configuration a frontend needs to
@@ -12,7 +12,7 @@ actually run a session:
 - the per-project advisory lock (`flock`), model-usage telemetry;
 - the SQLite-backed repeat/cron store (`repeat.db`).
 
-This is the **local coding-agent** persistence layer. It assumes a single-user
+This is the **local agent** persistence layer. It assumes a single-user
 workstation: paths resolve via XDG `ProjectDirs`, sessions are keyed by project
 root, and a process-level `flock` enforces single-instance-per-project.
 
