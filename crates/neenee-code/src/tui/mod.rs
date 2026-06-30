@@ -856,6 +856,7 @@ pub async fn run_tui(
         hint_context_rect: None,
         token_ledger: Some(token_ledger),
         token_report_scroll: 0,
+        token_report_detail: false,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,

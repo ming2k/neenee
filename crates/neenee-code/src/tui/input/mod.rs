@@ -270,6 +270,9 @@ pub enum InputAction {
     SessionActivate,
     /// Open the currently-selected session in the sessions picker.
     OpenSelectedSession,
+    /// Drill into the selected provider/model line in the TokenReport bill
+    /// (the per-model detail). Bound to `Enter`.
+    TokenReportActivate,
     /// Delete the currently-selected session in the sessions picker.
     DeleteSelectedSession,
     /// Close any modal.
@@ -715,12 +718,23 @@ impl SgrLeakGuard {
         };
 
         // The match returns (next_state, is_part_of_sequence). A character is
-        // part of a leaked sequence when it either advances the tracker or is
-        // the sequence's terminator; a character that *aborts* an in-progress
-        // prefix (e.g. `ESC [` followed by a letter instead of `<`) is NOT part
-        // of any mouse report, so it is handed back to the caller as Accept.
+        // "part of a leaked sequence" — and therefore dropped — only when it is
+        // a payload byte of an `ESC [ < …` mouse report (the `[`, `<`, digits,
+        // `;`, and the `M`/`m` terminator). A bare `Esc` keypress is *never*
+        // dropped: it is a real control key (never inserted as text), it is the
+        // double-Esc interrupt path, and it clears focus / closes modals.
+        // Dropping it silently — as the first version of this guard did — broke
+        // double-Esc interrupt entirely. Instead we *deliver* the Esc (Accept)
+        // and merely enter the tracking state, so the `[` that follows a
+        // genuine leak still starts suppression without ever swallowing the Esc
+        // itself.
         let (next, part) = match (self.state, c) {
-            (SgrState::Idle, '\x1b') => (SgrState::SawEsc, true),
+            // A bare Esc from idle: deliver it, but arm the tracker so a
+            // following `[` still opens a leak window.
+            (SgrState::Idle, '\x1b') => (SgrState::SawEsc, false),
+            // `ESC [`: the `[` is the first byte that can only be leak noise
+            // (a real `[` key arrives as a printable char from idle), so start
+            // suppressing here. The leading Esc was already delivered above.
             (SgrState::SawEsc, '[') => (SgrState::SawCsi, true),
             // The SGR mouse intro. Once we see this prefix the rest of the
             // payload is unambiguously a mouse report fragment.
@@ -733,7 +747,11 @@ impl SgrLeakGuard {
             // SGR mouse report after all. Hand the *current* char back for
             // normal processing (it is genuine input) and resync to idle.
             (SgrState::InSgr, _) => (SgrState::Idle, false),
-            (SgrState::SawEsc, '\x1b') => (SgrState::SawEsc, true),
+            // A second Esc while one is already buffered: this is a genuine
+            // double-Esc (the double-Esc interrupt pattern), not a leak — a
+            // real SGR sequence has `[` next, never another Esc. Deliver it and
+            // stay armed so the next non-`[` char cleanly aborts to idle.
+            (SgrState::SawEsc, '\x1b') => (SgrState::SawEsc, false),
             (SgrState::SawEsc | SgrState::SawCsi, _) => (SgrState::Idle, false),
             (SgrState::Idle, _) => (SgrState::Idle, false),
         };
@@ -1037,7 +1055,7 @@ pub fn process_event(
                     super::Modal::ConfigNudge => InputAction::ConfigNudgeToggle,
                     super::Modal::ConfigLayout => InputAction::ConfigLayoutApply,
                     super::Modal::Activity => InputAction::CloseModal,
-                    super::Modal::TokenReport => InputAction::CloseModal,
+                    super::Modal::TokenReport => InputAction::TokenReportActivate,
                     super::Modal::None => {
                         if context.has_focused_target {
                             return InputAction::ActivateFocusedTarget;
@@ -1719,7 +1737,7 @@ pub fn process_event(
                     super::Modal::AddModel => InputAction::MoveAddModel { forward: false },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
-                    super::Modal::TokenReport => InputAction::ScrollUp,
+                    super::Modal::TokenReport => InputAction::ModalUp,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusPrevTarget
@@ -1775,7 +1793,7 @@ pub fn process_event(
                     super::Modal::AddModel => InputAction::MoveAddModel { forward: true },
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
-                    super::Modal::TokenReport => InputAction::ScrollDown,
+                    super::Modal::TokenReport => InputAction::ModalDown,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusNextTarget
@@ -4500,7 +4518,9 @@ mod tests {
     #[test]
     fn sgr_guard_drops_split_sgr_mouse_sequence() {
         // The exact symptom from the field: a mouse report crossterm split into
-        // individual chars. `ESC [ < 0 ; 3 5 ; 4 6 M` should vanish entirely.
+        // individual chars. `ESC [ < 0 ; 3 5 ; 4 6 M` — the `[ < … M` payload
+        // is dropped, but the leading Esc is *delivered* (it is a real control
+        // key, never inserted as text, and is the double-Esc interrupt path).
         let seq: Vec<Event> = [
             leaked_esc(),
             leaked_char('['),
@@ -4517,13 +4537,14 @@ mod tests {
         .into_iter()
         .collect();
         let (accepted, dropped) = drain_guard(&seq);
-        assert_eq!(accepted, 0, "no byte of a split SGR sequence should leak");
-        assert_eq!(dropped, seq.len());
+        assert_eq!(accepted, 1, "the leading Esc is delivered, the rest dropped");
+        assert_eq!(dropped, seq.len() - 1);
     }
 
     #[test]
     fn sgr_guard_drops_release_variant_lowercase_m() {
-        // SGR release uses lowercase `m`. Same coverage as the press variant.
+        // SGR release uses lowercase `m`. Same coverage as the press variant:
+        // only the leading Esc is delivered.
         let seq: Vec<Event> = [
             leaked_esc(),
             leaked_char('['),
@@ -4538,14 +4559,15 @@ mod tests {
         .into_iter()
         .collect();
         let (accepted, _) = drain_guard(&seq);
-        assert_eq!(accepted, 0);
+        assert_eq!(accepted, 1);
     }
 
     #[test]
     fn sgr_guard_drops_run_of_split_sequences() {
         // The real complaint showed *many* sequences back to back (resize drag).
         // The guard must resync to idle after each terminating M/m and catch
-        // the next one too.
+        // the next one too. Each sequence's leading Esc is delivered; the
+        // remaining payload bytes are swallowed.
         let one = |b: char| {
             vec![
                 leaked_esc(),
@@ -4562,7 +4584,7 @@ mod tests {
             .flatten()
             .collect();
         let (accepted, _) = drain_guard(&seq);
-        assert_eq!(accepted, 0, "every sequence in a run must be swallowed");
+        assert_eq!(accepted, 3, "each sequence delivers its leading Esc");
     }
 
     #[test]
@@ -4579,13 +4601,39 @@ mod tests {
     }
 
     #[test]
+    fn sgr_guard_delivers_lone_esc() {
+        // Regression: a standalone Esc (e.g. the first of a double-Esc
+        // interrupt) must reach the app. The previous guard dropped it as a
+        // suspected leak prefix, which broke double-Esc interrupt entirely.
+        let mut g = SgrLeakGuard::default();
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
+        // Not idle: it armed the tracker so a following `[` still opens a leak.
+        assert!(!g.is_idle());
+        // A subsequent normal char aborts the tracking and is delivered too.
+        assert!(matches!(g.feed(&leaked_char('x')), Feed::Accept));
+        assert!(g.is_idle());
+    }
+
+    #[test]
+    fn sgr_guard_delivers_double_esc() {
+        // The double-Esc interrupt path: two Escs with nothing between them.
+        // Neither is part of an SGR sequence (a real leak has `[` next, never
+        // another Esc), so both must be delivered.
+        let mut g = SgrLeakGuard::default();
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
+        assert!(!g.is_idle());
+    }
+
+    #[test]
     fn sgr_guard_recovers_from_aborted_prefix() {
         // `ESC [` followed by something other than `<` is a real CSI (e.g. an
-        // arrow key's payload). The buffered ESC and [ should not be silently
-        // lost beyond a single resync; after aborting, normal typing resumes.
+        // arrow key's payload). The leading Esc is delivered; `[` is dropped
+        // (it can only be leak noise from this state); the aborting char is
+        // delivered and the guard returns to idle.
         let mut g = SgrLeakGuard::default();
         // ESC [ A = Up arrow, delivered as separate chars by a broken read.
-        assert!(matches!(g.feed(&leaked_esc()), Feed::Drop));
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
         assert!(matches!(g.feed(&leaked_char('[')), Feed::Drop));
         // 'A' is not the SGR intro: the guard aborts and *this* event is
         // accepted (returned to the caller to deal with), then goes idle.
@@ -4600,7 +4648,7 @@ mod tests {
         // A genuine parsed mouse event or a resize resyncs the tracker, so a
         // half-buffered prefix can't poison the next real interaction.
         let mut g = SgrLeakGuard::default();
-        assert!(matches!(g.feed(&leaked_esc()), Feed::Drop));
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
         assert!(matches!(g.feed(&leaked_char('[')), Feed::Drop));
         assert!(matches!(g.feed(&Event::Resize(80, 24)), Feed::Accept));
         assert!(g.is_idle());
@@ -4612,9 +4660,9 @@ mod tests {
         // A malformed payload (non-digit, non-;) while inside an SGR sequence
         // resyncs to idle instead of swallowing arbitrary following text.
         let mut g = SgrLeakGuard::default();
-        for ev in [leaked_esc(), leaked_char('['), leaked_char('<')] {
-            assert!(matches!(g.feed(&ev), Feed::Drop));
-        }
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Accept));
+        assert!(matches!(g.feed(&leaked_char('[')), Feed::Drop));
+        assert!(matches!(g.feed(&leaked_char('<')), Feed::Drop));
         // A letter that is not the terminator: abort and resync.
         assert!(matches!(g.feed(&leaked_char('Z')), Feed::Accept));
         assert!(g.is_idle());

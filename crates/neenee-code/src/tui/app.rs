@@ -160,6 +160,9 @@ pub struct App {
     pub token_ledger: Option<Arc<neenee_core::TokenSourceLedger>>,
     /// Scroll offset of the TokenReport modal body.
     pub token_report_scroll: usize,
+    /// `true` when the TokenReport modal is drilled into a single provider/model
+    /// detail (per-round line items + cache efficiency); `false` = the bill list.
+    pub token_report_detail: bool,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
     /// when no todos are shown (empty task list or bar hidden).

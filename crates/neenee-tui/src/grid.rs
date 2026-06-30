@@ -165,6 +165,22 @@ impl Grid {
             return;
         }
         let idx = self.index_of(x, y);
+
+        // If we are overwriting the right half of a wide character, clear its head.
+        if x > 0 && self.content[idx].is_wide_continuation() {
+            let left_idx = self.index_of(x - 1, y);
+            self.content[left_idx].symbol = " ".to_string();
+            self.content[left_idx].width = 1;
+            self.mark(x - 1, y);
+        }
+        // If we are overwriting a wide character's head, clear its trailing continuation.
+        if self.content[idx].width >= 2 && x + 1 < self.width {
+            let right_idx = self.index_of(x + 1, y);
+            self.content[right_idx].symbol = " ".to_string();
+            self.content[right_idx].width = 1;
+            self.mark(x + 1, y);
+        }
+
         self.content[idx] = cell;
         self.mark(x, y);
     }
@@ -228,12 +244,32 @@ impl Grid {
                 style: cell_style,
             };
             let head_idx = self.index_of(cx, cy);
+
+            if cx > 0 && self.content[head_idx].is_wide_continuation() {
+                let left_idx = self.index_of(cx - 1, cy);
+                self.content[left_idx].symbol = " ".to_string();
+                self.content[left_idx].width = 1;
+                self.mark(cx - 1, cy);
+            }
+            if self.content[head_idx].width >= 2 && cx + 1 < self.width {
+                let right_idx = self.index_of(cx + 1, cy);
+                self.content[right_idx].symbol = " ".to_string();
+                self.content[right_idx].width = 1;
+                self.mark(cx + 1, cy);
+            }
+
             self.content[head_idx] = head;
             self.mark(cx, cy);
             // Place the trailing continuation cell for a wide glyph, carrying
             // the glyph's background so the column can never ghost.
             if w >= 2 && cx + 1 < self.width {
                 let trail_idx = self.index_of(cx + 1, cy);
+                if self.content[trail_idx].width >= 2 && cx + 2 < self.width {
+                    let right_idx = self.index_of(cx + 2, cy);
+                    self.content[right_idx].symbol = " ".to_string();
+                    self.content[right_idx].width = 1;
+                    self.mark(cx + 2, cy);
+                }
                 self.content[trail_idx] = Cell::wide_continuation(cell_style);
                 self.mark(cx + 1, cy);
             }
@@ -248,7 +284,32 @@ impl Grid {
     pub fn fill_rect(&mut self, x: u16, y: u16, w: u16, h: u16, style: crate::Style) {
         let blank = Cell::blank_styled(style);
         for row in y..y.saturating_add(h).min(self.height) {
-            for col in x..x.saturating_add(w).min(self.width) {
+            let col_start = x;
+            let col_end = x.saturating_add(w).min(self.width);
+            if col_start >= self.width {
+                continue;
+            }
+
+            if col_start > 0 {
+                let left_idx = self.index_of(col_start, row);
+                if self.content[left_idx].is_wide_continuation() {
+                    let head_idx = self.index_of(col_start - 1, row);
+                    self.content[head_idx].symbol = " ".to_string();
+                    self.content[head_idx].width = 1;
+                    self.mark(col_start - 1, row);
+                }
+            }
+            if col_end > col_start {
+                let right_idx = self.index_of(col_end - 1, row);
+                if self.content[right_idx].width >= 2 && col_end < self.width {
+                    let trail_idx = self.index_of(col_end, row);
+                    self.content[trail_idx].symbol = " ".to_string();
+                    self.content[trail_idx].width = 1;
+                    self.mark(col_end, row);
+                }
+            }
+
+            for col in col_start..col_end {
                 let idx = self.index_of(col, row);
                 self.content[idx] = blank.clone();
             }
@@ -262,8 +323,19 @@ impl Grid {
         if y >= self.height {
             return;
         }
+        let start_x = x.min(self.width.saturating_sub(1));
+        if start_x > 0 {
+            let start_idx = self.index_of(start_x, y);
+            if self.content[start_idx].is_wide_continuation() {
+                let head_idx = self.index_of(start_x - 1, y);
+                self.content[head_idx].symbol = " ".to_string();
+                self.content[head_idx].width = 1;
+                self.mark(start_x - 1, y);
+            }
+        }
+        
         let blank = Cell::blank_styled(style);
-        let start = self.index_of(x.min(self.width.saturating_sub(1)), y);
+        let start = self.index_of(start_x, y);
         let end = self.index_of(self.width, y);
         for cell in &mut self.content[start..end] {
             *cell = blank.clone();

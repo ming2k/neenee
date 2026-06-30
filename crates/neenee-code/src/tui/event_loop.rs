@@ -1257,6 +1257,8 @@ pub(super) async fn run_app_loop(
                         Some(render::draw_token_report_modal(
                             f,
                             &report,
+                            app.modal_index.min(report.rows.len().saturating_sub(1)),
+                            app.token_report_detail,
                             &mut app.token_report_scroll,
                             &app.theme,
                         ))
@@ -2734,7 +2736,13 @@ pub(super) async fn run_app_loop(
                     }
                 }
                 input::InputAction::CloseModal => {
-                    // Most modals close straight to chat. The model editor
+                    if app.active_modal == Modal::TokenReport && app.token_report_detail {
+                        // First Esc returns from the per-model detail to the
+                        // bill list; a second Esc closes the modal.
+                        app.token_report_detail = false;
+                        app.token_report_scroll = 0;
+                    } else {
+                        // Most modals close straight to chat. The model editor
                     // instead steps back to the model picker, so a key entry is
                     // recoverable with Esc.
                     let mut return_to_picker = false;
@@ -2775,11 +2783,25 @@ pub(super) async fn run_app_loop(
                         app.modal_index = 0;
                         return_to_picker = true;
                     }
-                    app.active_modal = if return_to_picker {
-                        Modal::Provider
-                    } else {
-                        Modal::None
-                    };
+                        app.active_modal = if return_to_picker {
+                            Modal::Provider
+                        } else {
+                            Modal::None
+                        };
+                    }
+                }
+                input::InputAction::TokenReportActivate => {
+                    if app.active_modal == Modal::TokenReport && !app.token_report_detail {
+                        let has_rows = app
+                            .token_ledger
+                            .as_ref()
+                            .map(|l| !l.snapshot().rows.is_empty())
+                            .unwrap_or(false);
+                        if has_rows {
+                            app.token_report_detail = true;
+                            app.token_report_scroll = 0;
+                        }
+                    }
                 }
                 input::InputAction::ScrollUp => {
                     if app.active_modal == Modal::Activity {
@@ -3372,6 +3394,19 @@ pub(super) async fn run_app_loop(
                         let count = crate::tui::render::overlays::config_layout::ROW_COUNT;
                         app.modal_index = (app.modal_index + 1) % count;
                     }
+                    Modal::TokenReport => {
+                        if app.token_report_detail {
+                            app.token_report_scroll = app.token_report_scroll.saturating_sub(1);
+                        } else {
+                            let count = app
+                                .token_ledger
+                                .as_ref()
+                                .map(|l| l.snapshot().rows.len())
+                                .unwrap_or(0)
+                                .max(1);
+                            app.modal_index = (app.modal_index + count - 1) % count;
+                        }
+                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
@@ -3383,7 +3418,6 @@ pub(super) async fn run_app_loop(
                     | Modal::Mcp
                     | Modal::Skills
                     | Modal::Activity
-                    | Modal::TokenReport
                     | Modal::None => {}
                 },
                 input::InputAction::ModalDown => match app.active_modal {
@@ -3431,6 +3465,19 @@ pub(super) async fn run_app_loop(
                         let count = crate::tui::render::overlays::config_layout::ROW_COUNT;
                         app.modal_index = (app.modal_index + 1) % count;
                     }
+                    Modal::TokenReport => {
+                        if app.token_report_detail {
+                            app.token_report_scroll = app.token_report_scroll.saturating_add(1);
+                        } else {
+                            let count = app
+                                .token_ledger
+                                .as_ref()
+                                .map(|l| l.snapshot().rows.len())
+                                .unwrap_or(0)
+                                .max(1);
+                            app.modal_index = (app.modal_index + 1) % count;
+                        }
+                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
@@ -3442,7 +3489,6 @@ pub(super) async fn run_app_loop(
                     | Modal::Mcp
                     | Modal::Skills
                     | Modal::Activity
-                    | Modal::TokenReport
                     | Modal::None => {}
                 },
                 input::InputAction::QuestionUp => {
@@ -3692,6 +3738,7 @@ pub(super) async fn run_app_loop(
                         app.active_modal = Modal::TokenReport;
                         app.modal_index = 0;
                         app.token_report_scroll = 0;
+                        app.token_report_detail = false;
                         app.selection = SelectionState::None;
                         app.focused_target = None;
                         app.drag.cancel();

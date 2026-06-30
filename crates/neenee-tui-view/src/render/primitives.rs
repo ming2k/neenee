@@ -40,14 +40,22 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(r);
 
-    Layout::default()
+    let area = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage((100 - percent_x) / 2),
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
         ])
-        .split(popup_layout[1])[1]
+        .split(popup_layout[1])[1];
+    // Snap the width to an even column count. A modal insets its body by
+    // `MODAL_INNER_H_PADDING` on each side (an even total), so an even outer
+    // width yields an even body width — which CJK / full-width glyphs (each 2
+    // columns wide) can tile without leaving a stranded trailing column that
+    // forces every wrap line short by one glyph. The odd column is shed from
+    // the right margin; the rect stays centered because `Layout` already
+    // divided the margins evenly.
+    even_width(area)
 }
 
 /// Like [`centered_rect`] but the vertical extent is an explicit row count
@@ -64,14 +72,29 @@ pub(super) fn centered_rect_h(percent_x: u16, height: u16, r: Rect) -> Rect {
         width: r.width,
         height,
     };
-    Layout::default()
+    let area = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage((100 - percent_x) / 2),
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
         ])
-        .split(band)[1]
+        .split(band)[1];
+    // See `centered_rect`: an even width gives the body an even usable width so
+    // full-width (CJK) glyphs tile flush on every wrap line.
+    even_width(area)
+}
+
+/// Floor a rect's width to the nearest even column count, clamped to ≥ 0.
+///
+/// This is the single lever that makes every modal body an even-width surface.
+/// Because [`modal_frame`] insets the body symmetrically by `MODAL_INNER_H_PADDING`
+/// (an even total), an even panel width propagates to an even body width, so a
+/// run of 2-column CJK glyphs fills every row end-to-end instead of stranding
+/// one empty column that costs a full glyph on each wrapped line.
+fn even_width(mut rect: Rect) -> Rect {
+    rect.width &= !1;
+    rect
 }
 
 #[derive(Clone, Copy)]
@@ -755,6 +778,7 @@ mod tests {
             Modal::Tools,
             Modal::Mcp,
             Modal::Permissions,
+            Modal::Skills,
             Modal::Activity,
         ] {
             assert!(modal_spec(modal).is_some());
@@ -818,5 +842,78 @@ mod tests {
         assert_eq!(modal_footer_text(&hints, 14), "Enter · Esc");
         assert_eq!(modal_footer_text(&hints, 3), "Esc");
         assert_eq!(modal_footer_text(&hints, 2), "E…");
+    }
+
+    #[test]
+    fn even_width_floors_to_nearest_even_column() {
+        assert_eq!(even_width(Rect::new(0, 0, 0, 5)), Rect::new(0, 0, 0, 5));
+        assert_eq!(even_width(Rect::new(0, 0, 1, 5)), Rect::new(0, 0, 0, 5));
+        assert_eq!(even_width(Rect::new(0, 0, 2, 5)), Rect::new(0, 0, 2, 5));
+        assert_eq!(even_width(Rect::new(7, 3, 15, 9)), Rect::new(7, 3, 14, 9));
+        assert_eq!(even_width(Rect::new(7, 3, 16, 9)), Rect::new(7, 3, 16, 9));
+    }
+
+    #[test]
+    fn centered_rect_produces_even_width() {
+        // `centered_rect` must shed the odd trailing column so the body it
+        // encloses gets an even usable width. Check several host widths and
+        // percentages — including odd host widths and odd splits. Centering
+        // itself is the `Layout` engine's integer-division behaviour (which
+        // already tolerates a column of asymmetry on percentage splits); the
+        // guarantee we add is purely that the resulting width is even.
+        for &host_w in &[79u16, 80, 81, 120, 121] {
+            for &percent in &[50u16, 58, 64, 66, 72, 80] {
+                let host = Rect::new(0, 0, host_w, 40);
+                let area = centered_rect(percent, 50, host);
+                assert_eq!(
+                    area.width % 2,
+                    0,
+                    "width {w} for host {host_w}@{percent}% must be even",
+                    w = area.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn centered_rect_h_produces_even_width() {
+        for &host_w in &[79u16, 80, 81, 120, 121] {
+            for &percent in &[60u16, 64, 66] {
+                let host = Rect::new(0, 0, host_w, 40);
+                let area = centered_rect_h(percent, 12, host);
+                assert_eq!(
+                    area.width % 2,
+                    0,
+                    "width {w} for host {host_w}@{percent}% must be even",
+                    w = area.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modal_area_body_is_even_width_for_cjk() {
+        // The end-to-end invariant: a modal panel plus its symmetric inner
+        // padding yields an even body width, so a run of full-width (2-col)
+        // CJK glyphs tiles every row without stranding a trailing column.
+        // Use a real grid + frame the way the renderers do, across odd and
+        // even terminal widths.
+        for &cols in &[79u16, 80, 81, 119, 120, 121, 200] {
+            let mut grid = neenee_tui::Grid::new(cols, 50);
+            let frame = Frame::new(&mut grid);
+            let area = modal_area(&frame, Modal::Help).expect("help modal has geometry");
+            assert_eq!(
+                area.width % 2,
+                0,
+                "modal panel width must be even at {cols} cols"
+            );
+            // `modal_frame` insets by MODAL_INNER_H_PADDING on each side.
+            let body_w = area.width.saturating_sub(2 * MODAL_INNER_H_PADDING);
+            assert_eq!(
+                body_w % 2,
+                0,
+                "modal body width must be even at {cols} cols (was {body_w})"
+            );
+        }
     }
 }

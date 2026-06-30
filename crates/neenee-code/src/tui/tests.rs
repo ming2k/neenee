@@ -576,6 +576,7 @@ fn app_in_tempdir(files: &[&str], dirs: &[&str]) -> (App, tempfile::TempDir) {
         hint_context_rect: None,
         token_ledger: None,
         token_report_scroll: 0,
+        token_report_detail: false,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,
