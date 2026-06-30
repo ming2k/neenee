@@ -521,6 +521,9 @@ pub fn draw_model_editor(
     let label_style = Style::default()
         .fg(theme.brand())
         .add_modifier(Modifier::BOLD);
+    // Per-row content budget: the body rect width (already inside the modal's
+    // inner padding). Used to right-align the effort/thinking selectors.
+    let body_width = f.body.width as usize;
     let mut body: Vec<Line> = Vec::new();
     if show_key {
         body.push(Line::from(vec![
@@ -546,10 +549,18 @@ pub fn draw_model_editor(
                 theme.fg()
             })
             .add_modifier(Modifier::BOLD);
+        let chev_style = Style::default().fg(theme.muted());
+        let label = format!(" {:<8}", "Effort");
+        // Right-align the `< value >` selector to the body's right edge.
+        let selector = format!("< {} >", effort);
+        let pad = body_width
+            .saturating_sub(label.width() + selector.width());
         body.push(Line::from(vec![
-            Span::styled(format!(" {:<8}", "Effort"), label_style),
+            Span::styled(label, label_style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled("< ".to_string(), chev_style),
             Span::styled(effort.to_string(), value_style),
-            Span::styled("   ← →".to_string(), Style::default().fg(theme.muted())),
+            Span::styled(" >".to_string(), chev_style),
         ]));
     }
 
@@ -563,13 +574,20 @@ pub fn draw_model_editor(
                 theme.fg()
             })
             .add_modifier(Modifier::BOLD);
+        let label = format!(" {:<8}", "Thinking");
+        let selector = format!("< {} >", if on { "on" } else { "off" });
+        let pad = body_width
+            .saturating_sub(label.width() + selector.width());
+        let chev_style = Style::default().fg(theme.muted());
         body.push(Line::from(vec![
-            Span::styled(format!(" {:<8}", "Thinking"), label_style),
-            Span::styled(if on { "on" } else { "off" }.to_string(), value_style),
+            Span::styled(label, label_style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled("< ".to_string(), chev_style),
             Span::styled(
-                "   ␣ toggle".to_string(),
-                Style::default().fg(theme.muted()),
+                if on { "on" } else { "off" }.to_string(),
+                value_style,
             ),
+            Span::styled(" >".to_string(), chev_style),
         ]));
     }
 
