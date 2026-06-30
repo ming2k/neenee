@@ -588,7 +588,7 @@ impl Agent {
     /// reconstructs its per-turn guard from the new thresholds (the current
     /// turn, if any, keeps its already-built guard state — per-turn state is
     /// not retroactively patched). The `enabled` flag is read at every round
-    /// boundary in [`Self::apply_guard_actions`], so a mid-turn toggle takes
+    /// boundary in `Self::apply_guard_actions`, so a mid-turn toggle takes
     /// effect on the very next round.
     ///
     /// Wired from `[principal.nudge]` in `config.toml` at startup, mutated at
@@ -601,7 +601,7 @@ impl Agent {
 
     /// Snapshot of the live nudge configuration. The `/config` modal reads
     /// this to render the current values; the round boundary reads
-    /// `enabled` to gate [`Self::apply_guard_actions`].
+    /// `enabled` to gate `Self::apply_guard_actions`.
     pub fn nudge_config(&self) -> neenee_core::NudgeConfig {
         *self.nudge_config.read().unwrap_or_else(|e| e.into_inner())
     }

@@ -1442,7 +1442,10 @@ mod tests {
             "cache_read_input_tokens": 8000,
         });
         let parsed = parse_anthropic_usage(&usage).expect("usage parses");
-        assert_eq!(parsed.prompt_tokens, 13200, "cache tokens folded into prompt");
+        assert_eq!(
+            parsed.prompt_tokens, 13200,
+            "cache tokens folded into prompt"
+        );
         assert_eq!(parsed.completion_tokens, 50);
         assert_eq!(parsed.total_tokens, 13250);
         assert_eq!(parsed.cache_creation_input_tokens, 5000);

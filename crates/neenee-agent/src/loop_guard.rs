@@ -303,7 +303,7 @@ impl RoundGuardState {
     /// merged [`GuardAction`]. Called once at the round boundary. After this,
     /// the pending state is cleared until the next `set_round`. A
     /// [`GuardAction::Block`] returned by a guard is applied here as a side
-    /// effect — its signatures are added to [`blocked_signatures`](Self::blocked_signatures)
+    /// effect — its signatures are added to `blocked_signatures`
     /// — *before* the action is returned, so the caller only needs to handle
     /// the message/inject surface.
     pub fn take_action(&mut self) -> GuardAction {

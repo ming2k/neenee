@@ -80,7 +80,10 @@ pub fn draw_sessions_modal(
         const COL_GUTTER: usize = 2;
         let badge_w = badge.width();
         let col1_budget = body_width.saturating_sub(meta_w + COL_GUTTER);
-        let overview = truncate_ellipsis(&one_line(&session.overview), col1_budget.saturating_sub(badge_w));
+        let overview = truncate_ellipsis(
+            &one_line(&session.overview),
+            col1_budget.saturating_sub(badge_w),
+        );
         let left = format!("{}{}", badge, overview);
         let left_w = left.width();
         let pad = body_width.saturating_sub(left_w + meta_w);

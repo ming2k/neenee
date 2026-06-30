@@ -188,8 +188,8 @@ pub fn draw_token_report_modal(
         // `cache_read_tokens` is the payoff (served at ~0.1×); `cache_write_tokens`
         // is the upfront premium. Hit-rate = read / (read + uncached reported
         // input) shows whether the `cache_control` breakpoints are landing.
-        let any_cache = report.grand_total.cache_read_tokens > 0
-            || report.grand_total.cache_write_tokens > 0;
+        let any_cache =
+            report.grand_total.cache_read_tokens > 0 || report.grand_total.cache_write_tokens > 0;
         if any_cache {
             body.push(Line::from(""));
             body.push(Line::from(Span::styled(
@@ -210,9 +210,8 @@ pub fn draw_token_report_modal(
                 // (estimated input never goes through the cache). Reported input
                 // here is the whole reported token total minus the cache
                 // portions, i.e. the dynamic suffix the model actually re-read.
-                let denom = (read
-                    + (row.totals.reported_tokens - read - write).max(0))
-                    .max(1) as f64;
+                let denom =
+                    (read + (row.totals.reported_tokens - read - write).max(0)).max(1) as f64;
                 let hit = (read as f64 / denom * 100.0).round() as i64;
                 body.push(Line::from(vec![
                     Span::styled(
@@ -229,8 +228,7 @@ pub fn draw_token_report_modal(
                     ),
                     Span::styled(
                         format!("  {:>3}% hit", hit),
-                        Style::default()
-                            .fg(if hit >= 50 { theme.ok() } else { theme.muted() }),
+                        Style::default().fg(if hit >= 50 { theme.ok() } else { theme.muted() }),
                     ),
                 ]));
             }
@@ -250,7 +248,9 @@ pub fn draw_token_report_modal(
                 ),
                 Span::styled(
                     format!("  write {:>w$}", fmt_tokens(g_write), w = 9),
-                    Style::default().fg(theme.warn()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.warn())
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("  {:>3}% hit", g_hit),

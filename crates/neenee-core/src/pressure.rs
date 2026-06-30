@@ -131,7 +131,7 @@ pub struct ContextBudget {
 /// Callers that need a token estimate should use [`estimate_tokens`] instead,
 /// which classifies characters. The pruning/compaction pipeline measures its
 /// *character budgets* (summary budget, reclaim thresholds) in this same byte
-/// space — see [`summary_char_budget`] — and the token↔byte conversion
+/// space — see `summary_char_budget` — and the token↔byte conversion
 /// constant [`CHARS_PER_TOKEN`] anchors that direction.
 pub fn estimate_bytes(messages: &[Message]) -> usize {
     messages.iter().map(message_bytes).sum()
@@ -143,7 +143,7 @@ pub fn estimate_bytes(messages: &[Message]) -> usize {
 /// it stays accurate for mixed Chinese + code conversations.
 ///
 /// `reasoning_content` is excluded (never sent to providers), mirroring
-/// [`message_bytes`].
+/// `message_bytes`.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     let mut tokens: i64 = 0;
     for m in messages {

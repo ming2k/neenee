@@ -125,6 +125,9 @@ fn cap_output(stdout: &str) -> String {
     let mut out = String::new();
     let mut lines = 0usize;
     let mut truncated = false;
+    // `lines` counts *written* lines (conditionally incremented, not the loop
+    // index), so `enumerate()` would not be a faithful rewrite.
+    #[allow(clippy::explicit_counter_loop)]
     for line in stdout.lines() {
         if lines >= GREP_MAX_LINES || out.len() + line.len() + 1 > GREP_MAX_BYTES {
             truncated = true;

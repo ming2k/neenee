@@ -132,7 +132,7 @@ impl EventLog {
             }
             match serde_json::from_str::<EventEnvelope>(&line) {
                 Ok(envelope) => {
-                    if watermark.map_or(true, |w| envelope.seq > w) {
+                    if watermark.is_none_or(|w| envelope.seq > w) {
                         events.push(envelope);
                     }
                 }
@@ -157,7 +157,10 @@ impl EventLog {
     /// treated as seeded; the load path already tolerates blank/malformed
     /// trailing lines.
     pub fn is_empty(&self) -> bool {
-        !self.path.exists() || std::fs::metadata(&self.path).map(|m| m.len() == 0).unwrap_or(true)
+        !self.path.exists()
+            || std::fs::metadata(&self.path)
+                .map(|m| m.len() == 0)
+                .unwrap_or(true)
     }
 
     /// The highest `seq` present in the log, or `None` when the log is empty.
@@ -168,7 +171,7 @@ impl EventLog {
         let file = File::open(&self.path).ok()?;
         let reader = BufReader::new(file);
         let mut max: Option<u64> = None;
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.trim().is_empty() {
                 continue;
             }
@@ -176,10 +179,10 @@ impl EventLog {
             // tiny serde_json::Value read of the first field avoids
             // deserializing every message payload just to learn the high-water
             // mark.
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(seq) = value.get("seq").and_then(|v| v.as_u64()) {
-                    max = Some(max.map_or(seq, |m| m.max(seq)));
-                }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
+                && let Some(seq) = value.get("seq").and_then(|v| v.as_u64())
+            {
+                max = Some(max.map_or(seq, |m| m.max(seq)));
             }
         }
         max

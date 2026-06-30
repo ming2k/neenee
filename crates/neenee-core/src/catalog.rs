@@ -36,7 +36,7 @@ pub enum Transport {
     /// speak the Anthropic Messages wire protocol, not OpenAI chat-completions.
     ///
     /// Two orthogonal reasoning knobs ride on the transport, both optional and
-    /// both typed (they live in this crate — [`Effort`] and
+    /// both typed (they live in this crate — `Effort` and
     /// [`crate::ThinkingMode`] — so there is no string↔enum shuffle at the
     /// factory layer):
     ///

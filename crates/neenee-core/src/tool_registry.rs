@@ -106,7 +106,7 @@ inventory::collect!(ToolRegistration);
 /// appears verbatim in prompts and provider schemas: a `(name, variant)`
 /// collision is a programming error, not a recoverable data condition. We catch
 /// it loudly at its source in debug/test builds via
-/// [`debug_assert_unique_identities`], where which-registration-wins would
+/// `debug_assert_unique_identities`, where which-registration-wins would
 /// otherwise depend on non-deterministic `inventory` link order.
 pub fn collect_toolset(ctx: &ToolContext) -> ToolSet {
     let mut tools = Vec::new();

@@ -553,8 +553,7 @@ pub fn draw_model_editor(
         let label = format!(" {:<8}", "Effort");
         // Right-align the `< value >` selector to the body's right edge.
         let selector = format!("< {} >", effort);
-        let pad = body_width
-            .saturating_sub(label.width() + selector.width());
+        let pad = body_width.saturating_sub(label.width() + selector.width());
         body.push(Line::from(vec![
             Span::styled(label, label_style),
             Span::raw(" ".repeat(pad)),
@@ -576,17 +575,13 @@ pub fn draw_model_editor(
             .add_modifier(Modifier::BOLD);
         let label = format!(" {:<8}", "Thinking");
         let selector = format!("< {} >", if on { "on" } else { "off" });
-        let pad = body_width
-            .saturating_sub(label.width() + selector.width());
+        let pad = body_width.saturating_sub(label.width() + selector.width());
         let chev_style = Style::default().fg(theme.muted());
         body.push(Line::from(vec![
             Span::styled(label, label_style),
             Span::raw(" ".repeat(pad)),
             Span::styled("< ".to_string(), chev_style),
-            Span::styled(
-                if on { "on" } else { "off" }.to_string(),
-                value_style,
-            ),
+            Span::styled(if on { "on" } else { "off" }.to_string(), value_style),
             Span::styled(" >".to_string(), chev_style),
         ]));
     }

@@ -1157,7 +1157,7 @@ impl SessionStore {
     /// disks), which stalls every concurrent reader and writer. Instead the
     /// caller mutates the in-memory `data` under the lock, clones the
     /// snapshot and path, drops the guard, and hands the blocking work to
-    /// [`spawn_blocking`] so it runs on a dedicated thread and never pins the
+    /// `spawn_blocking` so it runs on a dedicated thread and never pins the
     /// executor.
     async fn persist_off_runtime(
         &self,
@@ -2550,8 +2550,8 @@ mod tests {
         // left `append_round`'s `MessagesAppended` event in the log but the
         // snapshot still at the previous turn boundary. The tail replay must
         // recover it. This is the "log authoritative for the tail" contract.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-fastpath-lag-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-fastpath-lag-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         let first_id = store.id().await;
@@ -2590,8 +2590,8 @@ mod tests {
         // A snapshot whose stored checksum no longer matches its content (real
         // corruption, not a recompute) must not be trusted: the load falls
         // through to a full replay from the authoritative event log.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-fastpath-corrupt-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-fastpath-corrupt-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store
@@ -2622,8 +2622,8 @@ mod tests {
         // A clean close persists the snapshot with its watermark stamped to the
         // log's high-water mark, so the next load replays an empty tail — the
         // O(snapshot) fast path that makes resume cheap.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-fastpath-clean-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-fastpath-clean-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store
@@ -2643,7 +2643,10 @@ mod tests {
         let high = EventLog::new(path.with_extension("jsonl"))
             .high_seq()
             .expect("log is seeded");
-        assert_eq!(watermark, high, "watermark == log high-water after clean persist");
+        assert_eq!(
+            watermark, high,
+            "watermark == log high-water after clean persist"
+        );
 
         // The tail past the watermark is empty.
         let tail = EventLog::new(path.with_extension("jsonl"))
@@ -2665,12 +2668,15 @@ mod tests {
         // fast path (there is no watermark to gate it); it replays the whole
         // log, then rewrites the snapshot with a watermark so the *next* load
         // is fast. This is the schema-migration path.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-fastpath-legacy-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-fastpath-legacy-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
         store
-            .replace_messages(vec![Message::new(neenee_core::Role::User, "legacy content")])
+            .replace_messages(vec![Message::new(
+                neenee_core::Role::User,
+                "legacy content",
+            )])
             .await
             .unwrap();
 
@@ -2689,7 +2695,10 @@ mod tests {
         // The snapshot on disk now has a watermark (the reload rewrote it).
         let rewritten: SessionData =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(rewritten.applied_seq.is_some(), "reload backfills the watermark");
+        assert!(
+            rewritten.applied_seq.is_some(),
+            "reload backfills the watermark"
+        );
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -2701,17 +2710,14 @@ mod tests {
         // single seed and the snapshot's watermark matches the seed's
         // high-water mark — so a subsequent reload replays an empty tail and
         // sees identical state. No event is lost.
-        let directory = std::env::temp_dir()
-            .join(format!("neenee-log-compaction-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neenee-log-compaction-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
 
         // Push well past the threshold via repeated title sets (cheap events).
         for i in 0..(LOG_COMPACTION_THRESHOLD + 64) as u64 {
-            store
-                .set_title(Some(format!("t{i}")), false)
-                .await
-                .unwrap();
+            store.set_title(Some(format!("t{i}")), false).await.unwrap();
         }
         let persisted_id = store.id().await;
 

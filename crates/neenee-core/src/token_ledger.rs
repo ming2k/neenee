@@ -230,7 +230,10 @@ mod tests {
         // Turn 2: a cache read (subsequent turn hits the cache).
         ledger.record_reported("anthropic", "claude-sonnet-4-5", 8200, 0, 8000);
         let row = &ledger.snapshot().rows[0];
-        assert_eq!(row.totals.reported_tokens, 21400, "all reported tokens summed");
+        assert_eq!(
+            row.totals.reported_tokens, 21400,
+            "all reported tokens summed"
+        );
         assert_eq!(row.totals.cache_write_tokens, 5000);
         assert_eq!(row.totals.cache_read_tokens, 8000);
         assert_eq!(row.totals.estimated_tokens, 0);

@@ -52,7 +52,7 @@ pub struct PrincipalConfig {
     /// either gets it from a human (interactive-classifier → input panel) or
     /// fails fast with a non-interactive remedy hint. When `true`, the bash
     /// schema **dynamically** adds a `stdin` field the model can fill, and the
-    /// dispatch layer threads it through as [`StdinPolicy::Prefilled`]. This
+    /// dispatch layer threads it through as `StdinPolicy::Prefilled`. This
     /// is the explicit authorization that "input may come from the model" —
     /// without it, stdin is structurally unreachable from the model's
     /// arguments. Wired through `Agent::set_allow_model_stdin`.

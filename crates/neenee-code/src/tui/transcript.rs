@@ -118,8 +118,11 @@ pub(super) fn transcript_messages_from_core(
                     // Historical results match by tool name, so use it as the id.
                     // Disclosure is applied when the matching result finishes
                     // the step below (lifecycle-aware default), mirroring live.
-                    let mut step =
-                        TranscriptMessage::tool_step(call.name.clone(), call.name.clone(), call.arguments);
+                    let mut step = TranscriptMessage::tool_step(
+                        call.name.clone(),
+                        call.name.clone(),
+                        call.arguments,
+                    );
                     step.provider = provider.clone();
                     step.model = model.clone();
                     step.round = Some(restored_round);
