@@ -778,11 +778,19 @@ pub async fn execute_turn(
         if streamed_text.swap(false, Ordering::SeqCst) {
             let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
         }
-        let delay_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
+        let base_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
+        // Apply equal jitter (half fixed, half random) to de-synchronise
+        // clients that fail in unison — e.g. many sessions behind one load
+        // balancer all hitting a flaky upstream at once. The jittered value
+        // stays within `[base/2, base]`, so the configured cap and any
+        // server `Retry-After` are still honoured. `apply_jitter_ms` is a
+        // pure function; the RNG is injected here so it stays out of tests.
+        let delay_ms = apply_jitter_ms(base_ms, |_| fastrand::u64(0..base_ms));
         tracing::warn!(
             attempt = attempt + 1,
             max_attempts = retry_limit,
             delay_ms,
+            base_ms,
             "retrying after transient provider error"
         );
         let _ = tx.send(turn(
@@ -918,6 +926,26 @@ pub fn retry_delay_ms(
     retry_after_ms
         .unwrap_or_else(|| base_ms.saturating_mul(2u64.saturating_pow(exponent)))
         .min(max_ms.max(1))
+}
+
+/// Apply "equal jitter" to a backoff delay, the variant recommended for
+/// client-side retries: half the delay is fixed, the other half is randomised.
+/// Unlike "full jitter" (`[0, base]`) it never collapses to a near-zero delay,
+/// so a retry never fires immediately; unlike "no jitter" it still de-synchronises
+/// clients that fail in unison (e.g. behind the same load balancer). The result
+/// is always in `[base/2, base]`, so the configured upper bound is respected and
+/// a server-supplied `Retry-After` (which bypasses `retry_delay_ms`) is honoured
+/// while still being jittered to avoid thundering-herd on its expiry.
+///
+/// `roll` is an injected `[0, base] -> u64` closure so this stays a pure,
+/// deterministic, unit-testable function; the only call site (`execute_turn`)
+/// supplies `fastrand`. A `base` of 0 is degenerate and passed through unchanged.
+pub fn apply_jitter_ms(base: u64, roll: impl Fn(u64) -> u64) -> u64 {
+    if base == 0 {
+        return 0;
+    }
+    let half = base / 2;
+    half + roll(base - half).min(base - half)
 }
 
 fn public_retry_reason(message: &str) -> String {

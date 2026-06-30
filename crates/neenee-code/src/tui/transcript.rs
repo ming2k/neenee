@@ -6,6 +6,9 @@
 //!
 //! [`Message`]: neenee_core::Message
 
+use std::collections::HashMap;
+use std::collections::VecDeque;
+
 use neenee_core::{Message, Role};
 
 use crate::tui::config::{self, TuiConfig};
@@ -82,6 +85,12 @@ pub(super) fn transcript_messages_from_core(
     // `RoundStarted`-driven stamp so resumed sessions get the same round-
     // boundary separators between adjacent tool-only rounds.
     let mut restored_round: u64 = 0;
+    // Index of every still-unfinished tool step, queued per tool name. A tool
+    // result pairs with the *earliest* unfinished step of the same name (live
+    // order), so a per-name FIFO reproduces the old forward-scan semantics in
+    // O(1) per result instead of rescanning the whole `restored` vec — turning
+    // the restore of a tool-heavy session from O(n²) into O(n).
+    let mut pending_steps: HashMap<String, VecDeque<usize>> = HashMap::new();
     for mut message in messages {
         if message.hidden || message.role == Role::System {
             continue;
@@ -110,10 +119,14 @@ pub(super) fn transcript_messages_from_core(
                     // Disclosure is applied when the matching result finishes
                     // the step below (lifecycle-aware default), mirroring live.
                     let mut step =
-                        TranscriptMessage::tool_step(call.name.clone(), call.name, call.arguments);
+                        TranscriptMessage::tool_step(call.name.clone(), call.name.clone(), call.arguments);
                     step.provider = provider.clone();
                     step.model = model.clone();
                     step.round = Some(restored_round);
+                    pending_steps
+                        .entry(call.name)
+                        .or_default()
+                        .push_back(restored.len());
                     restored.push(step);
                 }
                 if message.content.is_empty() {
@@ -124,8 +137,11 @@ pub(super) fn transcript_messages_from_core(
         if message.role == Role::Tool
             && let Some((name, output)) = parse_tool_result(&message.content)
         {
-            let mut finished = false;
-            for item in restored.iter_mut() {
+            // Pair with the earliest unfinished step of this name (O(1) via the
+            // per-name queue). Fall back to nothing if no step is pending — an
+            // orphan result is then rendered as a plain message below.
+            if let Some(idx) = pending_steps.get_mut(name).and_then(|q| q.pop_front()) {
+                let item = &mut restored[idx];
                 if item.finish_tool_step(name, output, neenee_core::ToolOutput::text(output), 0) {
                     // Apply the lifecycle-aware default disclosure so
                     // restored steps match live (Failed/Denied expand,
@@ -135,12 +151,8 @@ pub(super) fn transcript_messages_from_core(
                             step_interaction::default_tool_expanded(status, name, config, false);
                         item.set_tool_step_expanded(default);
                     }
-                    finished = true;
-                    break;
+                    continue;
                 }
-            }
-            if finished {
-                continue;
             }
         }
         if let Some(message) = transcript_message_from_core(message) {

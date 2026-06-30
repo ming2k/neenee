@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use neenee_core::Tool;
 use neenee_core::mcp::{McpConnectionStatus, McpServerConfig};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::{
     Arc,
@@ -463,6 +463,15 @@ async fn build_tools_from_server(server: &Arc<McpServer>) -> Result<Vec<Arc<dyn 
         .and_then(Value::as_array)
         .ok_or_else(|| "MCP tools/list response has no tools array".to_string())?;
 
+    // `sanitize_name` is a lossy, many-to-one mapping (every non-`[A-Za-z0-9_]`
+    // char folds to `_`), so distinct server-side tool names can collapse to the
+    // same public name (e.g. `read-file` and `read.file` both become
+    // `read_file`). Left unchecked, the second adapter would be silently dropped
+    // by the first-wins `ToolSet`, making that tool unreachable. We guarantee
+    // uniqueness here, where the whole server's tool list is in scope, by
+    // appending the lowest free numeric suffix on collision. `original_name` is
+    // untouched, so `tools/call` still targets the correct server-side tool.
+    let mut taken = HashSet::new();
     definitions
         .iter()
         .map(|definition| {
@@ -471,10 +480,13 @@ async fn build_tools_from_server(server: &Arc<McpServer>) -> Result<Vec<Arc<dyn 
                 .and_then(Value::as_str)
                 .ok_or_else(|| "MCP tool has no name".to_string())?
                 .to_string();
-            let public_name = format!(
-                "mcp__{}__{}",
-                sanitize_name(server.name()),
-                sanitize_name(&original_name)
+            let public_name = unique_name(
+                format!(
+                    "mcp__{}__{}",
+                    sanitize_name(server.name()),
+                    sanitize_name(&original_name)
+                ),
+                &mut taken,
             );
             let description = definition
                 .get("description")
@@ -537,6 +549,24 @@ fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
+/// Reserve a collision-free variant of `name` within `taken`, recording the
+/// result. The first claimant keeps the bare name; each later duplicate gets the
+/// lowest free `_2`, `_3`, … suffix. Deterministic and order-stable, so a server
+/// returning the same `tools/list` always yields the same public names.
+fn unique_name(name: String, taken: &mut HashSet<String>) -> String {
+    if taken.insert(name.clone()) {
+        return name;
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{name}_{suffix}");
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 fn render_tool_result(result: &Value) -> String {
     if let Some(content) = result.get("content").and_then(Value::as_array) {
         let rendered = content
@@ -558,6 +588,22 @@ mod tests {
     #[test]
     fn names_are_safe_for_provider_function_schemas() {
         assert_eq!(sanitize_name("git tools/read-file"), "git_tools_read_file");
+    }
+
+    #[test]
+    fn colliding_public_names_are_disambiguated_deterministically() {
+        // `read-file` and `read.file` both sanitize to the same public name;
+        // the second (and third) must get a distinct, stable suffix.
+        let mut taken = HashSet::new();
+        let first = unique_name("mcp__s__read_file".to_string(), &mut taken);
+        let second = unique_name("mcp__s__read_file".to_string(), &mut taken);
+        let third = unique_name("mcp__s__read_file".to_string(), &mut taken);
+        assert_eq!(first, "mcp__s__read_file");
+        assert_eq!(second, "mcp__s__read_file_2");
+        assert_eq!(third, "mcp__s__read_file_3");
+        // A name that only differs after sanitization keeps its own identity.
+        let other = unique_name("mcp__s__write_file".to_string(), &mut taken);
+        assert_eq!(other, "mcp__s__write_file");
     }
 
     #[test]

@@ -33,6 +33,7 @@ walkdir = "2"
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 httpdate = "1"
+fastrand = "2"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 tracing = "0.1"

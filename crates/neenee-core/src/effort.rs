@@ -101,8 +101,10 @@ impl Effort {
 /// tier to such an upstream risks a 400, so the safe subset is the default.
 pub const EFFORT_COMMON: &[Effort] = &[Effort::Low, Effort::Medium, Effort::High];
 
-/// The full `low..=max` range including `xhigh`, used for first-party Claude
-/// models (Opus 4.8 / Fable 5 etc.) that honor every tier.
+/// The full `low..=max` range including `xhigh`, honored by the models that
+/// accept every tier: Claude Opus 4.8 and Opus 4.7 (and Fable 5 / Mythos 5).
+/// `xhigh` is *not* universal — Opus/Sonnet 4.6 reject it (use
+/// [`EFFORT_CLAUDE_NO_XHIGH`]).
 pub const EFFORT_CLAUDE_FULL: &[Effort] = &[
     Effort::Low,
     Effort::Medium,
@@ -110,6 +112,13 @@ pub const EFFORT_CLAUDE_FULL: &[Effort] = &[
     Effort::Xhigh,
     Effort::Max,
 ];
+
+/// `low`/`medium`/`high`/`max` — the effort range for Claude models that honor
+/// `max` but **not** `xhigh`: Claude Sonnet 4.6 and Opus 4.6. (`xhigh` is
+/// limited to Opus 4.8 / 4.7 and the Fable/Mythos line.) Requesting `xhigh`
+/// here clamps down to `high`.
+pub const EFFORT_CLAUDE_NO_XHIGH: &[Effort] =
+    &[Effort::Low, Effort::Medium, Effort::High, Effort::Max];
 
 #[cfg(test)]
 mod tests {

@@ -1058,6 +1058,24 @@ impl App {
         ranked
     }
 
+    /// Record `entry` in the cross-session input history: dedup against the
+    /// last entry, reset the up/down recall cursor, and persist the new entry
+    /// to disk immediately (off-thread) so it survives an unclean exit and is
+    /// visible to concurrent sessions right away rather than only on exit.
+    pub fn record_input_history(&mut self, entry: String) {
+        self.history_index = None;
+        if entry.is_empty() || self.input_history.last() == Some(&entry) {
+            return;
+        }
+        self.input_history.push(entry.clone());
+        // `save_history` lock+merges into the on-disk union, so persisting just
+        // the new entry is enough and cheap. Off-thread: the write takes a file
+        // lock and must not block the event loop.
+        tokio::task::spawn_blocking(move || {
+            let _ = neenee_store::config::Config::save_history(std::slice::from_ref(&entry));
+        });
+    }
+
     /// Tear down the history modal's borrowed state: hand the parked composer
     /// draft back, drop any filter query, and clear the search/preview
     /// sub-flags. Shared by the Esc (`CloseModal`) and click-outside dismiss

@@ -51,8 +51,10 @@ works across kimi / GLM / OpenAI / Gemini.
 | `pattern` | string | yes | — | Regex |
 | `path` | string | no | `.` | Search root |
 | `ext` | string | no | — | File extension filter |
+| `context` | integer | no | `0` | Lines of context per match (clamped to 10) |
 
-Backed by ripgrep.
+Backed by ripgrep. Output is capped globally (≈200 lines / 32 KB) with a
+truncation notice; `--max-count` bounds matches per file at 50.
 
 ## `glob`
 

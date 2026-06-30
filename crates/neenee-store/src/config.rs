@@ -729,7 +729,7 @@ impl Config {
                 merged.push(entry.clone());
             }
         }
-        const HISTORY_CAP: usize = 1_000;
+        const HISTORY_CAP: usize = 10_000;
         if merged.len() > HISTORY_CAP {
             let drain = merged.len() - HISTORY_CAP;
             merged.drain(..drain);

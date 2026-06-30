@@ -573,7 +573,7 @@ mod tests {
             name: "Test",
             family: "test",
             context_window: 100_000,
-            reasoning: false,
+            thinking: crate::thinking::ThinkingSupport::None,
             tool_call: true,
             vision: true,
             format: crate::WireFormat::OpenAiCompat,

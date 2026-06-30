@@ -133,7 +133,7 @@ pub fn build_session_context(
 /// depends on tool calling for every provider, so it is always advertised.
 pub fn derive_capabilities(model: &str) -> Vec<String> {
     let mut caps = vec!["tool calling".to_string()];
-    if neenee_core::resolve_model(model).reasoning {
+    if neenee_core::resolve_model(model).reasoning() {
         caps.push("reasoning".to_string());
     }
     caps

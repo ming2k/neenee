@@ -107,6 +107,18 @@ impl EventLog {
 
     /// Read all events in log order.
     pub fn load(&self) -> Result<Vec<EventEnvelope>, String> {
+        self.load_since(None)
+    }
+
+    /// Read only events with `seq > watermark` (or all events when `watermark`
+    /// is `None`), in ascending `seq` order. Used by the snapshot fast path:
+    /// a session's snapshot records the highest seq it already folded in
+    /// `applied_seq`, so resuming replays only the post-snapshot tail instead
+    /// of the whole history. Every line is still read (JSONL is not
+    /// seekable by seq), but envelopes at or below the watermark are parsed
+    /// and discarded without being stored, so a fresh snapshot with an empty
+    /// tail pays only the sequential read cost, not the per-event allocation.
+    pub fn load_since(&self, watermark: Option<u64>) -> Result<Vec<EventEnvelope>, String> {
         let file = match File::open(&self.path) {
             Ok(f) => f,
             Err(_) => return Ok(Vec::new()),
@@ -119,7 +131,11 @@ impl EventLog {
                 continue;
             }
             match serde_json::from_str::<EventEnvelope>(&line) {
-                Ok(envelope) => events.push(envelope),
+                Ok(envelope) => {
+                    if watermark.map_or(true, |w| envelope.seq > w) {
+                        events.push(envelope);
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(
                         path = %self.path.display(),
@@ -134,10 +150,46 @@ impl EventLog {
         Ok(events)
     }
 
+    /// Whether the log file is empty (missing or zero-length). A metadata stat,
+    /// not a parse: `ensure_event_log_started` is called on every mutation, so
+    /// the old behaviour of re-parsing the entire log just to test emptiness
+    /// was an O(n) cost per write. A file that exists with non-zero length is
+    /// treated as seeded; the load path already tolerates blank/malformed
+    /// trailing lines.
+    pub fn is_empty(&self) -> bool {
+        !self.path.exists() || std::fs::metadata(&self.path).map(|m| m.len() == 0).unwrap_or(true)
+    }
+
+    /// The highest `seq` present in the log, or `None` when the log is empty.
+    /// Used to decide whether a snapshot's watermark is already at the
+    /// high-water mark (tail empty) without replaying. Reads to the end of the
+    /// file once; cheaper than `load` because envelopes are not retained.
+    pub fn high_seq(&self) -> Option<u64> {
+        let file = File::open(&self.path).ok()?;
+        let reader = BufReader::new(file);
+        let mut max: Option<u64> = None;
+        for line in reader.lines().flatten() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Parse only the leading `seq` rather than the full envelope: a
+            // tiny serde_json::Value read of the first field avoids
+            // deserializing every message payload just to learn the high-water
+            // mark.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(seq) = value.get("seq").and_then(|v| v.as_u64()) {
+                    max = Some(max.map_or(seq, |m| m.max(seq)));
+                }
+            }
+        }
+        max
+    }
+
     /// Append a single event atomically-ish: the line is written with
     /// `O_APPEND` and fsynced. A crash between write and fsync may leave a
-    /// partial line; readers skip malformed lines.
-    pub fn append(&self, event: SessionEvent) -> Result<(), String> {
+    /// partial line; readers skip malformed lines. Returns the reserved `seq`,
+    /// so callers can record it as the watermark of the data they just mutated.
+    pub fn append(&self, event: SessionEvent) -> Result<u64, String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -182,7 +234,7 @@ impl EventLog {
             .and_then(|_| file.write_all(b"\n"))
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("could not append event: {e}"))?;
-        Ok(())
+        Ok(next_seq)
     }
 
     /// Replace the entire log with the given events. Used when compacting the

@@ -91,9 +91,64 @@ pub(crate) async fn ensure_success(
     }
 }
 
+/// `io::ErrorKind`s that mean a *transient* connection-layer failure: the peer
+/// or an intermediary reset, aborted, truncated, or timed out the connection.
+/// These are safe to retry. Logical kinds (`InvalidData`, `PermissionDenied`, …)
+/// are deliberately excluded — a retry cannot fix them.
+fn is_transient_io_kind(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        kind,
+        ConnectionReset
+            | ConnectionAborted
+            | ConnectionRefused
+            | BrokenPipe
+            | UnexpectedEof
+            | NotConnected
+            | TimedOut
+    )
+}
+
+/// Walk an error's `source()` chain for a `std::io::Error` whose kind is a
+/// transient connection failure. reqwest wraps hyper which wraps the underlying
+/// `io::Error`, so "connection reset by peer" lives several links down the
+/// chain — never on the top-level error — which is exactly why the old
+/// top-level `is_connect()`/`is_request()` check could not see it.
+fn chain_has_transient_io(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = next {
+        if let Some(io) = err.downcast_ref::<std::io::Error>()
+            && is_transient_io_kind(io.kind())
+        {
+            return true;
+        }
+        next = err.source();
+    }
+    false
+}
+
+/// Whether a reqwest failure is a transient transport-layer error worth
+/// retrying. Supersedes the narrow `is_timeout() || is_connect() || is_request()`
+/// check, which only covered connection *establishment*, request *building*, and
+/// deadlines — and so silently dropped the most common streaming failure: the
+/// connection being reset or truncated *mid-body*, after the response headers
+/// arrived (surfaced by reqwest as a body error and, underneath, an
+/// `io::ErrorKind::ConnectionReset`/`UnexpectedEof`).
+fn is_transient_transport_error(error: &reqwest::Error) -> bool {
+    // `is_body()` is the missing piece: a read failure while streaming the
+    // response body. The other three retain the original connection/request/
+    // deadline coverage.
+    if error.is_timeout() || error.is_connect() || error.is_request() || error.is_body() {
+        return true;
+    }
+    // Defence in depth: even when reqwest does not categorise it as the above,
+    // a reset/abort/truncation is an `io::Error` somewhere in the source chain.
+    chain_has_transient_io(error)
+}
+
 pub(crate) fn transport_error(provider: &str, error: reqwest::Error) -> String {
     let message = format!("{} transport error: {}", provider, error);
-    if error.is_timeout() || error.is_connect() || error.is_request() {
+    if is_transient_transport_error(&error) {
         retryable_error(message, None)
     } else {
         message
@@ -112,5 +167,69 @@ mod tests {
 
         headers.insert("retry-after-ms", "750".parse().unwrap());
         assert_eq!(retry_after_ms(&headers), Some(750));
+    }
+
+    #[test]
+    fn transient_io_kinds_are_retryable() {
+        use std::io::ErrorKind::*;
+        for kind in [
+            ConnectionReset,
+            ConnectionAborted,
+            ConnectionRefused,
+            BrokenPipe,
+            UnexpectedEof,
+            NotConnected,
+            TimedOut,
+        ] {
+            assert!(is_transient_io_kind(kind), "{kind:?} should be transient");
+        }
+    }
+
+    #[test]
+    fn logical_io_kinds_are_not_retryable() {
+        use std::io::ErrorKind::*;
+        for kind in [InvalidData, InvalidInput, PermissionDenied, NotFound] {
+            assert!(
+                !is_transient_io_kind(kind),
+                "{kind:?} must not be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_reset_is_found_deep_in_the_source_chain() {
+        // Mirror the reqwest→hyper→io nesting: the reset signal is never on the
+        // top-level error, only several `source()` links down.
+        #[derive(Debug)]
+        struct Wrap(Box<dyn std::error::Error + Send + Sync + 'static>);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wrapper")
+            }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(self.0.as_ref())
+            }
+        }
+
+        let io = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        );
+        let nested = Wrap(Box::new(Wrap(Box::new(io))));
+        assert!(
+            chain_has_transient_io(&nested),
+            "a reset buried two wrappers deep must still be detected"
+        );
+
+        let benign = Wrap(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad utf8",
+        )));
+        assert!(
+            !chain_has_transient_io(&benign),
+            "a non-transient io kind must not be flagged"
+        );
     }
 }

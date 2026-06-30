@@ -495,7 +495,8 @@ pub(super) async fn run_app_loop(
         // entirely. This is the single biggest source of the "slows down the
         // longer you use it" sluggishness.
         let messages_version = runtime.messages.version();
-        if messages_version != app.messages_version {
+        let transcript_changed = messages_version != app.messages_version;
+        if transcript_changed {
             app.messages = runtime.messages.read().await.clone();
             app.messages_version = messages_version;
             // The transcript changed, so cached per-message heights may be
@@ -1297,6 +1298,20 @@ pub(super) async fn run_app_loop(
                 .unwrap_or(natural_max);
             app.scroll = app.scroll.min(limit);
         }
+
+        // Anti-jump on transcript replace (e.g. resuming a session): the draw we
+        // just did measured the *new*, taller transcript while `scroll` still
+        // held the previous transcript's bottom, so that first frame is pinned
+        // too high. Now that `max_scroll` reflects the real content height, pin
+        // to the true bottom and force an immediate redraw within this iteration
+        // (no input-poll wait) so the corrected frame replaces the stale one
+        // back-to-back — the user never sees the intermediate scroll position.
+        // `transcript_changed` clears next iteration, so this fires at most once.
+        if transcript_changed && needs_draw && app.follow_bottom && app.scroll != app.max_scroll {
+            app.scroll = app.max_scroll;
+            input_redraw_pending = true;
+            continue;
+        }
         app.retain_visible_focused_target();
 
         // Drain all currently-ready input events before redrawing. The first
@@ -1476,10 +1491,7 @@ pub(super) async fn run_app_loop(
                                 .write()
                                 .await
                                 .push(TranscriptMessage::new(Role::User, text.clone()).queued());
-                            if !text.is_empty() && app.input_history.last() != Some(&text) {
-                                app.input_history.push(text.clone());
-                            }
-                            app.history_index = None;
+                            app.record_input_history(text.clone());
                             app.follow_bottom = true;
                             app.pin_summary_line = None;
                         } else {
@@ -1497,10 +1509,7 @@ pub(super) async fn run_app_loop(
                                 .write()
                                 .await
                                 .push(TranscriptMessage::new(Role::User, text.clone()));
-                            if !text.is_empty() && app.input_history.last() != Some(&text) {
-                                app.input_history.push(text.clone());
-                            }
-                            app.history_index = None;
+                            app.record_input_history(text.clone());
                             app.follow_bottom = true;
                             app.pin_summary_line = None;
                             let _ = app.tx.send(AgentRequest::Chat {
@@ -1557,10 +1566,7 @@ pub(super) async fn run_app_loop(
                             TranscriptMessage::new(Role::User, cmd.clone())
                                 .with_origin(UserMessageOrigin::Slash),
                         );
-                    if app.input_history.last() != Some(&cmd) {
-                        app.input_history.push(cmd.clone());
-                    }
-                    app.history_index = None;
+                    app.record_input_history(cmd.clone());
                     // `/serve` is a pure frontend concern (hot-attach a
                     // WebSocket listener to the running session). Intercept
                     // it here rather than routing through agent_loop.
@@ -1650,10 +1656,7 @@ pub(super) async fn run_app_loop(
                             TranscriptMessage::new(Role::User, display.clone())
                                 .with_origin(UserMessageOrigin::Shell),
                         );
-                    if app.input_history.last() != Some(&display) {
-                        app.input_history.push(display);
-                    }
-                    app.history_index = None;
+                    app.record_input_history(display);
                     let _ = app.tx.send(AgentRequest::ShellCommand { command });
                 }
                 input::InputAction::ProviderPickerActivate => {

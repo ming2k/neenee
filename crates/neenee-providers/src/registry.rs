@@ -29,11 +29,12 @@ const ANTHROPIC_MODEL_MAX_TOKENS: &[(&str, u32)] = &[
     ("qwen3.6-plus", 65536),
     ("qwen3.5-plus", 65536),
     // Claude family served via the hihusky relay (and any Anthropic relay).
-    // Claude 4.x supports a 64K output limit; cap there so long agent turns
-    // are not truncated by the provider's flat 8192 default.
-    ("claude-opus-4-8", 64000),
-    ("claude-sonnet-4-6", 64000),
-    ("claude-haiku-4-5-20251001", 32000),
+    // Claude 4.6+ Opus/Sonnet support a 128K synchronous output limit (1M
+    // context); Haiku 4.5 supports 64K. Cap there so long agent turns are not
+    // truncated by the provider's flat 8192 default.
+    ("claude-opus-4-8", 128000),
+    ("claude-sonnet-4-6", 128000),
+    ("claude-haiku-4-5-20251001", 64000),
 ];
 
 /// Look up the `max_tokens` for an Anthropic-format model id. `None` lets the
@@ -358,7 +359,7 @@ mod build_tests {
             "agent",
         )
         .with_max_tokens(anthropic_model_max_tokens("claude-opus-4-8").unwrap());
-        assert_eq!(opus.max_tokens, 64000);
+        assert_eq!(opus.max_tokens, 128000);
     }
 
     #[test]

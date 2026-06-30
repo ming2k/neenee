@@ -50,3 +50,56 @@ impl ThinkingMode {
         matches!(self, ThinkingMode::Adaptive)
     }
 }
+
+/// What kind of extended thinking a model supports, and **how it is encoded on
+/// the wire**. [`ThinkingMode`] is the user's on/off *intent*; `ThinkingSupport`
+/// is the model's *capability*, and the two combine at request-build time to
+/// decide which (if any) `thinking` object the Anthropic transport emits.
+///
+/// This is the single source of truth for thinking capability — the boolean
+/// "does it reason" used for display derives from it via [`Self::reasons`].
+/// Carried per-model in the registry exactly like [`crate::effort::Effort`]
+/// levels, so the transport never guesses the wire form from a model id.
+///
+/// The Anthropic Messages API exposes **two mutually exclusive** thinking
+/// mechanisms, which is why a single bool is insufficient:
+/// - **Adaptive** (`thinking: {type:"adaptive"}` + `output_config.effort`):
+///   the model decides depth per request. Opus 4.7+ accept *only* this; the
+///   legacy manual form is rejected with 400.
+/// - **Manual** (`thinking: {type:"enabled", budget_tokens: N}`): a fixed token
+///   budget, no `effort`. The only form Haiku 4.5 / Opus·Sonnet 4.5 / Claude 4
+///   accept; needs the `interleaved-thinking` beta header alongside tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingSupport {
+    /// The model cannot think. (GPT-4o, Gemini, the conservative fallback.)
+    #[default]
+    None,
+    /// The model reasons, but its reasoning is surfaced via the OpenAI-compatible
+    /// `reasoning_content` stream, not an Anthropic `thinking` object. (GLM,
+    /// Kimi, DeepSeek, MiMo, MiniMax, Qwen — including third-party models served
+    /// over an Anthropic-compatible relay, where the transport falls back to the
+    /// conservative `adaptive` form if the user turns thinking on.)
+    ReasoningContent,
+    /// Anthropic **adaptive** thinking: emit `thinking: {type:"adaptive"}` and
+    /// drive depth via `output_config.effort`. Opt-in (off unless the user turns
+    /// it on); manual `type:"enabled"` is rejected with 400. (Opus 4.7/4.8;
+    /// Opus·Sonnet 4.6 also accept the deprecated manual form, but adaptive is
+    /// canonical.)
+    AnthropicAdaptive,
+    /// Anthropic adaptive thinking that is **always on** and cannot be disabled;
+    /// the `thinking` object is emitted regardless of the user's on/off choice.
+    /// (Claude Fable 5 / Mythos 5.)
+    AnthropicAdaptiveAlwaysOn,
+    /// Anthropic **manual** extended thinking: emit
+    /// `thinking: {type:"enabled", budget_tokens: N}` (no `effort`). Opt-in.
+    /// (Claude Haiku 4.5; Opus·Sonnet 4.5; Claude 4 / 4.1.)
+    AnthropicManual,
+}
+
+impl ThinkingSupport {
+    /// `true` when the model reasons at all — the coarse capability used for
+    /// display. Everything except [`Self::None`] reasons.
+    pub const fn reasons(self) -> bool {
+        !matches!(self, ThinkingSupport::None)
+    }
+}

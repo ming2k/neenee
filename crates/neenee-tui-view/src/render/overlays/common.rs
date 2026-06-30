@@ -28,6 +28,19 @@ pub fn relative_time_compact(ts: u64) -> String {
     }
 }
 
+/// Flatten a string to a single visual line: every control character
+/// (newline, carriage return, tab, …) becomes a space. Without this, a `\n` or
+/// `\r` embedded in row text (e.g. a session overview built from a multi-line
+/// first user message) is painted verbatim by the terminal as a carriage
+/// return, dumping the rest of the row at column 0 of the *screen* — so the row
+/// spills out the left edge of the modal. Collapsing to spaces keeps the row
+/// inside its column budget.
+pub fn one_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Truncate `s` to fit `max` display columns, appending `…` when it doesn't.
 /// Width-aware so CJK/wide glyphs don't break the column budget. Used by table-
 /// like modal rows to cap a long first column and leave room for the rest.

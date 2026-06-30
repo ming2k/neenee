@@ -100,8 +100,14 @@ inventory::collect!(ToolRegistration);
 /// registrations into capabilities (by [`Tool::name`]) and variants (by
 /// [`Tool::variant`]). Factories that decline (return `None`) are skipped.
 /// Duplicate `(name, variant)` pairs are dropped keeping the first registration
-/// — an accidental double-register merely shadows instead of breaking the
-/// agent.
+/// — an accidental double-register merely shadows instead of breaking the agent
+/// in release. Unlike MCP tool names (data-driven, lossily sanitized, so
+/// disambiguated at runtime), a builtin name is a compile-time contract that
+/// appears verbatim in prompts and provider schemas: a `(name, variant)`
+/// collision is a programming error, not a recoverable data condition. We catch
+/// it loudly at its source in debug/test builds via
+/// [`debug_assert_unique_identities`], where which-registration-wins would
+/// otherwise depend on non-deterministic `inventory` link order.
 pub fn collect_toolset(ctx: &ToolContext) -> ToolSet {
     let mut tools = Vec::new();
     for entry in inventory::iter::<ToolRegistration> {
@@ -109,8 +115,31 @@ pub fn collect_toolset(ctx: &ToolContext) -> ToolSet {
             tools.push(tool);
         }
     }
+    debug_assert_unique_identities(&tools);
     ToolSet::from_tools(tools)
 }
+
+/// Panic if any two tools share the same `(name, variant)` identity. A no-op in
+/// release (the [`ToolSet`] first-wins shadow keeps the agent running); a hard
+/// failure in debug/test builds so an accidental double-register is caught in CI
+/// rather than silently shipped.
+#[cfg(debug_assertions)]
+fn debug_assert_unique_identities(tools: &[Arc<dyn Tool>]) {
+    let mut seen = BTreeSet::new();
+    for tool in tools {
+        assert!(
+            seen.insert((tool.name(), tool.variant())),
+            "duplicate builtin tool registration for (name={:?}, variant={:?}): \
+             two register_tool! sites claim the same identity",
+            tool.name(),
+            tool.variant(),
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+fn debug_assert_unique_identities(_tools: &[Arc<dyn Tool>]) {}
 
 /// One capability: a logical tool identity (its [`Tool::name`]) realized by one
 /// or more variants keyed by [`Tool::variant`]. Exactly one variant is the
@@ -545,6 +574,34 @@ mod tests {
         assert!(!names.contains(&"registry_declined"));
     }
 
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate builtin tool registration")]
+    fn duplicate_identity_panics_in_debug() {
+        // Same name AND same (default) variant => a true identity collision.
+        debug_assert_unique_identities(&[
+            Arc::new(PingTool) as Arc<dyn Tool>,
+            Arc::new(PingTool) as Arc<dyn Tool>,
+        ]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn distinct_variants_are_not_a_collision() {
+        // Same name but different variant is the legitimate variant mechanism,
+        // not a double-register; the guard must allow it.
+        debug_assert_unique_identities(&[
+            Arc::new(VariantTool {
+                variant: "default",
+                desc: "default impl",
+            }) as Arc<dyn Tool>,
+            Arc::new(VariantTool {
+                variant: "terse",
+                desc: "terse impl",
+            }) as Arc<dyn Tool>,
+        ]);
+    }
+
     /// Two variants of one capability: `name()` shared, `variant()` distinct.
     struct VariantTool {
         variant: &'static str,
@@ -675,7 +732,7 @@ mod tests {
             name: "Test",
             family: "test",
             context_window: 100_000,
-            reasoning: false,
+            thinking: crate::thinking::ThinkingSupport::None,
             tool_call: true,
             vision,
             format: crate::WireFormat::OpenAiCompat,

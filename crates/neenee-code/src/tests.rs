@@ -7,7 +7,8 @@
 
 use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    ContextProjectionSettings, ProxyProvider, TurnContext, TurnInput, execute_turn, retry_delay_ms,
+    ContextProjectionSettings, ProxyProvider, TurnContext, TurnInput, apply_jitter_ms, execute_turn,
+    retry_delay_ms,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_core::{AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent, async_trait};
@@ -432,4 +433,29 @@ fn retry_delay_honors_headers_and_exponential_bounds() {
     assert_eq!(retry_delay_ms(1, None, 1_000, 30_000), 1_000);
     assert_eq!(retry_delay_ms(3, None, 1_000, 30_000), 4_000);
     assert_eq!(retry_delay_ms(2, Some(45_000), 1_000, 30_000), 30_000);
+}
+
+#[test]
+fn apply_jitter_stays_within_half_to_full_range() {
+    // Equal jitter: result ∈ [base/2, base]. A roll of 0 yields the floor,
+    // a roll of the full span yields the ceiling — both bounds are closed.
+    assert_eq!(apply_jitter_ms(1_000, |_| 0), 500);
+    assert_eq!(apply_jitter_ms(1_000, |span| span), 1_000);
+    // A mid-range roll lands exactly halfway between floor and ceiling.
+    assert_eq!(apply_jitter_ms(1_000, |span| span / 2), 750);
+    // Odd base still floors cleanly: [1500/2 .. 1500].
+    assert_eq!(apply_jitter_ms(1_500, |_| 0), 750);
+    assert_eq!(apply_jitter_ms(1_500, |span| span), 1_500);
+}
+
+#[test]
+fn apply_jitter_never_exceeds_base() {
+    // A pathological roll larger than the span must be clamped back to the
+    // ceiling, so jitter can never push a delay past the configured cap.
+    assert_eq!(apply_jitter_ms(1_000, |_| u64::MAX), 1_000);
+}
+
+#[test]
+fn apply_jitter_passes_zero_through_unchanged() {
+    assert_eq!(apply_jitter_ms(0, |_| 1_000), 0);
 }

@@ -26,6 +26,7 @@ dirs = { workspace = true }
 include_dir = "0.7"
 inventory = { workspace = true }
 regex = "1"
+fastrand = { workspace = true }
 
 [dev-dependencies]
 neenee-tools = { path = "../neenee-tools" }

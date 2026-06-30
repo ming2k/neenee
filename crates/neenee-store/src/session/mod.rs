@@ -31,7 +31,7 @@ pub use neenee_core::{estimate_bytes, estimate_tokens};
 /// for structured injection provenance. All three are structural no-ops for
 /// legacy snapshots, which load with the new fields at their `#[serde(default)]`
 /// values (`None` / `false`).
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 /// Sentinel value for `PursuitCheckpoint::max_iterations` indicating an uncapped
 /// run. `/pursue` runs until the model emits the completion marker, the user
@@ -127,6 +127,16 @@ struct SessionData {
     /// so legacy snapshots load with `pursuit = None` and no migration is needed.
     #[serde(default)]
     pursuit: Option<Pursuit>,
+    /// High-water mark: the `seq` of the last event already folded into this
+    /// snapshot. On load, the snapshot is read as a fast path and only log
+    /// events with `seq > applied_seq` are replayed (the tail), so resuming a
+    /// long session costs O(tail) instead of O(whole-history). `None` on
+    /// legacy snapshots and on the very first persist of a session (before any
+    /// event has been folded); the load path falls back to a full replay.
+    /// Covered by the checksum like every other field, so a tampered watermark
+    /// is rejected as corruption rather than silently skipping events.
+    #[serde(default)]
+    applied_seq: Option<u64>,
 }
 
 impl Default for SessionData {
@@ -148,6 +158,7 @@ impl Default for SessionData {
             title: None,
             title_manual: false,
             pursuit: None,
+            applied_seq: None,
         }
     }
 }
@@ -178,6 +189,12 @@ fn migrate_session_data(mut data: SessionData) -> SessionData {
     // for every message; no payload transformation is needed, only the version
     // bump. Provenance is henceforth stamped at each injection site going
     // forward — pre-C4 messages are simply unattributed.
+    // C5 (snapshot fast-path): `applied_seq` was added with
+    // `#[serde(default)]`, so a legacy snapshot loads with
+    // `applied_seq = None` and the load path falls back to a full replay;
+    // no payload transformation is needed, only the version bump. The first
+    // persist after this upgrade folds the full state and records the
+    // watermark, so subsequent loads take the fast path.
     data.schema_version = CURRENT_SCHEMA_VERSION;
     data
 }
@@ -221,7 +238,13 @@ fn verify_checksum(data: &SessionData) -> Result<(), String> {
 const BLOB_OFFLOAD_THRESHOLD: usize = 4_096;
 
 /// Write `data` to `path` with a freshly computed checksum, offloading large
-/// inline content to the blob store before serialization.
+/// inline content to the blob store before serialization. Stamps the
+/// [`SessionData::applied_seq`] watermark to the sibling event log's high-water
+/// `seq`, so a later load of this snapshot replays only the tail past it. The
+/// log file is derived from `path` (`.json` → `.jsonl`); a missing or empty log
+/// leaves an existing watermark untouched (a snapshot can be written with no
+/// log yet during seeding, in which case the load path falls back to full
+/// replay anyway).
 fn write_session_file(
     path: &Path,
     data: &SessionData,
@@ -229,6 +252,14 @@ fn write_session_file(
 ) -> Result<(), String> {
     let mut data = data.clone();
     offload_session_blobs(&mut data, blob_store)?;
+    // The watermark reflects the events already folded into `data`. Each write
+    // site appends its event(s) to the log *before* persisting, so the log's
+    // high-water mark is exactly what this snapshot has absorbed.
+    let log_path = path.with_extension("jsonl");
+    let event_log = EventLog::new(log_path);
+    if let Some(high) = event_log.high_seq() {
+        data.applied_seq = Some(high);
+    }
     data.checksum = Some(compute_checksum(&data)?);
     fsutil::atomic_write_json(path, &data)
 }
@@ -291,7 +322,7 @@ fn load_message_blobs(message: &mut Message, blob_store: &BlobStore) -> Result<(
 /// Every session must begin with this event so replay reconstructs the id,
 /// parent link, and timestamps.
 fn ensure_event_log_started(event_log: &EventLog, data: &SessionData) -> Result<(), String> {
-    if event_log.load()?.is_empty() {
+    if event_log.is_empty() {
         event_log.append(SessionEvent::Started {
             id: data.id.clone(),
             parent_id: data.parent_id.clone(),
@@ -947,10 +978,12 @@ impl SessionStore {
 
         let child_path = self.sessions_dir.join(format!("{fork_id}.json"));
         let child_log = EventLog::new(child_path.with_extension("jsonl"));
-        // Persist the child snapshot and seed its own event log so it is
-        // independently resumable (one store = one file = one log).
+        // Seed the child's own event log first, then persist the snapshot, so
+        // the snapshot's `applied_seq` watermark reflects the freshly-seeded
+        // log and a later load takes the fast path (one store = one file =
+        // one log).
+        child_log.rewrite(snapshot_to_events(&child))?;
         persist_to(&child_path, &child, &self.blob_store)?;
-        let _ = child_log.rewrite(snapshot_to_events(&child));
 
         // Repoint this store at the child; the parent file is already current.
         state.path = child_path;
@@ -986,11 +1019,12 @@ impl SessionStore {
 
         let side_path = self.sessions_dir.join(format!("{side_id}.json"));
         let side_log = EventLog::new(side_path.with_extension("jsonl"));
-        // Persist the side snapshot and seed its own event log so it is
-        // independently resumable (one store = one file = one log), exactly
+        // Seed the side's own event log first, then persist the snapshot, so the
+        // snapshot's `applied_seq` watermark reflects the seeded log and a later
+        // load takes the fast path (one store = one file = one log), exactly
         // like `fork`. The primary's files are never touched.
+        side_log.rewrite(snapshot_to_events(&side))?;
         persist_to(&side_path, &side, &self.blob_store)?;
-        let _ = side_log.rewrite(snapshot_to_events(&side));
 
         // Deliberately do NOT mutate `state` — the primary keeps its active
         // pointer, history, and in-flight turn intact.
@@ -1135,9 +1169,22 @@ impl SessionStore {
         // not async work. `BlockingError` only occurs at runtime shutdown, in
         // which case the session is tearing down anyway — surface it as a
         // plain error.
-        tokio::task::spawn_blocking(move || persist_to(&path, &data, &blob_store))
-            .await
-            .map_err(|e| format!("session persist task failed: {e}"))?
+        //
+        // Log compaction runs *before* the snapshot write when the append-only
+        // log has grown past its threshold and the snapshot has fully folded
+        // it. Compacting first means the snapshot's `applied_seq` watermark
+        // (stamped from the log's high-water mark inside `write_session_file`)
+        // ends up equal to the compacted seed's high-water mark, so the next
+        // load replays an empty tail. The log stays bounded over the life of a
+        // long session without ever dropping an event the snapshot has not
+        // already absorbed.
+        let log_path = path.with_extension("jsonl");
+        tokio::task::spawn_blocking(move || {
+            compact_log_if_needed(&log_path, &data)?;
+            persist_to(&path, &data, &blob_store)
+        })
+        .await
+        .map_err(|e| format!("session persist task failed: {e}"))?
     }
 
     /// Write `data` to `sessions_dir/<data.id>.json`. Used to materialise a
@@ -1215,12 +1262,73 @@ fn persist_to(path: &Path, data: &SessionData, blob_store: &BlobStore) -> Result
     write_session_file(path, data, blob_store)
 }
 
+/// Once the append-only event log holds more than this many events it is
+/// rewritten to a single seed derived from the session's current full
+/// snapshot. Every call to `persist_off_runtime` writes a *full* snapshot of
+/// the current state (the only non-full persist is `append_round`'s
+/// `Persist::None` mid-turn arm, which does not reach this path), so any event
+/// the seed would supersede has already been folded into the snapshot about to
+/// be written. Compaction can therefore never drop an unabsorbed event. The
+/// seed keeps the replay tail short over a long-lived session: the rewrite is
+/// `snapshot_to_events`, one line per non-empty field.
+const LOG_COMPACTION_THRESHOLD: usize = 1024;
+
+/// Compact the event log at `log_path` to a single seed when it has grown past
+/// [`LOG_COMPACTION_THRESHOLD`]. The seed is derived from `data` via
+/// `snapshot_to_events`, so the freshly-rewritten log's high-water mark is
+/// picked up by the subsequent `write_session_file` (which stamps
+/// `applied_seq` from the log) and the next load replays an empty tail. A no-op
+/// when the log is small.
+fn compact_log_if_needed(log_path: &Path, data: &SessionData) -> Result<(), String> {
+    // Cheap stat-based size check first: avoid parsing a log that is under the
+    // threshold on every persist. Events average well under 1 KiB of envelope
+    // overhead but carry arbitrary message payloads, so a byte threshold would
+    // be payload-dependent; counting lines needs a read regardless, so gate it
+    // behind the metadata length so the common (small-log) case pays only a
+    // `stat`.
+    let len = match std::fs::metadata(log_path) {
+        Ok(m) => m.len() as usize,
+        Err(_) => return Ok(()),
+    };
+    if len < LOG_COMPACTION_THRESHOLD * 64 {
+        return Ok(());
+    }
+    let log = EventLog::new(log_path.to_path_buf());
+    let envelopes = log.load()?;
+    if envelopes.len() < LOG_COMPACTION_THRESHOLD {
+        return Ok(());
+    }
+    log.rewrite(snapshot_to_events(data))?;
+    tracing::debug!(
+        path = %log_path.display(),
+        events = envelopes.len(),
+        "compacted event log to a single seed"
+    );
+    Ok(())
+}
+
 /// Load the session for `path` from its event log when one exists; otherwise
 /// import from the snapshot file (seeding a fresh log from it), or start from
 /// an empty session when neither exists. This is the single load path shared
 /// by [`SessionStore::for_path`] and [`SessionStore::open`], and it also
 /// lazily seeds event logs for legacy archived snapshots that predate the
 /// per-session log layout (ADR-0018).
+///
+/// Fast path (snapshot present, `applied_seq` watermark set, checksum ok):
+/// deserialise the snapshot JSON and replay only log events with
+/// `seq > applied_seq`. This is O(snapshot + tail), not O(snapshot + history).
+/// The snapshot is written on every turn-boundary persist with its watermark
+/// stamped to the log's high-water mark, so a clean close leaves an empty tail
+/// and resume is a single JSON read. A crash mid-turn (after `append_round`
+/// appended a `MessagesAppended` event but before the next `replace_messages`
+/// rewrote the snapshot) leaves a short tail of at most a few events, replayed
+/// in O(tail).
+///
+/// Fallbacks: a missing/corrupt snapshot, a snapshot without a watermark
+/// (pre-C5 legacy), a checksum mismatch, or an event whose `Started` seq differs
+/// from the snapshot's identity all drop to a full replay from the event log,
+/// which is the authoritative source. If there is no log either, the snapshot
+/// is imported and a fresh log is seeded from it.
 fn load_or_seed(
     path: &Path,
     event_log_path: &Path,
@@ -1228,7 +1336,39 @@ fn load_or_seed(
     project_root: &Path,
 ) -> SessionData {
     let event_log = EventLog::new(event_log_path.to_path_buf());
-    if let Ok(envelopes) = event_log.load()
+    let log_seeded = !event_log.is_empty();
+
+    // ── Fast path: snapshot + watermark + checksum-valid → replay only tail.
+    // A corrupt snapshot or checksum mismatch must not surface as a hard error
+    // (the log is authoritative), so any deserialise/verify failure falls
+    // through to the full-replay path below rather than aborting the load.
+    if log_seeded
+        && let Ok(snapshot) = load_snapshot(path)
+        && let Some(watermark) = snapshot.applied_seq
+        && verify_checksum(&snapshot).is_ok()
+    {
+        let tail = event_log.load_since(Some(watermark)).unwrap_or_default();
+        let mut data = snapshot;
+        if !tail.is_empty() {
+            apply_events(&mut data, &tail);
+        }
+        if let Err(error) = load_session_blobs(&mut data, blob_store) {
+            tracing::warn!(error = %error, "could not load session blobs");
+        }
+        if data.schema_version < CURRENT_SCHEMA_VERSION {
+            data = migrate_session_data(data);
+        }
+        return data;
+    }
+
+    // ── Full replay from the event log (authoritative). Integrity is
+    // guaranteed by the replay itself: each event carries full snapshot
+    // semantics, so re-deriving the state from the log is as trustworthy as
+    // verifying a stored checksum. (Replay starts from `default()` whose
+    // `checksum` is `None`, so a post-replay `verify_checksum` is a no-op
+    // accept — it was already a no-op before this change, not a lost check.)
+    if log_seeded
+        && let Ok(envelopes) = event_log.load()
         && !envelopes.is_empty()
     {
         let mut data = SessionData::default();
@@ -1236,12 +1376,16 @@ fn load_or_seed(
         if let Err(error) = load_session_blobs(&mut data, blob_store) {
             tracing::warn!(error = %error, "could not load session blobs from event log");
         }
-        if let Err(error) = verify_checksum(&data) {
-            tracing::warn!(path = %path.display(), error = %error, "session checksum failed");
+        if data.schema_version < CURRENT_SCHEMA_VERSION {
+            data = migrate_session_data(data);
         }
+        // The snapshot was missing/legacy/corrupt; rewrite it now so the next
+        // load takes the fast path.
+        let _ = persist_to(path, &data, blob_store);
         return data;
     }
-    // No event log: import from the snapshot, or start fresh.
+
+    // ── No event log: import from the snapshot, or start fresh.
     let mut data = fs::read_to_string(path)
         .ok()
         .and_then(|content| serde_json::from_str::<SessionData>(&content).ok())
@@ -1260,6 +1404,16 @@ fn load_or_seed(
     }
     let _ = event_log.rewrite(snapshot_to_events(&data));
     data
+}
+
+/// Deserialise the snapshot JSON at `path` into a [`SessionData`], rehydrating
+/// no blobs (the caller does that once after deciding which path produced the
+/// data). Returns `Err` for a missing or unparseable file so the caller can
+/// fall through to full replay.
+fn load_snapshot(path: &Path) -> Result<SessionData, String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("could not read snapshot: {e}"))?;
+    serde_json::from_str::<SessionData>(&content)
+        .map_err(|e| format!("could not parse snapshot: {e}"))
 }
 
 fn summary(data: &SessionData, active: bool) -> SessionSummary {
@@ -1299,6 +1453,14 @@ fn session_overview(data: &SessionData) -> String {
 }
 
 fn truncate_preview(text: &str, max: usize) -> String {
+    // Flatten to one line: control chars (newlines, tabs, …) would otherwise
+    // survive into the picker row, where the terminal paints a `\n`/`\r` as a
+    // carriage return and spills the row out the left edge of the modal.
+    let text: String = text
+        .trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let text = text.trim();
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max {
@@ -2380,28 +2542,202 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_log_is_authoritative_on_reload() {
-        let directory =
-            std::env::temp_dir().join(format!("neenee-events-reload-{}", uuid::Uuid::new_v4()));
+    async fn snapshot_fast_path_replays_only_the_tail_on_lag() {
+        // The snapshot fast path (C5): a checksum-valid snapshot with an
+        // `applied_seq` watermark is authoritative for its folded range, and
+        // only log events *after* the watermark are replayed. The
+        // operationally important case is a lagging snapshot — a crash mid-turn
+        // left `append_round`'s `MessagesAppended` event in the log but the
+        // snapshot still at the previous turn boundary. The tail replay must
+        // recover it. This is the "log authoritative for the tail" contract.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-fastpath-lag-{}", uuid::Uuid::new_v4()));
         let path = directory.join("session.json");
         let store = SessionStore::for_path(path.clone());
+        let first_id = store.id().await;
         store
             .replace_messages(vec![Message::new(neenee_core::Role::User, "first")])
             .await
             .unwrap();
-        let first_id = store.id().await;
 
-        // Corrupt the snapshot cache: the event log must still restore state.
-        let mut corrupted: SessionData =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        corrupted.model_window[0].content = "tampered".to_string();
-        let test_blobs = BlobStore::new(directory.join("blobs"));
-        write_session_file(&path, &corrupted, &test_blobs).unwrap();
+        // Simulate a mid-turn crash: append an event the snapshot has NOT
+        // folded (its watermark still points at the replace above).
+        {
+            let state = store.state.lock().await;
+            state
+                .event_log
+                .append(SessionEvent::MessagesAppended {
+                    messages: vec![Message::new(neenee_core::Role::Assistant, "recovered tail")],
+                })
+                .unwrap();
+            // Deliberately do NOT persist the snapshot, so its watermark lags.
+        }
 
-        // Re-open: for_path replays the event log, not the snapshot.
+        // Re-open: the snapshot is checksum-valid but lags by one event. The
+        // fast path must replay the tail and surface the appended message.
         let reloaded = SessionStore::for_path(path.clone());
         assert_eq!(reloaded.id().await, first_id);
-        assert_eq!(reloaded.model_window().await[0].content, "first");
+        let messages = reloaded.model_window().await;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "first");
+        assert_eq!(messages[1].content, "recovered tail");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn checksum_invalid_snapshot_falls_back_to_full_replay() {
+        // A snapshot whose stored checksum no longer matches its content (real
+        // corruption, not a recompute) must not be trusted: the load falls
+        // through to a full replay from the authoritative event log.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-fastpath-corrupt-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "truth")])
+            .await
+            .unwrap();
+
+        // Corrupt the snapshot's content WITHOUT recomputing the checksum, so
+        // verification fails. Rewrite the raw JSON directly.
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut tampered = raw.replace("truth", "LIE");
+        // Force a checksum mismatch by zeroing the stored checksum field.
+        tampered = tampered.replace(
+            "\"checksum\":",
+            "\"checksum\":999999999,\"_x\":0,\"checksum\":",
+        );
+        fs::write(&path, tampered).unwrap();
+
+        let reloaded = SessionStore::for_path(path.clone());
+        // Full replay from the log restores the true content.
+        assert_eq!(reloaded.model_window().await[0].content, "truth");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn applied_seq_watermark_round_trips_and_enables_empty_tail_load() {
+        // A clean close persists the snapshot with its watermark stamped to the
+        // log's high-water mark, so the next load replays an empty tail — the
+        // O(snapshot) fast path that makes resume cheap.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-fastpath-clean-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "hi")])
+            .await
+            .unwrap();
+        store
+            .set_title(Some("my session".to_string()), false)
+            .await
+            .unwrap();
+        let persisted_id = store.id().await;
+
+        // The on-disk snapshot must carry the watermark at the high-water mark.
+        let on_disk: SessionData =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let watermark = on_disk.applied_seq.expect("watermark stamped on persist");
+        let high = EventLog::new(path.with_extension("jsonl"))
+            .high_seq()
+            .expect("log is seeded");
+        assert_eq!(watermark, high, "watermark == log high-water after clean persist");
+
+        // The tail past the watermark is empty.
+        let tail = EventLog::new(path.with_extension("jsonl"))
+            .load_since(Some(watermark))
+            .unwrap();
+        assert!(tail.is_empty(), "clean close leaves an empty tail");
+
+        // Reload restores the title (snapshot-folded) and id.
+        let reloaded = SessionStore::for_path(path.clone());
+        assert_eq!(reloaded.id().await, persisted_id);
+        assert_eq!(reloaded.model_window().await[0].content, "hi");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn legacy_snapshot_without_watermark_falls_back_to_full_replay() {
+        // A pre-C5 snapshot has no `applied_seq`. The load must not take the
+        // fast path (there is no watermark to gate it); it replays the whole
+        // log, then rewrites the snapshot with a watermark so the *next* load
+        // is fast. This is the schema-migration path.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-fastpath-legacy-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+        store
+            .replace_messages(vec![Message::new(neenee_core::Role::User, "legacy content")])
+            .await
+            .unwrap();
+
+        // Strip the watermark from the persisted snapshot, simulating a pre-C5
+        // file (checksum is recomputed so the file is internally consistent).
+        let mut data: SessionData =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        data.applied_seq = None;
+        let test_blobs = BlobStore::new(directory.join("blobs"));
+        write_session_file(&path, &data, &test_blobs).unwrap();
+
+        // Reload: no watermark → full replay → rewrite with watermark.
+        let reloaded = SessionStore::for_path(path.clone());
+        assert_eq!(reloaded.model_window().await[0].content, "legacy content");
+
+        // The snapshot on disk now has a watermark (the reload rewrote it).
+        let rewritten: SessionData =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(rewritten.applied_seq.is_some(), "reload backfills the watermark");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn event_log_compacts_once_past_threshold_and_stays_consistent() {
+        // Once the append-only log exceeds LOG_COMPACTION_THRESHOLD events and
+        // the snapshot has fully folded it, a persist rewrites the log to a
+        // single seed and the snapshot's watermark matches the seed's
+        // high-water mark — so a subsequent reload replays an empty tail and
+        // sees identical state. No event is lost.
+        let directory = std::env::temp_dir()
+            .join(format!("neenee-log-compaction-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("session.json");
+        let store = SessionStore::for_path(path.clone());
+
+        // Push well past the threshold via repeated title sets (cheap events).
+        for i in 0..(LOG_COMPACTION_THRESHOLD + 64) as u64 {
+            store
+                .set_title(Some(format!("t{i}")), false)
+                .await
+                .unwrap();
+        }
+        let persisted_id = store.id().await;
+
+        // After the final persist, the log should have been compacted back to a
+        // small seed (snapshot_to_events emits a handful of lines, not 1k+).
+        let log = EventLog::new(path.with_extension("jsonl"));
+        let count = log.load().unwrap().len();
+        assert!(
+            count < LOG_COMPACTION_THRESHOLD,
+            "log should be compacted, has {count} events"
+        );
+
+        // The on-disk snapshot watermark matches the seed's high-water mark.
+        let on_disk: SessionData =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let watermark = on_disk.applied_seq.expect("watermark present");
+        let high = log.high_seq().expect("seeded log");
+        assert_eq!(watermark, high, "watermark == compacted-seed high-water");
+
+        // Reload is consistent and replays an empty tail.
+        let tail = log.load_since(Some(watermark)).unwrap();
+        assert!(tail.is_empty());
+        let reloaded = SessionStore::for_path(path.clone());
+        assert_eq!(reloaded.id().await, persisted_id);
+        let (title, _) = reloaded.title().await;
+        assert_eq!(title.as_deref(), Some("t1087")); // last set wins
 
         let _ = fs::remove_dir_all(directory);
     }

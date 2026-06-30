@@ -14,6 +14,8 @@
 //! The catalog consults this when building the [`crate::catalog::Transport`] so
 //! one provider (`opencode-go`) can host models of mixed formats.
 
+use crate::thinking::ThinkingSupport;
+
 /// The wire protocol a provider uses to reach a model. Determined per model
 /// (not per provider): the same model id is served the same way everywhere in
 /// practice, and opencode-go's mixed-format catalogue is the reason this field
@@ -46,8 +48,11 @@ pub struct Model {
     pub family: &'static str,
     /// Context window in tokens. `0` means unknown.
     pub context_window: usize,
-    /// Whether the model emits `reasoning_content` / supports thinking.
-    pub reasoning: bool,
+    /// What extended thinking this model supports and how it is encoded on the
+    /// wire. The single source of truth for thinking capability; the coarse
+    /// "does it reason" bool used for display derives from it via
+    /// [`Model::reasoning`]. See [`ThinkingSupport`].
+    pub thinking: ThinkingSupport,
     /// Whether the model supports native tool/function calling.
     pub tool_call: bool,
     /// Whether the model supports vision (image inputs via `image_url`/
@@ -73,6 +78,14 @@ pub struct Model {
     /// [`crate::effort::EFFORT_COMMON`] (conservative); non-reasoning / non-
     /// Anthropic-protocol models carry `&[]`.
     pub effort_levels: &'static [crate::effort::Effort],
+}
+
+impl Model {
+    /// Coarse "does this model reason at all" flag, for capability display.
+    /// Derives from [`Self::thinking`] so there is one source of truth.
+    pub const fn reasoning(&self) -> bool {
+        self.thinking.reasons()
+    }
 }
 
 /// The canonical registry of known models. Add a model here when it is
@@ -107,7 +120,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GLM-5.2",
         family: "glm",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -119,7 +132,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GLM-5.1",
         family: "glm",
         context_window: 200_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -131,7 +144,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GLM-5",
         family: "glm",
         context_window: 200_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -143,7 +156,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GLM-4.7",
         family: "glm",
         context_window: 200_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -156,7 +169,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Kimi K2.7 Code",
         family: "kimi",
         context_window: 262_144,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -168,7 +181,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Kimi K2.6",
         family: "kimi",
         context_window: 262_144,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -180,7 +193,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Kimi K2.5",
         family: "kimi",
         context_window: 262_144,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -195,37 +208,42 @@ pub const KNOWN_MODELS: &[Model] = &[
         id: "claude-opus-4-8",
         name: "Claude Opus 4.8",
         family: "claude",
-        context_window: 200_000,
-        reasoning: true,
+        context_window: 1_000_000,
+        thinking: ThinkingSupport::AnthropicAdaptive,
         tool_call: true,
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
+        // Opus 4.8 honors the full effort range including `xhigh`/`max`.
         effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
     },
     Model {
         id: "claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",
         family: "claude",
-        context_window: 200_000,
-        reasoning: true,
+        context_window: 1_000_000,
+        thinking: ThinkingSupport::AnthropicAdaptive,
         tool_call: true,
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
-        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
+        // Sonnet 4.6 honors `max` but NOT `xhigh` (xhigh is Opus 4.8/4.7 only).
+        effort_levels: crate::effort::EFFORT_CLAUDE_NO_XHIGH,
     },
     Model {
         id: "claude-haiku-4-5-20251001",
         name: "Claude Haiku 4.5",
         family: "claude",
         context_window: 200_000,
-        reasoning: true,
+        // Haiku 4.5 supports only MANUAL extended thinking
+        // (`thinking:{type:"enabled",budget_tokens}`); it has no adaptive mode
+        // and rejects the `effort` parameter (400), hence empty `effort_levels`.
+        thinking: ThinkingSupport::AnthropicManual,
         tool_call: true,
         vision: true,
         format: WireFormat::AnthropicCompat,
         model_guidance: "",
-        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
+        effort_levels: &[],
     },
     // ── GPT (OpenAI) ───────────────────────────────────────────────────────
     Model {
@@ -233,7 +251,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GPT-4o",
         family: "gpt",
         context_window: 128_000,
-        reasoning: false,
+        thinking: ThinkingSupport::None,
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
@@ -245,7 +263,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "GPT-4o Mini",
         family: "gpt",
         context_window: 128_000,
-        reasoning: false,
+        thinking: ThinkingSupport::None,
         tool_call: true,
         vision: true,
         format: WireFormat::OpenAiCompat,
@@ -258,7 +276,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Gemini 2.5 Flash",
         family: "gemini",
         context_window: 1_000_000,
-        reasoning: false,
+        thinking: ThinkingSupport::None,
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
@@ -270,7 +288,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Gemini 2.0 Flash",
         family: "gemini",
         context_window: 1_000_000,
-        reasoning: false,
+        thinking: ThinkingSupport::None,
         tool_call: true,
         vision: true,
         format: WireFormat::Gemini,
@@ -283,7 +301,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "DeepSeek V4 Flash",
         family: "deepseek",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -295,7 +313,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "DeepSeek V4 Pro",
         family: "deepseek",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -308,7 +326,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiMo V2.5",
         family: "mimo",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -320,7 +338,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiMo V2.5 Pro",
         family: "mimo",
         context_window: 1_048_576,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -332,7 +350,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiMo V2 Pro",
         family: "mimo",
         context_window: 1_048_576,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -344,7 +362,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiMo V2 Omni",
         family: "mimo",
         context_window: 262_144,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -357,7 +375,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiniMax M3",
         family: "minimax",
         context_window: 512_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
@@ -369,7 +387,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiniMax M2.7",
         family: "minimax",
         context_window: 204_800,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
@@ -381,7 +399,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "MiniMax M2.5",
         family: "minimax",
         context_window: 204_800,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::AnthropicCompat,
@@ -397,7 +415,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Qwen3.7 Max",
         family: "qwen",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -409,7 +427,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Qwen3.7 Plus",
         family: "qwen",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -421,7 +439,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Qwen3.6 Plus",
         family: "qwen",
         context_window: 1_000_000,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -433,7 +451,7 @@ pub const KNOWN_MODELS: &[Model] = &[
         name: "Qwen3.5 Plus",
         family: "qwen",
         context_window: 262_144,
-        reasoning: true,
+        thinking: ThinkingSupport::ReasoningContent,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -457,7 +475,7 @@ pub fn fallback_model(_id: &str) -> Model {
         name: "",
         family: "",
         context_window: 0,
-        reasoning: false,
+        thinking: ThinkingSupport::None,
         tool_call: true,
         vision: false,
         format: WireFormat::OpenAiCompat,
@@ -496,14 +514,14 @@ mod tests {
         let m = resolve("glm-5.2");
         assert_eq!(m.name, "GLM-5.2");
         assert_eq!(m.context_window, 1_000_000);
-        assert!(m.reasoning);
+        assert!(m.reasoning());
     }
 
     #[test]
     fn resolve_falls_back_for_unknown() {
         let m = resolve("some-local-model");
         assert_eq!(m.context_window, 0);
-        assert!(!m.reasoning);
+        assert!(!m.reasoning());
         // The harness depends on tool calling, so even the fallback assumes it.
         assert!(m.tool_call);
     }

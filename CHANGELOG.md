@@ -5,6 +5,57 @@ All notable changes to **neenee** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Resume no longer shows a one-frame scroll jump.** Opening a session replaced
+  the whole transcript while `scroll`/`max_scroll` still held the previous
+  (short) transcript's measurement, so the first frame painted the tall new
+  transcript pinned too high and the *next* frame snapped to the true bottom —
+  a visible reflow rather than a single rendered final frame. When the
+  transcript changes and bottom-follow is on, the loop now pins to the
+  freshly-measured bottom and forces a back-to-back redraw within the same
+  iteration (no input-poll wait), so the corrected frame replaces the stale one
+  imperceptibly.
+
+- **Sessions picker rows no longer spill out the left edge of the modal.** A
+  session `overview` built from a multi-line first user message could carry
+  embedded `\n`/`\r`, which the terminal paints as a carriage return — dumping
+  the rest of the row at column 0 of the *screen*. Control characters are now
+  collapsed to spaces both in the view layer (`overlays::common::one_line`)
+  before truncation and at the source (`store::truncate_preview`), so the row
+  stays inside its column budget.
+
+### Changed
+
+- **Session resume is now O(snapshot + tail), not O(whole-history).** The
+  session snapshot (`<id>.json`) gained an `applied_seq` watermark recording the
+  highest event-seq it has already folded. On load, a checksum-valid snapshot
+  with a watermark is read as a fast path and only log events *after* the
+  watermark are replayed — a clean close leaves an empty tail, so resume is a
+  single JSON read; a crash mid-turn (`append_round`'s
+  `MessagesAppended` not yet folded by the next `replace_messages`) leaves a
+  tail of at most a few events. A corrupt/legacy/no-watermark snapshot, a
+  checksum mismatch, or a divergent `Started` id all fall back to the
+  authoritative full-replay path (and rewrite the snapshot so the next load is
+  fast). Schema bumped to 5; old sessions load with `applied_seq = None` and
+  backfill the watermark on first persist. `EventLog::append` now returns the
+  reserved seq; `load_since(watermark)` and a metadata-stat `is_empty`/
+  `high_seq` replace the O(n) per-mutation full-log re-reads.
+
+- **Event logs self-compact.** Once an append-only log exceeds 1024 events at a
+  full-snapshot persist point (every turn boundary), it is rewritten to a single
+  seed derived from the current snapshot, so the replay tail stays bounded over
+  a long-lived session. The only non-full persist (`append_round`'s mid-turn
+  `Persist::None` arm) never reaches the compaction path, so no unabsorbed event
+  is ever dropped.
+
+- **Restoring a tool-heavy session is O(n), not O(n²).** `transcript_messages_from_core`
+  paired each tool result with its originating step by rescanning the whole
+  restored transcript; it now indexes still-open steps per tool name in a FIFO
+  queue, pairing in O(1) while preserving the earliest-open-step semantics.
+
 ## [0.12.0] - 2026-06-30
 
 ### Fixed

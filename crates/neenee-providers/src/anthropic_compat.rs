@@ -62,7 +62,7 @@ pub use neenee_core::effort::Effort;
 /// entirely, which disables thinking on models where that is honored
 /// (Opus-4.7/4.8); on Fable/Mythos thinking is always on and cannot be
 /// disabled, so `Off` is a no-op there.
-pub use neenee_core::ThinkingMode;
+pub use neenee_core::{ThinkingMode, ThinkingSupport};
 
 /// Resolved thinking/effort configuration for an Anthropic Messages provider.
 ///
@@ -391,22 +391,45 @@ impl AnthropicMessagesProvider {
             &mut body["messages"],
             MAX_BREAKPOINTS.saturating_sub(breakpoints),
         );
-        // Resolve the thinking/effort config against this model's family and
-        // stamp it. `adaptive` is the only on-mode for every current model that
-        // accepts a `thinking` object at all; the legacy `enabled`+
-        // `budget_tokens` form is rejected (400) on Fable/Opus-4.7+, so it is
-        // never emitted. Effort lives in the top-level `output_config`, not in
-        // `thinking` — placing it wrong is the most common 400 source.
         // Resolve the thinking/effort config against this model's registered
-        // `effort_levels` and stamp it. The clamp range comes from the model
-        // registry (the single source of truth), not a family guess. A model
-        // with empty `effort_levels` skips clamping; combined with the mode
-        // check below this means a non-reasoning / non-Anthropic model emits
-        // no `thinking` field at all.
-        let model_levels = neenee_core::model::resolve(&self.model).effort_levels;
-        let resolved = self.thinking.resolve_for(model_levels);
-        if let ThinkingMode::Adaptive = resolved.mode {
-            // `display:"summarized"` is load-bearing: Opus 4.7/4.8 and Fable 5
+        // capability. The model registry (`ThinkingSupport` + `effort_levels`)
+        // is the single source of truth for *how* a model reasons on the wire —
+        // never a family/id guess. Effort is clamped to the model's supported
+        // levels here (the clamp range comes from the registry).
+        //
+        // Anthropic exposes two MUTUALLY EXCLUSIVE thinking encodings, so a flat
+        // bool cannot describe it:
+        //   • adaptive — `thinking:{type:"adaptive"}` (+ `output_config.effort`):
+        //     Opus 4.7/4.8, Sonnet/Opus 4.6. Manual `type:"enabled"` → 400.
+        //   • manual   — `thinking:{type:"enabled",budget_tokens}` (no effort):
+        //     Haiku 4.5, Opus/Sonnet 4.5, Claude 4. Needs the
+        //     `interleaved-thinking` beta header with tools (see `anthropic_beta`).
+        // `AdaptiveAlwaysOn` (Fable/Mythos 5) thinks unconditionally; everything
+        // else (None / ReasoningContent / unknown relays) only thinks when the
+        // user explicitly opted in, defaulting to the conservative `adaptive`
+        // form.
+        let model = neenee_core::model::resolve(&self.model);
+        let resolved = self.thinking.resolve_for(model.effort_levels);
+        let want = resolved.mode.is_on();
+        match model.thinking {
+            ThinkingSupport::AnthropicManual if want => {
+                // No `display` field with manual thinking (it defaults to
+                // summarized on the models that use this form); `budget_tokens`
+                // must be < `max_tokens`.
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": manual_thinking_budget(self.max_tokens),
+                });
+            }
+            ThinkingSupport::AnthropicAdaptiveAlwaysOn => {
+                body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            }
+            // AnthropicAdaptive when the user opted in, plus the conservative
+            // default for any other model reached over the Anthropic wire
+            // (third-party relays, user-defined ids) that the user turned
+            // thinking on for.
+            //
+            // `display:"summarized"` is load-bearing: Opus 4.7/4.8 (and Fable 5)
             // default to `display:"omitted"` when the field is absent, which
             // streams ONLY `signature_delta` (captured silently into the
             // signature stash) and NO `thinking_delta` — so the transcript would
@@ -414,20 +437,48 @@ impl AnthropicMessagesProvider {
             // readable thinking text as `thinking_delta` events, which the
             // pipeline renders via `TranscriptMessage::thinking`. The signature
             // still arrives and is replayed verbatim on the next turn either way.
-            body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            _ if want => {
+                body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            }
+            _ => {}
         }
-        // `high` is the wire default, so an *implicit* default omits
-        // `output_config` entirely (keeps requests lean, and avoids sending
-        // `output_config` to relays that may not expect it). An *explicit*
-        // choice is honored verbatim — even `high` — so that "what you set is
-        // what you send". Previously this compared against `Effort::High` and
-        // silently dropped an explicit `effort = "high"`, making the config a
-        // no-op; the explicit/implicit distinction (`Option<Effort>`) fixes it.
-        if let Some(effort) = resolved.effort {
+        // Effort rides in the top-level `output_config`, never inside `thinking`
+        // (placing it wrong is the most common 400). Emit it ONLY for models
+        // that advertise an effort vocabulary: Haiku 4.5 and unknown relays
+        // carry `&[]` and reject `effort`, so an explicit choice there is
+        // dropped rather than sent. `high` is the wire default, but an explicit
+        // choice is honored verbatim — "what you set is what you send".
+        if !model.effort_levels.is_empty()
+            && let Some(effort) = resolved.effort
+        {
             body["output_config"] = json!({ "effort": effort.as_str() });
         }
         body
     }
+
+    /// The `anthropic-beta` header value this request requires, if any.
+    ///
+    /// Manual extended thinking (`thinking:{type:"enabled"}`, used by Haiku 4.5)
+    /// combined with tool use requires interleaved thinking, gated behind a beta
+    /// header. Adaptive-thinking models need no beta header. Returns `None` when
+    /// the resolved model is not a manual-thinking model or the user has thinking
+    /// turned off.
+    fn anthropic_beta(&self) -> Option<&'static str> {
+        let model = neenee_core::model::resolve(&self.model);
+        (matches!(model.thinking, ThinkingSupport::AnthropicManual) && self.thinking.mode.is_on())
+            .then_some("interleaved-thinking-2025-05-14")
+    }
+}
+
+/// The `budget_tokens` value for MANUAL extended thinking
+/// (`thinking:{type:"enabled"}`) on models without adaptive thinking
+/// (Haiku 4.5). The Messages API requires `budget_tokens < max_tokens`, so we
+/// reserve roughly half the output budget for reasoning, clamped to a sane
+/// floor/ceiling. Manual thinking has no `effort` knob, so this fixed heuristic
+/// is the single depth control; with interleaved thinking + tools the model may
+/// exceed it at runtime (the limit then becomes the context window).
+fn manual_thinking_budget(max_tokens: u32) -> u32 {
+    (max_tokens / 2).clamp(1024, 32_000)
 }
 
 // ── Prompt-caching breakpoint helpers ────────────────────────────────────
@@ -779,11 +830,15 @@ impl Provider for AnthropicMessagesProvider {
         let client = reqwest::Client::new();
         let body = self.request_body(messages, false);
 
-        let response = client
+        let mut request = client
             .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .header(reqwest::header::USER_AGENT, &self.user_agent);
+        if let Some(beta) = self.anthropic_beta() {
+            request = request.header("anthropic-beta", beta);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -889,11 +944,15 @@ impl Provider for AnthropicMessagesProvider {
         let client = reqwest::Client::new();
         let body = self.request_body(messages, true);
 
-        let response = client
+        let mut request = client
             .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .header(reqwest::header::USER_AGENT, &self.user_agent);
+        if let Some(beta) = self.anthropic_beta() {
+            request = request.header("anthropic-beta", beta);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -921,11 +980,16 @@ impl Provider for AnthropicMessagesProvider {
         &self,
         messages: Vec<Message>,
     ) -> Result<BoxStream<'static, Result<ProviderStreamEvent, String>>, String> {
-        let response = reqwest::Client::new()
+        let client = reqwest::Client::new();
+        let mut request = client
             .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
+            .header(reqwest::header::USER_AGENT, &self.user_agent);
+        if let Some(beta) = self.anthropic_beta() {
+            request = request.header("anthropic-beta", beta);
+        }
+        let response = request
             .json(&self.request_body(messages, true))
             .send()
             .await
@@ -1521,6 +1585,82 @@ mod tests {
             body.get("output_config").is_none(),
             "default high effort omits output_config"
         );
+    }
+
+    #[test]
+    fn haiku_uses_manual_thinking_not_adaptive_when_opted_in() {
+        // Haiku 4.5 has NO adaptive mode — it accepts only manual extended
+        // thinking (`type:"enabled"` + budget_tokens) and rejects `effort`.
+        // Opting thinking on must therefore emit the manual form (never
+        // adaptive), drop any effort, and require the interleaved-thinking beta
+        // header for tool use.
+        let provider = AnthropicMessagesProvider::new(
+            "k".to_string(),
+            "claude-haiku-4-5-20251001".to_string(),
+            "https://x",
+        )
+        .with_thinking(
+            ThinkingConfig::default()
+                .with_mode(ThinkingMode::Adaptive)
+                .with_effort(Effort::Max),
+        );
+        let body = provider.request_body(vec![Message::new(Role::User, "hi")], false);
+        assert_eq!(body["thinking"]["type"], "enabled", "manual, not adaptive");
+        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert!(budget > 0 && budget < u64::from(provider.max_tokens));
+        assert!(
+            body.get("output_config").is_none(),
+            "Haiku rejects effort — output_config must be dropped"
+        );
+        assert_eq!(
+            provider.anthropic_beta(),
+            Some("interleaved-thinking-2025-05-14"),
+        );
+    }
+
+    #[test]
+    fn haiku_omits_thinking_and_beta_when_off() {
+        // Opt-in default: with thinking off, Haiku sends no thinking object and
+        // needs no beta header.
+        let provider = AnthropicMessagesProvider::new(
+            "k".to_string(),
+            "claude-haiku-4-5-20251001".to_string(),
+            "https://x",
+        );
+        let body = provider.request_body(vec![Message::new(Role::User, "hi")], false);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(provider.anthropic_beta(), None);
+    }
+
+    #[test]
+    fn sonnet_46_clamps_xhigh_to_high_but_opus_48_keeps_it() {
+        // Sonnet 4.6 honors `max` but NOT `xhigh`; an xhigh request clamps to
+        // high. Opus 4.8 honors the full range and keeps xhigh.
+        let sonnet = AnthropicMessagesProvider::new(
+            "k".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            "https://x",
+        )
+        .with_thinking(
+            ThinkingConfig::default()
+                .with_mode(ThinkingMode::Adaptive)
+                .with_effort(Effort::Xhigh),
+        );
+        let body = sonnet.request_body(vec![Message::new(Role::User, "hi")], false);
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        let opus = AnthropicMessagesProvider::new(
+            "k".to_string(),
+            "claude-opus-4-8".to_string(),
+            "https://x",
+        )
+        .with_thinking(
+            ThinkingConfig::default()
+                .with_mode(ThinkingMode::Adaptive)
+                .with_effort(Effort::Xhigh),
+        );
+        let body = opus.request_body(vec![Message::new(Role::User, "hi")], false);
+        assert_eq!(body["output_config"]["effort"], "xhigh");
     }
 
     #[test]
